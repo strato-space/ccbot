@@ -1,0 +1,89 @@
+{
+  "threads": [
+    {
+      "fixture_id": "fresh-home-thread",
+      "session_id": "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9",
+      "thread_name": "Investigate ccbot bug",
+      "cwd": "/home",
+      "originator": "codex_vscode",
+      "cli_version": "0.118.0",
+      "source": "vscode",
+      "model_provider": "openai",
+      "forked_from_id": null,
+      "rollout_file": "rollouts/fresh_home_thread.jsonl",
+      "captured_from": "~/.codex/sessions/2026/04/02/rollout-2026-04-02T16-04-24-019d4e4b-7fac-77f3-b559-cb8e9b4c39a9.jsonl",
+      "path_shape": "root-owned codex home with non-root cwd"
+    },
+    {
+      "fixture_id": "resumed-home-thread",
+      "session_id": "019d4e76-7fae-7a90-bc40-2290ee269660",
+      "thread_name": "Capture Codex evidence fixtures",
+      "cwd": "/home",
+      "originator": "codex_vscode",
+      "cli_version": "0.118.0",
+      "source": {
+        "subagent": {
+          "thread_spawn": {
+            "parent_thread_id": "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9",
+            "depth": 1,
+            "agent_nickname": "Bacon",
+            "agent_role": "worker"
+          }
+        }
+      },
+      "model_provider": "openai",
+      "forked_from_id": "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9",
+      "rollout_file": "rollouts/resumed_home_thread.jsonl",
+      "captured_from": "~/.codex/sessions/2026/04/02/rollout-2026-04-02T16-51-22-019d4e76-7fae-7a90-bc40-2290ee269660.jsonl",
+      "path_shape": "root-owned codex home with non-root cwd"
+    },
+    {
+      "fixture_id": "nonroot-cwd-reasoning-thread",
+      "session_id": "019d4d8b-65d8-7c60-9317-459cdb087487",
+      "thread_name": "Найди offer Stockcity",
+      "cwd": "/home/strato-space",
+      "originator": "codex_vscode",
+      "cli_version": "0.118.0-alpha.2",
+      "source": "vscode",
+      "model_provider": "openai",
+      "forked_from_id": null,
+      "rollout_file": "rollouts/nonroot_reasoning_turn.jsonl",
+      "captured_from": "~/.codex/sessions/2026/04/02/rollout-2026-04-02T12-34-35-019d4d8b-65d8-7c60-9317-459cdb087487.jsonl",
+      "path_shape": "root-owned codex home with non-root cwd"
+    },
+    {
+      "fixture_id": "root-cwd-tool-thread",
+      "session_id": "019d3932-39e4-74e3-9e72-136b65c3841a",
+      "thread_name": "Root tools investigation",
+      "cwd": "/root",
+      "originator": "codex_vscode",
+      "cli_version": "0.0.0",
+      "source": "unknown",
+      "model_provider": "openai",
+      "forked_from_id": null,
+      "rollout_file": "rollouts/root_tool_call_and_output.jsonl",
+      "captured_from": "~/.codex/sessions/2026/03/29/rollout-2026-03-29T13-44-46-019d3932-39e4-74e3-9e72-136b65c3841a.jsonl",
+      "path_shape": "root-owned codex home with root cwd"
+    }
+  ],
+  "same_cwd_groups": [
+    {
+      "cwd": "/home",
+      "session_ids": [
+        "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9",
+        "019d4e63-f279-79b1-8dfd-be785dc4a419",
+        "019d4e76-7fae-7a90-bc40-2290ee269660"
+      ],
+      "note": "Real same-cwd ambiguity group pulled from local session_index and rollout metadata."
+    },
+    {
+      "cwd": "/home/strato-space",
+      "session_ids": [
+        "019d477c-c242-7731-9b6f-4bb15bf67cdf",
+        "019d4825-4370-78a1-aec5-9237edfb6150",
+        "019d4d8b-65d8-7c60-9317-459cdb087487"
+      ],
+      "note": "Real non-root cwd group preserved to prevent /root-only assumptions."
+    }
+  ]
+}

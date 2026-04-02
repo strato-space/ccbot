@@ -1,0 +1,18 @@
+{
+  "tracked_sessions": {
+    "stale-nonroot-rollout": {
+      "session_id": "019dffff-0000-7000-8000-stale0000000",
+      "file_path": "/home/service-user/.codex/sessions/2026/04/02/rollout-2026-04-02T17-10-00-019dffff-0000-7000-8000-stale0000000.jsonl",
+      "last_byte_offset": 0
+    },
+    "root-shaped-rollout": {
+      "session_id": "019d3932-39e4-74e3-9e72-136b65c3841a",
+      "file_path": "/root/.codex/sessions/2026/03/29/rollout-2026-03-29T13-44-46-019d3932-39e4-74e3-9e72-136b65c3841a.jsonl",
+      "last_byte_offset": 4096
+    }
+  },
+  "notes": [
+    "stale-nonroot-rollout is synthetic and intentionally points at a missing non-root-shaped ~/.codex path.",
+    "root-shaped-rollout mirrors a real tracked-session path form."
+  ]
+}

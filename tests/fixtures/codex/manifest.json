@@ -1,0 +1,31 @@
+{
+  "captured_at": "2026-04-02",
+  "source_of_truth": {
+    "codex_home": "~/.codex",
+    "tmux_session": "0",
+    "note": "Fixtures were curated from real local Codex rollout/session-index artifacts and a live tmux pane. Sensitive content was redacted, but object shapes, field names, cwd/path forms, and event taxonomy were preserved."
+  },
+  "coverage": [
+    "fresh-thread",
+    "resumed-thread",
+    "same-cwd-multiple-threads",
+    "stale-index-entry",
+    "missing-rollout-file",
+    "interrupted-turn",
+    "reasoning",
+    "command-execution",
+    "tool-call-output",
+    "prompt-snapshot"
+  ],
+  "files": {
+    "session_index_rows": "session_index_rows.json",
+    "thread_metadata": "thread_metadata.json",
+    "missing_rollout_reference": "monitor_state_missing_rollout.json",
+    "fresh_thread_rollout": "rollouts/fresh_home_thread.jsonl",
+    "resumed_thread_rollout": "rollouts/resumed_home_thread.jsonl",
+    "reasoning_rollout": "rollouts/nonroot_reasoning_turn.jsonl",
+    "tool_rollout": "rollouts/root_tool_call_and_output.jsonl",
+    "interrupted_rollout": "rollouts/interrupted_turn_nonroot.jsonl",
+    "prompt_snapshot": "panes/tmux_session_0_resume_prompt.json"
+  }
+}

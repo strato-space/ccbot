@@ -1,0 +1,46 @@
+{
+  "description": "Curated real session_index rows plus one synthetic stale entry used to validate fail-closed resolution.",
+  "rows": [
+    {
+      "fixture_id": "same-cwd-home-fresh",
+      "row": {
+        "id": "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9",
+        "thread_name": "Investigate ccbot bug",
+        "updated_at": "2026-04-02T13:04:36.812404714Z"
+      }
+    },
+    {
+      "fixture_id": "same-cwd-home-review",
+      "row": {
+        "id": "019d4e63-f279-79b1-8dfd-be785dc4a419",
+        "thread_name": "Review ccbot adaptation plan",
+        "updated_at": "2026-04-02T13:31:20.346520946Z"
+      }
+    },
+    {
+      "fixture_id": "same-cwd-home-resumed-worker",
+      "row": {
+        "id": "019d4e76-7fae-7a90-bc40-2290ee269660",
+        "thread_name": "Capture Codex evidence fixtures",
+        "updated_at": "2026-04-02T13:51:36.312172591Z"
+      }
+    },
+    {
+      "fixture_id": "nonroot-cwd-reasoning",
+      "row": {
+        "id": "019d4d8b-65d8-7c60-9317-459cdb087487",
+        "thread_name": "Найди offer Stockcity",
+        "updated_at": "2026-04-02T09:35:14.815562334Z"
+      }
+    },
+    {
+      "fixture_id": "stale-index-entry",
+      "row": {
+        "id": "019dffff-0000-7000-8000-stale0000000",
+        "thread_name": "Stale fixture missing rollout",
+        "updated_at": "2026-04-02T17:10:00.000000000Z"
+      },
+      "notes": "Synthetic stale row. No rollout fixture exists for this id."
+    }
+  ]
+}

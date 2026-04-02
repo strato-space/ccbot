@@ -1,0 +1,26 @@
+{
+  "captured_at": "2026-04-02T17:24:00+03:00",
+  "source": {
+    "command": "tmux capture-pane -epJS - -t 0:0.0 | tail -n 120",
+    "tmux_session": "0",
+    "window": "0",
+    "pane": "0",
+    "pane_current_command": "node",
+    "pane_current_path": "/home",
+    "tty": "/dev/pts/17"
+  },
+  "visible_text": [
+    "root@p2:/home/strato-space# codex resume",
+    "OpenAI Codex (v0.119.0-alpha.3)",
+    "model: gpt-5.4 xhigh",
+    "directory: /home/strato-space",
+    "Tip: You can resume a previous conversation by running codex resume",
+    "› ping",
+    "■ Your access token could not be refreshed because your refresh token was already used.",
+    "• pong",
+    "■ You've hit your usage limit. Upgrade to Pro ... or try again at Apr 3rd, 2026 5:32 AM.",
+    "› Explain this codebase",
+    "gpt-5.4 xhigh · 100% left · /home/strato-space"
+  ],
+  "ansi_text": "root@p2:/home/strato-space# codex resume \n\u001b[2m╭─────────────────────────────────────────────╮\n│ >_ \u001b[0;1mOpenAI Codex\u001b[0;2m (v0.119.0-alpha.3)          │\n│                                             │\n│ model:     \u001b[0mgpt-5.4 xhigh\u001b[2m   \u001b[0m\u001b[38;5;6m/model\u001b[2m\u001b[39m to change │\n│ directory: \u001b[0m/home/strato-space\u001b[2m               │\n╰─────────────────────────────────────────────╯\n\n\u001b[0m  \u001b[1mTip:\u001b[0m You can resume a previous conversation by running \u001b[38;5;6mcodex resume\n\n\u001b[1;2m\u001b[39m\u001b[48;2;57;57;71m› \u001b[0m\u001b[48;2;57;57;71mping\n\n\u001b[38;5;1m\u001b[49m■ Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\n\n\u001b[1;2m\u001b[39m\u001b[48;2;57;57;71m› \u001b[0m\u001b[48;2;57;57;71mping\n\n\u001b[2m\u001b[49m• \u001b[0mpong\n\n\u001b[1;2m\u001b[48;2;57;57;71m› \u001b[0m\u001b[48;2;57;57;71mping\n\n\u001b[38;5;1m\u001b[49m■ You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Apr 3rd, 2026 5:32 AM.\n\n\u001b[48;2;57;57;71m \n\u001b[1m›\u001b[0m\u001b[48;2;57;57;71m \u001b[2mExplain this codebase\n\u001b[0m\u001b[48;2;57;57;71m \n\u001b[2m\u001b[49m  gpt-5.4 xhigh · 100% left · /home/strato-space"
+}
