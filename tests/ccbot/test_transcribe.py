@@ -9,6 +9,20 @@ from ccbot import transcribe
 
 
 @pytest.fixture(autouse=True)
+def _clear_proxy_env(monkeypatch):
+    """Prevent host proxy settings from affecting local httpx client creation."""
+    for key in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _reset_client():
     """Ensure each test starts with a fresh client."""
     transcribe._client = None
