@@ -1,9 +1,8 @@
-"""JSONL transcript parser for Claude Code session files.
+"""JSONL transcript parser for runtime rollout logs.
 
-Parses Claude Code session JSONL files and extracts structured messages.
-Handles: text, thinking, tool_use, tool_result, local_command, and user messages.
-Tool pairing: tool_use blocks in assistant messages are matched with
-tool_result blocks in subsequent user messages via tool_use_id.
+Parses Claude-shaped JSONL today, but emits runtime-neutral normalized events so
+later runtime adapters can distinguish persisted thread history from the live
+process that produced it.
 
 Shared by both session.py (history) and session_monitor.py (real-time).
 Format reference: https://github.com/desis123/claude-code-viewer
@@ -19,7 +18,17 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .runtime_types import InputAction, NormalizedEvent
+
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "InputAction",
+    "ParsedEntry",
+    "ParsedMessage",
+    "PendingToolInfo",
+    "TranscriptParser",
+]
 
 
 @dataclass
@@ -31,23 +40,7 @@ class ParsedMessage:
     tool_name: str | None = None  # For tool_use messages
 
 
-@dataclass
-class ParsedEntry:
-    """A single parsed message entry ready for display."""
-
-    role: str  # "user" | "assistant"
-    text: str  # Already formatted text
-    content_type: (
-        str  # "text" | "thinking" | "tool_use" | "tool_result" | "local_command"
-    )
-    tool_use_id: str | None = None
-    timestamp: str | None = None  # ISO timestamp from JSONL
-    tool_name: str | None = (
-        None  # For tool_use entries, the tool name (e.g. "AskUserQuestion")
-    )
-    image_data: list[tuple[str, bytes]] | None = (
-        None  # For tool_result entries with images: (media_type, raw_bytes)
-    )
+ParsedEntry = NormalizedEvent
 
 
 @dataclass
@@ -414,7 +407,7 @@ class TranscriptParser:
         entries: list[dict],
         pending_tools: dict[str, PendingToolInfo] | None = None,
     ) -> tuple[list[ParsedEntry], dict[str, PendingToolInfo]]:
-        """Parse a list of JSONL entries into a flat list of display-ready messages.
+        """Parse a list of JSONL entries into normalized rollout events.
 
         This is the shared core logic used by both get_recent_messages (history)
         and check_for_updates (monitor).

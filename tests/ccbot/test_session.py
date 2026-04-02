@@ -32,6 +32,21 @@ class TestThreadBindings:
         result = set(mgr.iter_thread_bindings())
         assert result == {(100, 1, "@1"), (100, 2, "@2"), (200, 3, "@3")}
 
+    def test_get_topic_binding(self, mgr: SessionManager) -> None:
+        mgr.bind_thread(100, 1, "@1", window_name="proj")
+        binding = mgr.get_topic_binding(100, 1)
+        assert binding is not None
+        assert binding.user_id == 100
+        assert binding.thread_id == 1
+        assert binding.window_id == "@1"
+        assert binding.window_name == "proj"
+
+    def test_iter_topic_bindings(self, mgr: SessionManager) -> None:
+        mgr.bind_thread(100, 1, "@1", window_name="one")
+        mgr.bind_thread(100, 2, "@2", window_name="two")
+        result = {(b.user_id, b.thread_id, b.window_id) for b in mgr.iter_topic_bindings()}
+        assert result == {(100, 1, "@1"), (100, 2, "@2")}
+
 
 class TestGroupChatId:
     """Tests for group chat_id routing (supergroup forum topic support).

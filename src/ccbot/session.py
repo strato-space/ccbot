@@ -1,24 +1,14 @@
-"""Claude Code session management — the core state hub.
+"""Core runtime state hub for bindings, live processes, and thread locators.
 
-Manages the key mappings:
-  Window→Session (window_states): which Claude session_id a window holds (keyed by window_id).
-  User→Thread→Window (thread_bindings): topic-to-window bindings (1 topic = 1 window_id).
+This module still interoperates with the current Claude-shaped storage, but it
+now exposes runtime-neutral nouns so later Codex work can distinguish:
 
-Responsibilities:
-  - Persist/load state to ~/.ccbot/state.json.
-  - Sync window↔session bindings from session_map.json (written by hook).
-  - Resolve window IDs to ClaudeSession objects (JSONL file reading).
-  - Track per-user read offsets for unread-message detection.
-  - Manage thread↔window bindings for Telegram topic routing.
-  - Send keystrokes to tmux windows and retrieve message history.
-  - Maintain window_id→display name mapping for UI display.
-  - Re-resolve stale window IDs on startup (tmux server restart recovery).
+- topic binding: Telegram topic -> tmux window
+- live process descriptor: current process metadata for a window
+- thread locator: persisted conversation identity and rollout path
 
-Key class: SessionManager (singleton instantiated as `session_manager`).
-Key methods for thread binding access:
-  - resolve_window_for_thread: Get window_id for a user's thread
-  - iter_thread_bindings: Generator for iterating all (user_id, thread_id, window_id)
-  - find_users_for_session: Find all users bound to a session_id
+Legacy method names remain as compatibility wrappers while the rest of the bot
+is migrated task by task.
 """
 
 import asyncio
@@ -33,70 +23,32 @@ from typing import Any
 import aiofiles
 
 from .config import config
+from .runtime_types import LiveProcessDescriptor, ThreadLocator, TopicBinding
 from .tmux_manager import tmux_manager
 from .transcript_parser import TranscriptParser
 from .utils import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class WindowState:
-    """Persistent state for a tmux window.
-
-    Attributes:
-        session_id: Associated Claude session ID (empty if not yet detected)
-        cwd: Working directory for direct file path construction
-        window_name: Display name of the window
-    """
-
-    session_id: str = ""
-    cwd: str = ""
-    window_name: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {
-            "session_id": self.session_id,
-            "cwd": self.cwd,
-        }
-        if self.window_name:
-            d["window_name"] = self.window_name
-        return d
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "WindowState":
-        return cls(
-            session_id=data.get("session_id", ""),
-            cwd=data.get("cwd", ""),
-            window_name=data.get("window_name", ""),
-        )
-
-
-@dataclass
-class ClaudeSession:
-    """Information about a Claude Code session."""
-
-    session_id: str
-    summary: str
-    message_count: int
-    file_path: str
+WindowState = LiveProcessDescriptor
+ClaudeSession = ThreadLocator
 
 
 @dataclass
 class SessionManager:
-    """Manages session state for Claude Code.
+    """Manages persisted bindings, process descriptors, and thread locators.
 
     All internal keys use window_id (e.g. '@0', '@12') for uniqueness.
     Display names (window_name) are stored separately for UI presentation.
 
-    window_states: window_id -> WindowState (session_id, cwd, window_name)
+    window_states: window_id -> LiveProcessDescriptor
     user_window_offsets: user_id -> {window_id -> byte_offset}
     thread_bindings: user_id -> {thread_id -> window_id}
     window_display_names: window_id -> window_name (for display)
     group_chat_ids: "user_id:thread_id" -> group chat_id (for supergroup routing)
     """
 
-    window_states: dict[str, WindowState] = field(default_factory=dict)
+    window_states: dict[str, LiveProcessDescriptor] = field(default_factory=dict)
     user_window_offsets: dict[int, dict[str, int]] = field(default_factory=dict)
     thread_bindings: dict[int, dict[int, str]] = field(default_factory=dict)
     # window_id -> display name (window_name)
@@ -144,7 +96,7 @@ class SessionManager:
             try:
                 state = json.loads(config.state_file.read_text())
                 self.window_states = {
-                    k: WindowState.from_dict(v)
+                    k: LiveProcessDescriptor.from_dict(v)
                     for k, v in state.get("window_states", {}).items()
                 }
                 self.user_window_offsets = {
@@ -210,7 +162,7 @@ class SessionManager:
         changed = False
 
         # --- Migrate window_states ---
-        new_window_states: dict[str, WindowState] = {}
+        new_window_states: dict[str, LiveProcessDescriptor] = {}
         for key, ws in self.window_states.items():
             if self._is_window_id(key):
                 if key in live_ids:
@@ -408,7 +360,7 @@ class SessionManager:
     def update_display_name(self, window_id: str, new_name: str) -> None:
         """Update the display name for a window and persist state."""
         self.window_display_names[window_id] = new_name
-        # Also update WindowState.window_name if it exists
+        # Also update the live process descriptor if it exists
         if window_id in self.window_states:
             self.window_states[window_id].window_name = new_name
         self._save_state()
@@ -531,14 +483,14 @@ class SessionManager:
             if not new_sid:
                 continue
             state = self.get_window_state(window_id)
-            if state.session_id != new_sid or state.cwd != new_cwd:
+            if state.thread_id != new_sid or state.cwd != new_cwd:
                 logger.info(
                     "Session map: window_id %s updated sid=%s, cwd=%s",
                     window_id,
                     new_sid,
                     new_cwd,
                 )
-                state.session_id = new_sid
+                state.thread_id = new_sid
                 state.cwd = new_cwd
                 changed = True
             # Update display name
@@ -560,16 +512,20 @@ class SessionManager:
 
     # --- Window state management ---
 
-    def get_window_state(self, window_id: str) -> WindowState:
-        """Get or create window state."""
+    def get_process_descriptor(self, window_id: str) -> LiveProcessDescriptor:
+        """Get or create the live process descriptor for a tmux window."""
         if window_id not in self.window_states:
-            self.window_states[window_id] = WindowState()
+            self.window_states[window_id] = LiveProcessDescriptor()
         return self.window_states[window_id]
 
+    def get_window_state(self, window_id: str) -> WindowState:
+        """Backward-compatible alias for get_process_descriptor()."""
+        return self.get_process_descriptor(window_id)
+
     def clear_window_session(self, window_id: str) -> None:
-        """Clear session association for a window (e.g., after /clear command)."""
-        state = self.get_window_state(window_id)
-        state.session_id = ""
+        """Clear the persisted thread association for a window."""
+        state = self.get_process_descriptor(window_id)
+        state.thread_id = ""
         self._save_state()
         logger.info("Cleared session for window_id %s", window_id)
 
@@ -582,22 +538,22 @@ class SessionManager:
         """
         return re.sub(r"[^a-zA-Z0-9-]", "-", cwd)
 
-    def _build_session_file_path(self, session_id: str, cwd: str) -> Path | None:
-        """Build the direct file path for a session from session_id and cwd."""
-        if not session_id or not cwd:
+    def _build_session_file_path(self, thread_id: str, cwd: str) -> Path | None:
+        """Build the direct rollout path for a thread from thread_id and cwd."""
+        if not thread_id or not cwd:
             return None
         encoded_cwd = self._encode_cwd(cwd)
-        return config.claude_projects_path / encoded_cwd / f"{session_id}.jsonl"
+        return config.claude_projects_path / encoded_cwd / f"{thread_id}.jsonl"
 
-    async def _get_session_direct(
-        self, session_id: str, cwd: str
-    ) -> ClaudeSession | None:
-        """Get a ClaudeSession directly from session_id and cwd (no scanning)."""
-        file_path = self._build_session_file_path(session_id, cwd)
+    async def _get_thread_locator_direct(
+        self, thread_id: str, cwd: str
+    ) -> ThreadLocator | None:
+        """Resolve a persisted thread directly from thread_id and cwd."""
+        file_path = self._build_session_file_path(thread_id, cwd)
 
         # Fallback: glob search if direct path doesn't exist
         if not file_path or not file_path.exists():
-            pattern = f"*/{session_id}.jsonl"
+            pattern = f"*/{thread_id}.jsonl"
             matches = list(config.claude_projects_path.glob(pattern))
             if matches:
                 file_path = matches[0]
@@ -636,17 +592,24 @@ class SessionManager:
         if not summary:
             summary = last_user_msg[:50] if last_user_msg else "Untitled"
 
-        return ClaudeSession(
-            session_id=session_id,
+        return ThreadLocator(
+            thread_id=thread_id,
             summary=summary,
             message_count=message_count,
             file_path=str(file_path),
+            cwd=cwd,
         )
+
+    async def _get_session_direct(
+        self, session_id: str, cwd: str
+    ) -> ClaudeSession | None:
+        """Backward-compatible wrapper for Claude-shaped call sites."""
+        return await self._get_thread_locator_direct(session_id, cwd)
 
     # --- Directory session listing ---
 
-    async def list_sessions_for_directory(self, cwd: str) -> list[ClaudeSession]:
-        """List existing Claude sessions for a directory.
+    async def list_threads_for_directory(self, cwd: str) -> list[ThreadLocator]:
+        """List persisted threads for a directory.
 
         Encodes the cwd path to find the project directory under
         ~/.claude/projects/{encoded_cwd}/, globs *.jsonl files, and
@@ -667,32 +630,36 @@ class SessionManager:
         )
 
         # Skip sessions-index and cap at 10
-        sessions: list[ClaudeSession] = []
+        sessions: list[ThreadLocator] = []
         for f in jsonl_files:
             if f.stem == "sessions-index":
                 continue
             if len(sessions) >= 10:
                 break
             session_id = f.stem
-            session = await self._get_session_direct(session_id, cwd)
+            session = await self._get_thread_locator_direct(session_id, cwd)
             if session and session.message_count > 0:
                 sessions.append(session)
         return sessions
 
-    # --- Window → Session resolution ---
+    async def list_sessions_for_directory(self, cwd: str) -> list[ClaudeSession]:
+        """Backward-compatible wrapper for legacy callers."""
+        return await self.list_threads_for_directory(cwd)
 
-    async def resolve_session_for_window(self, window_id: str) -> ClaudeSession | None:
-        """Resolve a tmux window to the best matching Claude session.
+    # --- Window -> thread resolution ---
 
-        Uses persisted session_id + cwd to construct file path directly.
-        Returns None if no session is associated with this window.
+    async def resolve_thread_for_window(self, window_id: str) -> ThreadLocator | None:
+        """Resolve a tmux window to the persisted thread bound to its process.
+
+        Uses persisted thread_id + cwd to construct the rollout path directly.
+        Returns None if no thread is associated with this window.
         """
-        state = self.get_window_state(window_id)
+        state = self.get_process_descriptor(window_id)
 
-        if not state.session_id or not state.cwd:
+        if not state.thread_id or not state.cwd:
             return None
 
-        session = await self._get_session_direct(state.session_id, state.cwd)
+        session = await self._get_thread_locator_direct(state.thread_id, state.cwd)
         if session:
             return session
 
@@ -700,13 +667,17 @@ class SessionManager:
         logger.warning(
             "Session file no longer exists for window_id %s (sid=%s, cwd=%s)",
             window_id,
-            state.session_id,
+            state.thread_id,
             state.cwd,
         )
-        state.session_id = ""
+        state.thread_id = ""
         state.cwd = ""
         self._save_state()
         return None
+
+    async def resolve_session_for_window(self, window_id: str) -> ClaudeSession | None:
+        """Backward-compatible wrapper for legacy callers."""
+        return await self.resolve_thread_for_window(window_id)
 
     # --- User window offset management ---
 
@@ -784,30 +755,58 @@ class SessionManager:
             return None
         return self.get_window_for_thread(user_id, thread_id)
 
-    def iter_thread_bindings(self) -> Iterator[tuple[int, int, str]]:
-        """Iterate all thread bindings as (user_id, thread_id, window_id).
+    def get_topic_binding(
+        self, user_id: int, thread_id: int
+    ) -> TopicBinding | None:
+        """Resolve a persisted topic binding object."""
+        window_id = self.get_window_for_thread(user_id, thread_id)
+        if not window_id:
+            return None
+        return TopicBinding(
+            user_id=user_id,
+            thread_id=thread_id,
+            window_id=window_id,
+            window_name=self.get_display_name(window_id),
+        )
 
-        Provides encapsulated access to thread_bindings without exposing
-        the internal data structure directly.
-        """
+    def iter_topic_bindings(self) -> Iterator[TopicBinding]:
+        """Iterate persisted topic bindings as structured runtime-neutral objects."""
         for user_id, bindings in self.thread_bindings.items():
             for thread_id, window_id in bindings.items():
-                yield user_id, thread_id, window_id
+                yield TopicBinding(
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    window_id=window_id,
+                    window_name=self.get_display_name(window_id),
+                )
+
+    def iter_thread_bindings(self) -> Iterator[tuple[int, int, str]]:
+        """Backward-compatible tuple view over iter_topic_bindings()."""
+        for binding in self.iter_topic_bindings():
+            yield binding.user_id, binding.thread_id, binding.window_id
+
+    async def find_bindings_for_thread(self, thread_id: str) -> list[TopicBinding]:
+        """Find all topic bindings whose live window resolves to thread_id."""
+        result: list[TopicBinding] = []
+        for binding in self.iter_topic_bindings():
+            resolved = await self.resolve_thread_for_window(binding.window_id)
+            if resolved and resolved.thread_id == thread_id:
+                result.append(binding)
+        return result
 
     async def find_users_for_session(
         self,
         session_id: str,
     ) -> list[tuple[int, str, int]]:
-        """Find all users whose thread-bound window maps to the given session_id.
+        """Backward-compatible tuple view over find_bindings_for_thread().
 
         Returns list of (user_id, window_id, thread_id) tuples.
         """
-        result: list[tuple[int, str, int]] = []
-        for user_id, thread_id, window_id in self.iter_thread_bindings():
-            resolved = await self.resolve_session_for_window(window_id)
-            if resolved and resolved.session_id == session_id:
-                result.append((user_id, window_id, thread_id))
-        return result
+        bindings = await self.find_bindings_for_thread(session_id)
+        return [
+            (binding.user_id, binding.window_id, binding.thread_id)
+            for binding in bindings
+        ]
 
     # --- Tmux helpers ---
 
@@ -837,13 +836,13 @@ class SessionManager:
         start_byte: int = 0,
         end_byte: int | None = None,
     ) -> tuple[list[dict], int]:
-        """Get user/assistant messages for a window's session.
+        """Get normalized message history for the thread bound to a window.
 
-        Resolves window → session, then reads the JSONL.
+        Resolves window -> thread, then reads the JSONL rollout.
         Supports byte range filtering via start_byte/end_byte.
         Returns (messages, total_count).
         """
-        session = await self.resolve_session_for_window(window_id)
+        session = await self.resolve_thread_for_window(window_id)
         if not session or not session.file_path:
             return [], 0
 
