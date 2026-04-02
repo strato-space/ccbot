@@ -61,6 +61,35 @@ class UIPattern:
 
 UI_PATTERNS: list[UIPattern] = [
     UIPattern(
+        name="CodexExecApproval",
+        top=(re.compile(r"^\s*Would you like to run the following command\?"),),
+        bottom=(re.compile(r"^\s*Press enter to confirm or esc to cancel"),),
+    ),
+    UIPattern(
+        name="CodexPatchApproval",
+        top=(re.compile(r"^\s*Would you like to make the following edits\?"),),
+        bottom=(re.compile(r"^\s*Press enter to confirm or esc to cancel"),),
+    ),
+    UIPattern(
+        name="CodexPermissionsPopup",
+        top=(re.compile(r"^\s*Update Model Permissions"),),
+        bottom=(re.compile(r"^\s*Press enter to confirm or esc to go back"),),
+    ),
+    UIPattern(
+        name="CodexModelPicker",
+        top=(re.compile(r"^\s*Select Model and Effort"),),
+        bottom=(
+            re.compile(
+                r"^\s*Press enter to select reasoning effort, or esc to dismiss\.?"
+            ),
+        ),
+    ),
+    UIPattern(
+        name="CodexReasoningPicker",
+        top=(re.compile(r"^\s*Select Reasoning Level for "),),
+        bottom=(re.compile(r"^\s*Press enter to confirm or esc to go back"),),
+    ),
+    UIPattern(
         name="ExitPlanMode",
         top=(
             re.compile(r"^\s*Would you like to proceed\?"),
@@ -129,6 +158,16 @@ UI_PATTERNS: list[UIPattern] = [
         ),
     ),
 ]
+
+REMOTE_ACTION_PROMPTS = frozenset(
+    {
+        "CodexExecApproval",
+        "CodexPatchApproval",
+        "CodexPermissionsPopup",
+        "CodexModelPicker",
+        "CodexReasoningPicker",
+    }
+)
 
 
 # ── Post-processing ──────────────────────────────────────────────────────
@@ -223,6 +262,7 @@ def classify_input_surface(pane_text: str) -> InputSurface:
             has_visible_prompt=True,
             has_interactive_ui=True,
             prompt_name=interactive.name or "interactive_ui",
+            allows_remote_actions=(interactive.name or "") in REMOTE_ACTION_PROMPTS,
         )
 
     status_line = parse_status_line(pane_text)

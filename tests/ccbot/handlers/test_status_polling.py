@@ -139,3 +139,42 @@ class TestStatusPollerSettingsDetection:
             # Verify the message text contains model picker content
             assert "Select model" in call_kwargs["text"]
             assert "Remote controls are disabled for this prompt" in call_kwargs["text"]
+
+    @pytest.mark.asyncio
+    async def test_codex_exec_approval_end_to_end_sends_keyboard(self, mock_bot: AsyncMock):
+        window_id = "@5"
+        mock_window = MagicMock()
+        mock_window.window_id = window_id
+        approval_pane = (
+            "\n"
+            "  Would you like to run the following command?\n"
+            "\n"
+            "  Reason: because the model asked to do it\n"
+            "\n"
+            "  $ echo hello world\n"
+            "\n"
+            "› 1. Yes, proceed (y)\n"
+            "  2. Yes, and don't ask again for commands that start with `echo hello world` (p)\n"
+            "  3. No, and tell Codex what to do differently (esc)\n"
+            "\n"
+            "  Press enter to confirm or esc to cancel\n"
+        )
+
+        with (
+            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux_poll,
+            patch("ccbot.handlers.interactive_ui.tmux_manager") as mock_tmux_ui,
+            patch("ccbot.handlers.interactive_ui.session_manager") as mock_sm,
+        ):
+            mock_tmux_poll.find_window_by_id = AsyncMock(return_value=mock_window)
+            mock_tmux_poll.capture_pane = AsyncMock(return_value=approval_pane)
+            mock_tmux_ui.find_window_by_id = AsyncMock(return_value=mock_window)
+            mock_tmux_ui.capture_pane = AsyncMock(return_value=approval_pane)
+            mock_sm.resolve_chat_id.return_value = 100
+
+            await update_status_message(
+                mock_bot, user_id=1, window_id=window_id, thread_id=42
+            )
+
+        call_kwargs = mock_bot.send_message.call_args.kwargs
+        assert call_kwargs["reply_markup"] is not None
+        assert "Would you like to run the following command?" in call_kwargs["text"]

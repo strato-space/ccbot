@@ -53,6 +53,18 @@ READ_ONLY_PROMPT_NOTE = (
     "Remote controls are disabled for this prompt in the core lane."
 )
 
+VERTICAL_PROMPTS = frozenset(
+    {
+        "CodexExecApproval",
+        "CodexPatchApproval",
+        "CodexPermissionsPopup",
+        "CodexModelPicker",
+        "CodexReasoningPicker",
+    }
+)
+
+TAB_SPACE_PROMPTS = frozenset({"Settings"})
+
 
 def get_interactive_window(user_id: int, thread_id: int | None = None) -> str | None:
     """Get the window_id for user's interactive mode."""
@@ -94,21 +106,33 @@ def _build_interactive_keyboard(
     ``ui_name`` controls the layout: ``RestoreCheckpoint`` omits ←/→ keys
     since only vertical selection is needed.
     """
-    vertical_only = ui_name == "RestoreCheckpoint"
+    vertical_only = ui_name == "RestoreCheckpoint" or ui_name in VERTICAL_PROMPTS
+    include_tab_space = ui_name in TAB_SPACE_PROMPTS
 
     rows: list[list[InlineKeyboardButton]] = []
-    # Row 1: directional keys
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "␣ Space", callback_data=f"{CB_ASK_SPACE}{window_id}"[:64]
-            ),
-            InlineKeyboardButton("↑", callback_data=f"{CB_ASK_UP}{window_id}"[:64]),
-            InlineKeyboardButton(
-                "⇥ Tab", callback_data=f"{CB_ASK_TAB}{window_id}"[:64]
-            ),
-        ]
-    )
+    # Row 1: primary navigation keys
+    if include_tab_space:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "␣ Space", callback_data=f"{CB_ASK_SPACE}{window_id}"[:64]
+                ),
+                InlineKeyboardButton(
+                    "↑", callback_data=f"{CB_ASK_UP}{window_id}"[:64]
+                ),
+                InlineKeyboardButton(
+                    "⇥ Tab", callback_data=f"{CB_ASK_TAB}{window_id}"[:64]
+                ),
+            ]
+        )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "↑", callback_data=f"{CB_ASK_UP}{window_id}"[:64]
+                ),
+            ]
+        )
     if vertical_only:
         rows.append(
             [
@@ -148,8 +172,10 @@ def _build_interactive_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
-def _build_prompt_message(pane_text: str, surface_name: str) -> str:
-    """Build a read-only prompt snapshot for Telegram."""
+def _build_prompt_message(
+    pane_text: str, surface_name: str, *, read_only: bool = True
+) -> str:
+    """Build a prompt snapshot for Telegram."""
     content = extract_interactive_content(pane_text)
     if content and content.content.strip():
         body = content.content.strip()
@@ -157,7 +183,9 @@ def _build_prompt_message(pane_text: str, surface_name: str) -> str:
         visible_lines = [line.rstrip() for line in pane_text.splitlines() if line.strip()]
         body = "\n".join(list(islice(visible_lines[-10:], 10))).strip()
     header = f"⚠️ {surface_name or 'Prompt'} detected"
-    return f"{header}\n\n{body}\n\n{READ_ONLY_PROMPT_NOTE}".strip()
+    if read_only:
+        return f"{header}\n\n{body}\n\n{READ_ONLY_PROMPT_NOTE}".strip()
+    return f"{header}\n\n{body}".strip()
 
 
 async def handle_interactive_ui(
@@ -198,7 +226,11 @@ async def handle_interactive_ui(
         if surface.allows_remote_actions
         else None
     )
-    text = _build_prompt_message(pane_text, surface.prompt_name)
+    text = _build_prompt_message(
+        pane_text,
+        surface.prompt_name,
+        read_only=not surface.allows_remote_actions,
+    )
 
     # Build thread kwargs for send_message
     thread_kwargs: dict[str, int] = {}

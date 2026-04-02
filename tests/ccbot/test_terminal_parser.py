@@ -199,6 +199,45 @@ class TestIsInteractiveUI:
 
 
 class TestClassifyInputSurface:
+    def test_detects_codex_exec_approval_prompt(self):
+        pane = (
+            "\n"
+            "  Would you like to run the following command?\n"
+            "\n"
+            "  Reason: because the model asked to do it\n"
+            "\n"
+            "  $ echo hello world\n"
+            "\n"
+            "› 1. Yes, proceed (y)\n"
+            "  2. Yes, and don't ask again for commands that start with `echo hello world` (p)\n"
+            "  3. No, and tell Codex what to do differently (esc)\n"
+            "\n"
+            "  Press enter to confirm or esc to cancel\n"
+        )
+
+        surface = classify_input_surface(pane)
+
+        assert surface.kind == "blocked_prompt"
+        assert surface.prompt_name == "CodexExecApproval"
+        assert surface.allows_remote_actions is True
+
+    def test_detects_codex_model_picker(self):
+        pane = (
+            "  Select Model and Effort\n"
+            "  Access legacy models by running codex -m <model_name> or in your config.toml\n"
+            "\n"
+            "› 1. gpt-5.3-codex (default)  Latest frontier agentic coding model.\n"
+            "  2. gpt-5.4                  Latest frontier agentic coding model.\n"
+            "\n"
+            "  Press enter to select reasoning effort, or esc to dismiss.\n"
+        )
+
+        surface = classify_input_surface(pane)
+
+        assert surface.kind == "blocked_prompt"
+        assert surface.prompt_name == "CodexModelPicker"
+        assert surface.allows_remote_actions is True
+
     def test_detects_interactive_ui(self, sample_pane_settings: str):
         surface = classify_input_surface(sample_pane_settings)
 
