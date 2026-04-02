@@ -30,6 +30,20 @@ class TestLiveProcessDescriptor:
         assert restored.thread_id == "thread-1"
         assert restored.session_id == "thread-1"
 
+    def test_round_trip_preserves_non_default_runtime(self) -> None:
+        descriptor = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            window_name="proj",
+            runtime_kind="codex",
+        )
+
+        payload = descriptor.to_dict()
+
+        assert payload["runtime_kind"] == "codex"
+        restored = LiveProcessDescriptor.from_dict(payload)
+        assert restored.runtime_kind == "codex"
+
 
 class TestThreadLocator:
     def test_session_id_is_thread_alias(self) -> None:

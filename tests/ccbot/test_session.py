@@ -41,11 +41,26 @@ class TestThreadBindings:
         assert binding.window_id == "@1"
         assert binding.window_name == "proj"
 
+    def test_get_topic_binding_preserves_runtime_kind(self, mgr: SessionManager) -> None:
+        mgr.bind_thread(100, 1, "@1", window_name="proj")
+        mgr.get_window_state("@1").runtime_kind = "codex"
+        binding = mgr.get_topic_binding(100, 1)
+        assert binding is not None
+        assert binding.runtime_kind == "codex"
+
     def test_iter_topic_bindings(self, mgr: SessionManager) -> None:
         mgr.bind_thread(100, 1, "@1", window_name="one")
         mgr.bind_thread(100, 2, "@2", window_name="two")
         result = {(b.user_id, b.thread_id, b.window_id) for b in mgr.iter_topic_bindings()}
         assert result == {(100, 1, "@1"), (100, 2, "@2")}
+
+    def test_iter_topic_bindings_preserves_runtime_kind(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.bind_thread(100, 1, "@1", window_name="one")
+        mgr.get_window_state("@1").runtime_kind = "codex"
+        binding = next(mgr.iter_topic_bindings())
+        assert binding.runtime_kind == "codex"
 
 
 class TestGroupChatId:

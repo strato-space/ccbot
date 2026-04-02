@@ -477,21 +477,28 @@ class SessionManager:
             if not self._is_window_id(window_id):
                 continue
             valid_wids.add(window_id)
+            state = self.get_window_state(window_id)
             new_sid = info.get("session_id", "")
             new_cwd = info.get("cwd", "")
             new_wname = info.get("window_name", "")
+            new_runtime_kind = info.get("runtime_kind", state.runtime_kind)
             if not new_sid:
                 continue
-            state = self.get_window_state(window_id)
-            if state.thread_id != new_sid or state.cwd != new_cwd:
+            if (
+                state.thread_id != new_sid
+                or state.cwd != new_cwd
+                or state.runtime_kind != new_runtime_kind
+            ):
                 logger.info(
-                    "Session map: window_id %s updated sid=%s, cwd=%s",
+                    "Session map: window_id %s updated sid=%s, cwd=%s, runtime=%s",
                     window_id,
                     new_sid,
                     new_cwd,
+                    new_runtime_kind,
                 )
                 state.thread_id = new_sid
                 state.cwd = new_cwd
+                state.runtime_kind = new_runtime_kind
                 changed = True
             # Update display name
             if new_wname:
@@ -767,6 +774,7 @@ class SessionManager:
             thread_id=thread_id,
             window_id=window_id,
             window_name=self.get_display_name(window_id),
+            runtime_kind=self.get_process_descriptor(window_id).runtime_kind,
         )
 
     def iter_topic_bindings(self) -> Iterator[TopicBinding]:
@@ -778,6 +786,7 @@ class SessionManager:
                     thread_id=thread_id,
                     window_id=window_id,
                     window_name=self.get_display_name(window_id),
+                    runtime_kind=self.get_process_descriptor(window_id).runtime_kind,
                 )
 
     def iter_thread_bindings(self) -> Iterator[tuple[int, int, str]]:

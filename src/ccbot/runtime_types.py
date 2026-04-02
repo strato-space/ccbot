@@ -50,6 +50,8 @@ class LiveProcessDescriptor:
         }
         if self.window_name:
             data["window_name"] = self.window_name
+        if self.runtime_kind != "claude":
+            data["runtime_kind"] = self.runtime_kind
         return data
 
     @classmethod
@@ -134,4 +136,3 @@ class InputAction:
     submit: bool = True
     runtime_kind: str = "claude"
     metadata: dict[str, Any] = field(default_factory=dict)
-

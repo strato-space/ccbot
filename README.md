@@ -11,13 +11,13 @@ https://github.com/user-attachments/assets/15ffb38e-5eb9-4720-93b9-412e4961dc93
 
 Claude Code runs in your terminal. When you step away from your computer — commuting, on the couch, or just away from your desk — the session keeps working, but you lose visibility and control.
 
-CCBot solves this by letting you **seamlessly continue the same session from Telegram**. The key insight is that it operates on **tmux**, not the Claude Code SDK. Your Claude Code process stays exactly where it is, in a tmux window on your machine. CCBot simply reads its output and sends keystrokes to it. This means:
+CCBot solves this by letting you **seamlessly continue the same terminal-backed conversation from Telegram**. The key insight is that it operates on **tmux**, not the Claude Code SDK. Your Claude Code process stays exactly where it is, in a tmux window on your machine. CCBot simply reads its output and sends keystrokes to it. This means:
 
 - **Switch from desktop to phone mid-conversation** — Claude is working on a refactor? Walk away, keep monitoring and responding from Telegram.
 - **Switch back to desktop anytime** — Since the tmux session was never interrupted, just `tmux attach` and you're back in the terminal with full scrollback and context.
-- **Run multiple sessions in parallel** — Each Telegram topic maps to a separate tmux window, so you can juggle multiple projects from one chat group.
+- **Run multiple conversations in parallel** — Each Telegram topic maps to a separate tmux window, so you can juggle multiple projects from one chat group.
 
-Other Telegram bots for Claude Code typically wrap the Claude Code SDK to create separate API sessions. Those sessions are isolated — you can't resume them in your terminal. CCBot takes a different approach: it's just a thin control layer over tmux, so the terminal remains the source of truth and you never lose the ability to switch back.
+Other Telegram bots for Claude Code typically wrap the Claude Code SDK to create separate API sessions. Those sessions are isolated — you can't resume them in your terminal. CCBot takes a different approach: it's just a thin control layer over tmux, so the terminal remains the live control surface and you never lose the ability to switch back.
 
 In fact, CCBot itself was built this way — iterating on itself through Claude Code sessions monitored and driven from Telegram via CCBot.
 
@@ -32,7 +32,7 @@ Maintainer reference:
 
 ## Features
 
-- **Topic-based sessions** — Each Telegram topic maps 1:1 to a tmux window and Claude session
+- **Topic-based control** — Each Telegram topic binds to one tmux window at a time, while the live process in that window may start or resume a persisted conversation
 - **Real-time notifications** — Get Telegram messages for assistant responses, thinking content, tool use/result, and local command output
 - **Interactive UI** — Navigate AskUserQuestion, ExitPlanMode, and Permission Prompts via inline keyboard
 - **Voice messages** — Voice messages are transcribed via OpenAI and forwarded as text
@@ -175,7 +175,9 @@ Any unrecognized `/command` is also forwarded to Claude Code as-is (e.g. `/revie
 
 ### Topic Workflow
 
-**1 Topic = 1 Window = 1 Session.** The bot runs in Telegram Forum (topics) mode.
+**1 Topic = 1 live tmux binding at a time.** The bot runs in Telegram Forum (topics) mode.
+
+Each topic controls one tmux window at a time. The process inside that window may start a fresh conversation or resume an existing persisted thread.
 
 **Creating a new session:**
 
