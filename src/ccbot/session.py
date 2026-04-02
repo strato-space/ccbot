@@ -45,6 +45,8 @@ from .utils import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
+BLOCKED_PROMPT_SEND_MESSAGE = "Input blocked by a visible prompt in the terminal"
+
 WindowState = LiveProcessDescriptor
 ClaudeSession = ThreadLocator
 
@@ -951,7 +953,7 @@ class SessionManager:
         if pane_text:
             surface = classify_input_surface(pane_text)
             if surface.kind == "blocked_prompt":
-                return False, "Input blocked by a visible prompt in the terminal"
+                return False, BLOCKED_PROMPT_SEND_MESSAGE
 
         runtime_kind = (
             self.window_states[window_id].runtime_kind

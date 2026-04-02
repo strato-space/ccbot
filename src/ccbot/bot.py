@@ -131,7 +131,7 @@ from .markdown_v2 import convert_markdown
 from .handlers.response_builder import build_response_parts
 from .handlers.status_polling import status_poll_loop
 from .screenshot import text_to_image
-from .session import session_manager
+from .session import BLOCKED_PROMPT_SEND_MESSAGE, session_manager
 from .session_monitor import NewMessage, SessionMonitor
 from .terminal_parser import classify_input_surface, extract_bash_output
 from .tmux_manager import tmux_manager
@@ -173,6 +173,33 @@ def _get_thread_id(update: Update) -> int | None:
     if tid is None or tid == 1:
         return None
     return tid
+
+
+async def _surface_blocked_prompt_state(
+    bot: Bot,
+    user_id: int,
+    window_id: str,
+    thread_id: int | None,
+    *,
+    reply_message: object | None = None,
+    chat_id: int | None = None,
+) -> None:
+    """Show the current blocked prompt as a read-only snapshot."""
+    await handle_interactive_ui(bot, user_id, window_id, thread_id)
+    notice = (
+        "⚠️ Terminal prompt is waiting for a decision. "
+        "Remote input is disabled for this state."
+    )
+    if reply_message is not None:
+        await safe_reply(reply_message, notice)
+        return
+    if chat_id is not None:
+        await safe_send(
+            bot,
+            chat_id,
+            notice,
+            message_thread_id=thread_id,
+        )
 
 
 # --- Command handlers ---
@@ -329,6 +356,15 @@ async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # Send /usage command to the runtime TUI
     success, message = await session_manager.send_to_window(w.window_id, "/usage")
     if not success:
+        if message == BLOCKED_PROMPT_SEND_MESSAGE:
+            await _surface_blocked_prompt_state(
+                context.bot,
+                user.id,
+                w.window_id,
+                thread_id,
+                reply_message=update.message,
+            )
+            return
         await safe_reply(update.message, f"Failed to capture usage info: {message}")
         return
     # Wait for the modal to render
@@ -547,6 +583,15 @@ async def forward_command_handler(
         # interactive UIs every 1s (status_polling.py), so no
         # proactive detection needed here — the poller handles it.
     else:
+        if message == BLOCKED_PROMPT_SEND_MESSAGE:
+            await _surface_blocked_prompt_state(
+                context.bot,
+                user.id,
+                wid,
+                thread_id,
+                reply_message=update.message,
+            )
+            return
         await safe_reply(update.message, f"❌ {message}")
 
 
@@ -636,6 +681,15 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     success, message = await session_manager.send_to_window(wid, text_to_send)
     if not success:
+        if message == BLOCKED_PROMPT_SEND_MESSAGE:
+            await _surface_blocked_prompt_state(
+                context.bot,
+                user.id,
+                wid,
+                thread_id,
+                reply_message=update.message,
+            )
+            return
         await safe_reply(update.message, f"❌ {message}")
         return
 
@@ -713,6 +767,15 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     success, message = await session_manager.send_to_window(wid, text)
     if not success:
+        if message == BLOCKED_PROMPT_SEND_MESSAGE:
+            await _surface_blocked_prompt_state(
+                context.bot,
+                user.id,
+                wid,
+                thread_id,
+                reply_message=update.message,
+            )
+            return
         await safe_reply(update.message, f"❌ {message}")
         return
 
@@ -975,16 +1038,26 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             user.id,
             thread_id,
         )
-        await handle_interactive_ui(context.bot, user.id, wid, thread_id)
-        await safe_reply(
-            update.message,
-            "⚠️ Terminal prompt is waiting for a decision. "
-            "Remote input is disabled for this state.",
+        await _surface_blocked_prompt_state(
+            context.bot,
+            user.id,
+            wid,
+            thread_id,
+            reply_message=update.message,
         )
         return
 
     success, message = await session_manager.send_to_window(wid, text)
     if not success:
+        if message == BLOCKED_PROMPT_SEND_MESSAGE:
+            await _surface_blocked_prompt_state(
+                context.bot,
+                user.id,
+                wid,
+                thread_id,
+                reply_message=update.message,
+            )
+            return
         await safe_reply(update.message, f"❌ {message}")
         return
 
@@ -1129,6 +1202,15 @@ async def _create_and_bind_window(
                 )
                 if not send_ok:
                     logger.warning("Failed to forward pending text: %s", send_msg)
+                    if send_msg == BLOCKED_PROMPT_SEND_MESSAGE:
+                        await _surface_blocked_prompt_state(
+                            context.bot,
+                            user.id,
+                            created_wid,
+                            pending_thread_id,
+                            chat_id=resolved_chat,
+                        )
+                        return
                     await safe_send(
                         context.bot,
                         resolved_chat,
@@ -1518,6 +1600,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             if not send_ok:
                 logger.warning("Failed to forward pending text: %s", send_msg)
+                if send_msg == BLOCKED_PROMPT_SEND_MESSAGE:
+                    await _surface_blocked_prompt_state(
+                        context.bot,
+                        user.id,
+                        selected_wid,
+                        thread_id,
+                        chat_id=resolved_chat,
+                    )
+                    return
                 await safe_send(
                     context.bot,
                     resolved_chat,
