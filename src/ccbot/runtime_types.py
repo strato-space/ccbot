@@ -32,6 +32,7 @@ class LiveProcessDescriptor:
     cwd: str = ""
     window_name: str = ""
     runtime_kind: str = "claude"
+    registered_at: float = 0.0
 
     @property
     def session_id(self) -> str:
@@ -51,6 +52,8 @@ class LiveProcessDescriptor:
         }
         if self.window_name:
             data["window_name"] = self.window_name
+        if self.registered_at:
+            data["registered_at"] = self.registered_at
         return data
 
     @classmethod
@@ -60,6 +63,7 @@ class LiveProcessDescriptor:
             cwd=data.get("cwd", ""),
             window_name=data.get("window_name", ""),
             runtime_kind=data.get("runtime_kind", "claude"),
+            registered_at=float(data.get("registered_at", 0.0) or 0.0),
         )
 
 

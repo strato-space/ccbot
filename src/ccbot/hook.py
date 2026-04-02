@@ -1,8 +1,9 @@
-"""Hook subcommand for Claude Code session tracking.
+"""Hook subcommand for Claude compatibility session tracking.
 
 Called by Claude Code's SessionStart hook to maintain a window↔session
-mapping in <CCBOT_DIR>/session_map.json. Also provides `--install` to
-auto-configure the hook in ~/.claude/settings.json.
+mapping in <CCBOT_DIR>/session_map.json. Codex launcher-side registration is
+handled elsewhere; this module remains the Claude compatibility path and also
+provides `--install` to auto-configure the hook in ~/.claude/settings.json.
 
 This module must NOT import config.py (which requires TELEGRAM_BOT_TOKEN),
 since hooks run inside tmux panes where bot env vars are not set.

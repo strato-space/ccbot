@@ -9,6 +9,7 @@ shared modules.
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from telegram import CallbackQuery, User
 
 from ccbot import bot as bot_mod
 
@@ -288,3 +289,49 @@ class TestRuntimeInputRouting:
             "Window not found", show_alert=True
         )
         mock_sm.send_special_key_to_window.assert_not_called()
+
+
+class TestLauncherRegistration:
+    def test_infer_runtime_kind_from_wrapped_command(self):
+        assert bot_mod.infer_runtime_kind_from_command("env FOO=1 codex") == "codex"
+        assert bot_mod.infer_runtime_kind_from_command("bash -lc codex") == "codex"
+        assert bot_mod.infer_runtime_kind_from_command("/usr/local/bin/codex --json") == "codex"
+        assert bot_mod.infer_runtime_kind_from_command("uvx codex --help") == "codex"
+        assert bot_mod.infer_runtime_kind_from_command("claude --dangerously-skip-permissions") == "claude"
+
+    @pytest.mark.asyncio
+    async def test_create_and_bind_window_registers_codex_without_hook_wait(self):
+        query = MagicMock(spec=CallbackQuery)
+        query.answer = AsyncMock()
+        context = _make_context()
+        user = MagicMock(spec=User)
+        user.id = 1
+
+        with (
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock),
+            patch.object(bot_mod.config, "claude_command", "codex"),
+        ):
+            mock_tmux.create_window = AsyncMock(
+                return_value=(True, "Created window 'proj' at /tmp/project", "proj", "@7")
+            )
+            mock_sm.register_live_process = MagicMock()
+            mock_sm.wait_for_session_map_entry = AsyncMock(return_value=True)
+
+            await bot_mod._create_and_bind_window(
+                query,
+                context,
+                user,
+                "/tmp/project",
+                pending_thread_id=None,
+            )
+
+        mock_sm.register_live_process.assert_called_once_with(
+            "@7",
+            "/tmp/project",
+            window_name="proj",
+            runtime_kind="codex",
+            thread_id="",
+        )
+        mock_sm.wait_for_session_map_entry.assert_not_awaited()

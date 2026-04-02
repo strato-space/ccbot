@@ -34,6 +34,57 @@ def _build_fixture_codex_home(tmp_path: Path) -> Path:
     return codex_home
 
 
+def _write_codex_thread(
+    codex_home: Path,
+    *,
+    thread_id: str,
+    cwd: str,
+    thread_name: str,
+    updated_at: str,
+) -> None:
+    sessions_root = codex_home / "sessions" / "2026" / "04" / "02"
+    sessions_root.mkdir(parents=True, exist_ok=True)
+    session_index = codex_home / "session_index.jsonl"
+    with session_index.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "id": thread_id,
+                    "thread_name": thread_name,
+                    "updated_at": updated_at,
+                }
+            )
+            + "\n"
+        )
+    rollout = sessions_root / f"rollout-{thread_id}.jsonl"
+    rollout.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "timestamp": updated_at,
+                        "type": "session_meta",
+                        "payload": {"id": thread_id, "cwd": cwd},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": updated_at,
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "agent_message",
+                            "phase": "commentary",
+                            "message": "hello",
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def _build_legacy_claude_project(tmp_path: Path, cwd: str, thread_id: str) -> Path:
     encoded_cwd = SessionManager._encode_cwd(cwd)
     project_dir = tmp_path / encoded_cwd
@@ -181,3 +232,101 @@ async def test_session_manager_preserves_legacy_claude_threads_in_mixed_director
         "legacy-claude-thread",
     ]
     assert sessions[-1].summary == "Legacy Claude thread"
+
+
+@pytest.mark.asyncio
+async def test_codex_registration_fails_closed_for_parallel_same_cwd_starts(
+    session_manager: SessionManager,
+) -> None:
+    session_manager.register_live_process("@1", "/home", runtime_kind="codex")
+    session_manager.register_live_process("@2", "/home", runtime_kind="codex")
+    session_manager.get_window_state("@1").registered_at = 0.0
+    session_manager.get_window_state("@2").registered_at = 0.0
+
+    assert await session_manager.resolve_thread_for_window("@1") is None
+    assert await session_manager.resolve_thread_for_window("@2") is None
+
+
+@pytest.mark.asyncio
+async def test_codex_registration_ignores_stale_history_candidates(
+    session_manager: SessionManager,
+) -> None:
+    session_manager.register_live_process("@1", "/home", runtime_kind="codex")
+    state = session_manager.get_window_state("@1")
+    newest_home_candidate = max(
+        candidate.ordering_timestamp
+        for candidate in session_manager.codex_thread_catalog.candidates
+        if candidate.normalized_cwd == "/home"
+    )
+    state.registered_at = newest_home_candidate + 1000
+
+    assert await session_manager.resolve_thread_for_window("@1") is None
+
+
+@pytest.mark.asyncio
+async def test_codex_resume_registration_prefers_explicit_thread_id(
+    session_manager: SessionManager,
+) -> None:
+    session_manager.register_live_process(
+        "@1",
+        "/home",
+        runtime_kind="codex",
+        thread_id="019d4e4b-7fac-77f3-b559-cb8e9b4c39a9",
+    )
+
+    resolved = await session_manager.resolve_thread_for_window("@1")
+
+    assert resolved is not None
+    assert resolved.thread_id == "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9"
+
+
+@pytest.mark.asyncio
+async def test_register_live_process_resets_stale_window_state(
+    session_manager: SessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_manager.register_live_process(
+        "@1",
+        "/old",
+        runtime_kind="codex",
+        thread_id="stale-thread",
+    )
+    state = session_manager.get_window_state("@1")
+    state.registered_at = 10.0
+
+    monkeypatch.setattr("ccbot.session.time.time", lambda: 42.0)
+    session_manager.register_live_process("@1", "/new", runtime_kind="codex")
+
+    refreshed = session_manager.get_window_state("@1")
+    assert refreshed.cwd == "/new"
+    assert refreshed.thread_id == ""
+    assert refreshed.registered_at == 42.0
+
+
+@pytest.mark.asyncio
+async def test_codex_registration_recovers_after_delayed_index_write(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / ".codex"
+    catalog = CodexThreadCatalog(codex_home=codex_home)
+    monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+    monkeypatch.setattr(SessionManager, "_save_state", lambda self: None)
+    manager = SessionManager(codex_thread_catalog=catalog)
+    manager.register_live_process("@1", "/workspace/app", runtime_kind="codex")
+
+    assert await manager.resolve_thread_for_window("@1") is None
+
+    _write_codex_thread(
+        codex_home,
+        thread_id="019d4e63-f279-79b1-8dfd-be785dc4a419",
+        cwd="/workspace/app",
+        thread_name="Delayed thread",
+        updated_at="2026-04-02T14:30:00Z",
+    )
+    manager.get_window_state("@1").registered_at = 0.0
+
+    resolved = await manager.resolve_thread_for_window("@1")
+
+    assert resolved is not None
+    assert resolved.thread_id == "019d4e63-f279-79b1-8dfd-be785dc4a419"

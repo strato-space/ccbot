@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Iterator
@@ -23,7 +24,11 @@ from typing import Any
 import aiofiles
 
 from .config import config
-from .codex_threads import CodexThreadCatalog
+from .codex_threads import (
+    CodexThreadCandidate,
+    CodexThreadCatalog,
+    CodexThreadResolution,
+)
 from .input_driver import runtime_input_driver
 from .runtime_types import InputAction, LiveProcessDescriptor, ThreadLocator, TopicBinding
 from .state_schema import (
@@ -511,10 +516,8 @@ class SessionManager:
                 valid_wids.add(window_id)
             else:
                 legacy_keys_seen = True
-            if not new_sid:
-                continue
             if (
-                state.thread_id != new_sid
+                (new_sid and state.thread_id != new_sid)
                 or state.cwd != new_cwd
                 or state.runtime_kind != new_runtime_kind
             ):
@@ -525,7 +528,8 @@ class SessionManager:
                     new_cwd,
                     new_runtime_kind,
                 )
-                state.thread_id = new_sid
+                if new_sid:
+                    state.thread_id = new_sid
                 state.cwd = new_cwd
                 state.runtime_kind = new_runtime_kind
                 changed = True
@@ -563,6 +567,27 @@ class SessionManager:
         """Backward-compatible alias for get_process_descriptor()."""
         return self.get_process_descriptor(window_id)
 
+    def register_live_process(
+        self,
+        window_id: str,
+        cwd: str,
+        *,
+        window_name: str = "",
+        runtime_kind: str | None = None,
+        thread_id: str = "",
+    ) -> WindowState:
+        """Register a live process before its persisted thread is known."""
+        state = self.get_process_descriptor(window_id)
+        state.cwd = cwd
+        if window_name:
+            state.window_name = window_name
+        if runtime_kind:
+            state.runtime_kind = runtime_kind
+        state.registered_at = time.time()
+        state.thread_id = thread_id
+        self._save_state()
+        return state
+
     def clear_window_session(self, window_id: str) -> None:
         """Clear the persisted thread association for a window."""
         state = self.get_process_descriptor(window_id)
@@ -589,12 +614,7 @@ class SessionManager:
     async def _get_thread_locator_direct(
         self, thread_id: str, cwd: str
     ) -> ThreadLocator | None:
-        """Resolve a persisted thread directly from thread_id and cwd."""
-        if self.codex_thread_catalog is not None:
-            locator = self.codex_thread_catalog.exact_locator(thread_id, cwd)
-            if locator is not None:
-                return locator
-
+        """Resolve a legacy Claude transcript directly from thread_id and cwd."""
         file_path = self._build_session_file_path(thread_id, cwd)
 
         # Fallback: glob search if direct path doesn't exist
@@ -666,6 +686,7 @@ class SessionManager:
         seen_thread_ids: set[str] = set()
 
         if self.codex_thread_catalog is not None:
+            self.codex_thread_catalog.refresh()
             candidates = await asyncio.to_thread(
                 self.codex_thread_catalog.list_candidates_for_cwd, cwd
             )
@@ -710,28 +731,68 @@ class SessionManager:
     async def resolve_thread_for_window(self, window_id: str) -> ThreadLocator | None:
         """Resolve a tmux window to the persisted thread bound to its process.
 
-        Uses persisted thread_id + cwd to construct the rollout path directly.
-        Returns None if no thread is associated with this window.
+        Uses the explicit launcher registration first, then exact cwd-based
+        resolution. Ambiguity is fail-closed.
         """
         state = self.get_process_descriptor(window_id)
-
-        if not state.thread_id or not state.cwd:
+        resolution = await self.resolve_thread_candidate(window_id)
+        if resolution is None:
             return None
 
-        session = await self._get_thread_locator_direct(state.thread_id, state.cwd)
-        if session:
-            return session
+        if resolution.status == "selected" and resolution.selected is not None:
+            selected = resolution.selected
+            changed = False
+            if state.thread_id != selected.thread_id:
+                state.thread_id = selected.thread_id
+                changed = True
+            if selected.cwd and state.cwd != selected.cwd:
+                state.cwd = selected.cwd
+                changed = True
+            if changed:
+                self._save_state()
+            return selected
 
-        # File no longer exists, clear state
-        logger.warning(
-            "Session file no longer exists for window_id %s (sid=%s, cwd=%s)",
-            window_id,
-            state.thread_id,
-            state.cwd,
-        )
-        state.thread_id = ""
-        state.cwd = ""
-        self._save_state()
+        if resolution.status == "ambiguous":
+            logger.warning(
+                "Ambiguous Codex thread resolution for window_id %s (cwd=%s)",
+                window_id,
+                state.cwd,
+            )
+        return None
+
+    async def resolve_thread_candidate(
+        self, window_id: str
+    ) -> CodexThreadResolution | None:
+        """Resolve a live window to a Codex thread candidate without mutating state."""
+        state = self.get_process_descriptor(window_id)
+        if not state.cwd:
+            return None
+
+        if state.runtime_kind == "codex" and self.codex_thread_catalog is not None:
+            self.codex_thread_catalog.refresh()
+            return self.codex_thread_catalog.resolve_for_registration(
+                registered_thread_id=state.thread_id or None,
+                cwd=state.cwd,
+                registered_at=state.registered_at,
+            )
+
+        if state.thread_id and state.cwd:
+            session = await self._get_thread_locator_direct(state.thread_id, state.cwd)
+            if session:
+                return CodexThreadResolution(
+                    status="selected",
+                    selected=CodexThreadCandidate(
+                        thread_id=session.thread_id,
+                        thread_name=session.summary,
+                        cwd=session.cwd,
+                        rollout_file=Path(session.file_path),
+                        message_count=session.message_count,
+                        mtime=0.0,
+                        preview=session.summary,
+                    ),
+                    candidates=(),
+                    reason="legacy_direct_lookup",
+                )
         return None
 
     async def resolve_session_for_window(self, window_id: str) -> ClaudeSession | None:

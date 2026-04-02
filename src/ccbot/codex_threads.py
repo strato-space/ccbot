@@ -134,6 +134,12 @@ class CodexThreadCandidate:
         return normalize_cwd(self.cwd)
 
     @property
+    def ordering_timestamp(self) -> float:
+        if self.updated_at:
+            return _parse_timestamp(self.updated_at)
+        return self.mtime
+
+    @property
     def summary(self) -> str:
         title = self.thread_name.strip() or self.preview.strip()
         return title or self.thread_id
@@ -195,6 +201,16 @@ class CodexThreadCatalog:
         self.session_index_path = session_index_path or (self.codex_home / "session_index.jsonl")
         self.sessions_root = sessions_root or (self.codex_home / "sessions")
 
+    def refresh(self) -> None:
+        """Invalidate cached directory scans so delayed writes become visible."""
+        for key in (
+            "index_entries",
+            "rollout_lookup",
+            "candidates",
+            "index_only_entries",
+        ):
+            self.__dict__.pop(key, None)
+
     @cached_property
     def index_entries(self) -> tuple[CodexThreadIndexEntry, ...]:
         """Load session_index entries in file order with last-wins deduping."""
@@ -225,7 +241,7 @@ class CodexThreadCatalog:
             (
                 path
                 for path in self.sessions_root.rglob("*")
-                if path.is_file() and path.suffix in {".jsonl", ".json", ".gz", ".zst"}
+                if path.is_file() and path.suffix in {".jsonl", ".json"}
             ),
             key=lambda path: str(path),
         )
@@ -429,6 +445,53 @@ class CodexThreadCatalog:
             selected=None,
             reason="no_persisted_threads",
         )
+
+    def resolve_for_registration(
+        self,
+        *,
+        registered_thread_id: str | None = None,
+        cwd: str | None = None,
+        registered_at: float = 0.0,
+    ) -> CodexThreadResolution:
+        """Resolve a thread for an explicitly registered live Codex process."""
+        if registered_thread_id:
+            return self.resolve(thread_id=registered_thread_id, cwd=cwd)
+
+        if not cwd:
+            return CodexThreadResolution(
+                status="not_found",
+                selected=None,
+                reason="launcher_registration_missing_cwd",
+            )
+
+        candidates = self.list_candidates_for_cwd(cwd)
+        if registered_at > 0:
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate.ordering_timestamp >= registered_at
+            ]
+            if len(candidates) == 1:
+                return CodexThreadResolution(
+                    status="selected",
+                    selected=candidates[0],
+                    candidates=tuple(candidates),
+                    reason="explicit_launcher_registration",
+                )
+            if len(candidates) > 1:
+                return CodexThreadResolution(
+                    status="ambiguous",
+                    selected=None,
+                    candidates=tuple(candidates),
+                    reason="explicit_launcher_registration_ambiguous",
+                )
+            return CodexThreadResolution(
+                status="not_found",
+                selected=None,
+                reason="explicit_launcher_registration_not_found",
+            )
+
+        return self.resolve(cwd=cwd)
 
     def exact_locator(self, thread_id: str, cwd: str) -> ThreadLocator | None:
         """Return a locator only when thread id and cwd match exactly."""

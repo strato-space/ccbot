@@ -119,6 +119,7 @@ from .handlers.message_queue import (
     get_message_queue,
     shutdown_workers,
 )
+from .launcher_registration import infer_runtime_kind_from_command
 from .handlers.message_sender import (
     NO_LINK_PREVIEW,
     safe_edit,
@@ -1031,18 +1032,30 @@ async def _create_and_bind_window(
             pending_thread_id,
             resume_session_id,
         )
-        # Wait for Claude Code's SessionStart hook to register in session_map.
-        # Resume sessions take longer to start (loading session state), so use
-        # a longer timeout to avoid silently dropping messages.
-        hook_timeout = 15.0 if resume_session_id else 5.0
-        hook_ok = await session_manager.wait_for_session_map_entry(
-            created_wid, timeout=hook_timeout
+        runtime_kind = infer_runtime_kind_from_command(config.claude_command)
+        session_manager.register_live_process(
+            created_wid,
+            selected_path,
+            window_name=created_wname,
+            runtime_kind=runtime_kind,
+            thread_id=resume_session_id or "",
         )
 
-        # --resume creates a new session_id in the hook, but messages continue
-        # writing to the resumed session's JSONL file. Override window_state to
-        # track the original session_id so the monitor can route messages back.
-        if resume_session_id:
+        # Claude windows still rely on SessionStart hook registration.
+        hook_ok = True
+        if runtime_kind != "codex":
+            # Wait for Claude Code's SessionStart hook to register in session_map.
+            # Resume sessions take longer to start (loading session state), so use
+            # a longer timeout to avoid silently dropping messages.
+            hook_timeout = 15.0 if resume_session_id else 5.0
+            hook_ok = await session_manager.wait_for_session_map_entry(
+                created_wid, timeout=hook_timeout
+            )
+
+        # Claude resume may create a new session_id in the hook, but messages
+        # continue writing to the resumed session's JSONL file. Override the
+        # live descriptor to track the original resumed thread.
+        if resume_session_id and runtime_kind != "codex":
             ws = session_manager.get_window_state(created_wid)
             if not hook_ok:
                 # Hook timed out — manually populate window_state so the

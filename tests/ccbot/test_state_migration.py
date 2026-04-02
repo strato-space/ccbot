@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from ccbot import hook as hook_module
 from ccbot import monitor_state as monitor_state_module
 from ccbot import session as session_module
+from ccbot.codex_threads import CodexThreadCatalog
 from ccbot.monitor_state import MonitorState, TrackedSession
 from ccbot.session import SessionManager
 from ccbot.session_monitor import SessionMonitor
@@ -202,6 +204,13 @@ def test_hook_writes_versioned_session_map_and_backup(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_versioned_session_map_is_read_by_session_monitor(tmp_path, monkeypatch):
     session_map_file = tmp_path / "session_map.json"
+    project_root = tmp_path / "projects"
+    project_dir = project_root / SessionManager._encode_cwd("/tmp/project-9")
+    project_dir.mkdir(parents=True)
+    (project_dir / "thread-9.jsonl").write_text(
+        json.dumps({"type": "summary", "summary": "Recovered Claude thread"}) + "\n",
+        encoding="utf-8",
+    )
     session_map_file.write_text(
         json.dumps(
             {
@@ -220,11 +229,82 @@ async def test_versioned_session_map_is_read_by_session_monitor(tmp_path, monkey
     )
 
     monkeypatch.setattr(session_module.config, "session_map_file", session_map_file)
+    monkeypatch.setattr(session_module.config, "claude_projects_path", project_root)
+    monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+    manager = SessionManager()
+    await manager.load_session_map()
+    manager.bind_thread(100, 7, "@9", window_name="proj-9")
+    monkeypatch.setattr(session_module, "session_manager", manager)
     monitor = SessionMonitor(
         projects_path=tmp_path / "projects",
         state_file=tmp_path / "monitor_state.json",
+    )
+    monkeypatch.setattr(
+        "ccbot.session_monitor.tmux_manager.list_windows",
+        AsyncMock(return_value=[SimpleNamespace(window_id="@9")]),
     )
 
     current_map = await monitor._load_current_session_map()
 
     assert current_map == {"@9": "thread-9"}
+
+
+@pytest.mark.asyncio
+async def test_monitor_recovers_codex_binding_from_persisted_registration(
+    tmp_path,
+    monkeypatch,
+):
+    state_file = tmp_path / "state.json"
+    codex_home = tmp_path / ".codex"
+    sessions_root = codex_home / "sessions" / "2026" / "04" / "02"
+    sessions_root.mkdir(parents=True)
+    thread_id = "019d4e76-7fae-7a90-bc40-2290ee269660"
+    (codex_home / "session_index.jsonl").write_text(
+        json.dumps(
+            {
+                "id": thread_id,
+                "thread_name": "Recovered thread",
+                "updated_at": "2026-04-02T14:00:00Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (sessions_root / f"rollout-{thread_id}.jsonl").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-02T14:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": thread_id, "cwd": "/tmp/project-9"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(session_module.config, "state_file", state_file)
+    monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+    manager = SessionManager(
+        codex_thread_catalog=CodexThreadCatalog(codex_home=codex_home)
+    )
+    manager.register_live_process(
+        "@9",
+        "/tmp/project-9",
+        runtime_kind="codex",
+        thread_id=thread_id,
+    )
+    manager.bind_thread(100, 7, "@9", window_name="proj-9")
+    monkeypatch.setattr(session_module, "session_manager", manager)
+
+    monitor = SessionMonitor(
+        projects_path=tmp_path / "projects",
+        state_file=tmp_path / "monitor_state.json",
+    )
+    monkeypatch.setattr(
+        "ccbot.session_monitor.tmux_manager.list_windows",
+        AsyncMock(return_value=[SimpleNamespace(window_id="@9")]),
+    )
+
+    current_map = await monitor._load_current_session_map()
+
+    assert current_map == {"@9": thread_id}

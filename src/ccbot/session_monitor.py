@@ -23,7 +23,6 @@ from .config import config
 from .codex_threads import normalize_cwd
 from .codex_rollout import CodexRolloutNormalizer
 from .monitor_state import MonitorState, TrackedSession
-from .state_schema import split_session_map_payload
 from .runtime_types import NormalizedEvent, RolloutSource
 from .tmux_manager import tmux_manager
 from .transcript_parser import TranscriptParser
@@ -379,31 +378,24 @@ class SessionMonitor:
         return new_messages
 
     async def _load_current_session_map(self) -> dict[str, str]:
-        """Load current binding map and return window_key -> thread_id mapping.
+        """Build the current live binding map from topic bindings plus resolution.
 
-        Keys in session_map are formatted as "tmux_session:window_id"
-        (e.g. "ccbot:@12"). Old-format keys ("ccbot:window_name") are also
-        accepted so that sessions running before a code upgrade continue
-        to be monitored until the hook re-fires with new format.
-        Only entries matching our tmux_session_name are processed.
+        The source of truth is the persisted topic/window binding and live
+        process registration state, not the legacy Claude hook map alone.
         """
+        from .session import session_manager
+
+        await session_manager.load_session_map()
+        live_window_ids = {window.window_id for window in await tmux_manager.list_windows()}
         window_to_session: dict[str, str] = {}
-        if config.session_map_file.exists():
-            try:
-                async with aiofiles.open(config.session_map_file, "r") as f:
-                    content = await f.read()
-                session_map, _, _ = split_session_map_payload(json.loads(content))
-                prefix = f"{config.tmux_session_name}:"
-                for key, info in session_map.items():
-                    # Only process entries for our tmux session
-                    if not key.startswith(prefix):
-                        continue
-                    window_key = key[len(prefix) :]
-                    session_id = info.get("session_id", "")
-                    if session_id:
-                        window_to_session[window_key] = session_id
-            except (json.JSONDecodeError, OSError):
-                pass
+
+        for binding in session_manager.iter_topic_bindings():
+            if binding.window_id not in live_window_ids:
+                continue
+            resolved = await session_manager.resolve_thread_for_window(binding.window_id)
+            if resolved is not None and resolved.thread_id:
+                window_to_session[binding.window_id] = resolved.thread_id
+
         return window_to_session
 
     async def _cleanup_all_stale_sessions(self) -> None:
