@@ -187,6 +187,18 @@ class CodexThreadLookup:
     def normalized_cwd(self) -> str:
         return normalize_cwd(self.cwd)
 
+    def to_candidate(self, entry: CodexThreadIndexEntry | None = None) -> CodexThreadCandidate:
+        return CodexThreadCandidate(
+            thread_id=self.thread_id,
+            thread_name=entry.normalized_thread_name if entry else "",
+            cwd=self.cwd,
+            rollout_file=self.file_path,
+            message_count=self.message_count,
+            updated_at=entry.updated_at if entry else "",
+            mtime=self.mtime,
+            preview=self.preview,
+        )
+
 
 class CodexThreadCatalog:
     """Adapter that enumerates and resolves persisted Codex threads."""
@@ -310,6 +322,46 @@ class CodexThreadCatalog:
         except OSError:
             return None
 
+    def _load_rollout_identity(self, path: Path) -> CodexThreadLookup | None:
+        """Load only the identifying session metadata from a rollout file."""
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as stream:
+                thread_id = ""
+                cwd = ""
+                for line in stream:
+                    if not line.strip():
+                        continue
+                    data = TranscriptParser.parse_line(line)
+                    if not isinstance(data, dict):
+                        continue
+                    if data.get("type") != "session_meta":
+                        continue
+                    payload = data.get("payload") or {}
+                    thread_id = str(
+                        payload.get("id")
+                        or payload.get("session_id")
+                        or payload.get("sessionId")
+                        or ""
+                    ).strip()
+                    cwd = str(payload.get("cwd") or "").strip()
+                    break
+                if not thread_id:
+                    thread_id = _extract_thread_id_from_filename(path)
+                if not thread_id:
+                    return None
+                if not cwd:
+                    cwd = read_cwd_from_jsonl(path)
+                return CodexThreadLookup(
+                    thread_id=thread_id,
+                    file_path=path,
+                    cwd=cwd,
+                    message_count=0,
+                    mtime=path.stat().st_mtime,
+                    preview="",
+                )
+        except OSError:
+            return None
+
     @cached_property
     def rollout_lookup(self) -> dict[str, CodexThreadLookup]:
         return self._read_rollout_lookup()
@@ -372,6 +424,80 @@ class CodexThreadCatalog:
             if candidate.thread_id == thread_id:
                 return candidate
         return None
+
+    def get_candidate_fast(self, thread_id: str) -> CodexThreadCandidate | None:
+        """Resolve a candidate by thread id without scanning the full catalog."""
+        if not thread_id:
+            return None
+        index_by_id = {entry.thread_id: entry for entry in self.index_entries}
+        for path in sorted(
+            self.sessions_root.rglob(f"*{thread_id}*.jsonl"),
+            key=lambda candidate: candidate.stat().st_mtime,
+            reverse=True,
+        ):
+            lookup = self._load_rollout_identity(path)
+            if lookup is None or lookup.thread_id != thread_id:
+                continue
+            full_lookup = self._load_rollout_lookup(path)
+            if full_lookup is None:
+                continue
+            return full_lookup.to_candidate(index_by_id.get(thread_id))
+        return None
+
+    def resolve_recent_for_registration(
+        self,
+        *,
+        cwd: str,
+        registered_at: float,
+    ) -> CodexThreadResolution:
+        """Resolve a just-registered process by scanning only recent rollout files."""
+        normalized_cwd = normalize_cwd(cwd)
+        if not normalized_cwd:
+            return CodexThreadResolution(
+                status="not_found",
+                selected=None,
+                reason="launcher_registration_missing_cwd",
+            )
+
+        recent_paths = sorted(
+            (
+                path
+                for path in self.sessions_root.rglob("rollout-*.jsonl")
+                if path.is_file() and path.stat().st_mtime >= max(0.0, registered_at - 5.0)
+            ),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        index_by_id = {entry.thread_id: entry for entry in self.index_entries}
+        candidates: list[CodexThreadCandidate] = []
+        for path in recent_paths:
+            lookup = self._load_rollout_identity(path)
+            if lookup is None or lookup.normalized_cwd != normalized_cwd:
+                continue
+            full_lookup = self._load_rollout_lookup(path)
+            if full_lookup is None:
+                continue
+            candidates.append(full_lookup.to_candidate(index_by_id.get(full_lookup.thread_id)))
+
+        if len(candidates) == 1:
+            return CodexThreadResolution(
+                status="selected",
+                selected=candidates[0],
+                candidates=tuple(candidates),
+                reason="explicit_launcher_registration_recent_rollout",
+            )
+        if len(candidates) > 1:
+            return CodexThreadResolution(
+                status="ambiguous",
+                selected=None,
+                candidates=tuple(candidates),
+                reason="explicit_launcher_registration_recent_rollout_ambiguous",
+            )
+        return CodexThreadResolution(
+            status="not_found",
+            selected=None,
+            reason="explicit_launcher_registration_recent_rollout_not_found",
+        )
 
     def resolve(
         self,

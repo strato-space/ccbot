@@ -60,6 +60,7 @@ VERTICAL_PROMPTS = frozenset(
         "CodexPermissionsPopup",
         "CodexModelPicker",
         "CodexReasoningPicker",
+        "CodexTrustPrompt",
     }
 )
 

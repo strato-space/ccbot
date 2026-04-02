@@ -169,7 +169,7 @@ class TestCommandSurface:
         assert "Claude Code Monitor" not in text
 
     @pytest.mark.asyncio
-    async def test_usage_command_rewrites_to_status(self):
+    async def test_usage_command_points_codex_users_to_status(self):
         update = _make_topic_update()
         context = _make_context()
 
@@ -180,12 +180,33 @@ class TestCommandSurface:
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
             mock_sm.resolve_window_for_thread.return_value = "@7"
-            mock_sm.send_to_window = AsyncMock(return_value=(True, "Sent to @7"))
+            mock_sm.get_window_state.return_value = SimpleNamespace(runtime_kind="codex")
 
             await bot_mod.usage_command(update, context)
 
-        mock_sm.send_to_window.assert_awaited_once_with("@7", "/status")
+        mock_sm.send_to_window.assert_not_called()
         mock_reply.assert_awaited_once()
+        assert "/status" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_usage_command_fails_closed_when_runtime_metadata_is_missing(self):
+        update = _make_topic_update()
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.resolve_window_for_thread.return_value = "@7"
+            mock_sm.window_states = {}
+
+            await bot_mod.usage_command(update, context)
+
+        mock_sm.send_to_window.assert_not_called()
+        mock_reply.assert_awaited_once()
+        assert "registered runtime metadata" in mock_reply.await_args.args[1]
         assert "/status" in mock_reply.await_args.args[1]
 
 
@@ -418,7 +439,7 @@ class TestRuntimeInputRouting:
         assert "/status" in mock_reply.await_args.args[1]
 
     @pytest.mark.asyncio
-    async def test_usage_command_aliases_to_status(self):
+    async def test_usage_command_forwards_to_claude_runtime(self):
         update = _make_topic_update()
         update.message.text = "/usage"
         context = _make_context()
@@ -430,12 +451,13 @@ class TestRuntimeInputRouting:
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
             mock_sm.resolve_window_for_thread.return_value = "@7"
+            mock_sm.get_window_state.return_value = SimpleNamespace(runtime_kind="claude")
             mock_sm.send_to_window = AsyncMock(return_value=(True, "Sent to @7"))
 
             await bot_mod.usage_command(update, context)
 
-        mock_sm.send_to_window.assert_awaited_once_with("@7", "/status")
-        assert "/status" in mock_reply.await_args.args[1]
+        mock_sm.send_to_window.assert_awaited_once_with("@7", "/usage")
+        assert "Claude usage modal requested" in mock_reply.await_args.args[1]
 
     @pytest.mark.asyncio
     async def test_interactive_ui_callback_missing_window_fails_closed(self):

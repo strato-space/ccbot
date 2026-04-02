@@ -199,6 +199,24 @@ class TestIsInteractiveUI:
 
 
 class TestClassifyInputSurface:
+    def test_detects_codex_trust_prompt(self):
+        pane = (
+            "  > You are in /tmp/example\n"
+            "\n"
+            "  Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection.\n"
+            "\n"
+            "› 1. Yes, continue\n"
+            "  2. No, quit\n"
+            "\n"
+            "  Press enter to continue\n"
+        )
+
+        surface = classify_input_surface(pane)
+
+        assert surface.kind == "blocked_prompt"
+        assert surface.prompt_name == "CodexTrustPrompt"
+        assert surface.allows_remote_actions is True
+
     def test_detects_codex_exec_approval_prompt(self):
         pane = (
             "\n"

@@ -187,13 +187,27 @@ def _get_thread_id(update: Update) -> int | None:
     return tid
 
 
-def _get_window_runtime_kind(window_id: str) -> str:
-    """Return the persisted runtime kind for a bound window."""
-    state = session_manager.get_window_state(window_id)
-    runtime_kind = getattr(state, "runtime_kind", config.default_runtime_kind)
+def _get_window_runtime_kind(window_id: str) -> str | None:
+    """Return the persisted runtime kind for a bound window.
+
+    This intentionally fails closed for windows that have no persisted runtime
+    metadata yet. ``SessionManager.get_window_state()`` auto-creates a default
+    descriptor, which would incorrectly classify an unknown Codex window as
+    legacy Claude if we called it unconditionally here.
+    """
+    window_states = getattr(session_manager, "window_states", None)
+    if isinstance(window_states, dict):
+        state = window_states.get(window_id)
+        if state is None:
+            return None
+        runtime_kind = getattr(state, "runtime_kind", None)
+    else:
+        state = session_manager.get_window_state(window_id)
+        runtime_kind = getattr(state, "runtime_kind", None)
+
     if isinstance(runtime_kind, str) and runtime_kind:
         return runtime_kind
-    return config.default_runtime_kind
+    return None
 
 
 def build_bot_commands() -> list[BotCommand]:
@@ -372,7 +386,7 @@ async def esc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Backward-compatible alias: Codex uses `/status`, not `/usage`."""
+    """Legacy Claude-only usage helper; Codex windows should use `/status`."""
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
         return
@@ -385,7 +399,14 @@ async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await safe_reply(update.message, UNBOUND_TOPIC_MESSAGE)
         return
 
-    success, message = await session_manager.send_to_window(wid, "/status")
+    if _get_window_runtime_kind(wid) != "claude":
+        await safe_reply(
+            update.message,
+            "⚠️ `/usage` is only available for Claude windows with registered runtime metadata. Use `/status` in Codex windows.",
+        )
+        return
+
+    success, message = await session_manager.send_to_window(wid, "/usage")
     if not success:
         if message == BLOCKED_PROMPT_SEND_MESSAGE:
             await _surface_blocked_prompt_state(
@@ -396,12 +417,9 @@ async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 reply_message=update.message,
             )
             return
-        await safe_reply(update.message, f"❌ /usage is not a Codex command: {message}")
+        await safe_reply(update.message, f"❌ Failed to capture usage info: {message}")
         return
-    await safe_reply(
-        update.message,
-        "ℹ️ Codex uses `/status` instead of `/usage`. Forwarded `/status` to the terminal.",
-    )
+    await safe_reply(update.message, "ℹ️ Claude usage modal requested in the terminal.")
 
 
 # --- Screenshot keyboard with quick control keys ---

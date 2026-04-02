@@ -773,6 +773,22 @@ class SessionManager:
             return None
 
         if state.runtime_kind == "codex" and self.codex_thread_catalog is not None:
+            if state.thread_id:
+                candidate = self.codex_thread_catalog.get_candidate_fast(state.thread_id)
+                if candidate is not None:
+                    return CodexThreadResolution(
+                        status="selected",
+                        selected=candidate,
+                        candidates=(candidate,),
+                        reason="explicit_thread_id_fast_path",
+                    )
+            if state.registered_at > 0:
+                recent_resolution = self.codex_thread_catalog.resolve_recent_for_registration(
+                    cwd=state.cwd,
+                    registered_at=state.registered_at,
+                )
+                if recent_resolution.status != "not_found":
+                    return recent_resolution
             self.codex_thread_catalog.refresh()
             return self.codex_thread_catalog.resolve_for_registration(
                 registered_thread_id=state.thread_id or None,

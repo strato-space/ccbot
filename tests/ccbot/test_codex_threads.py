@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -194,6 +195,69 @@ def test_catalog_fails_closed_on_missing_rollout_and_session_manager_uses_catalo
     )
     assert missing.status == "not_found"
     assert missing.reason == "explicit_thread_id_not_found"
+
+
+def test_catalog_resolves_recent_registration_without_full_catalog_scan(
+    tmp_path: Path,
+) -> None:
+    codex_home = _build_fixture_codex_home(tmp_path)
+    thread_id = "019d5000-0000-7000-8000-fastpath000001"
+    cwd = "/tmp/ccbot-fast-path"
+    updated_at = "2026-04-02T23:59:59Z"
+    _write_codex_thread(
+        codex_home,
+        thread_id=thread_id,
+        cwd=cwd,
+        thread_name="Fresh fast-path thread",
+        updated_at=updated_at,
+    )
+    rollout = next((codex_home / "sessions").rglob(f"*{thread_id}*.jsonl"))
+    now = time.time()
+    Path(rollout).touch()
+    catalog = CodexThreadCatalog(codex_home=codex_home)
+
+    resolution = catalog.resolve_recent_for_registration(
+        cwd=cwd,
+        registered_at=now - 1.0,
+    )
+
+    assert resolution.status == "selected"
+    assert resolution.selected is not None
+    assert resolution.selected.thread_id == thread_id
+    assert resolution.reason == "explicit_launcher_registration_recent_rollout"
+
+
+@pytest.mark.asyncio
+async def test_session_manager_uses_fast_thread_lookup_before_full_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    codex_home = _build_fixture_codex_home(tmp_path)
+    thread_id = "019d5000-0000-7000-8000-fastpath000002"
+    cwd = "/tmp/ccbot-fast-thread-id"
+    _write_codex_thread(
+        codex_home,
+        thread_id=thread_id,
+        cwd=cwd,
+        thread_name="Explicit thread-id fast path",
+        updated_at="2026-04-02T23:59:59Z",
+    )
+    catalog = CodexThreadCatalog(codex_home=codex_home)
+
+    monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+    monkeypatch.setattr(SessionManager, "_save_state", lambda self: None)
+    manager = SessionManager(codex_thread_catalog=catalog)
+    manager.register_live_process("@1", cwd, runtime_kind="codex", thread_id=thread_id)
+
+    def _explode_refresh() -> None:
+        raise AssertionError("full refresh should not run for explicit thread-id fast path")
+
+    monkeypatch.setattr(catalog, "refresh", _explode_refresh)
+
+    locator = await manager.resolve_thread_for_window("@1")
+
+    assert locator is not None
+    assert locator.thread_id == thread_id
 
 
 @pytest.mark.asyncio

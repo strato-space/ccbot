@@ -30,6 +30,18 @@ into a single "session" concept.
 Maintainer reference:
 - [`doc/runtime-ontology.md`](doc/runtime-ontology.md)
 - [`doc/state-migration.md`](doc/state-migration.md)
+- [`doc/strato-ops-codex.md`](doc/strato-ops-codex.md)
+
+## Strato Ops
+
+For the Strato fork, use the operator runbook in
+[`doc/strato-ops-codex.md`](doc/strato-ops-codex.md). It documents:
+
+- the live `tmux -> Codex -> rollout log` operating path
+- the legacy `CLAUDE_COMMAND` env var name that now launches `codex`
+- one-time state migration and reversible rollback via `*.v1.bak`
+- the operator tooling path `/home/tools/codex-tools/codex-session-scout`
+- the release-scope boundary: `voice`, `task`, and `ACP` are preserved but not expanded in this Codex release
 
 ## Features
 
@@ -38,7 +50,7 @@ Maintainer reference:
 - **Prompt-safe control lane** — Detect `input ready`, `busy`, and `blocked prompt` terminal states before sending input
 - **Voice messages** — Voice messages are transcribed via OpenAI and forwarded as text
 - **Send messages** — Forward text to Codex via tmux keystrokes
-- **Codex command forwarding** — Forward raw Codex slash commands, with a small supported menu surface for `/clear`, `/compact`, `/diff`, `/review`, and `/status`
+- **Codex command forwarding** — Forward raw Codex slash commands, with a small supported menu surface for `/clear`, `/compact`, `/diff`, `/init`, `/review`, and `/status`
 - **Create new sessions** — Start Codex sessions from Telegram via directory browser
 - **Resume sessions** — Pick up where you left off by resuming an existing Codex thread in a directory
 - **Kill sessions** — Close a topic to auto-kill the associated tmux window
@@ -57,17 +69,17 @@ Maintainer reference:
 
 ```bash
 # Using uv (recommended)
-uv tool install git+https://github.com/six-ddc/ccmux.git
+uv tool install git+https://github.com/strato-space/ccbot.git
 
 # Or using pipx
-pipx install git+https://github.com/six-ddc/ccmux.git
+pipx install git+https://github.com/strato-space/ccbot.git
 ```
 
 ### Option 2: Install from source
 
 ```bash
-git clone https://github.com/six-ddc/ccmux.git
-cd ccmux
+git clone https://github.com/strato-space/ccbot.git
+cd ccbot
 uv sync
 ```
 
@@ -102,7 +114,7 @@ ALLOWED_USERS=your_telegram_user_id
 | ----------------------- | ---------- | ------------------------------------------------ |
 | `CCBOT_DIR`             | `~/.ccbot` | Config/state directory (`.env` loaded from here) |
 | `TMUX_SESSION_NAME`     | `ccbot`    | Tmux session name                                |
-| `CLAUDE_COMMAND`        | `codex`    | Command to run in new windows                    |
+| `CLAUDE_COMMAND`        | `claude`   | Legacy env var name for the command run in new windows; set this explicitly to `codex` or your Codex wrapper in this fork |
 | `MONITOR_POLL_INTERVAL` | `2.0`      | Polling interval in seconds                      |
 | `CCBOT_SHOW_HIDDEN_DIRS` | `false` | Show hidden (dot) directories in directory browser |
 | `OPENAI_API_KEY` | _(none)_ | OpenAI API key for voice message transcription |
@@ -137,7 +149,8 @@ uv run ccbot
 | `/history`    | Message history for this topic |
 | `/screenshot` | Capture terminal screenshot |
 | `/esc`        | Send Escape to interrupt Codex |
-| `/usage`      | Compatibility alias that forwards `/status` |
+| `/unbind`     | Detach this topic from its live window |
+| `/usage`      | Legacy Claude-only helper; Codex users should prefer `/status` |
 
 **Supported Codex commands shown in the Telegram menu:**
 
@@ -146,10 +159,11 @@ uv run ccbot
 | `/clear`   | Start a fresh chat in the bound window |
 | `/compact` | Compact the current thread context |
 | `/diff`    | Show git diff |
+| `/init`    | Create `AGENTS.md` for Codex |
 | `/review`  | Review current changes |
 | `/status`  | Show Codex session status |
 
-Other raw `/command` inputs are still forwarded best-effort to the Codex TUI, but they are not part of the supported Telegram command surface unless documented above. This is intentional: commands that depend on prompt selection or other unsupported remote controls are not advertised in the menu even if Codex can handle them locally.
+Other raw `/command` inputs are still forwarded best-effort to the Codex TUI, but they are not part of the supported Telegram command surface unless documented above. This is intentional: commands that depend on prompt selection or other unsupported remote controls are not advertised in the menu even if Codex can handle them locally. Claude-only commands such as `/cost`, `/help`, `/memory`, and `/usage` are not part of the supported Codex lane.
 
 ### Topic Workflow
 
@@ -247,7 +261,7 @@ src/ccbot/
 ├── session.py             # Session management, state persistence, message history
 ├── session_monitor.py     # JSONL file monitoring (polling + change detection)
 ├── monitor_state.py       # Monitor state persistence (byte offsets)
-├── transcript_parser.py   # Claude Code JSONL transcript parsing
+├── transcript_parser.py   # Legacy transcript parsing + normalized rollout event shaping
 ├── terminal_parser.py     # Terminal pane parsing (interactive UI + status line)
 ├── html_converter.py      # Markdown → Telegram HTML conversion + HTML-aware splitting
 ├── screenshot.py          # Terminal text → PNG image with ANSI color support
@@ -269,8 +283,8 @@ src/ccbot/
 
 ## Contributors
 
-Thanks to all the people who contribute! We encourage using Claude Code to collaborate on contributions.
+Thanks to all the people who contribute! We encourage using Codex to collaborate on contributions.
 
-<a href="https://github.com/six-ddc/ccmux/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=six-ddc/ccmux" />
+<a href="https://github.com/strato-space/ccbot/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=strato-space/ccbot" />
 </a>

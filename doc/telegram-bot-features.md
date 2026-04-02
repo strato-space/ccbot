@@ -169,9 +169,10 @@ These commands are registered in the Telegram bot menu and forwarded to Codex vi
 | `/clear` | ↗ Start a fresh Codex chat in this window | Wipes the current chat and starts fresh. ccbot also clears session association |
 | `/compact` | ↗ Compact the current Codex thread | Summarize/compress context to free token budget |
 | `/diff` | ↗ Show git diff | Show the current workspace diff |
+| `/init` | ↗ Create AGENTS.md for Codex | Bootstrap project instructions for Codex |
 | `/review` | ↗ Review current changes | Start a code review against the current workspace |
 | `/status` | ↗ Show Codex session status | Display current session configuration and token usage |
-`/usage` still exists as a compatibility alias, but it is intentionally not advertised in the Telegram menu. CCBot rewrites it to `/status` for older muscle memory.
+`/usage` still exists as a legacy Claude helper, but it is intentionally not advertised in the Telegram menu. In Codex windows the bot now points users to `/status` instead of rewriting the command silently.
 
 ### Other Codex Commands (Raw Passthrough, Not Menu-Supported)
 
@@ -179,7 +180,7 @@ These commands are registered in the Telegram bot menu and forwarded to Codex vi
 |---------|:---:|:---:|:---:|-------|
 | `/new` | ✅ | No | ⚠️ Possible | Starts a fresh chat in the same live window; useful but not necessary in the Telegram menu |
 | `/rename <name>` | ❌ | No | ⚠️ Possible | Safe when sent with explicit inline args |
-| `/init` | ✅ | No | ⚠️ Caution | Creates `AGENTS.md`; valid, but potentially surprising from mobile |
+| `/init` | ✅ | No | ✅ Supported in menu | Creates `AGENTS.md` for Codex projects |
 | `/plan` | ✅ / args | No | ⚠️ Caution | Useful, but may create long plan output |
 | `/model` | ✅ | Yes | ✅ Optional lane only | Requires positively identified model picker prompt and remote prompt controls |
 | `/approvals` | ✅ | Yes | ✅ Optional lane only | Requires positively identified approvals popup and remote prompt controls |

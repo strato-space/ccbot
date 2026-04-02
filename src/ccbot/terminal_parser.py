@@ -61,6 +61,11 @@ class UIPattern:
 
 UI_PATTERNS: list[UIPattern] = [
     UIPattern(
+        name="CodexTrustPrompt",
+        top=(re.compile(r"^\s*>\s*You are in "),),
+        bottom=(re.compile(r"^\s*Press enter to continue"),),
+    ),
+    UIPattern(
         name="CodexExecApproval",
         top=(re.compile(r"^\s*Would you like to run the following command\?"),),
         bottom=(re.compile(r"^\s*Press enter to confirm or esc to cancel"),),
@@ -166,6 +171,7 @@ REMOTE_ACTION_PROMPTS = frozenset(
         "CodexPermissionsPopup",
         "CodexModelPicker",
         "CodexReasoningPicker",
+        "CodexTrustPrompt",
     }
 )
 

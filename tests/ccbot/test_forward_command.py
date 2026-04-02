@@ -79,6 +79,31 @@ class TestForwardCommand:
             mock_sm.send_to_window.assert_called_once_with("@5", "/cost")
 
     @pytest.mark.asyncio
+    async def test_claude_only_cost_command_is_rejected_for_codex_runtime(self):
+        update = _make_update("/cost")
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.resolve_window_for_thread.return_value = "@5"
+            mock_sm.get_window_state.return_value = MagicMock(runtime_kind="codex")
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+
+            from ccbot.bot import forward_command_handler
+
+            await forward_command_handler(update, context)
+
+            mock_sm.send_to_window.assert_not_called()
+            mock_reply.assert_awaited_once()
+            assert "/status" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
     async def test_blocked_prompt_surfaces_read_only_snapshot(self):
         update = _make_update("/model")
         context = _make_context()

@@ -1,7 +1,7 @@
 [project]
 name = "ccbot"
 version = "0.1.0"
-description = "Telegram Bot for monitoring Claude Code sessions"
+description = "Telegram bot for monitoring and driving Codex tmux sessions"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

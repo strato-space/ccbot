@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
 import libtmux
 
 from .config import SENSITIVE_ENV_VARS, config
+from .launcher_registration import infer_runtime_kind_from_command
 
 logger = logging.getLogger(__name__)
 
@@ -320,13 +322,13 @@ class TmuxManager:
         start_claude: bool = True,
         resume_session_id: str | None = None,
     ) -> tuple[bool, str, str, str]:
-        """Create a new tmux window and optionally start Claude Code.
+        """Create a new tmux window and optionally start the configured runtime.
 
         Args:
             work_dir: Working directory for the new window
             window_name: Optional window name (defaults to directory name)
-            start_claude: Whether to start claude command
-            resume_session_id: If set, append --resume <id> to claude command
+            start_claude: Whether to start the configured runtime command
+            resume_session_id: If set, resume the persisted thread/session id
 
         Returns:
             Tuple of (success, message, window_name, window_id)
@@ -363,14 +365,21 @@ class TmuxManager:
                 # Prevent Claude Code from overriding window name
                 window.set_window_option("allow-rename", "off")
 
-                # Start Claude Code if requested
+                # Start the configured runtime command if requested.
+                # Explicitly `cd` into the selected directory because shell init
+                # files may override tmux's start_directory on some hosts.
                 if start_claude:
                     pane = window.active_pane
                     if pane:
                         cmd = config.claude_command
+                        runtime_kind = infer_runtime_kind_from_command(cmd)
                         if resume_session_id:
-                            cmd = f"{cmd} --resume {resume_session_id}"
-                        pane.send_keys(cmd, enter=True)
+                            if runtime_kind == "codex":
+                                cmd = f"{cmd} resume {shlex.quote(resume_session_id)}"
+                            else:
+                                cmd = f"{cmd} --resume {shlex.quote(resume_session_id)}"
+                        launch_cmd = f"cd {shlex.quote(str(path))} && {cmd}"
+                        pane.send_keys(launch_cmd, enter=True)
 
                 logger.info(
                     "Created window '%s' (id=%s) at %s",

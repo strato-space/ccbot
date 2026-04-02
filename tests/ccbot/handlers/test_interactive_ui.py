@@ -82,6 +82,40 @@ class TestHandleInteractiveUI:
         assert READ_ONLY_PROMPT_NOTE not in call_kwargs["text"]
 
     @pytest.mark.asyncio
+    async def test_handle_codex_trust_prompt_sends_keyboard(self, mock_bot: AsyncMock):
+        window_id = "@5"
+        mock_window = MagicMock()
+        mock_window.window_id = window_id
+        trust_pane = (
+            "  > You are in /tmp/example\n"
+            "\n"
+            "  Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection.\n"
+            "\n"
+            "› 1. Yes, continue\n"
+            "  2. No, quit\n"
+            "\n"
+            "  Press enter to continue\n"
+        )
+
+        with (
+            patch("ccbot.handlers.interactive_ui.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.interactive_ui.session_manager") as mock_sm,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
+            mock_tmux.capture_pane = AsyncMock(return_value=trust_pane)
+            mock_sm.resolve_chat_id.return_value = 100
+
+            result = await handle_interactive_ui(
+                mock_bot, user_id=1, window_id=window_id, thread_id=42
+            )
+
+        assert result is True
+        call_kwargs = mock_bot.send_message.call_args.kwargs
+        assert call_kwargs["reply_markup"] is not None
+        assert "CodexTrustPrompt detected" in call_kwargs["text"]
+        assert READ_ONLY_PROMPT_NOTE not in call_kwargs["text"]
+
+    @pytest.mark.asyncio
     async def test_handle_settings_ui_sends_read_only_snapshot(
         self, mock_bot: AsyncMock, sample_pane_settings: str
     ):
@@ -163,3 +197,15 @@ class TestKeyboardLayoutForSettings:
         assert not any(CB_ASK_RIGHT in d for d in all_cb_data if d)
         assert not any(CB_ASK_TAB in d for d in all_cb_data if d)
         assert not any(CB_ASK_SPACE in d for d in all_cb_data if d)
+
+    def test_codex_trust_prompt_keyboard_is_vertical_only(self):
+        keyboard = _build_interactive_keyboard("@5", ui_name="CodexTrustPrompt")
+        all_cb_data = [
+            btn.callback_data for row in keyboard.inline_keyboard for btn in row
+        ]
+        assert any(CB_ASK_UP in d for d in all_cb_data if d)
+        assert any(CB_ASK_DOWN in d for d in all_cb_data if d)
+        assert any(CB_ASK_ESC in d for d in all_cb_data if d)
+        assert any(CB_ASK_ENTER in d for d in all_cb_data if d)
+        assert not any(CB_ASK_LEFT in d for d in all_cb_data if d)
+        assert not any(CB_ASK_RIGHT in d for d in all_cb_data if d)
