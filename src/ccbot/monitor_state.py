@@ -89,7 +89,7 @@ class MonitorState:
             logger.info(
                 f"Loaded {len(self.tracked_sessions)} tracked sessions from state"
             )
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.warning(f"Failed to load state file: {e}")
             self.tracked_sessions = {}
 

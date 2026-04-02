@@ -56,6 +56,21 @@ class TestMonitorStateLoad:
         state.load()
         assert state.tracked_sessions == {}
 
+    def test_load_invalid_schema_version(self, tmp_path):
+        state_file = tmp_path / "state.json"
+        state_file.write_text(
+            json.dumps(
+                {
+                    "schema_version": "not-a-number",
+                    "runtime_kind": "claude",
+                    "tracked_sessions": {},
+                }
+            )
+        )
+        state = MonitorState(state_file=state_file)
+        state.load()
+        assert state.tracked_sessions == {}
+
 
 class TestMonitorStateSave:
     def test_save_writes_via_atomic_write(self, tmp_path, monkeypatch):
