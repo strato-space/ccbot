@@ -1,8 +1,12 @@
 """Tests for SessionManager pure dict operations."""
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from ccbot.session import SessionManager
+from ccbot.runtime_types import LiveProcessDescriptor
 
 
 @pytest.fixture
@@ -172,6 +176,99 @@ class TestDisplayNames:
         mgr.bind_thread(100, 1, "@1")
         # No display name set, fallback to window_id
         assert mgr.get_display_name("@1") == "@1"
+
+
+class TestRuntimeInputDriverIntegration:
+    @pytest.mark.asyncio
+    async def test_send_to_window_uses_runtime_input_driver(self, mgr: SessionManager):
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(window_id="@1")
+            )
+            mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
+            mock_driver.send_raw_slash_command = AsyncMock(
+                return_value=(True, "Sent text to @1")
+            )
+
+            success, message = await mgr.send_to_window("@1", "/usage")
+
+        assert success is True
+        assert message == "Sent to @1"
+        mock_driver.send_raw_slash_command.assert_awaited_once_with(
+            "@1",
+            "/usage",
+            runtime_kind="codex",
+        )
+        mock_driver.send_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_send_to_window_uses_text_path_for_regular_messages(
+        self, mgr: SessionManager
+    ):
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(window_id="@1")
+            )
+            mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
+            mock_driver.send_raw_slash_command = AsyncMock()
+
+            success, message = await mgr.send_to_window("@1", "hello")
+
+        assert success is True
+        assert message == "Sent to @1"
+        mock_driver.send_text.assert_awaited_once_with(
+            "@1",
+            "hello",
+            runtime_kind="codex",
+        )
+        mock_driver.send_raw_slash_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_send_special_key_uses_runtime_input_driver(self, mgr: SessionManager):
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(window_id="@1")
+            )
+            mock_driver.send_special_key = AsyncMock(
+                return_value=(True, "Sent Escape")
+            )
+
+            success, message = await mgr.send_special_key_to_window("@1", "Escape")
+
+        assert success is True
+        assert message == "Sent Escape"
+        mock_driver.send_special_key.assert_awaited_once_with(
+            "@1",
+            "Escape",
+            runtime_kind="codex",
+        )
 
 
 class TestIsWindowId:

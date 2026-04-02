@@ -1,9 +1,10 @@
 """Tmux session/window management via libtmux.
 
 Wraps libtmux to provide async-friendly operations on a single tmux session:
-  - list_windows / find_window_by_name: discover Claude Code windows.
+  - list_windows / find_window_by_name: discover live windows.
   - capture_pane: read terminal content (plain or with ANSI colors).
-  - send_keys: forward user input or control keys to a window.
+  - send_keys / send_literal_text / send_key / send_enter: forward user input
+    or control keys to a window.
   - create_window / kill_window: lifecycle management.
 
 All blocking libtmux calls are wrapped in asyncio.to_thread().
@@ -223,81 +224,11 @@ class TmuxManager:
 
         return await asyncio.to_thread(_sync_capture)
 
-    async def send_keys(
+    async def _send_keys(
         self, window_id: str, text: str, enter: bool = True, literal: bool = True
     ) -> bool:
-        """Send keys to a specific window.
+        """Send keys to a specific window."""
 
-        Args:
-            window_id: The window ID to send to
-            text: Text to send
-            enter: Whether to press enter after the text
-            literal: If True, send text literally. If False, interpret special keys
-                     like "Up", "Down", "Left", "Right", "Escape", "Enter".
-
-        Returns:
-            True if successful, False otherwise
-        """
-        if literal and enter:
-            # Split into text + delay + Enter via libtmux.
-            # Claude Code's TUI sometimes interprets a rapid-fire Enter
-            # (arriving in the same input batch as the text) as a newline
-            # rather than submit.  A 500ms gap lets the TUI process the
-            # text before receiving Enter.
-            def _send_literal(chars: str) -> bool:
-                session = self.get_session()
-                if not session:
-                    logger.error("No tmux session found")
-                    return False
-                try:
-                    window = session.windows.get(window_id=window_id)
-                    if not window:
-                        logger.error(f"Window {window_id} not found")
-                        return False
-                    pane = window.active_pane
-                    if not pane:
-                        logger.error(f"No active pane in window {window_id}")
-                        return False
-                    pane.send_keys(chars, enter=False, literal=True)
-                    return True
-                except Exception as e:
-                    logger.error(f"Failed to send keys to window {window_id}: {e}")
-                    return False
-
-            def _send_enter() -> bool:
-                session = self.get_session()
-                if not session:
-                    return False
-                try:
-                    window = session.windows.get(window_id=window_id)
-                    if not window:
-                        return False
-                    pane = window.active_pane
-                    if not pane:
-                        return False
-                    pane.send_keys("", enter=True, literal=False)
-                    return True
-                except Exception as e:
-                    logger.error(f"Failed to send Enter to window {window_id}: {e}")
-                    return False
-
-            # Claude Code's ! command mode: send "!" first so the TUI
-            # switches to bash mode, wait 1s, then send the rest.
-            if text.startswith("!"):
-                if not await asyncio.to_thread(_send_literal, "!"):
-                    return False
-                rest = text[1:]
-                if rest:
-                    await asyncio.sleep(1.0)
-                    if not await asyncio.to_thread(_send_literal, rest):
-                        return False
-            else:
-                if not await asyncio.to_thread(_send_literal, text):
-                    return False
-            await asyncio.sleep(0.5)
-            return await asyncio.to_thread(_send_enter)
-
-        # Other cases: special keys (literal=False) or no-enter
         def _sync_send_keys() -> bool:
             session = self.get_session()
             if not session:
@@ -323,6 +254,24 @@ class TmuxManager:
                 return False
 
         return await asyncio.to_thread(_sync_send_keys)
+
+    async def send_keys(
+        self, window_id: str, text: str, enter: bool = True, literal: bool = True
+    ) -> bool:
+        """Compatibility wrapper around the raw tmux send-keys primitive."""
+        return await self._send_keys(window_id, text, enter=enter, literal=literal)
+
+    async def send_literal_text(self, window_id: str, text: str) -> bool:
+        """Send literal text to a pane without submitting it."""
+        return await self._send_keys(window_id, text, enter=False, literal=True)
+
+    async def send_key(self, window_id: str, key: str) -> bool:
+        """Send a named tmux key such as Escape, Up, Tab, or C-c."""
+        return await self._send_keys(window_id, key, enter=False, literal=False)
+
+    async def send_enter(self, window_id: str) -> bool:
+        """Send a bare Enter key to the active pane."""
+        return await self._send_keys(window_id, "", enter=True, literal=False)
 
     async def rename_window(self, window_id: str, new_name: str) -> bool:
         """Rename a tmux window by its ID."""

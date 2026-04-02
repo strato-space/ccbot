@@ -236,3 +236,55 @@ class TestMediaForwarding:
             await bot_mod.voice_handler(update, context)
 
             mock_sm.send_to_window.assert_called_once_with("@7", "Hello from voice")
+
+
+class TestRuntimeInputRouting:
+    @pytest.mark.asyncio
+    async def test_esc_command_uses_runtime_input_driver(self):
+        update = _make_topic_update()
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            mock_sm.resolve_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_sm.send_special_key_to_window = AsyncMock(
+                return_value=(True, "Sent Escape")
+            )
+
+            await bot_mod.esc_command(update, context)
+
+            mock_sm.send_special_key_to_window.assert_awaited_once_with("@7", "Escape")
+            mock_tmux.send_keys.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_interactive_ui_callback_missing_window_fails_closed(self):
+        update = MagicMock()
+        update.effective_user = MagicMock(id=1)
+        update.effective_chat = MagicMock(type="supergroup", id=100)
+        update.callback_query = MagicMock()
+        update.callback_query.data = f"{bot_mod.CB_ASK_UP}@7"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.message = MagicMock(message_thread_id=42, chat=update.effective_chat)
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=None)
+
+            await bot_mod.callback_handler(update, context)
+
+        update.callback_query.answer.assert_awaited_once_with(
+            "Window not found", show_alert=True
+        )
+        mock_sm.send_special_key_to_window.assert_not_called()

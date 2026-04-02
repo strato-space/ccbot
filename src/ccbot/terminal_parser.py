@@ -1,4 +1,4 @@
-"""Terminal output parser — detects Claude Code UI elements in pane text.
+"""Terminal output parser — detects terminal UI elements in pane text.
 
 Parses captured tmux pane content to detect:
   - Interactive UIs (AskUserQuestion, ExitPlanMode, Permission Prompt,
@@ -10,7 +10,8 @@ All Claude Code text patterns live here. To support a new UI type or
 a changed Claude Code version, edit UI_PATTERNS / STATUS_SPINNERS.
 
 Key functions: is_interactive_ui(), extract_interactive_content(),
-parse_status_line(), strip_pane_chrome(), extract_bash_output().
+parse_status_line(), classify_input_surface(), strip_pane_chrome(),
+extract_bash_output().
 """
 
 import re
@@ -23,6 +24,16 @@ class InteractiveUIContent:
 
     content: str  # The extracted display content
     name: str = ""  # Pattern name that matched (e.g. "AskUserQuestion")
+
+
+@dataclass(frozen=True)
+class InputSurface:
+    """Best-effort classification of the currently visible terminal surface."""
+
+    kind: str
+    has_visible_prompt: bool = False
+    has_interactive_ui: bool = False
+    status_line: str | None = None
 
 
 @dataclass(frozen=True)
@@ -191,6 +202,35 @@ def extract_interactive_content(pane_text: str) -> InteractiveUIContent | None:
 def is_interactive_ui(pane_text: str) -> bool:
     """Check if terminal currently shows an interactive UI."""
     return extract_interactive_content(pane_text) is not None
+
+
+def classify_input_surface(pane_text: str) -> InputSurface:
+    """Classify the visible terminal surface for input-driver decisions.
+
+    The classification is intentionally conservative: only surfaces that can be
+    positively identified are named. Everything else falls back to ``unknown``
+    so unsupported controls can degrade safely to no-op.
+    """
+    if not pane_text:
+        return InputSurface(kind="unknown")
+
+    interactive = extract_interactive_content(pane_text)
+    if interactive:
+        return InputSurface(
+            kind=interactive.name or "interactive_ui",
+            has_visible_prompt=True,
+            has_interactive_ui=True,
+        )
+
+    status_line = parse_status_line(pane_text)
+    if status_line is not None:
+        return InputSurface(kind="status", status_line=status_line)
+
+    lines = [line.strip() for line in pane_text.splitlines()[-8:] if line.strip()]
+    if any(line.startswith(("›", "❯")) for line in lines):
+        return InputSurface(kind="prompt", has_visible_prompt=True)
+
+    return InputSurface(kind="unknown")
 
 
 # ── Status line parsing ─────────────────────────────────────────────────

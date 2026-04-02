@@ -3,6 +3,7 @@
 import pytest
 
 from ccbot.terminal_parser import (
+    classify_input_surface,
     extract_bash_output,
     extract_interactive_content,
     is_interactive_ui,
@@ -189,6 +190,38 @@ class TestIsInteractiveUI:
 
     def test_false_for_empty_string(self):
         assert is_interactive_ui("") is False
+
+
+# ── classify_input_surface ──────────────────────────────────────────────
+
+
+class TestClassifyInputSurface:
+    def test_detects_interactive_ui(self, sample_pane_settings: str):
+        surface = classify_input_surface(sample_pane_settings)
+
+        assert surface.has_interactive_ui is True
+        assert surface.has_visible_prompt is True
+        assert surface.kind == "Settings"
+
+    def test_detects_status_surface(self, sample_pane_status_line: str):
+        surface = classify_input_surface(sample_pane_status_line)
+
+        assert surface.kind == "status"
+        assert surface.status_line == "Reading file src/main.py"
+
+    def test_detects_prompt_like_surface(self):
+        pane = "root@p2:/home/strato-space# codex resume\n› ping\n"
+
+        surface = classify_input_surface(pane)
+
+        assert surface.kind == "prompt"
+        assert surface.has_visible_prompt is True
+
+    def test_unknown_for_empty_string(self):
+        surface = classify_input_surface("")
+
+        assert surface.kind == "unknown"
+        assert surface.has_visible_prompt is False
 
 
 # ── strip_pane_chrome ───────────────────────────────────────────────────

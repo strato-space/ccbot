@@ -278,7 +278,7 @@ async def unbind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def esc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send Escape key to interrupt Claude."""
+    """Send Escape key to interrupt the active runtime."""
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
         return
@@ -297,9 +297,13 @@ async def esc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await safe_reply(update.message, f"❌ Window '{display}' no longer exists.")
         return
 
-    # Send Escape control character (no enter)
-    await tmux_manager.send_keys(w.window_id, "\x1b", enter=False)
-    await safe_reply(update.message, "⎋ Sent Escape")
+    success, message = await session_manager.send_special_key_to_window(
+        w.window_id, "Escape"
+    )
+    if success:
+        await safe_reply(update.message, "⎋ Sent Escape")
+    else:
+        await safe_reply(update.message, f"❌ {message}")
 
 
 async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -321,14 +325,21 @@ async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await safe_reply(update.message, f"Window '{wid}' no longer exists.")
         return
 
-    # Send /usage command to Claude Code TUI
-    await tmux_manager.send_keys(w.window_id, "/usage")
+    # Send /usage command to the runtime TUI
+    success, message = await session_manager.send_to_window(w.window_id, "/usage")
+    if not success:
+        await safe_reply(update.message, f"Failed to capture usage info: {message}")
+        return
     # Wait for the modal to render
     await asyncio.sleep(2.0)
     # Capture the pane content
     pane_text = await tmux_manager.capture_pane(w.window_id)
     # Dismiss the modal
-    await tmux_manager.send_keys(w.window_id, "Escape", enter=False, literal=False)
+    esc_ok, esc_msg = await session_manager.send_special_key_to_window(
+        w.window_id, "Escape"
+    )
+    if not esc_ok:
+        logger.debug("Failed to dismiss usage modal in %s: %s", w.window_id, esc_msg)
 
     if not pane_text:
         await safe_reply(update.message, "Failed to capture usage info.")
@@ -351,17 +362,17 @@ async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # --- Screenshot keyboard with quick control keys ---
 
-# key_id → (tmux_key, enter, literal)
-_KEYS_SEND_MAP: dict[str, tuple[str, bool, bool]] = {
-    "up": ("Up", False, False),
-    "dn": ("Down", False, False),
-    "lt": ("Left", False, False),
-    "rt": ("Right", False, False),
-    "esc": ("Escape", False, False),
-    "ent": ("Enter", False, False),
-    "spc": ("Space", False, False),
-    "tab": ("Tab", False, False),
-    "cc": ("C-c", False, False),
+# key_id → tmux key name
+_KEYS_SEND_MAP: dict[str, str] = {
+    "up": "Up",
+    "dn": "Down",
+    "lt": "Left",
+    "rt": "Right",
+    "esc": "Escape",
+    "ent": "Enter",
+    "spc": "Space",
+    "tab": "Tab",
+    "cc": "C-c",
 }
 
 # key_id → display label (shown in callback answer toast)
@@ -1568,10 +1579,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         window_id = data[len(CB_ASK_UP) :]
         thread_id = _get_thread_id(update)
         w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(w.window_id, "Up", enter=False, literal=False)
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+        if not w:
+            await query.answer("Window not found", show_alert=True)
+            return
+        success, message = await session_manager.send_special_key_to_window(
+            w.window_id, "Up"
+        )
+        if not success:
+            await query.answer(message, show_alert=True)
+            return
+        await asyncio.sleep(0.5)
+        await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
         await query.answer()
 
     # Interactive UI: Down arrow
@@ -1579,12 +1597,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         window_id = data[len(CB_ASK_DOWN) :]
         thread_id = _get_thread_id(update)
         w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(
-                w.window_id, "Down", enter=False, literal=False
-            )
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+        if not w:
+            await query.answer("Window not found", show_alert=True)
+            return
+        success, message = await session_manager.send_special_key_to_window(
+            w.window_id, "Down"
+        )
+        if not success:
+            await query.answer(message, show_alert=True)
+            return
+        await asyncio.sleep(0.5)
+        await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
         await query.answer()
 
     # Interactive UI: Left arrow
@@ -1592,12 +1615,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         window_id = data[len(CB_ASK_LEFT) :]
         thread_id = _get_thread_id(update)
         w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(
-                w.window_id, "Left", enter=False, literal=False
-            )
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+        if not w:
+            await query.answer("Window not found", show_alert=True)
+            return
+        success, message = await session_manager.send_special_key_to_window(
+            w.window_id, "Left"
+        )
+        if not success:
+            await query.answer(message, show_alert=True)
+            return
+        await asyncio.sleep(0.5)
+        await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
         await query.answer()
 
     # Interactive UI: Right arrow
@@ -1605,12 +1633,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         window_id = data[len(CB_ASK_RIGHT) :]
         thread_id = _get_thread_id(update)
         w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(
-                w.window_id, "Right", enter=False, literal=False
-            )
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+        if not w:
+            await query.answer("Window not found", show_alert=True)
+            return
+        success, message = await session_manager.send_special_key_to_window(
+            w.window_id, "Right"
+        )
+        if not success:
+            await query.answer(message, show_alert=True)
+            return
+        await asyncio.sleep(0.5)
+        await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
         await query.answer()
 
     # Interactive UI: Escape
@@ -1618,11 +1651,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         window_id = data[len(CB_ASK_ESC) :]
         thread_id = _get_thread_id(update)
         w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(
-                w.window_id, "Escape", enter=False, literal=False
-            )
-            await clear_interactive_msg(user.id, context.bot, thread_id)
+        if not w:
+            await query.answer("Window not found", show_alert=True)
+            return
+        success, message = await session_manager.send_special_key_to_window(
+            w.window_id, "Escape"
+        )
+        if not success:
+            await query.answer(message, show_alert=True)
+            return
+        await clear_interactive_msg(user.id, context.bot, thread_id)
         await query.answer("⎋ Esc")
 
     # Interactive UI: Enter
@@ -1630,12 +1668,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         window_id = data[len(CB_ASK_ENTER) :]
         thread_id = _get_thread_id(update)
         w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(
-                w.window_id, "Enter", enter=False, literal=False
-            )
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+        if not w:
+            await query.answer("Window not found", show_alert=True)
+            return
+        success, message = await session_manager.send_special_key_to_window(
+            w.window_id, "Enter"
+        )
+        if not success:
+            await query.answer(message, show_alert=True)
+            return
+        await asyncio.sleep(0.5)
+        await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
         await query.answer("⏎ Enter")
 
     # Interactive UI: Space
@@ -1643,12 +1686,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         window_id = data[len(CB_ASK_SPACE) :]
         thread_id = _get_thread_id(update)
         w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(
-                w.window_id, "Space", enter=False, literal=False
-            )
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+        if not w:
+            await query.answer("Window not found", show_alert=True)
+            return
+        success, message = await session_manager.send_special_key_to_window(
+            w.window_id, "Space"
+        )
+        if not success:
+            await query.answer(message, show_alert=True)
+            return
+        await asyncio.sleep(0.5)
+        await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
         await query.answer("␣ Space")
 
     # Interactive UI: Tab
@@ -1656,10 +1704,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         window_id = data[len(CB_ASK_TAB) :]
         thread_id = _get_thread_id(update)
         w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(w.window_id, "Tab", enter=False, literal=False)
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+        if not w:
+            await query.answer("Window not found", show_alert=True)
+            return
+        success, message = await session_manager.send_special_key_to_window(
+            w.window_id, "Tab"
+        )
+        if not success:
+            await query.answer(message, show_alert=True)
+            return
+        await asyncio.sleep(0.5)
+        await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
         await query.answer("⇥ Tab")
 
     # Interactive UI: refresh display
@@ -1684,16 +1739,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.answer("Unknown key")
             return
 
-        tmux_key, enter, literal = key_info
+        tmux_key = key_info
         w = await tmux_manager.find_window_by_id(window_id)
         if not w:
             await query.answer("Window not found", show_alert=True)
             return
 
-        await tmux_manager.send_keys(
-            w.window_id, tmux_key, enter=enter, literal=literal
+        success, message = await session_manager.send_special_key_to_window(
+            w.window_id, tmux_key
         )
-        await query.answer(_KEY_LABELS.get(key_id, key_id))
+        if success:
+            await query.answer(_KEY_LABELS.get(key_id, key_id))
+        else:
+            await query.answer(message, show_alert=True)
+            return
 
         # Refresh screenshot after key press
         await asyncio.sleep(0.5)
