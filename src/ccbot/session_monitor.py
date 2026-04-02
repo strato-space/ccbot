@@ -21,6 +21,7 @@ import aiofiles
 
 from .config import config
 from .codex_threads import normalize_cwd
+from .codex_rollout import CodexRolloutNormalizer
 from .monitor_state import MonitorState, TrackedSession
 from .state_schema import split_session_map_payload
 from .runtime_types import NormalizedEvent, RolloutSource
@@ -216,17 +217,24 @@ class SessionMonitor:
                     await f.seek(session.last_byte_offset)  # Reset for normal read
 
                 # Read only new lines from the offset.
-                # Track safe_offset: only advance past lines that parsed
-                # successfully. A non-empty line that fails JSON parsing is
-                # likely a partial write; stop and retry next cycle.
+                # Track safe_offset: advance past valid lines and past
+                # malformed complete lines, but stop on a trailing partial
+                # write so the next poll can finish the line.
                 safe_offset = session.last_byte_offset
                 async for line in f:
+                    line_end = await f.tell()
                     data = TranscriptParser.parse_line(line)
                     if data:
                         new_entries.append(data)
-                        safe_offset = await f.tell()
+                        safe_offset = line_end
                     elif line.strip():
-                        # Partial JSONL line — don't advance offset past it
+                        if line.endswith("\n"):
+                            logger.warning(
+                                "Corrupted JSONL line in session %s, skipping",
+                                session.session_id,
+                            )
+                            safe_offset = line_end
+                            continue
                         logger.warning(
                             "Partial JSONL line in session %s, will retry next cycle",
                             session.session_id,
@@ -234,7 +242,7 @@ class SessionMonitor:
                         break
                     else:
                         # Empty line — safe to skip
-                        safe_offset = await f.tell()
+                        safe_offset = line_end
 
                 session.last_byte_offset = safe_offset
 
@@ -314,19 +322,30 @@ class SessionMonitor:
                         rollout_source.thread_id,
                     )
 
-                # Parse new entries using the shared logic, carrying over pending tools
-                carry = self._pending_tools.get(rollout_source.thread_id, {})
-                parsed_entries, remaining = TranscriptParser.parse_entries(
-                    new_entries,
-                    pending_tools=carry,
-                )
-                if remaining:
-                    self._pending_tools[rollout_source.thread_id] = remaining
-                else:
+                # Parse new entries using the runtime-aware normalizer.
+                if new_entries and all(
+                    CodexRolloutNormalizer.is_codex_rollout_record(entry)
+                    for entry in new_entries
+                    if isinstance(entry, dict)
+                ):
+                    parsed_entries = TranscriptParser.parse_codex_rollout_entries(
+                        new_entries,
+                        thread_id=rollout_source.thread_id,
+                    )
                     self._pending_tools.pop(rollout_source.thread_id, None)
+                else:
+                    carry = self._pending_tools.get(rollout_source.thread_id, {})
+                    parsed_entries, remaining = TranscriptParser.parse_entries(
+                        new_entries,
+                        pending_tools=carry,
+                    )
+                    if remaining:
+                        self._pending_tools[rollout_source.thread_id] = remaining
+                    else:
+                        self._pending_tools.pop(rollout_source.thread_id, None)
 
                 for entry in parsed_entries:
-                    if not entry.text and not entry.image_data:
+                    if not entry.text and not entry.image_data and entry.event_kind != "lifecycle":
                         continue
                     # Skip user messages unless show_user_messages is enabled
                     if entry.role == "user" and not config.show_user_messages:
@@ -335,13 +354,15 @@ class SessionMonitor:
                         NormalizedEvent(
                             thread_id=rollout_source.thread_id,
                             text=entry.text,
-                            is_complete=True,
+                            is_complete=entry.is_complete,
                             content_type=entry.content_type,
                             tool_use_id=entry.tool_use_id,
                             role=entry.role,
                             tool_name=entry.tool_name,
                             image_data=entry.image_data,
                             timestamp=entry.timestamp,
+                            runtime_kind=entry.runtime_kind,
+                            event_kind=entry.event_kind,
                         )
                     )
 
@@ -479,6 +500,13 @@ class SessionMonitor:
                 new_messages = await self.check_for_updates(active_thread_ids)
 
                 for msg in new_messages:
+                    if msg.event_kind == "lifecycle":
+                        logger.debug(
+                            "Lifecycle marker thread=%s: %s",
+                            msg.thread_id,
+                            msg.tool_name or msg.content_type,
+                        )
+                        continue
                     status = "complete" if msg.is_complete else "streaming"
                     preview = msg.text[:80] + ("..." if len(msg.text) > 80 else "")
                     logger.info("[%s] thread=%s: %s", status, msg.thread_id, preview)

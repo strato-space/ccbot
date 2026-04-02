@@ -1,9 +1,13 @@
 """Unit tests for SessionMonitor JSONL reading and offset handling."""
 
+from __future__ import annotations
+
 import json
+from pathlib import Path
 
 import pytest
 
+from ccbot.runtime_types import RolloutSource
 from ccbot.monitor_state import TrackedSession
 from ccbot.session_monitor import SessionMonitor
 
@@ -75,6 +79,59 @@ class TestReadNewLinesOffsetRecovery:
         assert session.last_byte_offset == jsonl_file.stat().st_size
 
     @pytest.mark.asyncio
+    async def test_partial_trailing_line_is_retained_for_retry(
+        self, monitor, tmp_path, make_jsonl_entry
+    ):
+        jsonl_file = tmp_path / "session.jsonl"
+        entry1 = make_jsonl_entry(msg_type="assistant", content="first")
+        entry2 = make_jsonl_entry(msg_type="assistant", content="second")
+        first_line = json.dumps(entry1)
+        partial_second = json.dumps(entry2)[: len(json.dumps(entry2)) // 2]
+        jsonl_file.write_text(
+            first_line + "\n" + partial_second,
+            encoding="utf-8",
+        )
+
+        session = TrackedSession(
+            session_id="test-session",
+            file_path=str(jsonl_file),
+            last_byte_offset=0,
+        )
+
+        result = await monitor._read_new_lines(session, jsonl_file)
+
+        assert len(result) == 1
+        assert session.last_byte_offset == len(first_line.encode("utf-8")) + 1
+
+    @pytest.mark.asyncio
+    async def test_corrupted_complete_line_is_skipped(
+        self, monitor, tmp_path, make_jsonl_entry
+    ):
+        jsonl_file = tmp_path / "session.jsonl"
+        entry1 = make_jsonl_entry(msg_type="assistant", content="first")
+        entry3 = make_jsonl_entry(msg_type="assistant", content="third")
+        jsonl_file.write_text(
+            json.dumps(entry1)
+            + "\n"
+            + '{"type":"response_item","payload":{"type":"message","role":"assistant",'
+            + '"content": [broken]}}\n'
+            + json.dumps(entry3)
+            + "\n",
+            encoding="utf-8",
+        )
+
+        session = TrackedSession(
+            session_id="test-session",
+            file_path=str(jsonl_file),
+            last_byte_offset=0,
+        )
+
+        result = await monitor._read_new_lines(session, jsonl_file)
+
+        assert len(result) == 2
+        assert session.last_byte_offset == jsonl_file.stat().st_size
+
+    @pytest.mark.asyncio
     async def test_truncation_detection(self, monitor, tmp_path, make_jsonl_entry):
         """Detect file truncation and reset offset."""
         jsonl_file = tmp_path / "session.jsonl"
@@ -93,3 +150,40 @@ class TestReadNewLinesOffsetRecovery:
         # Should reset offset to 0 and read the line
         assert session.last_byte_offset == jsonl_file.stat().st_size
         assert len(result) == 1
+
+
+class TestCheckForUpdatesCodexRollout:
+    @pytest.fixture
+    def monitor(self, tmp_path):
+        return SessionMonitor(
+            projects_path=tmp_path / "projects",
+            state_file=tmp_path / "monitor_state.json",
+        )
+
+    @pytest.mark.asyncio
+    async def test_repeated_reads_do_not_duplicate_codex_events(
+        self, monitor, tmp_path
+    ):
+        rollout = Path(__file__).resolve().parents[1] / "fixtures" / "codex" / "rollouts" / "root_tool_call_and_output.jsonl"
+        copied = tmp_path / "thread.jsonl"
+        copied.write_text(rollout.read_text(encoding="utf-8"), encoding="utf-8")
+
+        thread_id = "thread-1"
+        tracked = TrackedSession(
+            session_id=thread_id,
+            file_path=str(copied),
+            last_byte_offset=0,
+        )
+        monitor.state.update_session(tracked)
+
+        async def _scan():
+            return [RolloutSource(thread_id=thread_id, file_path=copied)]
+
+        monitor.scan_rollout_sources = _scan  # type: ignore[assignment]
+
+        first = await monitor.check_for_updates({thread_id})
+        second = await monitor.check_for_updates({thread_id})
+
+        assert first
+        assert {event.event_kind for event in first} >= {"tool_call", "tool_output", "lifecycle"}
+        assert second == []

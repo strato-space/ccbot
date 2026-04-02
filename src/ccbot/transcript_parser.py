@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .runtime_types import InputAction, NormalizedEvent
+from .codex_rollout import CodexRolloutNormalizer
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ __all__ = [
     "ParsedEntry",
     "ParsedMessage",
     "PendingToolInfo",
+    "CodexRolloutNormalizer",
     "TranscriptParser",
 ]
 
@@ -753,3 +755,13 @@ class TranscriptParser:
             entry.text = entry.text.strip()
 
         return result, remaining_pending
+
+    @classmethod
+    def parse_codex_rollout_entries(
+        cls,
+        entries: list[dict[str, Any]],
+        *,
+        thread_id: str | None = None,
+    ) -> list[ParsedEntry]:
+        """Normalize Codex rollout JSONL records into generic events."""
+        return CodexRolloutNormalizer.normalize_records(entries, thread_id=thread_id)
