@@ -1,4 +1,7 @@
-"""Tests for terminal_parser — regex-based detection of Claude Code UI elements."""
+"""Tests for terminal_parser — terminal surface detection and UI parsing."""
+
+import json
+from pathlib import Path
 
 import pytest
 
@@ -201,12 +204,14 @@ class TestClassifyInputSurface:
 
         assert surface.has_interactive_ui is True
         assert surface.has_visible_prompt is True
-        assert surface.kind == "Settings"
+        assert surface.kind == "blocked_prompt"
+        assert surface.prompt_name == "Settings"
+        assert surface.allows_remote_actions is False
 
     def test_detects_status_surface(self, sample_pane_status_line: str):
         surface = classify_input_surface(sample_pane_status_line)
 
-        assert surface.kind == "status"
+        assert surface.kind == "busy"
         assert surface.status_line == "Reading file src/main.py"
 
     def test_detects_prompt_like_surface(self):
@@ -214,8 +219,33 @@ class TestClassifyInputSurface:
 
         surface = classify_input_surface(pane)
 
-        assert surface.kind == "prompt"
+        assert surface.kind == "input_ready"
         assert surface.has_visible_prompt is True
+
+    def test_detects_visible_prompt_error_as_blocked_prompt(self):
+        pane = (
+            "OpenAI Codex\n"
+            "› ping\n"
+            "■ You've hit your usage limit. Try again later.\n"
+            "› Explain this codebase\n"
+        )
+
+        surface = classify_input_surface(pane)
+
+        assert surface.kind == "blocked_prompt"
+        assert surface.has_visible_prompt is True
+        assert surface.prompt_name == "VisiblePromptError"
+
+    def test_detects_blocked_prompt_from_real_codex_fixture(self):
+        fixture = Path(__file__).resolve().parents[1] / "fixtures" / "codex" / "panes" / "tmux_session_0_resume_prompt.json"
+        payload = json.loads(fixture.read_text(encoding="utf-8"))
+        pane = "\n".join(payload["visible_text"])
+
+        surface = classify_input_surface(pane)
+
+        assert surface.kind == "blocked_prompt"
+        assert surface.has_visible_prompt is True
+        assert surface.prompt_name == "VisiblePromptError"
 
     def test_unknown_for_empty_string(self):
         surface = classify_input_surface("")

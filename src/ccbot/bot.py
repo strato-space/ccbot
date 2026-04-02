@@ -133,7 +133,7 @@ from .handlers.status_polling import status_poll_loop
 from .screenshot import text_to_image
 from .session import session_manager
 from .session_monitor import NewMessage, SessionMonitor
-from .terminal_parser import extract_bash_output, is_interactive_ui
+from .terminal_parser import classify_input_surface, extract_bash_output
 from .tmux_manager import tmux_manager
 from .transcribe import close_client as close_transcribe_client
 from .transcribe import transcribe_voice
@@ -968,16 +968,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Check for pending interactive UI before sending text.
     # This catches UIs (permission prompts, etc.) that status polling might have missed.
     pane_text = await tmux_manager.capture_pane(w.window_id)
-    if pane_text and is_interactive_ui(pane_text):
-        # UI detected — show it to user, then send text (acts as Enter)
+    surface = classify_input_surface(pane_text) if pane_text else None
+    if surface and surface.kind == "blocked_prompt":
         logger.info(
-            "Detected pending interactive UI before sending text (user=%d, thread=%s)",
+            "Detected blocked prompt before sending text (user=%d, thread=%s)",
             user.id,
             thread_id,
         )
         await handle_interactive_ui(context.bot, user.id, wid, thread_id)
-        # Small delay to let UI render in Telegram before text arrives
-        await asyncio.sleep(0.3)
+        await safe_reply(
+            update.message,
+            "⚠️ Terminal prompt is waiting for a decision. "
+            "Remote input is disabled for this state.",
+        )
+        return
 
     success, message = await session_manager.send_to_window(wid, text)
     if not success:

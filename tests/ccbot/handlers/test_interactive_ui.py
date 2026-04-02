@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ccbot.handlers.interactive_ui import (
+    READ_ONLY_PROMPT_NOTE,
     _build_interactive_keyboard,
     handle_interactive_ui,
 )
@@ -44,10 +45,10 @@ def _clear_interactive_state():
 @pytest.mark.usefixtures("_clear_interactive_state")
 class TestHandleInteractiveUI:
     @pytest.mark.asyncio
-    async def test_handle_settings_ui_sends_keyboard(
+    async def test_handle_settings_ui_sends_read_only_snapshot(
         self, mock_bot: AsyncMock, sample_pane_settings: str
     ):
-        """handle_interactive_ui captures Settings pane, sends message with keyboard."""
+        """Core lane prompt snapshots are read-only until T14 lands."""
         window_id = "@5"
         mock_window = MagicMock()
         mock_window.window_id = window_id
@@ -69,7 +70,9 @@ class TestHandleInteractiveUI:
         call_kwargs = mock_bot.send_message.call_args
         assert call_kwargs.kwargs["chat_id"] == 100
         assert call_kwargs.kwargs["message_thread_id"] == 42
-        assert call_kwargs.kwargs["reply_markup"] is not None
+        assert call_kwargs.kwargs["reply_markup"] is None
+        assert READ_ONLY_PROMPT_NOTE in call_kwargs.kwargs["text"]
+        assert "Settings detected" in call_kwargs.kwargs["text"]
 
     @pytest.mark.asyncio
     async def test_handle_no_ui_returns_false(self, mock_bot: AsyncMock):

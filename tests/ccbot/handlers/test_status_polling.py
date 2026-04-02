@@ -42,10 +42,10 @@ class TestStatusPollerSettingsDetection:
     """
 
     @pytest.mark.asyncio
-    async def test_settings_ui_detected_and_keyboard_sent(
+    async def test_settings_ui_detected_and_snapshot_sent(
         self, mock_bot: AsyncMock, sample_pane_settings: str
     ):
-        """Poller captures Settings pane → handle_interactive_ui sends keyboard."""
+        """Poller captures blocked prompt surface and delegates to prompt handler."""
         window_id = "@5"
         mock_window = MagicMock()
         mock_window.window_id = window_id
@@ -103,11 +103,10 @@ class TestStatusPollerSettingsDetection:
             mock_handle_ui.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_settings_ui_end_to_end_sends_telegram_keyboard(
+    async def test_settings_ui_end_to_end_sends_read_only_prompt_snapshot(
         self, mock_bot: AsyncMock, sample_pane_settings: str
     ):
-        """Full end-to-end: poller → is_interactive_ui → handle_interactive_ui
-        → bot.send_message with keyboard.
+        """Full end-to-end: poller → blocked prompt detection → Telegram snapshot.
 
         Uses real handle_interactive_ui (not mocked) to verify the full path.
         """
@@ -130,12 +129,13 @@ class TestStatusPollerSettingsDetection:
                 mock_bot, user_id=1, window_id=window_id, thread_id=42
             )
 
-            # Verify bot.send_message was called with keyboard
+            # Verify bot.send_message was called with a read-only snapshot
             mock_bot.send_message.assert_called_once()
             call_kwargs = mock_bot.send_message.call_args.kwargs
             assert call_kwargs["chat_id"] == 100
             assert call_kwargs["message_thread_id"] == 42
             keyboard = call_kwargs["reply_markup"]
-            assert keyboard is not None
+            assert keyboard is None
             # Verify the message text contains model picker content
             assert "Select model" in call_kwargs["text"]
+            assert "Remote controls are disabled for this prompt" in call_kwargs["text"]

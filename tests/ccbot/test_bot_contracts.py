@@ -266,6 +266,37 @@ class TestRuntimeInputRouting:
             mock_tmux.send_keys.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_text_handler_fails_closed_when_blocked_prompt_visible(self):
+        update = _make_topic_update()
+        update.message.text = "continue"
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
+            patch("ccbot.bot.handle_interactive_ui", new_callable=AsyncMock) as mock_handle_ui,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.capture_pane = AsyncMock(
+                return_value="OpenAI Codex\n› ping\n■ Approval required\n"
+            )
+
+            await bot_mod.text_handler(update, context)
+
+        mock_handle_ui.assert_awaited_once_with(context.bot, 1, "@7", 42)
+        mock_sm.send_to_window.assert_not_called()
+        mock_reply.assert_awaited_once()
+        assert (
+            "Terminal prompt is waiting for a decision"
+            in mock_reply.await_args.args[1]
+        )
+
+    @pytest.mark.asyncio
     async def test_interactive_ui_callback_missing_window_fails_closed(self):
         update = MagicMock()
         update.effective_user = MagicMock(id=1)

@@ -38,6 +38,7 @@ from .state_schema import (
     infer_runtime_kind,
     split_session_map_payload,
 )
+from .terminal_parser import classify_input_surface
 from .tmux_manager import tmux_manager
 from .transcript_parser import TranscriptParser
 from .utils import atomic_write_json
@@ -945,6 +946,12 @@ class SessionManager:
         window = await tmux_manager.find_window_by_id(window_id)
         if not window:
             return False, "Window not found (may have been closed)"
+
+        pane_text = await tmux_manager.capture_pane(window.window_id)
+        if pane_text:
+            surface = classify_input_surface(pane_text)
+            if surface.kind == "blocked_prompt":
+                return False, "Input blocked by a visible prompt in the terminal"
 
         runtime_kind = (
             self.window_states[window_id].runtime_kind

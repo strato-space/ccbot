@@ -278,6 +278,7 @@ class TestRuntimeInputDriverIntegration:
             mock_tmux.find_window_by_id = AsyncMock(
                 return_value=SimpleNamespace(window_id="@1")
             )
+            mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
             mock_driver.send_raw_slash_command = AsyncMock(
                 return_value=(True, "Sent text to @1")
@@ -311,6 +312,7 @@ class TestRuntimeInputDriverIntegration:
             mock_tmux.find_window_by_id = AsyncMock(
                 return_value=SimpleNamespace(window_id="@1")
             )
+            mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
             mock_driver.send_raw_slash_command = AsyncMock()
 
@@ -324,6 +326,34 @@ class TestRuntimeInputDriverIntegration:
             runtime_kind="codex",
         )
         mock_driver.send_raw_slash_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_send_to_window_fails_closed_on_blocked_prompt(
+        self, mgr: SessionManager
+    ):
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(window_id="@1")
+            )
+            mock_tmux.capture_pane = AsyncMock(
+                return_value="OpenAI Codex\n› ping\n■ Approval required\n"
+            )
+
+            success, message = await mgr.send_to_window("@1", "hello")
+
+        assert success is False
+        assert message == "Input blocked by a visible prompt in the terminal"
+        mock_driver.send_text.assert_not_called()
+        mock_driver.send_raw_slash_command.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_send_special_key_uses_runtime_input_driver(self, mgr: SessionManager):

@@ -24,7 +24,7 @@ from telegram import Bot
 from telegram.error import BadRequest
 
 from ..session import session_manager
-from ..terminal_parser import is_interactive_ui, parse_status_line
+from ..terminal_parser import classify_input_surface
 from ..tmux_manager import tmux_manager
 from .interactive_ui import (
     clear_interactive_msg,
@@ -72,13 +72,14 @@ async def update_status_message(
     if not pane_text:
         # Transient capture failure - keep existing status message
         return
+    surface = classify_input_surface(pane_text)
 
     interactive_window = get_interactive_window(user_id, thread_id)
     should_check_new_ui = True
 
     if interactive_window == window_id:
         # User is in interactive mode for THIS window
-        if is_interactive_ui(pane_text):
+        if surface.kind == "blocked_prompt":
             # Interactive UI still showing — skip status update (user is interacting)
             return
         # Interactive UI gone — clear interactive mode, fall through to status check.
@@ -90,11 +91,10 @@ async def update_status_message(
         # Clear stale interactive mode
         await clear_interactive_msg(user_id, bot, thread_id)
 
-    # Check for permission prompt (interactive UI not triggered via JSONL)
-    # ALWAYS check UI, regardless of skip_status
-    if should_check_new_ui and is_interactive_ui(pane_text):
+    # Check for blocked prompt surfaces (interactive UI or prompt-visible errors).
+    if should_check_new_ui and surface.kind == "blocked_prompt":
         logger.debug(
-            "Interactive UI detected in polling (user=%d, window=%s, thread=%s)",
+            "Blocked prompt detected in polling (user=%d, window=%s, thread=%s)",
             user_id,
             window_id,
             thread_id,
@@ -106,14 +106,12 @@ async def update_status_message(
     if skip_status:
         return
 
-    status_line = parse_status_line(pane_text)
-
-    if status_line:
+    if surface.kind == "busy" and surface.status_line:
         await enqueue_status_update(
             bot,
             user_id,
             window_id,
-            status_line,
+            surface.status_line,
             thread_id=thread_id,
         )
     # If no status line, keep existing status message (don't clear on transient state)

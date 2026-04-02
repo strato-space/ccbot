@@ -15,11 +15,15 @@ State dicts are keyed by (user_id, thread_id_or_0) for Telegram topic support.
 """
 
 import logging
+from itertools import islice
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..session import session_manager
-from ..terminal_parser import extract_interactive_content, is_interactive_ui
+from ..terminal_parser import (
+    classify_input_surface,
+    extract_interactive_content,
+)
 from ..tmux_manager import tmux_manager
 from .callback_data import (
     CB_ASK_DOWN,
@@ -44,6 +48,10 @@ _interactive_msgs: dict[tuple[int, int], int] = {}
 
 # Track interactive mode: (user_id, thread_id_or_0) -> window_id
 _interactive_mode: dict[tuple[int, int], str] = {}
+
+READ_ONLY_PROMPT_NOTE = (
+    "Remote controls are disabled for this prompt in the core lane."
+)
 
 
 def get_interactive_window(user_id: int, thread_id: int | None = None) -> str | None:
@@ -140,6 +148,18 @@ def _build_interactive_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def _build_prompt_message(pane_text: str, surface_name: str) -> str:
+    """Build a read-only prompt snapshot for Telegram."""
+    content = extract_interactive_content(pane_text)
+    if content and content.content.strip():
+        body = content.content.strip()
+    else:
+        visible_lines = [line.rstrip() for line in pane_text.splitlines() if line.strip()]
+        body = "\n".join(list(islice(visible_lines[-10:], 10))).strip()
+    header = f"⚠️ {surface_name or 'Prompt'} detected"
+    return f"{header}\n\n{body}\n\n{READ_ONLY_PROMPT_NOTE}".strip()
+
+
 async def handle_interactive_ui(
     bot: Bot,
     user_id: int,
@@ -164,25 +184,21 @@ async def handle_interactive_ui(
         logger.debug("No pane text captured for window_id %s", window_id)
         return False
 
-    # Quick check if it looks like an interactive UI
-    if not is_interactive_ui(pane_text):
+    surface = classify_input_surface(pane_text)
+    if surface.kind != "blocked_prompt":
         logger.debug(
-            "No interactive UI detected in window_id %s (last 3 lines: %s)",
+            "No blocked prompt detected in window_id %s (surface=%s)",
             window_id,
-            pane_text.strip().split("\n")[-3:],
+            surface.kind,
         )
         return False
 
-    # Extract content between separators
-    content = extract_interactive_content(pane_text)
-    if not content:
-        return False
-
-    # Build message with navigation keyboard
-    keyboard = _build_interactive_keyboard(window_id, ui_name=content.name)
-
-    # Send as plain text (no markdown conversion)
-    text = content.content
+    keyboard = (
+        _build_interactive_keyboard(window_id, ui_name=surface.prompt_name)
+        if surface.allows_remote_actions
+        else None
+    )
+    text = _build_prompt_message(pane_text, surface.prompt_name)
 
     # Build thread kwargs for send_message
     thread_kwargs: dict[str, int] = {}

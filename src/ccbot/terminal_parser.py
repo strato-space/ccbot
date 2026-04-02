@@ -34,6 +34,8 @@ class InputSurface:
     has_visible_prompt: bool = False
     has_interactive_ui: bool = False
     status_line: str | None = None
+    prompt_name: str = ""
+    allows_remote_actions: bool = False
 
 
 @dataclass(frozen=True)
@@ -217,18 +219,27 @@ def classify_input_surface(pane_text: str) -> InputSurface:
     interactive = extract_interactive_content(pane_text)
     if interactive:
         return InputSurface(
-            kind=interactive.name or "interactive_ui",
+            kind="blocked_prompt",
             has_visible_prompt=True,
             has_interactive_ui=True,
+            prompt_name=interactive.name or "interactive_ui",
         )
 
     status_line = parse_status_line(pane_text)
     if status_line is not None:
-        return InputSurface(kind="status", status_line=status_line)
+        return InputSurface(kind="busy", status_line=status_line)
 
     lines = [line.strip() for line in pane_text.splitlines()[-8:] if line.strip()]
+    if any(line.startswith("■") for line in lines) and any(
+        line.startswith(("›", "❯")) for line in lines
+    ):
+        return InputSurface(
+            kind="blocked_prompt",
+            has_visible_prompt=True,
+            prompt_name="VisiblePromptError",
+        )
     if any(line.startswith(("›", "❯")) for line in lines):
-        return InputSurface(kind="prompt", has_visible_prompt=True)
+        return InputSurface(kind="input_ready", has_visible_prompt=True)
 
     return InputSurface(kind="unknown")
 
