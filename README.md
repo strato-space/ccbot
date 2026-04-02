@@ -21,6 +21,15 @@ Other Telegram bots for Claude Code typically wrap the Claude Code SDK to create
 
 In fact, CCBot itself was built this way — iterating on itself through Claude Code sessions monitored and driven from Telegram via CCBot.
 
+## Runtime Model
+
+The Codex adaptation work uses an explicit runtime ontology to avoid collapsing
+live tmux control, persisted conversation identity, and on-disk rollout evidence
+into a single "session" concept.
+
+Maintainer reference:
+- [`doc/runtime-ontology.md`](doc/runtime-ontology.md)
+
 ## Features
 
 - **Topic-based sessions** — Each Telegram topic maps 1:1 to a tmux window and Claude session
