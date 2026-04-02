@@ -18,6 +18,7 @@ from ..telegram_sender import split_message
 from ..transcript_parser import TranscriptParser
 from .callback_data import CB_HISTORY_NEXT, CB_HISTORY_PREV
 from .message_sender import safe_edit, safe_reply, safe_send
+from .response_builder import format_response_text
 
 logger = logging.getLogger(__name__)
 
@@ -178,23 +179,16 @@ async def send_history(
             else:
                 lines.append("─────────────")
 
-            # Format message content
-            msg_text = msg["text"]
-            content_type = msg.get("content_type", "text")
-            msg_role = msg.get("role", "assistant")
-
-            # Strip expandable quote sentinels for history view
-            msg_text = msg_text.replace(_start, "").replace(_end, "")
-
-            # Add prefix based on role/type
-            if msg_role == "user":
-                # User message with emoji prefix (no newline)
-                lines.append(f"👤 {msg_text}")
-            elif content_type == "thinking":
-                # Thinking prefix to match real-time format
-                lines.append(f"∴ Thinking…\n{msg_text}")
-            else:
-                lines.append(msg_text)
+            msg_text = msg["text"].replace(_start, "").replace(_end, "")
+            lines.append(
+                format_response_text(
+                    msg_text,
+                    is_complete=True,
+                    content_type=msg.get("content_type", "text"),
+                    role=msg.get("role", "assistant"),
+                    for_history=True,
+                )
+            )
         full_text = "\n\n".join(lines)
         pages = split_message(full_text, max_length=4096)
 

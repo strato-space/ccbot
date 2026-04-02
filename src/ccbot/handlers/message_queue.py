@@ -121,7 +121,11 @@ def _can_merge_tasks(base: MessageTask, candidate: MessageTask) -> bool:
     """Check if two content tasks can be merged."""
     if base.window_id != candidate.window_id:
         return False
+    if base.thread_id != candidate.thread_id:
+        return False
     if candidate.task_type != "content":
+        return False
+    if base.content_type != candidate.content_type:
         return False
     # tool_use/tool_result break merge chain
     # - tool_use: will be edited later by tool_result

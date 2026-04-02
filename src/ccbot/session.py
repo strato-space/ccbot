@@ -24,6 +24,7 @@ from typing import Any
 import aiofiles
 
 from .config import config
+from .codex_rollout import CodexRolloutNormalizer
 from .codex_threads import (
     CodexThreadCandidate,
     CodexThreadCatalog,
@@ -750,7 +751,7 @@ class SessionManager:
                 changed = True
             if changed:
                 self._save_state()
-            return selected
+            return selected.to_locator()
 
         if resolution.status == "ambiguous":
             logger.warning(
@@ -1043,15 +1044,27 @@ class SessionManager:
             logger.error("Error reading session file %s: %s", file_path, e)
             return [], 0
 
-        parsed_entries, _ = TranscriptParser.parse_entries(entries)
+        if entries and all(
+            CodexRolloutNormalizer.is_codex_rollout_record(entry)
+            for entry in entries
+            if isinstance(entry, dict)
+        ):
+            parsed_entries = TranscriptParser.parse_codex_rollout_entries(
+                entries,
+                thread_id=session.thread_id,
+            )
+        else:
+            parsed_entries, _ = TranscriptParser.parse_entries(entries)
         all_messages = [
             {
                 "role": e.role,
                 "text": e.text,
                 "content_type": e.content_type,
                 "timestamp": e.timestamp,
+                "event_kind": getattr(e, "event_kind", "message"),
             }
             for e in parsed_entries
+            if getattr(e, "event_kind", "message") != "lifecycle"
         ]
 
         return all_messages, len(all_messages)

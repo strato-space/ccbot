@@ -1,10 +1,13 @@
 """Tests for SessionManager pure dict operations."""
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from ccbot.codex_threads import CodexThreadCatalog
 from ccbot.session import SessionManager
 from ccbot.runtime_types import LiveProcessDescriptor
 
@@ -176,6 +179,87 @@ class TestDisplayNames:
         mgr.bind_thread(100, 1, "@1")
         # No display name set, fallback to window_id
         assert mgr.get_display_name("@1") == "@1"
+
+
+class TestCodexHistory:
+    @pytest.mark.asyncio
+    async def test_get_recent_messages_reads_codex_rollout_events(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        codex_home = tmp_path / ".codex"
+        sessions_root = codex_home / "sessions" / "2026" / "04" / "02"
+        sessions_root.mkdir(parents=True)
+        thread_id = "019d4e76-7fae-7a90-bc40-2290ee269660"
+        (codex_home / "session_index.jsonl").write_text(
+            json.dumps(
+                {
+                    "id": thread_id,
+                    "thread_name": "History thread",
+                    "updated_at": "2026-04-02T14:00:00Z",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        rollout = sessions_root / f"rollout-{thread_id}.jsonl"
+        rollout.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "timestamp": "2026-04-02T14:00:00Z",
+                            "type": "session_meta",
+                            "payload": {"id": thread_id, "cwd": "/tmp/project-9"},
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "timestamp": "2026-04-02T14:00:01Z",
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "agent_message",
+                                "phase": "commentary",
+                                "message": "Working through it",
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "timestamp": "2026-04-02T14:00:02Z",
+                            "type": "response_item",
+                            "payload": {
+                                "type": "function_call_output",
+                                "call_id": "tool-1",
+                                "output": [{"type": "output_text", "text": "done"}],
+                            },
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+        monkeypatch.setattr(SessionManager, "_save_state", lambda self: None)
+        manager = SessionManager(
+            codex_thread_catalog=CodexThreadCatalog(codex_home=codex_home)
+        )
+        manager.register_live_process(
+            "@9",
+            "/tmp/project-9",
+            runtime_kind="codex",
+            thread_id=thread_id,
+        )
+        manager.bind_thread(100, 7, "@9", window_name="proj-9")
+
+        messages, total = await manager.get_recent_messages("@9")
+
+        assert total == 2
+        assert messages[0]["content_type"] == "commentary"
+        assert messages[0]["event_kind"] == "commentary"
+        assert messages[1]["content_type"] == "tool_result"
+        assert messages[1]["text"] == "done"
 
 
 class TestRuntimeInputDriverIntegration:

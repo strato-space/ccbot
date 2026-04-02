@@ -1,6 +1,8 @@
 """Tests for response_builder.build_response_parts."""
 
-from ccbot.handlers.response_builder import build_response_parts
+import pytest
+
+from ccbot.handlers.response_builder import build_response_parts, format_response_text
 from ccbot.transcript_parser import TranscriptParser
 
 EXP_START = TranscriptParser.EXPANDABLE_QUOTE_START
@@ -58,3 +60,38 @@ class TestBuildResponseParts:
         assert len(parts) == 1
         assert "\U0001f464" not in parts[0]
         assert "Thinking" not in parts[0]
+
+    @pytest.mark.parametrize(
+        ("content_type", "expected_prefix"),
+        [
+            ("commentary", "Commentary"),
+            ("reasoning", "Reasoning"),
+            ("command_execution", "Command"),
+            ("tool_use", "Tool"),
+            ("tool_result", "Tool Output"),
+            ("file_change", "Files"),
+        ],
+    )
+    def test_specialized_content_types_get_prefixes(
+        self, content_type: str, expected_prefix: str
+    ):
+        parts = build_response_parts(
+            "payload",
+            is_complete=True,
+            content_type=content_type,
+            role="assistant",
+        )
+        assert len(parts) == 1
+        assert expected_prefix in parts[0]
+
+    def test_history_format_preserves_reasoning_without_truncation(self):
+        formatted = format_response_text(
+            "x" * 800,
+            is_complete=True,
+            content_type="reasoning",
+            role="assistant",
+            for_history=True,
+        )
+        assert "Reasoning" in formatted
+        assert "truncated" not in formatted.lower()
+        assert len(formatted) > 800
