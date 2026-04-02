@@ -20,6 +20,7 @@ from typing import Any, Callable, Awaitable
 import aiofiles
 
 from .config import config
+from .codex_threads import normalize_cwd
 from .monitor_state import MonitorState, TrackedSession
 from .state_schema import split_session_map_payload
 from .runtime_types import NormalizedEvent, RolloutSource
@@ -75,10 +76,7 @@ class SessionMonitor:
         cwds = set()
         windows = await tmux_manager.list_windows()
         for w in windows:
-            try:
-                cwds.add(str(Path(w.cwd).resolve()))
-            except (OSError, ValueError):
-                cwds.add(w.cwd)
+            cwds.add(normalize_cwd(w.cwd))
         return cwds
 
     async def scan_rollout_sources(self) -> list[RolloutSource]:
@@ -116,10 +114,7 @@ class SessionMonitor:
                         if not thread_id or not full_path:
                             continue
 
-                        try:
-                            norm_pp = str(Path(project_path).resolve())
-                        except (OSError, ValueError):
-                            norm_pp = project_path
+                        norm_pp = normalize_cwd(project_path)
                         if norm_pp not in active_cwds:
                             continue
 
@@ -154,10 +149,7 @@ class SessionMonitor:
                         if dir_name.startswith("-"):
                             file_project_path = dir_name.replace("-", "/")
 
-                    try:
-                        norm_fp = str(Path(file_project_path).resolve())
-                    except (OSError, ValueError):
-                        norm_fp = file_project_path
+                    norm_fp = normalize_cwd(file_project_path)
 
                     if norm_fp not in active_cwds:
                         continue

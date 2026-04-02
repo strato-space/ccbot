@@ -23,7 +23,9 @@ from typing import Any
 import aiofiles
 
 from .config import config
-from .runtime_types import LiveProcessDescriptor, ThreadLocator, TopicBinding
+from .codex_threads import CodexThreadCatalog
+from .input_driver import runtime_input_driver
+from .runtime_types import InputAction, LiveProcessDescriptor, ThreadLocator, TopicBinding
 from .state_schema import (
     build_session_map_payload,
     ensure_legacy_backup,
@@ -68,8 +70,11 @@ class SessionManager:
     # History: originally added in 5afc111, erroneously removed in 26cb81f,
     # restored in PR #23.
     group_chat_ids: dict[str, int] = field(default_factory=dict)
+    codex_thread_catalog: CodexThreadCatalog | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        if self.codex_thread_catalog is None:
+            self.codex_thread_catalog = CodexThreadCatalog()
         self._load_state()
 
     def _save_state(self) -> None:
@@ -585,6 +590,11 @@ class SessionManager:
         self, thread_id: str, cwd: str
     ) -> ThreadLocator | None:
         """Resolve a persisted thread directly from thread_id and cwd."""
+        if self.codex_thread_catalog is not None:
+            locator = self.codex_thread_catalog.exact_locator(thread_id, cwd)
+            if locator is not None:
+                return locator
+
         file_path = self._build_session_file_path(thread_id, cwd)
 
         # Fallback: glob search if direct path doesn't exist
@@ -647,12 +657,16 @@ class SessionManager:
     async def list_threads_for_directory(self, cwd: str) -> list[ThreadLocator]:
         """List persisted threads for a directory.
 
-        Encodes the cwd path to find the project directory under
-        ~/.claude/projects/{encoded_cwd}/, globs *.jsonl files, and
-        extracts summary info from each.
-
-        Returns a list sorted by mtime (most recent first), capped at 10.
+        Prefers Codex thread catalog candidates when available, otherwise
+        falls back to the legacy Claude directory scan.
         """
+        if self.codex_thread_catalog is not None:
+            candidates = await asyncio.to_thread(
+                self.codex_thread_catalog.list_candidates_for_cwd, cwd
+            )
+            if candidates:
+                return [candidate.to_locator() for candidate in candidates]
+
         encoded_cwd = self._encode_cwd(cwd)
         project_dir = config.claude_projects_path / encoded_cwd
         if not project_dir.is_dir():
@@ -860,10 +874,56 @@ class SessionManager:
         window = await tmux_manager.find_window_by_id(window_id)
         if not window:
             return False, "Window not found (may have been closed)"
-        success = await tmux_manager.send_keys(window.window_id, text)
+
+        runtime_kind = (
+            self.window_states[window_id].runtime_kind
+            if window_id in self.window_states
+            else config.default_runtime_kind
+        )
+        trimmed = text.lstrip()
+        if trimmed.startswith("/"):
+            success, message = await runtime_input_driver.send_raw_slash_command(
+                window.window_id,
+                text,
+                runtime_kind=runtime_kind,
+            )
+        else:
+            success, message = await runtime_input_driver.send_text(
+                window.window_id,
+                text,
+                runtime_kind=runtime_kind,
+            )
         if success:
             return True, f"Sent to {display}"
-        return False, "Failed to send keys"
+        return False, message
+
+    async def send_special_key_to_window(
+        self, window_id: str, key: str
+    ) -> tuple[bool, str]:
+        """Send a control key through the runtime input driver."""
+        window = await tmux_manager.find_window_by_id(window_id)
+        if not window:
+            return False, "Window not found (may have been closed)"
+
+        runtime_kind = (
+            self.window_states[window_id].runtime_kind
+            if window_id in self.window_states
+            else config.default_runtime_kind
+        )
+        return await runtime_input_driver.send_special_key(
+            window.window_id,
+            key,
+            runtime_kind=runtime_kind,
+        )
+
+    async def send_input_to_window(
+        self, window_id: str, action: InputAction
+    ) -> tuple[bool, str]:
+        """Send a runtime-neutral input action to the live window."""
+        window = await tmux_manager.find_window_by_id(window_id)
+        if not window:
+            return False, "Window not found (may have been closed)"
+        return await runtime_input_driver.send_dispatch(window.window_id, action)
 
     # --- Message history ---
 
