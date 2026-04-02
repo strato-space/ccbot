@@ -6,6 +6,7 @@ raw slash-command passthrough so refactors cannot silently change behavior in
 shared modules.
 """
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -335,3 +336,89 @@ class TestLauncherRegistration:
             thread_id="",
         )
         mock_sm.wait_for_session_map_entry.assert_not_awaited()
+
+
+class TestThreadPickerFlow:
+    @staticmethod
+    def _make_callback_update(data: str, thread_id: int = 42) -> MagicMock:
+        update = MagicMock()
+        update.effective_user = MagicMock(id=1)
+        update.effective_chat = MagicMock(type="supergroup", id=100)
+        update.callback_query = MagicMock()
+        update.callback_query.data = data
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.message = MagicMock(
+            message_thread_id=thread_id,
+            chat=update.effective_chat,
+        )
+        return update
+
+    @pytest.mark.asyncio
+    async def test_directory_confirm_switches_to_thread_picker(self):
+        update = self._make_callback_update(bot_mod.CB_DIR_CONFIRM)
+        context = _make_context()
+        context.user_data = {
+            "_pending_thread_id": 42,
+            bot_mod.BROWSE_PATH_KEY: "/tmp/project",
+        }
+        thread = SimpleNamespace(
+            thread_id="thread-1",
+            summary="Existing Codex thread",
+            message_count=12,
+            file_path="/tmp/project/thread-1.jsonl",
+        )
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.build_thread_picker", return_value=("picker", MagicMock())),
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock) as mock_edit,
+        ):
+            mock_sm.list_threads_for_directory = AsyncMock(return_value=[thread])
+
+            await bot_mod.callback_handler(update, context)
+
+        assert context.user_data[bot_mod.STATE_KEY] == bot_mod.STATE_SELECTING_THREAD
+        assert context.user_data[bot_mod.THREADS_KEY] == [thread]
+        mock_sm.list_threads_for_directory.assert_awaited_once_with("/tmp/project")
+        mock_edit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_thread_picker_resume_uses_selected_thread_id(self):
+        update = self._make_callback_update(f"{bot_mod.CB_THREAD_SELECT}0")
+        context = _make_context()
+        context.user_data = {
+            "_pending_thread_id": 42,
+            "_selected_path": "/tmp/project",
+            bot_mod.THREADS_KEY: [SimpleNamespace(thread_id="thread-1")],
+        }
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._create_and_bind_window", new_callable=AsyncMock) as mock_create,
+        ):
+            await bot_mod.callback_handler(update, context)
+
+        mock_create.assert_awaited_once()
+        assert mock_create.await_args.kwargs["resume_session_id"] == "thread-1"
+
+    @pytest.mark.asyncio
+    async def test_thread_picker_fresh_thread_omits_resume_id(self):
+        update = self._make_callback_update(bot_mod.CB_THREAD_NEW)
+        context = _make_context()
+        context.user_data = {
+            "_pending_thread_id": 42,
+            "_selected_path": "/tmp/project",
+        }
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._create_and_bind_window", new_callable=AsyncMock) as mock_create,
+        ):
+            await bot_mod.callback_handler(update, context)
+
+        mock_create.assert_awaited_once()
+        assert mock_create.await_args.kwargs == {}

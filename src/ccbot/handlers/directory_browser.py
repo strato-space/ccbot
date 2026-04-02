@@ -1,8 +1,8 @@
-"""Directory browser and window picker UI for session creation.
+"""Directory browser and window picker UI for thread creation and resume.
 
 Provides UIs in Telegram for:
   - Window picker: list unbound tmux windows for quick binding
-  - Directory browser: navigate directory hierarchies to create new sessions
+  - Directory browser: navigate directory hierarchies to create new threads
 
 Key components:
   - DIRS_PER_PAGE: Number of directories shown per page
@@ -19,7 +19,7 @@ from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from ..session import ClaudeSession
+from ..runtime_types import ThreadLocator
 
 from ..config import config
 from .callback_data import (
@@ -28,9 +28,9 @@ from .callback_data import (
     CB_DIR_PAGE,
     CB_DIR_SELECT,
     CB_DIR_UP,
-    CB_SESSION_CANCEL,
-    CB_SESSION_NEW,
-    CB_SESSION_SELECT,
+    CB_THREAD_CANCEL,
+    CB_THREAD_NEW,
+    CB_THREAD_SELECT,
     CB_WIN_BIND,
     CB_WIN_CANCEL,
     CB_WIN_NEW,
@@ -47,8 +47,12 @@ BROWSE_PATH_KEY = "browse_path"
 BROWSE_PAGE_KEY = "browse_page"
 BROWSE_DIRS_KEY = "browse_dirs"  # Cache of subdirs for current path
 UNBOUND_WINDOWS_KEY = "unbound_windows"  # Cache of (name, cwd) tuples
-STATE_SELECTING_SESSION = "selecting_session"
-SESSIONS_KEY = "cached_sessions"  # Cache of ClaudeSession list
+STATE_SELECTING_THREAD = "selecting_thread"
+THREADS_KEY = "cached_threads"  # Cache of ThreadLocator list
+
+# Backward-compatible aliases while the rest of the bot is migrated.
+STATE_SELECTING_SESSION = STATE_SELECTING_THREAD
+SESSIONS_KEY = THREADS_KEY
 
 
 def clear_browse_state(user_data: dict | None) -> None:
@@ -67,11 +71,16 @@ def clear_window_picker_state(user_data: dict | None) -> None:
         user_data.pop(UNBOUND_WINDOWS_KEY, None)
 
 
-def clear_session_picker_state(user_data: dict | None) -> None:
-    """Clear session picker state keys from user_data."""
+def clear_thread_picker_state(user_data: dict | None) -> None:
+    """Clear thread picker state keys from user_data."""
     if user_data is not None:
         user_data.pop(STATE_KEY, None)
-        user_data.pop(SESSIONS_KEY, None)
+        user_data.pop(THREADS_KEY, None)
+
+
+def clear_session_picker_state(user_data: dict | None) -> None:
+    """Backward-compatible alias for clear_thread_picker_state()."""
+    clear_thread_picker_state(user_data)
 
 
 def build_window_picker(
@@ -89,7 +98,7 @@ def build_window_picker(
     lines = [
         "*Bind to Existing Window*\n",
         "These windows are running but not bound to any topic.",
-        "Pick one to attach it here, or start a new session.\n",
+        "Pick one to attach it here, or start a fresh thread.\n",
     ]
     for _wid, name, cwd in windows:
         display_cwd = cwd.replace(str(Path.home()), "~")
@@ -110,7 +119,7 @@ def build_window_picker(
 
     buttons.append(
         [
-            InlineKeyboardButton("➕ New Session", callback_data=CB_WIN_NEW),
+            InlineKeyboardButton("➕ New Thread", callback_data=CB_WIN_NEW),
             InlineKeyboardButton("Cancel", callback_data=CB_WIN_CANCEL),
         ]
     )
@@ -212,45 +221,58 @@ def _relative_time(file_path: str) -> str:
     return f"{d}d ago"
 
 
-def build_session_picker(
-    sessions: list[ClaudeSession],
+def build_thread_picker(
+    threads: list[ThreadLocator],
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """Build session picker UI for resuming an existing Claude session.
+    """Build thread picker UI for resuming an existing persisted thread.
 
     Args:
-        sessions: List of ClaudeSession objects (sorted by recency).
+        threads: List of ThreadLocator objects (sorted by recency).
 
     Returns: (text, keyboard).
     """
     lines = [
-        "*Resume Session?*\n",
-        "Existing sessions found in this directory.\n",
+        "*Resume Existing Thread?*\n",
+        "Persisted threads were found in this directory.\n",
     ]
-    for i, s in enumerate(sessions):
-        summary = s.summary[:40] + "…" if len(s.summary) > 40 else s.summary
-        rel = _relative_time(s.file_path)
+    for i, thread in enumerate(threads):
+        summary = (
+            thread.summary[:40] + "…" if len(thread.summary) > 40 else thread.summary
+        )
+        rel = _relative_time(thread.file_path)
         time_str = f" ({rel})" if rel else ""
-        lines.append(f"{i + 1}. {summary} — {s.message_count} msgs{time_str}")
+        lines.append(
+            f"{i + 1}. {summary} — {thread.message_count} messages{time_str}"
+        )
 
     buttons: list[list[InlineKeyboardButton]] = []
-    for i in range(0, len(sessions), 2):
+    for i in range(0, len(threads), 2):
         row = []
-        for j in range(min(2, len(sessions) - i)):
-            s = sessions[i + j]
-            label = s.summary[:14] + "…" if len(s.summary) > 14 else s.summary
+        for j in range(min(2, len(threads) - i)):
+            thread = threads[i + j]
+            label = (
+                thread.summary[:14] + "…" if len(thread.summary) > 14 else thread.summary
+            )
             row.append(
                 InlineKeyboardButton(
-                    f"▶ {label}", callback_data=f"{CB_SESSION_SELECT}{i + j}"
+                    f"↺ {label}", callback_data=f"{CB_THREAD_SELECT}{i + j}"
                 )
             )
         buttons.append(row)
 
     buttons.append(
         [
-            InlineKeyboardButton("➕ New Session", callback_data=CB_SESSION_NEW),
-            InlineKeyboardButton("Cancel", callback_data=CB_SESSION_CANCEL),
+            InlineKeyboardButton("➕ Fresh Thread", callback_data=CB_THREAD_NEW),
+            InlineKeyboardButton("Cancel", callback_data=CB_THREAD_CANCEL),
         ]
     )
 
     text = "\n".join(lines)
     return text, InlineKeyboardMarkup(buttons)
+
+
+def build_session_picker(
+    sessions: list[ThreadLocator],
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Backward-compatible alias for build_thread_picker()."""
+    return build_thread_picker(sessions)

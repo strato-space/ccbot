@@ -42,10 +42,15 @@ CB_ASK_SPACE = "aq:spc:"  # aq:spc:<window>
 CB_ASK_TAB = "aq:tab:"  # aq:tab:<window>
 CB_ASK_REFRESH = "aq:ref:"  # aq:ref:<window>
 
-# Session picker (resume existing session)
-CB_SESSION_SELECT = "rs:sel:"  # rs:sel:<index>
-CB_SESSION_NEW = "rs:new"  # start a new session
-CB_SESSION_CANCEL = "rs:cancel"  # cancel
+# Thread picker (resume existing persisted thread)
+CB_THREAD_SELECT = "rs:sel:"  # rs:sel:<index>
+CB_THREAD_NEW = "rs:new"  # start a fresh thread
+CB_THREAD_CANCEL = "rs:cancel"  # cancel
+
+# Backward-compatible aliases for older call sites and callback payloads.
+CB_SESSION_SELECT = CB_THREAD_SELECT
+CB_SESSION_NEW = CB_THREAD_NEW
+CB_SESSION_CANCEL = CB_THREAD_CANCEL
 
 # Screenshot control keys
 CB_KEYS_PREFIX = "kb:"  # kb:<key_id>:<window>

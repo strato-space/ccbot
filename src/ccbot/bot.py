@@ -1,7 +1,7 @@
 """Telegram bot handlers — the main UI layer of CCBot.
 
 Registers all command/callback/message handlers and manages the bot lifecycle.
-Each Telegram topic maps 1:1 to a tmux window (Claude session).
+Each Telegram topic maps 1:1 to a tmux window running a live agent process.
 
 Core responsibilities:
   - Command handlers: /start, /history, /screenshot, /esc, /kill, /unbind,
@@ -9,7 +9,7 @@ Core responsibilities:
   - Callback query handler: directory browser, history pagination,
     interactive UI navigation, screenshot refresh.
   - Topic-based routing: each named topic binds to one tmux window.
-    Unbound topics trigger the directory browser to create a new session.
+    Unbound topics trigger the directory browser to create or resume a thread.
   - Photo handling: photos sent by user are downloaded and forwarded
     to Claude Code as file paths (photo_handler).
   - Voice handling: voice messages are transcribed via OpenAI API and
@@ -75,9 +75,9 @@ from .handlers.callback_data import (
     CB_DIR_UP,
     CB_HISTORY_NEXT,
     CB_HISTORY_PREV,
-    CB_SESSION_CANCEL,
-    CB_SESSION_NEW,
-    CB_SESSION_SELECT,
+    CB_THREAD_CANCEL,
+    CB_THREAD_NEW,
+    CB_THREAD_SELECT,
     CB_KEYS_PREFIX,
     CB_SCREENSHOT_REFRESH,
     CB_WIN_BIND,
@@ -88,17 +88,17 @@ from .handlers.directory_browser import (
     BROWSE_DIRS_KEY,
     BROWSE_PAGE_KEY,
     BROWSE_PATH_KEY,
-    SESSIONS_KEY,
+    THREADS_KEY,
     STATE_BROWSING_DIRECTORY,
     STATE_KEY,
-    STATE_SELECTING_SESSION,
+    STATE_SELECTING_THREAD,
     STATE_SELECTING_WINDOW,
     UNBOUND_WINDOWS_KEY,
     build_directory_browser,
-    build_session_picker,
+    build_thread_picker,
     build_window_picker,
     clear_browse_state,
-    clear_session_picker_state,
+    clear_thread_picker_state,
     clear_window_picker_state,
 )
 from .handlers.cleanup import clear_topic_state
@@ -863,20 +863,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         context.user_data.pop("_pending_thread_id", None)
         context.user_data.pop("_pending_thread_text", None)
 
-    # Ignore text in session picker mode (only for the same thread)
+    # Ignore text in thread-picker mode (only for the same topic)
     if (
         context.user_data
-        and context.user_data.get(STATE_KEY) == STATE_SELECTING_SESSION
+        and context.user_data.get(STATE_KEY) == STATE_SELECTING_THREAD
     ):
         pending_tid = context.user_data.get("_pending_thread_id")
         if pending_tid == thread_id:
             await safe_reply(
                 update.message,
-                "Please use the session picker above, or tap Cancel.",
+                "Please use the thread picker above, or tap Cancel.",
             )
             return
         # Stale picker state from a different thread — clear it
-        clear_session_picker_state(context.user_data)
+        clear_thread_picker_state(context.user_data)
         context.user_data.pop("_pending_thread_id", None)
         context.user_data.pop("_pending_thread_text", None)
         context.user_data.pop("_selected_path", None)
@@ -1012,7 +1012,7 @@ async def _create_and_bind_window(
 ) -> None:
     """Create a tmux window, bind it to a topic, and forward pending text.
 
-    Shared by CB_DIR_CONFIRM (no sessions), CB_SESSION_NEW, and CB_SESSION_SELECT.
+    Shared by directory-confirm, fresh-thread, and thread-resume actions.
     """
     from telegram import CallbackQuery, User
 
@@ -1098,7 +1098,7 @@ async def _create_and_bind_window(
             except Exception as e:
                 logger.debug(f"Failed to rename topic: {e}")
 
-            status = "Resumed" if resume_session_id else "Created"
+            status = "Resumed thread" if resume_session_id else "Started fresh thread"
             await safe_edit(
                 query,
                 f"✅ {message}\n\n{status}. Send messages here.",
@@ -1334,20 +1334,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         clear_browse_state(context.user_data)
 
-        # Check for existing sessions in this directory
-        sessions = await session_manager.list_sessions_for_directory(selected_path)
-        if sessions:
-            # Show session picker — store state for later
+        # Check for existing persisted threads in this directory.
+        threads = await session_manager.list_threads_for_directory(selected_path)
+        if threads:
+            # Show thread picker — store state for later.
             if context.user_data is not None:
-                context.user_data[STATE_KEY] = STATE_SELECTING_SESSION
-                context.user_data[SESSIONS_KEY] = sessions
+                context.user_data[STATE_KEY] = STATE_SELECTING_THREAD
+                context.user_data[THREADS_KEY] = threads
                 context.user_data["_selected_path"] = selected_path
-            text, keyboard = build_session_picker(sessions)
+            text, keyboard = build_thread_picker(threads)
             await safe_edit(query, text, reply_markup=keyboard)
             await query.answer()
             return
 
-        # No existing sessions — create new window directly
+        # No existing persisted threads — create a fresh window directly.
         await _create_and_bind_window(
             query, context, user, selected_path, pending_thread_id
         )
@@ -1366,8 +1366,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await safe_edit(query, "Cancelled")
         await query.answer("Cancelled")
 
-    # Session picker: resume existing session
-    elif data.startswith(CB_SESSION_SELECT):
+    # Thread picker: resume an existing persisted thread.
+    elif data.startswith(CB_THREAD_SELECT):
         pending_tid = (
             context.user_data.get("_pending_thread_id") if context.user_data else None
         )
@@ -1379,25 +1379,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.answer("Stale picker (topic mismatch)", show_alert=True)
             return
         try:
-            idx = int(data[len(CB_SESSION_SELECT) :])
+            idx = int(data[len(CB_THREAD_SELECT) :])
         except ValueError:
             await query.answer("Invalid data")
             return
 
-        cached_sessions = (
-            context.user_data.get(SESSIONS_KEY, []) if context.user_data else []
+        cached_threads = (
+            context.user_data.get(THREADS_KEY, []) if context.user_data else []
         )
-        if idx < 0 or idx >= len(cached_sessions):
-            await query.answer("Session not found")
+        if idx < 0 or idx >= len(cached_threads):
+            await query.answer("Thread not found")
             return
 
-        session = cached_sessions[idx]
+        thread = cached_threads[idx]
         selected_path = (
             context.user_data.get("_selected_path", str(Path.cwd()))
             if context.user_data
             else str(Path.cwd())
         )
-        clear_session_picker_state(context.user_data)
+        clear_thread_picker_state(context.user_data)
         if context.user_data is not None:
             context.user_data.pop("_selected_path", None)
 
@@ -1407,10 +1407,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             user,
             selected_path,
             pending_tid,
-            resume_session_id=session.session_id,
+            resume_session_id=thread.thread_id,
         )
 
-    elif data == CB_SESSION_NEW:
+    elif data == CB_THREAD_NEW:
         pending_tid = (
             context.user_data.get("_pending_thread_id") if context.user_data else None
         )
@@ -1424,20 +1424,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             if context.user_data
             else str(Path.cwd())
         )
-        clear_session_picker_state(context.user_data)
+        clear_thread_picker_state(context.user_data)
         if context.user_data is not None:
             context.user_data.pop("_selected_path", None)
 
         await _create_and_bind_window(query, context, user, selected_path, pending_tid)
 
-    elif data == CB_SESSION_CANCEL:
+    elif data == CB_THREAD_CANCEL:
         pending_tid = (
             context.user_data.get("_pending_thread_id") if context.user_data else None
         )
         if pending_tid is not None and _get_thread_id(update) != pending_tid:
             await query.answer("Stale picker (topic mismatch)", show_alert=True)
             return
-        clear_session_picker_state(context.user_data)
+        clear_thread_picker_state(context.user_data)
         if context.user_data is not None:
             context.user_data.pop("_pending_thread_id", None)
             context.user_data.pop("_pending_thread_text", None)
@@ -1498,7 +1498,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         await safe_edit(
             query,
-            f"✅ Bound to window `{display}`",
+            f"✅ Bound this topic to live window `{display}`",
         )
 
         # Forward pending text if any
