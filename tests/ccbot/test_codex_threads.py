@@ -34,6 +34,33 @@ def _build_fixture_codex_home(tmp_path: Path) -> Path:
     return codex_home
 
 
+def _build_legacy_claude_project(tmp_path: Path, cwd: str, thread_id: str) -> Path:
+    encoded_cwd = SessionManager._encode_cwd(cwd)
+    project_dir = tmp_path / encoded_cwd
+    project_dir.mkdir(parents=True, exist_ok=True)
+    transcript = project_dir / f"{thread_id}.jsonl"
+    transcript.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "summary", "summary": "Legacy Claude thread"}),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "content": [
+                                {"type": "text", "text": "legacy prompt"},
+                            ]
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return transcript
+
+
 @pytest.fixture
 def fixture_catalog(tmp_path: Path) -> CodexThreadCatalog:
     return CodexThreadCatalog(codex_home=_build_fixture_codex_home(tmp_path))
@@ -43,6 +70,10 @@ def fixture_catalog(tmp_path: Path) -> CodexThreadCatalog:
 def session_manager(monkeypatch: pytest.MonkeyPatch, fixture_catalog: CodexThreadCatalog) -> SessionManager:
     monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
     monkeypatch.setattr(SessionManager, "_save_state", lambda self: None)
+    monkeypatch.setattr(
+        "ccbot.session.config.claude_projects_path",
+        fixture_catalog.codex_home / "empty-claude-projects",
+    )
     return SessionManager(codex_thread_catalog=fixture_catalog)
 
 
@@ -127,3 +158,26 @@ async def test_session_manager_lists_codex_candidates_for_directory(
         "Capture Codex evidence fixtures",
         "Investigate ccbot bug",
     ]
+
+
+@pytest.mark.asyncio
+async def test_session_manager_preserves_legacy_claude_threads_in_mixed_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    session_manager: SessionManager,
+    tmp_path: Path,
+) -> None:
+    _build_legacy_claude_project(
+        tmp_path,
+        "/home",
+        "legacy-claude-thread",
+    )
+    monkeypatch.setattr("ccbot.session.config.claude_projects_path", tmp_path)
+
+    sessions = await session_manager.list_threads_for_directory("/home")
+
+    assert [session.thread_id for session in sessions] == [
+        "019d4e76-7fae-7a90-bc40-2290ee269660",
+        "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9",
+        "legacy-claude-thread",
+    ]
+    assert sessions[-1].summary == "Legacy Claude thread"

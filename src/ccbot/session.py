@@ -657,20 +657,27 @@ class SessionManager:
     async def list_threads_for_directory(self, cwd: str) -> list[ThreadLocator]:
         """List persisted threads for a directory.
 
-        Prefers Codex thread catalog candidates when available, otherwise
-        falls back to the legacy Claude directory scan.
+        Returns Codex candidates plus any legacy Claude threads for the same cwd.
+
+        Mixed-runtime directories must not hide older Claude transcripts simply
+        because Codex candidates exist for the same path.
         """
+        sessions: list[ThreadLocator] = []
+        seen_thread_ids: set[str] = set()
+
         if self.codex_thread_catalog is not None:
             candidates = await asyncio.to_thread(
                 self.codex_thread_catalog.list_candidates_for_cwd, cwd
             )
-            if candidates:
-                return [candidate.to_locator() for candidate in candidates]
+            for candidate in candidates:
+                locator = candidate.to_locator()
+                sessions.append(locator)
+                seen_thread_ids.add(locator.thread_id)
 
         encoded_cwd = self._encode_cwd(cwd)
         project_dir = config.claude_projects_path / encoded_cwd
         if not project_dir.is_dir():
-            return []
+            return sessions
 
         # Collect JSONL files sorted by mtime (newest first)
         jsonl_files = sorted(
@@ -680,16 +687,18 @@ class SessionManager:
         )
 
         # Skip sessions-index and cap at 10
-        sessions: list[ThreadLocator] = []
         for f in jsonl_files:
             if f.stem == "sessions-index":
                 continue
             if len(sessions) >= 10:
                 break
             session_id = f.stem
+            if session_id in seen_thread_ids:
+                continue
             session = await self._get_thread_locator_direct(session_id, cwd)
             if session and session.message_count > 0:
                 sessions.append(session)
+                seen_thread_ids.add(session.thread_id)
         return sessions
 
     async def list_sessions_for_directory(self, cwd: str) -> list[ClaudeSession]:
