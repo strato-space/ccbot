@@ -87,6 +87,107 @@ class TestBotRegistration:
         assert "topic_closed_handler" in callbacks
         assert "topic_edited_handler" in callbacks
 
+    def test_build_bot_commands_advertises_only_codex_core_lane(self):
+        commands = bot_mod.build_bot_commands()
+        names = [command.command for command in commands]
+
+        assert names == [
+            "start",
+            "history",
+            "screenshot",
+            "esc",
+            "unbind",
+            "clear",
+            "compact",
+            "diff",
+            "init",
+            "review",
+            "status",
+        ]
+        assert "kill" not in names
+        assert "usage" not in names
+
+    @pytest.mark.asyncio
+    async def test_post_init_registers_codex_core_lane_commands(self):
+        application = MagicMock()
+        application.bot = AsyncMock()
+        application.bot.rate_limiter = MagicMock(
+            _base_limiter=MagicMock(max_rate=1, _level=0)
+        )
+
+        class _StubMonitor:
+            def set_message_callback(self, _callback) -> None:
+                return None
+
+            def start(self) -> None:
+                return None
+
+            def stop(self) -> None:
+                return None
+
+        dummy_task = MagicMock()
+
+        def _capture_task(coro):
+            coro.close()
+            return dummy_task
+
+        with (
+            patch("ccbot.bot.session_manager.resolve_stale_ids", new_callable=AsyncMock),
+            patch("ccbot.bot.SessionMonitor", return_value=_StubMonitor()),
+            patch("ccbot.bot.asyncio.create_task", side_effect=_capture_task),
+        ):
+            await bot_mod.post_init(application)
+
+        command_names = [
+            command.command
+            for command in application.bot.set_my_commands.await_args.args[0]
+        ]
+        assert "status" in command_names
+        assert "diff" in command_names
+        assert "review" in command_names
+        assert "usage" not in command_names
+        assert "model" not in command_names
+
+
+class TestCommandSurface:
+    @pytest.mark.asyncio
+    async def test_start_command_describes_codex_tmux_core_lane(self):
+        update = _make_topic_update()
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            await bot_mod.start_command(update, context)
+
+        mock_reply.assert_awaited_once()
+        text = mock_reply.await_args.args[1]
+        assert "Codex tmux control" in text
+        assert "Each topic controls one live tmux window" in text
+        assert "core lane" in text
+        assert "Claude Code Monitor" not in text
+
+    @pytest.mark.asyncio
+    async def test_usage_command_rewrites_to_status(self):
+        update = _make_topic_update()
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.resolve_window_for_thread.return_value = "@7"
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "Sent to @7"))
+
+            await bot_mod.usage_command(update, context)
+
+        mock_sm.send_to_window.assert_awaited_once_with("@7", "/status")
+        mock_reply.assert_awaited_once()
+        assert "/status" in mock_reply.await_args.args[1]
+
 
 class TestTopicCleanup:
     @pytest.mark.asyncio
@@ -295,6 +396,46 @@ class TestRuntimeInputRouting:
             "Terminal prompt is waiting for a decision"
             in mock_reply.await_args.args[1]
         )
+
+    @pytest.mark.asyncio
+    async def test_usage_command_is_runtime_gated_for_codex(self):
+        update = _make_topic_update()
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.resolve_window_for_thread.return_value = "@7"
+            mock_sm.get_window_state.return_value = SimpleNamespace(runtime_kind="codex")
+
+            await bot_mod.usage_command(update, context)
+
+        mock_sm.send_to_window.assert_not_called()
+        mock_reply.assert_awaited_once()
+        assert "/status" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_usage_command_aliases_to_status(self):
+        update = _make_topic_update()
+        update.message.text = "/usage"
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.resolve_window_for_thread.return_value = "@7"
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "Sent to @7"))
+
+            await bot_mod.usage_command(update, context)
+
+        mock_sm.send_to_window.assert_awaited_once_with("@7", "/status")
+        assert "/status" in mock_reply.await_args.args[1]
 
     @pytest.mark.asyncio
     async def test_interactive_ui_callback_missing_window_fails_closed(self):

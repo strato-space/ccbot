@@ -5,13 +5,13 @@ Each Telegram topic maps 1:1 to a tmux window running a live agent process.
 
 Core responsibilities:
   - Command handlers: /start, /history, /screenshot, /esc, /kill, /unbind,
-    plus forwarding unknown /commands to Claude Code via tmux.
+    plus forwarding supported raw /commands to Codex via tmux.
   - Callback query handler: directory browser, history pagination,
     interactive UI navigation, screenshot refresh.
   - Topic-based routing: each named topic binds to one tmux window.
     Unbound topics trigger the directory browser to create or resume a thread.
   - Photo handling: photos sent by user are downloaded and forwarded
-    to Claude Code as file paths (photo_handler).
+    to Codex as file paths (photo_handler).
   - Voice handling: voice messages are transcribed via OpenAI API and
     forwarded as text (voice_handler).
   - Automatic cleanup: closing a topic kills the associated window
@@ -147,15 +147,27 @@ session_monitor: SessionMonitor | None = None
 # Status polling task
 _status_poll_task: asyncio.Task | None = None
 
-# Claude Code commands shown in bot menu (forwarded via tmux)
-CC_COMMANDS: dict[str, str] = {
-    "clear": "↗ Clear conversation history",
-    "compact": "↗ Compact conversation context",
-    "cost": "↗ Show token/cost usage",
-    "help": "↗ Show Claude Code help",
-    "memory": "↗ Edit CLAUDE.md",
-    "model": "↗ Switch AI model",
+# Codex passthrough commands intentionally advertised in the Telegram menu.
+# Keep this list limited to the supported core lane; other raw slash commands
+# may still be typed manually and are forwarded best-effort.
+CODEX_MENU_COMMANDS: dict[str, str] = {
+    "clear": "↗ Start a fresh Codex chat in this window",
+    "compact": "↗ Compact the current Codex thread",
+    "diff": "↗ Show git diff in the current workspace",
+    "init": "↗ Create AGENTS.md for Codex",
+    "review": "↗ Review current changes",
+    "status": "↗ Show Codex session status",
 }
+
+CLAUDE_ONLY_COMMAND_HINTS: dict[str, str] = {
+    "cost": "⚠️ `/cost` is Claude-only. Use `/status` in Codex windows.",
+    "help": "⚠️ `/help` is Claude-only. Use `/status` or `/init` in Codex windows.",
+    "memory": (
+        "⚠️ `/memory` is Claude-only. Use `/init` or edit `AGENTS.md` directly in Codex projects."
+    ),
+}
+
+UNBOUND_TOPIC_MESSAGE = "❌ No Codex window is bound to this topic."
 
 
 def is_user_allowed(user_id: int | None) -> bool:
@@ -173,6 +185,29 @@ def _get_thread_id(update: Update) -> int | None:
     if tid is None or tid == 1:
         return None
     return tid
+
+
+def _get_window_runtime_kind(window_id: str) -> str:
+    """Return the persisted runtime kind for a bound window."""
+    state = session_manager.get_window_state(window_id)
+    runtime_kind = getattr(state, "runtime_kind", config.default_runtime_kind)
+    if isinstance(runtime_kind, str) and runtime_kind:
+        return runtime_kind
+    return config.default_runtime_kind
+
+
+def build_bot_commands() -> list[BotCommand]:
+    """Build the advertised Telegram command surface for the Codex core lane."""
+    commands = [
+        BotCommand("start", "Show the Codex topic workflow"),
+        BotCommand("history", "Show thread history for this topic"),
+        BotCommand("screenshot", "Capture the active tmux pane"),
+        BotCommand("esc", "Interrupt the active Codex task"),
+        BotCommand("unbind", "Detach this topic from its live window"),
+    ]
+    for cmd_name, desc in CODEX_MENU_COMMANDS.items():
+        commands.append(BotCommand(cmd_name, desc))
+    return commands
 
 
 async def _surface_blocked_prompt_state(
@@ -217,8 +252,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if update.message:
         await safe_reply(
             update.message,
-            "🤖 *Claude Code Monitor*\n\n"
-            "Each topic is a session. Create a new topic to start.",
+            "🤖 *Codex tmux control*\n\n"
+            "Each topic controls one live tmux window.\n"
+            "Create a topic, pick a directory, and CCBot will start or resume a Codex thread there.\n"
+            "The menu only advertises the supported core lane. Other raw Codex slash commands can still be typed manually.",
         )
 
 
@@ -233,7 +270,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     thread_id = _get_thread_id(update)
     wid = session_manager.resolve_window_for_thread(user.id, thread_id)
     if not wid:
-        await safe_reply(update.message, "❌ No session bound to this topic.")
+        await safe_reply(update.message, UNBOUND_TOPIC_MESSAGE)
         return
 
     await send_history(update.message, wid)
@@ -252,7 +289,7 @@ async def screenshot_command(
     thread_id = _get_thread_id(update)
     wid = session_manager.resolve_window_for_thread(user.id, thread_id)
     if not wid:
-        await safe_reply(update.message, "❌ No session bound to this topic.")
+        await safe_reply(update.message, UNBOUND_TOPIC_MESSAGE)
         return
 
     w = await tmux_manager.find_window_by_id(wid)
@@ -276,7 +313,7 @@ async def screenshot_command(
 
 
 async def unbind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Unbind this topic from its Claude session without killing the window."""
+    """Unbind this topic from its live Codex window without killing it."""
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
         return
@@ -290,7 +327,7 @@ async def unbind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     wid = session_manager.get_window_for_thread(user.id, thread_id)
     if not wid:
-        await safe_reply(update.message, "❌ No session bound to this topic.")
+        await safe_reply(update.message, UNBOUND_TOPIC_MESSAGE)
         return
 
     display = session_manager.get_display_name(wid)
@@ -300,8 +337,8 @@ async def unbind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await safe_reply(
         update.message,
         f"✅ Topic unbound from window '{display}'.\n"
-        "The Claude session is still running in tmux.\n"
-        "Send a message to bind to a new session.",
+        "The Codex window is still running in tmux.\n"
+        "Send a message to bind this topic to a different window or thread.",
     )
 
 
@@ -316,7 +353,7 @@ async def esc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     thread_id = _get_thread_id(update)
     wid = session_manager.resolve_window_for_thread(user.id, thread_id)
     if not wid:
-        await safe_reply(update.message, "❌ No session bound to this topic.")
+        await safe_reply(update.message, UNBOUND_TOPIC_MESSAGE)
         return
 
     w = await tmux_manager.find_window_by_id(wid)
@@ -335,7 +372,7 @@ async def esc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fetch Claude Code usage stats from TUI and send to Telegram."""
+    """Backward-compatible alias: Codex uses `/status`, not `/usage`."""
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
         return
@@ -345,56 +382,26 @@ async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     thread_id = _get_thread_id(update)
     wid = session_manager.resolve_window_for_thread(user.id, thread_id)
     if not wid:
-        await safe_reply(update.message, "No session bound to this topic.")
+        await safe_reply(update.message, UNBOUND_TOPIC_MESSAGE)
         return
 
-    w = await tmux_manager.find_window_by_id(wid)
-    if not w:
-        await safe_reply(update.message, f"Window '{wid}' no longer exists.")
-        return
-
-    # Send /usage command to the runtime TUI
-    success, message = await session_manager.send_to_window(w.window_id, "/usage")
+    success, message = await session_manager.send_to_window(wid, "/status")
     if not success:
         if message == BLOCKED_PROMPT_SEND_MESSAGE:
             await _surface_blocked_prompt_state(
                 context.bot,
                 user.id,
-                w.window_id,
+                wid,
                 thread_id,
                 reply_message=update.message,
             )
             return
-        await safe_reply(update.message, f"Failed to capture usage info: {message}")
+        await safe_reply(update.message, f"❌ /usage is not a Codex command: {message}")
         return
-    # Wait for the modal to render
-    await asyncio.sleep(2.0)
-    # Capture the pane content
-    pane_text = await tmux_manager.capture_pane(w.window_id)
-    # Dismiss the modal
-    esc_ok, esc_msg = await session_manager.send_special_key_to_window(
-        w.window_id, "Escape"
+    await safe_reply(
+        update.message,
+        "ℹ️ Codex uses `/status` instead of `/usage`. Forwarded `/status` to the terminal.",
     )
-    if not esc_ok:
-        logger.debug("Failed to dismiss usage modal in %s: %s", w.window_id, esc_msg)
-
-    if not pane_text:
-        await safe_reply(update.message, "Failed to capture usage info.")
-        return
-
-    # Try to parse structured usage info
-    from .terminal_parser import parse_usage_output
-
-    usage = parse_usage_output(pane_text)
-    if usage and usage.parsed_lines:
-        text = "\n".join(usage.parsed_lines)
-        await safe_reply(update.message, f"```\n{text}\n```")
-    else:
-        # Fallback: send raw pane capture trimmed
-        trimmed = pane_text.strip()
-        if len(trimmed) > 3000:
-            trimmed = trimmed[:3000] + "\n... (truncated)"
-        await safe_reply(update.message, f"```\n{trimmed}\n```")
 
 
 # --- Screenshot keyboard with quick control keys ---
@@ -534,7 +541,7 @@ async def topic_edited_handler(
 async def forward_command_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Forward any non-bot command as a slash command to the active Claude Code session."""
+    """Forward slash commands to the active tmux-backed runtime."""
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
         return
@@ -555,7 +562,7 @@ async def forward_command_handler(
     cc_slash = cmd_text.split("@")[0]  # strip bot mention
     wid = session_manager.resolve_window_for_thread(user.id, thread_id)
     if not wid:
-        await safe_reply(update.message, "❌ No session bound to this topic.")
+        await safe_reply(update.message, UNBOUND_TOPIC_MESSAGE)
         return
 
     w = await tmux_manager.find_window_by_id(wid)
@@ -565,6 +572,12 @@ async def forward_command_handler(
         return
 
     display = session_manager.get_display_name(wid)
+    runtime_kind = _get_window_runtime_kind(wid)
+    command_name = cc_slash[1:].split(None, 1)[0].lower()
+    if runtime_kind == "codex" and command_name in CLAUDE_ONLY_COMMAND_HINTS:
+        await safe_reply(update.message, CLAUDE_ONLY_COMMAND_HINTS[command_name])
+        return
+
     logger.info(
         "Forwarding command %s to window %s (user=%d)", cc_slash, display, user.id
     )
@@ -578,10 +591,8 @@ async def forward_command_handler(
             logger.info("Clearing session for window %s after /clear", display)
             session_manager.clear_window_session(wid)
 
-        # Interactive commands (e.g. /model) render a terminal-based UI
-        # with no JSONL tool_use entry.  The status poller already detects
-        # interactive UIs every 1s (status_polling.py), so no
-        # proactive detection needed here — the poller handles it.
+        # Prompt-producing commands are surfaced by the status poller when the
+        # runtime exposes a detectable prompt surface.
     else:
         if message == BLOCKED_PROMPT_SEND_MESSAGE:
             await _surface_blocked_prompt_state(
@@ -608,7 +619,7 @@ async def unsupported_content_handler(
     logger.debug("Unsupported content from user %d", user.id)
     await safe_reply(
         update.message,
-        "⚠ Only text, photo, and voice messages are supported. Stickers, video, and other media cannot be forwarded to Claude Code.",
+        "⚠ Only text, photo, and voice messages are supported. Stickers, video, and other media cannot be forwarded to Codex.",
     )
 
 
@@ -618,7 +629,7 @@ _IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle photos sent by the user: download and forward path to Claude Code."""
+    """Handle photos sent by the user: download and forward path to Codex."""
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
         if update.message:
@@ -645,7 +656,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if wid is None:
         await safe_reply(
             update.message,
-            "❌ No session bound to this topic. Send a text message first to create one.",
+            f"{UNBOUND_TOPIC_MESSAGE} Send a text message first to create one.",
         )
         return
 
@@ -669,7 +680,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     file_path = _IMAGES_DIR / filename
     await tg_file.download_to_drive(file_path)
 
-    # Build the message to send to Claude Code
+    # Build the message to send to Codex
     caption = update.message.caption or ""
     if caption:
         text_to_send = f"{caption}\n\n(image attached: {file_path})"
@@ -694,11 +705,11 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     # Confirm to user
-    await safe_reply(update.message, "📷 Image sent to Claude Code.")
+    await safe_reply(update.message, "📷 Image sent to Codex.")
 
 
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle voice messages: transcribe via OpenAI and forward text to Claude Code."""
+    """Handle voice messages: transcribe via OpenAI and forward text to Codex."""
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
         if update.message:
@@ -732,7 +743,7 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if wid is None:
         await safe_reply(
             update.message,
-            "❌ No session bound to this topic. Send a text message first to create one.",
+            f"{UNBOUND_TOPIC_MESSAGE} Send a text message first to create one.",
         )
         return
 
@@ -1979,21 +1990,7 @@ async def post_init(application: Application) -> None:
     global session_monitor, _status_poll_task
 
     await application.bot.delete_my_commands()
-
-    bot_commands = [
-        BotCommand("start", "Show welcome message"),
-        BotCommand("history", "Message history for this topic"),
-        BotCommand("screenshot", "Terminal screenshot with control keys"),
-        BotCommand("esc", "Send Escape to interrupt Claude"),
-        BotCommand("kill", "Kill session and delete topic"),
-        BotCommand("unbind", "Unbind topic from session (keeps window running)"),
-        BotCommand("usage", "Show Claude Code usage remaining"),
-    ]
-    # Add Claude Code slash commands
-    for cmd_name, desc in CC_COMMANDS.items():
-        bot_commands.append(BotCommand(cmd_name, desc))
-
-    await application.bot.set_my_commands(bot_commands)
+    await application.bot.set_my_commands(build_bot_commands())
 
     # Re-resolve stale window IDs from persisted state against live tmux windows
     await session_manager.resolve_stale_ids()
@@ -2078,14 +2075,14 @@ def create_bot() -> Application:
             topic_edited_handler,
         )
     )
-    # Forward any other /command to Claude Code
+    # Forward any other raw /command to Codex
     application.add_handler(MessageHandler(filters.COMMAND, forward_command_handler))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)
     )
-    # Photos: download and forward file path to Claude Code
+    # Photos: download and forward file path to Codex
     application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
-    # Voice: transcribe via OpenAI and forward text to Claude Code
+    # Voice: transcribe via OpenAI and forward text to Codex
     application.add_handler(MessageHandler(filters.VOICE, voice_handler))
     # Catch-all: non-text content (stickers, video, etc.)
     application.add_handler(

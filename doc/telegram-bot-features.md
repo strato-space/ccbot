@@ -1,5 +1,17 @@
 # Telegram Bot Advanced Features Research
 
+## Release Note
+
+The current Codex adaptation only advertises the supported Telegram core lane:
+
+- topic -> live tmux window binding
+- directory / thread picker
+- text / voice / photo forwarding
+- history and screenshot inspection
+- a small supported Codex slash-command menu
+
+Raw slash commands can still be typed manually and are forwarded best-effort, but the documented and registered menu surface stays narrower than the full Codex TUI command set.
+
 ## 1. Telegram Bot API Feature Overview
 
 ### 1.1 Rich Text & Formatting
@@ -114,17 +126,17 @@
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| **MarkdownV2 formatting** | ✅ | All messages use MarkdownV2 via `telegramify-markdown` with plaintext fallback |
+| **HTML formatting** | ✅ | Messages render via `chatgpt-md-converter`; MarkdownV2 is no longer the active runtime formatter |
 | **send_chat_action("typing")** | ✅ | Shown while processing user messages and during long operations |
-| **InlineKeyboardMarkup** | ✅ | Used extensively: session list, history pagination, directory browser, interactive UI, screenshot refresh |
+| **InlineKeyboardMarkup** | ✅ | Used extensively: thread picker, history pagination, directory browser, prompt snapshots, screenshot refresh |
 | **callback_query.answer()** | ✅ | Instant feedback on all callback button clicks |
 | **editMessageText** | ✅ | Status-to-content conversion, tool_result editing into tool_use messages |
 | **editMessageMedia** | ✅ | Screenshot refresh replaces image in-place |
 | **deleteMessage** | ✅ | Status message cleanup, interactive UI cleanup |
-| **BotCommand + set_my_commands** | ✅ | 10 commands registered: /start, /list, /history, /screenshot, /esc + 5 Claude Code forwards |
+| **BotCommand + set_my_commands** | ✅ | Bot menu is limited to the supported Codex core lane plus a small passthrough subset |
 | **sendDocument** | ✅ | Screenshots sent as PNG documents |
 | **ReplyKeyboardRemove** | ✅ | Used when switching away from reply keyboard |
-| **Claude Code command forwarding** | ✅ | /clear, /compact, /cost, /help, /memory forwarded to tmux |
+| **Codex command forwarding** | ✅ | Raw `/command` input is forwarded to tmux; the documented menu only exposes the supported Codex subset |
 | **Message rate limiting** | ✅ | 1.1s minimum interval per user to avoid flood control |
 | **Per-user message queues** | ✅ | FIFO ordering, content/status task separation, message merging |
 | **Status message deduplication** | ✅ | Skip edit if status text unchanged |
@@ -133,55 +145,53 @@
 
 | # | Feature | Impact | Effort | Notes |
 |---|---------|--------|--------|-------|
-| 1 | **sendMessageDraft (streaming)** | High | Medium | Stream Claude's responses progressively instead of waiting for complete messages. Bot API 9.3+ required. Would significantly improve perceived responsiveness |
-| 2 | **Expandable blockquote for thinking** | Medium | Low | Wrap Claude's thinking/reasoning in `<blockquote expandable>` for cleaner layout. Replaces spoiler approach — better UX since content is visible on tap without losing context |
+| 1 | **sendMessageDraft (streaming)** | High | Medium | Stream Codex responses progressively instead of waiting for complete messages. Bot API 9.3+ required. Would significantly improve perceived responsiveness |
+| 2 | **Expandable blockquote for thinking** | Medium | Low | Wrap Codex thinking/reasoning in `<blockquote expandable>` for cleaner layout. Replaces spoiler approach — better UX since content is visible on tap without losing context |
 | 3 | **reply_parameters with quote** | Medium | Low | Quote the specific user message when replying, providing clear message association |
 | 4 | **copy_text button** | Medium | Low | Add "Copy" button to code block messages for one-tap clipboard copy |
-| 5 | **link_preview_options** | Low | Low | Disable or minimize link previews in Claude's responses to reduce visual noise |
+| 5 | **link_preview_options** | Low | Low | Disable or minimize link previews in Codex responses to reduce visual noise |
 | 6 | **message_effect_id** | Low | Low | Add subtle animation effects on completion or error messages |
 | 7 | **Forum Topics in Private Chat** | Medium | High | Organize per-session conversations as topics in a single private chat instead of interleaving |
-| 8 | **Checklists** | Low | Medium | Display Claude's task lists as native Telegram checklists |
+| 8 | **Checklists** | Low | Medium | Display Codex task lists as native Telegram checklists |
 | 9 | **WebApp dashboard** | Medium | High | Real-time terminal view, session management UI via Mini App |
 | 10 | **pinChatMessage** | Low | Low | Pin summary or active session info |
 
 ---
 
-## 3. Claude Code Slash Commands
+## 3. Codex Slash Commands
 
-### Currently Forwarded by ccbot
+### Currently Advertised by ccbot
 
-These 5 commands are registered in the Telegram bot menu and forwarded to Claude Code via tmux:
+These commands are registered in the Telegram bot menu and forwarded to Codex via tmux:
 
 | Command | Bot Menu Description | Function |
 |---------|---------------------|----------|
-| `/clear` | ↗ Clear conversation history | Wipes conversation, starts fresh. ccbot also clears session association |
-| `/compact` | ↗ Compact conversation context | Summarize/compress context to free token budget. Supports optional instructions |
-| `/cost` | ↗ Show token/cost usage | Display token counts and API cost for current session |
-| `/help` | ↗ Show Claude Code help | List available commands and usage help |
-| `/memory` | ↗ Edit CLAUDE.md | Open CLAUDE.md for editing project instructions |
+| `/clear` | ↗ Start a fresh Codex chat in this window | Wipes the current chat and starts fresh. ccbot also clears session association |
+| `/compact` | ↗ Compact the current Codex thread | Summarize/compress context to free token budget |
+| `/diff` | ↗ Show git diff | Show the current workspace diff |
+| `/review` | ↗ Review current changes | Start a code review against the current workspace |
+| `/status` | ↗ Show Codex session status | Display current session configuration and token usage |
+`/usage` still exists as a compatibility alias, but it is intentionally not advertised in the Telegram menu. CCBot rewrites it to `/status` for older muscle memory.
 
-### Other Claude Code Commands (Full Reference)
+### Other Codex Commands (Raw Passthrough, Not Menu-Supported)
 
 | Command | Parameterless | Interactive | Suitable for Telegram | Notes |
 |---------|:---:|:---:|:---:|-------|
-| `/context` | ✅ | No | ✅ Recommended | Show context window usage. Useful for monitoring |
-| `/status` | ✅ | No | ✅ Possible | Show project/session status |
-| `/review` | ✅ | No | ⚠️ Caution | Starts code review — may produce very long output |
-| `/init` | ✅ | Possibly | ⚠️ Caution | Initialize CLAUDE.md — may prompt for confirmation |
-| `/doctor` | ✅ | No | ⚠️ Caution | Diagnose environment — output can be lengthy |
-| `/stats` | ✅ | No | ❌ No | Shows terminal graphs/charts, not renderable via Telegram |
-| `/rewind` | No | Yes (selection) | ❌ No | Interactive message selector — requires terminal UI |
-| `/resume` | No | Yes (selection) | ❌ No | Interactive session picker — requires terminal UI |
-| `/rename` | No (needs name) | No | ⚠️ Possible | Needs parameter: `/rename new-name` |
-| `/permissions` | ✅ | Yes | ❌ No | Interactive permission management |
-| `/hooks` | ✅ | Yes | ❌ No | Interactive hook configuration |
-| `/agents` | ✅ | Yes | ❌ No | Interactive agent management |
-| `/login` | ✅ | Yes (browser) | ❌ No | Opens browser for authentication |
-| `/logout` | ✅ | No | ⚠️ Caution | Logs out — destructive, should not be easily accessible |
+| `/new` | ✅ | No | ⚠️ Possible | Starts a fresh chat in the same live window; useful but not necessary in the Telegram menu |
+| `/rename <name>` | ❌ | No | ⚠️ Possible | Safe when sent with explicit inline args |
+| `/init` | ✅ | No | ⚠️ Caution | Creates `AGENTS.md`; valid, but potentially surprising from mobile |
+| `/plan` | ✅ / args | No | ⚠️ Caution | Useful, but may create long plan output |
+| `/model` | ✅ | Yes | ✅ Optional lane only | Requires positively identified model picker prompt and remote prompt controls |
+| `/approvals` | ✅ | Yes | ✅ Optional lane only | Requires positively identified approvals popup and remote prompt controls |
+| `/permissions` | ✅ | Yes | ✅ Optional lane only | Same as `/approvals`; TUI prompt driven |
+| `/logout` | ✅ | No | ❌ No | Destructive; should not be advertised in Telegram |
+| `/quit` / `/exit` | ✅ | No | ❌ No | Terminates the live Codex process |
 
-### Recommendations for Additional Forwarding
+### Surface Policy
 
-Consider adding `/context` to CC_COMMANDS — it is parameterless, non-interactive, and provides useful context window usage info that complements `/cost`.
+- Registered bot commands should describe only the supported Codex Telegram workflow.
+- Prompt-driven commands stay out of the advertised menu unless the prompt parser can positively identify and drive the resulting TUI state.
+- Raw passthrough remains available for expert use, but undocumented commands are best-effort rather than release-contract behavior.
 
 ---
 
