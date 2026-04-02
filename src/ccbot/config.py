@@ -15,6 +15,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from .utils import ccbot_dir
+from .state_schema import DEFAULT_RUNTIME_KIND, SCHEMA_VERSION, LEGACY_BACKUP_SUFFIX
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,9 @@ class Config:
         self.state_file = self.config_dir / "state.json"
         self.session_map_file = self.config_dir / "session_map.json"
         self.monitor_state_file = self.config_dir / "monitor_state.json"
+        self.state_schema_version = SCHEMA_VERSION
+        self.state_backup_suffix = LEGACY_BACKUP_SUFFIX
+        self.default_runtime_kind = DEFAULT_RUNTIME_KIND
 
         # Claude Code session monitoring configuration
         # Support custom projects path for Claude variants (e.g., cc-mirror, zai)

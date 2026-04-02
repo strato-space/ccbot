@@ -21,6 +21,7 @@ import aiofiles
 
 from .config import config
 from .monitor_state import MonitorState, TrackedSession
+from .state_schema import split_session_map_payload
 from .runtime_types import NormalizedEvent, RolloutSource
 from .tmux_manager import tmux_manager
 from .transcript_parser import TranscriptParser
@@ -378,7 +379,7 @@ class SessionMonitor:
             try:
                 async with aiofiles.open(config.session_map_file, "r") as f:
                     content = await f.read()
-                session_map = json.loads(content)
+                session_map, _, _ = split_session_map_payload(json.loads(content))
                 prefix = f"{config.tmux_session_name}:"
                 for key, info in session_map.items():
                     # Only process entries for our tmux session

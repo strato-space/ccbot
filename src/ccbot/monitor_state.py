@@ -13,6 +13,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .state_schema import (
+    DEFAULT_RUNTIME_KIND,
+    SCHEMA_VERSION,
+    ensure_legacy_backup,
+    infer_runtime_kind,
+    normalize_runtime_kind,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -23,6 +31,7 @@ class TrackedSession:
     session_id: str
     file_path: str  # Path to .jsonl file
     last_byte_offset: int = 0  # Byte offset for incremental reading
+    runtime_kind: str = DEFAULT_RUNTIME_KIND
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dict for JSON serialization."""
@@ -35,6 +44,7 @@ class TrackedSession:
             session_id=data.get("session_id", ""),
             file_path=data.get("file_path", ""),
             last_byte_offset=data.get("last_byte_offset", 0),
+            runtime_kind=normalize_runtime_kind(data.get("runtime_kind")),
         )
 
 
@@ -48,6 +58,8 @@ class MonitorState:
 
     state_file: Path
     tracked_sessions: dict[str, TrackedSession] = field(default_factory=dict)
+    schema_version: int = SCHEMA_VERSION
+    runtime_kind: str = DEFAULT_RUNTIME_KIND
     _dirty: bool = field(default=False, repr=False)
 
     def load(self) -> None:
@@ -58,10 +70,22 @@ class MonitorState:
 
         try:
             data = json.loads(self.state_file.read_text())
+            migrated_legacy = "schema_version" not in data
+            if migrated_legacy:
+                ensure_legacy_backup(self.state_file)
+            self.schema_version = int(data.get("schema_version", SCHEMA_VERSION))
+            self.runtime_kind = normalize_runtime_kind(
+                data.get("runtime_kind", self.runtime_kind)
+            )
             sessions = data.get("tracked_sessions", {})
             self.tracked_sessions = {
                 k: TrackedSession.from_dict(v) for k, v in sessions.items()
             }
+            self.runtime_kind = infer_runtime_kind(
+                session.runtime_kind for session in self.tracked_sessions.values()
+            )
+            if migrated_legacy:
+                self.save()
             logger.info(
                 f"Loaded {len(self.tracked_sessions)} tracked sessions from state"
             )
@@ -73,10 +97,16 @@ class MonitorState:
         """Save state to file atomically."""
         from .utils import atomic_write_json
 
+        runtime_kind = infer_runtime_kind(
+            session.runtime_kind for session in self.tracked_sessions.values()
+        )
+        self.runtime_kind = runtime_kind
         data = {
+            "schema_version": self.schema_version,
+            "runtime_kind": runtime_kind,
             "tracked_sessions": {
                 k: v.to_dict() for k, v in self.tracked_sessions.items()
-            }
+            },
         }
 
         try:

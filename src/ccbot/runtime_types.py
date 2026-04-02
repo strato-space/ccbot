@@ -47,9 +47,8 @@ class LiveProcessDescriptor:
         data: dict[str, Any] = {
             "session_id": self.thread_id,
             "cwd": self.cwd,
+            "runtime_kind": self.runtime_kind,
         }
-        if self.runtime_kind != "claude":
-            data["runtime_kind"] = self.runtime_kind
         if self.window_name:
             data["window_name"] = self.window_name
         return data

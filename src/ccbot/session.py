@@ -24,6 +24,12 @@ import aiofiles
 
 from .config import config
 from .runtime_types import LiveProcessDescriptor, ThreadLocator, TopicBinding
+from .state_schema import (
+    build_session_map_payload,
+    ensure_legacy_backup,
+    infer_runtime_kind,
+    split_session_map_payload,
+)
 from .tmux_manager import tmux_manager
 from .transcript_parser import TranscriptParser
 from .utils import atomic_write_json
@@ -68,6 +74,10 @@ class SessionManager:
 
     def _save_state(self) -> None:
         state: dict[str, Any] = {
+            "schema_version": config.state_schema_version,
+            "runtime_kind": infer_runtime_kind(
+                window_state.runtime_kind for window_state in self.window_states.values()
+            ),
             "window_states": {k: v.to_dict() for k, v in self.window_states.items()},
             "user_window_offsets": {
                 str(uid): offsets for uid, offsets in self.user_window_offsets.items()
@@ -95,6 +105,9 @@ class SessionManager:
         if config.state_file.exists():
             try:
                 state = json.loads(config.state_file.read_text())
+                migrate_legacy = "schema_version" not in state
+                if migrate_legacy:
+                    ensure_legacy_backup(config.state_file)
                 self.window_states = {
                     k: LiveProcessDescriptor.from_dict(v)
                     for k, v in state.get("window_states", {}).items()
@@ -132,7 +145,7 @@ class SessionManager:
                         "Detected old-format state (window_name keys), "
                         "will re-resolve on startup"
                     )
-                    pass
+                    migrate_legacy = True
 
             except (json.JSONDecodeError, ValueError) as e:
                 logger.warning("Failed to load state: %s", e)
@@ -141,7 +154,40 @@ class SessionManager:
                 self.thread_bindings = {}
                 self.window_display_names = {}
                 self.group_chat_ids = {}
-                pass
+                migrate_legacy = False
+            else:
+                if migrate_legacy:
+                    self._save_state()
+
+    def _session_map_entries(self) -> tuple[dict[str, dict[str, Any]], bool, bool]:
+        """Load session_map entries from either the legacy or versioned shape.
+
+        Returns (entries, versioned, loaded_ok). Invalid JSON is a load failure
+        so callers do not accidentally overwrite a corrupt file.
+        """
+        if not config.session_map_file.exists():
+            return {}, False, False
+
+        try:
+            raw = json.loads(config.session_map_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}, False, False
+
+        entries, _, versioned = split_session_map_payload(raw)
+        if not versioned:
+            ensure_legacy_backup(config.session_map_file)
+        return entries, versioned, True
+
+    def _write_session_map_entries(self, entries: dict[str, dict[str, Any]]) -> None:
+        """Persist session_map entries in the versioned envelope."""
+        payload = build_session_map_payload(
+            entries,
+            runtime_kind=infer_runtime_kind(
+                entry.get("runtime_kind", config.default_runtime_kind)
+                for entry in entries.values()
+            ),
+        )
+        atomic_write_json(config.session_map_file, payload)
 
     async def resolve_stale_ids(self) -> None:
         """Re-resolve persisted window IDs against live tmux windows.
@@ -288,30 +334,19 @@ class SessionManager:
         await self._cleanup_old_format_session_map_keys()
 
     async def _cleanup_old_format_session_map_keys(self) -> None:
-        """Remove old-format keys (window_name instead of @window_id) from session_map.json."""
+        """Preserve legacy session_map bindings while ensuring versioned storage."""
         if not config.session_map_file.exists():
             return
-        try:
-            async with aiofiles.open(config.session_map_file, "r") as f:
-                content = await f.read()
-            session_map = json.loads(content)
-        except (json.JSONDecodeError, OSError):
+        session_map, versioned, loaded = self._session_map_entries()
+        if not loaded:
+            return
+        if versioned:
             return
 
-        prefix = f"{config.tmux_session_name}:"
-        old_keys = [
-            key
-            for key in session_map
-            if key.startswith(prefix) and not self._is_window_id(key[len(prefix) :])
-        ]
-        if not old_keys:
-            return
-
-        for key in old_keys:
-            del session_map[key]
-        atomic_write_json(config.session_map_file, session_map)
+        self._write_session_map_entries(session_map)
         logger.info(
-            "Cleaned up %d old-format session_map keys: %s", len(old_keys), old_keys
+            "Migrated legacy session_map to versioned envelope (%d entries preserved)",
+            len(session_map),
         )
 
     async def _cleanup_stale_session_map_entries(self, live_ids: set[str]) -> None:
@@ -323,11 +358,8 @@ class SessionManager:
         """
         if not config.session_map_file.exists():
             return
-        try:
-            async with aiofiles.open(config.session_map_file, "r") as f:
-                content = await f.read()
-            session_map = json.loads(content)
-        except (json.JSONDecodeError, OSError):
+        session_map, versioned, loaded = self._session_map_entries()
+        if not loaded:
             return
 
         prefix = f"{config.tmux_session_name}:"
@@ -338,14 +370,14 @@ class SessionManager:
             and self._is_window_id(key[len(prefix) :])
             and key[len(prefix) :] not in live_ids
         ]
-        if not stale_keys:
+        if not stale_keys and versioned:
             return
 
         for key in stale_keys:
             del session_map[key]
             logger.info("Removed stale session_map entry: %s", key)
 
-        atomic_write_json(config.session_map_file, session_map)
+        self._write_session_map_entries(session_map)
         logger.info(
             "Cleaned up %d stale session_map entries (windows no longer in tmux)",
             len(stale_keys),
@@ -427,21 +459,14 @@ class SessionManager:
         key = f"{config.tmux_session_name}:{window_id}"
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
-            try:
-                if config.session_map_file.exists():
-                    async with aiofiles.open(config.session_map_file, "r") as f:
-                        content = await f.read()
-                    session_map = json.loads(content)
-                    info = session_map.get(key, {})
-                    if info.get("session_id"):
-                        # Found — load into window_states immediately
-                        logger.debug(
-                            "session_map entry found for window_id %s", window_id
-                        )
-                        await self.load_session_map()
-                        return True
-            except (json.JSONDecodeError, OSError):
-                pass
+            session_map, _, loaded = self._session_map_entries()
+            if loaded and session_map:
+                info = session_map.get(key, {})
+                if info.get("session_id"):
+                    # Found — load into window_states immediately
+                    logger.debug("session_map entry found for window_id %s", window_id)
+                    await self.load_session_map()
+                    return True
             await asyncio.sleep(interval)
         logger.warning(
             "Timed out waiting for session_map entry: window_id=%s", window_id
@@ -458,30 +483,29 @@ class SessionManager:
         """
         if not config.session_map_file.exists():
             return
-        try:
-            async with aiofiles.open(config.session_map_file, "r") as f:
-                content = await f.read()
-            session_map = json.loads(content)
-        except (json.JSONDecodeError, OSError):
+        session_map, versioned, loaded = self._session_map_entries()
+        if not loaded:
             return
 
         prefix = f"{config.tmux_session_name}:"
         valid_wids: set[str] = set()
         changed = False
+        legacy_keys_seen = False
 
         for key, info in session_map.items():
             # Only process entries for our tmux session
             if not key.startswith(prefix):
                 continue
             window_id = key[len(prefix) :]
-            if not self._is_window_id(window_id):
-                continue
-            valid_wids.add(window_id)
             state = self.get_window_state(window_id)
             new_sid = info.get("session_id", "")
             new_cwd = info.get("cwd", "")
             new_wname = info.get("window_name", "")
             new_runtime_kind = info.get("runtime_kind", state.runtime_kind)
+            if self._is_window_id(window_id):
+                valid_wids.add(window_id)
+            else:
+                legacy_keys_seen = True
             if not new_sid:
                 continue
             if (
@@ -507,15 +531,20 @@ class SessionManager:
                     self.window_display_names[window_id] = new_wname
                     changed = True
 
-        # Clean up window_states entries not in current session_map.
-        stale_wids = [w for w in self.window_states if w and w not in valid_wids]
-        for wid in stale_wids:
-            logger.info("Removing stale window_state: %s", wid)
-            del self.window_states[wid]
-            changed = True
+        # Clean up window_states entries only once the binding map has fully
+        # transitioned to tmux window IDs. Legacy window-name keys are preserved
+        # until the codex binding path has been validated.
+        if valid_wids and not legacy_keys_seen:
+            stale_wids = [w for w in self.window_states if w and w not in valid_wids]
+            for wid in stale_wids:
+                logger.info("Removing stale window_state: %s", wid)
+                del self.window_states[wid]
+                changed = True
 
-        if changed:
+        if changed or not versioned:
             self._save_state()
+        if not versioned:
+            self._write_session_map_entries(session_map)
 
     # --- Window state management ---
 

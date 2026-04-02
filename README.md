@@ -29,6 +29,7 @@ into a single "session" concept.
 
 Maintainer reference:
 - [`doc/runtime-ontology.md`](doc/runtime-ontology.md)
+- [`doc/state-migration.md`](doc/state-migration.md)
 
 ## Features
 

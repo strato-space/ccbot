@@ -22,6 +22,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .state_schema import (
+    build_session_map_payload,
+    ensure_legacy_backup,
+    infer_runtime_kind,
+    split_session_map_payload,
+)
+
 logger = logging.getLogger(__name__)
 
 # Validate session_id looks like a UUID
@@ -242,7 +249,10 @@ def hook_main() -> None:
                 session_map: dict[str, dict[str, str]] = {}
                 if map_file.exists():
                     try:
-                        session_map = json.loads(map_file.read_text())
+                        raw_map = json.loads(map_file.read_text())
+                        session_map, _, versioned = split_session_map_payload(raw_map)
+                        if not versioned:
+                            ensure_legacy_backup(map_file)
                     except (json.JSONDecodeError, OSError):
                         logger.warning(
                             "Failed to read existing session_map, starting fresh"
@@ -252,6 +262,7 @@ def hook_main() -> None:
                     "session_id": session_id,
                     "cwd": cwd,
                     "window_name": window_name,
+                    "runtime_kind": "claude",
                 }
 
                 # Clean up old-format key ("session:window_name") if it exists.
@@ -263,12 +274,23 @@ def hook_main() -> None:
 
                 from .utils import atomic_write_json
 
-                atomic_write_json(map_file, session_map)
+                session_runtime_kind = infer_runtime_kind(
+                    entry.get("runtime_kind", "claude")
+                    for entry in session_map.values()
+                )
+                atomic_write_json(
+                    map_file,
+                    build_session_map_payload(
+                        session_map,
+                        runtime_kind=session_runtime_kind,
+                    ),
+                )
                 logger.info(
-                    "Updated session_map: %s -> session_id=%s, cwd=%s",
+                    "Updated session_map: %s -> session_id=%s, cwd=%s, runtime=%s",
                     session_window_key,
                     session_id,
                     cwd,
+                    session_runtime_kind,
                 )
             finally:
                 fcntl.flock(lock_f, fcntl.LOCK_UN)
