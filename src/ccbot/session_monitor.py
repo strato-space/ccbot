@@ -1,14 +1,17 @@
-"""Rollout monitoring service for normalized runtime events.
+"""Replay-evidence monitor for normalized runtime events.
 
 Runs an async polling loop that:
   1. Loads the current binding map to know which thread ids are active.
   2. Detects binding changes (new/changed/deleted windows) and cleans up.
-  3. Reads new JSONL lines from each rollout source using byte-offset tracking.
+  3. Reads new JSONL lines from each tracked replay source using byte-offset tracking.
   4. Parses entries via TranscriptParser and emits NormalizedEvent objects.
 
 Optimizations: mtime cache skips unchanged files; byte offset avoids re-reading.
 
-Legacy Claude-shaped names remain as compatibility aliases for the wider codebase.
+In the current Codex implementation the monitor observes the live semantic
+stream by tailing the same append-only artifact that also serves as persisted
+replay evidence. Legacy Claude-shaped names remain as compatibility aliases for
+the wider codebase.
 """
 
 import asyncio
@@ -170,9 +173,9 @@ class SessionMonitor:
         return await self.scan_rollout_sources()
 
     async def _read_new_lines(
-        self, session: TrackedSession, file_path: Path
+        self, tracked_source: TrackedSession, file_path: Path
     ) -> list[dict]:
-        """Read new lines from a session file using byte offset for efficiency.
+        """Read new lines from replay evidence using byte offset for efficiency.
 
         Detects file truncation (e.g. after /clear) and resets offset.
         Recovers from corrupted offsets (mid-line) by scanning to next line.
@@ -185,41 +188,42 @@ class SessionMonitor:
                 file_size = await f.tell()
 
                 # Detect file truncation: if offset is beyond file size, reset
-                if session.last_byte_offset > file_size:
+                if tracked_source.last_byte_offset > file_size:
                     logger.info(
-                        "File truncated for session %s "
+                        "Replay evidence truncated for thread %s "
                         "(offset %d > size %d). Resetting.",
-                        session.session_id,
-                        session.last_byte_offset,
+                        tracked_source.thread_id,
+                        tracked_source.last_byte_offset,
                         file_size,
                     )
-                    session.last_byte_offset = 0
+                    tracked_source.last_byte_offset = 0
 
                 # Seek to last read position for incremental reading
-                await f.seek(session.last_byte_offset)
+                await f.seek(tracked_source.last_byte_offset)
 
                 # Detect corrupted offset: if we're mid-line (not at '{'),
                 # scan forward to the next line start. This can happen if
                 # the state file was manually edited or corrupted.
-                if session.last_byte_offset > 0:
+                if tracked_source.last_byte_offset > 0:
                     first_char = await f.read(1)
                     if first_char and first_char != "{":
                         logger.warning(
-                            "Corrupted offset %d in session %s (mid-line), "
+                            "Corrupted offset %d in thread %s replay evidence "
+                            "(mid-line), "
                             "scanning to next line",
-                            session.last_byte_offset,
-                            session.session_id,
+                            tracked_source.last_byte_offset,
+                            tracked_source.thread_id,
                         )
                         await f.readline()  # Skip rest of partial line
-                        session.last_byte_offset = await f.tell()
+                        tracked_source.last_byte_offset = await f.tell()
                         return []
-                    await f.seek(session.last_byte_offset)  # Reset for normal read
+                    await f.seek(tracked_source.last_byte_offset)  # Reset for normal read
 
                 # Read only new lines from the offset.
                 # Track safe_offset: advance past valid lines and past
                 # malformed complete lines, but stop on a trailing partial
                 # write so the next poll can finish the line.
-                safe_offset = session.last_byte_offset
+                safe_offset = tracked_source.last_byte_offset
                 async for line in f:
                     line_end = await f.tell()
                     data = TranscriptParser.parse_line(line)
@@ -229,24 +233,24 @@ class SessionMonitor:
                     elif line.strip():
                         if line.endswith("\n"):
                             logger.warning(
-                                "Corrupted JSONL line in session %s, skipping",
-                                session.session_id,
+                                "Corrupted JSONL line in thread %s replay evidence, skipping",
+                                tracked_source.thread_id,
                             )
                             safe_offset = line_end
                             continue
                         logger.warning(
-                            "Partial JSONL line in session %s, will retry next cycle",
-                            session.session_id,
+                            "Partial JSONL line in thread %s replay evidence, will retry next cycle",
+                            tracked_source.thread_id,
                         )
                         break
                     else:
                         # Empty line — safe to skip
                         safe_offset = line_end
 
-                session.last_byte_offset = safe_offset
+                tracked_source.last_byte_offset = safe_offset
 
         except OSError as e:
-            logger.error("Error reading session file %s: %s", file_path, e)
+            logger.error("Error reading replay evidence %s: %s", file_path, e)
         return new_entries
 
     async def check_for_updates(
@@ -270,7 +274,7 @@ class SessionMonitor:
             if rollout_source.thread_id not in active_thread_ids:
                 continue
             try:
-                tracked = self.state.get_session(rollout_source.thread_id)
+                tracked = self.state.get_tracked_source(rollout_source.thread_id)
 
                 if tracked is None:
                     # For new threads, initialize offset to end of file
@@ -286,7 +290,7 @@ class SessionMonitor:
                         file_path=str(rollout_source.file_path),
                         last_byte_offset=file_size,
                     )
-                    self.state.update_session(tracked)
+                    self.state.update_tracked_source(tracked)
                     self._file_mtimes[rollout_source.thread_id] = current_mtime
                     logger.info(
                         "Started tracking rollout source for thread: %s",
@@ -365,7 +369,7 @@ class SessionMonitor:
                         )
                     )
 
-                self.state.update_session(tracked)
+                self.state.update_tracked_source(tracked)
 
             except OSError as e:
                 logger.debug(
@@ -413,7 +417,7 @@ class SessionMonitor:
                 f"[Startup cleanup] Removing {len(stale_sessions)} stale sessions"
             )
             for session_id in stale_sessions:
-                self.state.remove_session(session_id)
+                self.state.remove_tracked_source(session_id)
                 self._file_mtimes.pop(session_id, None)
             self.state.save_if_dirty()
 
@@ -455,7 +459,7 @@ class SessionMonitor:
         # Perform cleanup
         if sessions_to_remove:
             for session_id in sessions_to_remove:
-                self.state.remove_session(session_id)
+                self.state.remove_tracked_source(session_id)
                 self._file_mtimes.pop(session_id, None)
             self.state.save_if_dirty()
 
@@ -465,7 +469,7 @@ class SessionMonitor:
         return current_map
 
     async def _monitor_loop(self) -> None:
-        """Background loop for checking session updates.
+        """Background loop for checking replay-evidence updates.
 
         Uses simple async polling with aiofiles for non-blocking I/O.
         """

@@ -69,7 +69,7 @@ class LiveProcessDescriptor:
 
 @dataclass
 class ThreadLocator:
-    """Resolved persisted conversation identity plus its rollout path."""
+    """Resolved persisted conversation identity plus its replay evidence path."""
 
     thread_id: str
     summary: str
@@ -83,10 +83,20 @@ class ThreadLocator:
         """Backward-compatible alias for historical Claude call sites."""
         return self.thread_id
 
+    @property
+    def replay_path(self) -> str:
+        """Runtime-neutral alias for the persisted replay evidence path."""
+        return self.file_path
+
 
 @dataclass
 class RolloutSource:
-    """Readable event source associated with a persisted thread."""
+    """Readable replay source associated with a persisted thread.
+
+    In the current Codex implementation, tailing this append-only artifact
+    yields both the observed live semantic stream and the persisted replay
+    evidence. The concepts remain distinct even when the artifact is shared.
+    """
 
     thread_id: str
     file_path: Path
@@ -102,6 +112,11 @@ class RolloutSource:
     def session_id(self) -> str:
         """Backward-compatible alias for monitor code that still says session."""
         return self.thread_id
+
+    @property
+    def replay_path(self) -> Path:
+        """Runtime-neutral alias for the persisted replay evidence path."""
+        return self.file_path
 
 
 @dataclass

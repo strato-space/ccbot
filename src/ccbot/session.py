@@ -5,7 +5,7 @@ now exposes runtime-neutral nouns so later Codex work can distinguish:
 
 - topic binding: Telegram topic -> tmux window
 - live process descriptor: current process metadata for a window
-- thread locator: persisted conversation identity and rollout path
+- thread locator: persisted conversation identity and replay evidence path
 
 Legacy method names remain as compatibility wrappers while the rest of the bot
 is migrated task by task.

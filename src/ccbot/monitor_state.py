@@ -1,8 +1,8 @@
-"""Monitor state persistence — tracks byte offsets for each session.
+"""Monitor state persistence for tracked replay evidence sources.
 
-Persists TrackedSession records (session_id, file_path, last_byte_offset)
-to ~/.ccbot/monitor_state.json so the session monitor can resume
-incremental reading after restarts without re-sending old messages.
+Persists TrackedSession records (persisted conversation identity, replay path,
+last_byte_offset) to ~/.ccbot/monitor_state.json so the session monitor can
+resume incremental reading after restarts without re-sending old messages.
 
 Key classes: MonitorState, TrackedSession.
 """
@@ -26,12 +26,35 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TrackedSession:
-    """State for a tracked Claude Code session."""
+    """Tracked replay-evidence cursor keyed by persisted conversation identity.
+
+    The wider codebase still calls this a "session" for compatibility, but in
+    Codex-oriented paths it tracks one replayable JSONL source for one persisted
+    thread identity.
+    """
 
     session_id: str
-    file_path: str  # Path to .jsonl file
+    file_path: str  # Path to replayable JSONL evidence
     last_byte_offset: int = 0  # Byte offset for incremental reading
     runtime_kind: str = DEFAULT_RUNTIME_KIND
+
+    @property
+    def thread_id(self) -> str:
+        """Backward-compatible alias for persisted thread-oriented code paths."""
+        return self.session_id
+
+    @thread_id.setter
+    def thread_id(self, value: str) -> None:
+        self.session_id = value
+
+    @property
+    def replay_path(self) -> str:
+        """Runtime-neutral alias for the persisted replay evidence path."""
+        return self.file_path
+
+    @replay_path.setter
+    def replay_path(self, value: str) -> None:
+        self.file_path = value
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dict for JSON serialization."""
@@ -50,10 +73,10 @@ class TrackedSession:
 
 @dataclass
 class MonitorState:
-    """Persistent state for the session monitor.
+    """Persistent state for tracked replay-evidence cursors.
 
-    Stores tracking information for all monitored sessions
-    to prevent duplicate notifications after restarts.
+    Stores tracking information for all monitored replay sources to prevent
+    duplicate notifications after restarts.
     """
 
     state_file: Path
@@ -119,19 +142,40 @@ class MonitorState:
             logger.error("Failed to save state file: %s", e)
 
     def get_session(self, session_id: str) -> TrackedSession | None:
-        """Get tracked session by ID."""
+        """Get tracked replay source by persisted identity.
+
+        Legacy name retained for the Claude-shaped call sites.
+        """
         return self.tracked_sessions.get(session_id)
 
+    def get_tracked_source(self, thread_id: str) -> TrackedSession | None:
+        """Runtime-neutral alias for thread/replay-oriented monitor code."""
+        return self.get_session(thread_id)
+
     def update_session(self, session: TrackedSession) -> None:
-        """Update or add a tracked session."""
+        """Update or add a tracked replay source.
+
+        Legacy name retained for the Claude-shaped call sites.
+        """
         self.tracked_sessions[session.session_id] = session
         self._dirty = True
 
+    def update_tracked_source(self, tracked_source: TrackedSession) -> None:
+        """Runtime-neutral alias for thread/replay-oriented monitor code."""
+        self.update_session(tracked_source)
+
     def remove_session(self, session_id: str) -> None:
-        """Remove a tracked session."""
+        """Remove a tracked replay source.
+
+        Legacy name retained for the Claude-shaped call sites.
+        """
         if session_id in self.tracked_sessions:
             del self.tracked_sessions[session_id]
             self._dirty = True
+
+    def remove_tracked_source(self, thread_id: str) -> None:
+        """Runtime-neutral alias for thread/replay-oriented monitor code."""
+        self.remove_session(thread_id)
 
     def save_if_dirty(self) -> None:
         """Save state only if it has been modified."""

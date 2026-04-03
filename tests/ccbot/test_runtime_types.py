@@ -25,6 +25,7 @@ class TestLiveProcessDescriptor:
             "session_id": "thread-1",
             "cwd": "/tmp/project",
             "window_name": "proj",
+            "runtime_kind": "claude",
         }
         restored = LiveProcessDescriptor.from_dict(payload)
         assert restored.thread_id == "thread-1"
@@ -56,6 +57,7 @@ class TestThreadLocator:
 
         assert locator.session_id == "thread-1"
         assert locator.file_path == "/tmp/thread.jsonl"
+        assert locator.replay_path == "/tmp/thread.jsonl"
 
 
 class TestRolloutSource:
@@ -64,6 +66,7 @@ class TestRolloutSource:
 
         assert source.file_path == Path("/tmp/thread.jsonl")
         assert source.session_id == "thread-1"
+        assert source.replay_path == Path("/tmp/thread.jsonl")
 
 
 class TestNormalizedEvent:
