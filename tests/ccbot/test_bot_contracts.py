@@ -332,6 +332,45 @@ class TestCommandSurface:
             show_alert=True,
         )
 
+    @pytest.mark.asyncio
+    async def test_cancel_callback_recovers_topic_from_callback_message_context(self):
+        update = MagicMock()
+        update.effective_user = MagicMock(id=1)
+        update.effective_chat = MagicMock(type="supergroup", id=100)
+        update.callback_query = MagicMock()
+        update.callback_query.data = append_bind_flow_token(
+            bot_mod.CB_WIN_CANCEL,
+            version=2,
+            nonce="nonce123",
+        )
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.message = MagicMock(
+            message_thread_id=42,
+            chat=update.effective_chat,
+        )
+        context = _make_context()
+        context.user_data = {
+            bot_mod.STATE_KEY: bot_mod.STATE_SELECTING_WINDOW,
+        }
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock),
+        ):
+            mock_sm.validate_topic_bind_flow_callback.return_value = True
+
+            await bot_mod.callback_handler(update, context)
+
+        mock_sm.validate_topic_bind_flow_callback.assert_called_once_with(
+            1,
+            42,
+            2,
+            "nonce123",
+        )
+        mock_sm.require_manual_bind.assert_called_once_with(1, 42)
+
 
 class TestTopicCleanup:
     @pytest.mark.asyncio

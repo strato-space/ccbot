@@ -1,0 +1,13 @@
+{
+  "runtime_kind": "codex",
+  "fixture_id": "fresh-home-thread",
+  "thread_id": "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9",
+  "thread_name": "Investigate ccbot bug",
+  "cwd": "/home",
+  "originator": "codex_vscode",
+  "cli_version": "0.118.0",
+  "model_provider": "openai",
+  "rollout_file": "../../codex/rollouts/fresh_home_thread.jsonl",
+  "captured_from": "~/.codex/sessions/2026/04/02/rollout-2026-04-02T16-04-24-019d4e4b-7fac-77f3-b559-cb8e9b4c39a9.jsonl",
+  "path_shape": "root-owned codex home with non-root cwd"
+}

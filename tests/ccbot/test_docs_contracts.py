@@ -87,3 +87,12 @@ def test_topic_policy_migration_doc_captures_nonce_and_stale_callback_rules() ->
     assert "topic_bind_flow_nonces" in doc
     assert "Legacy callbacks without credentials are treated as stale." in doc
     assert "explicit `/unbind`" in doc
+
+
+def test_runtime_event_contract_doc_names_semantic_and_delivery_layers() -> None:
+    doc = _read("doc/runtime-event-contract.md")
+
+    assert "semantic_kind" in doc
+    assert "delivery_class" in doc
+    assert "status_message_eligible" in doc
+    assert "ACP-protocol" in doc

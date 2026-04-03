@@ -473,6 +473,7 @@ class TranscriptParser:
                             role="assistant",
                             text=formatted,
                             content_type="local_command",
+                            event_kind="command_execution",
                             timestamp=entry_timestamp,
                         )
                     )
@@ -496,6 +497,7 @@ class TranscriptParser:
                                     role="assistant",
                                     text=t,
                                     content_type="text",
+                                    event_kind="assistant_message",
                                     timestamp=entry_timestamp,
                                 )
                             )
@@ -516,6 +518,7 @@ class TranscriptParser:
                                         role="assistant",
                                         text=plan,
                                         content_type="text",
+                                        event_kind="assistant_message",
                                         timestamp=entry_timestamp,
                                     )
                                 )
@@ -536,6 +539,7 @@ class TranscriptParser:
                                     role="assistant",
                                     text=summary,
                                     content_type="tool_use",
+                                    event_kind="tool_call",
                                     tool_use_id=tool_id,
                                     timestamp=entry_timestamp,
                                     tool_name=name,
@@ -547,6 +551,7 @@ class TranscriptParser:
                                     role="assistant",
                                     text=summary,
                                     content_type="tool_use",
+                                    event_kind="tool_call",
                                     tool_use_id=tool_id or None,
                                     timestamp=entry_timestamp,
                                     tool_name=name,
@@ -562,6 +567,7 @@ class TranscriptParser:
                                     role="assistant",
                                     text=quoted,
                                     content_type="thinking",
+                                    event_kind="reasoning",
                                     timestamp=entry_timestamp,
                                 )
                             )
@@ -571,6 +577,7 @@ class TranscriptParser:
                                     role="assistant",
                                     text="(thinking)",
                                     content_type="thinking",
+                                    event_kind="reasoning",
                                     timestamp=entry_timestamp,
                                 )
                             )
@@ -618,6 +625,7 @@ class TranscriptParser:
                                     role="assistant",
                                     text=entry_text,
                                     content_type="tool_result",
+                                    event_kind="tool_output",
                                     tool_use_id=_tuid,
                                     timestamp=entry_timestamp,
                                 )
@@ -647,6 +655,7 @@ class TranscriptParser:
                                     role="assistant",
                                     text=entry_text,
                                     content_type="tool_result",
+                                    event_kind="tool_output",
                                     tool_use_id=_tuid,
                                     timestamp=entry_timestamp,
                                     image_data=result_images,
@@ -693,6 +702,7 @@ class TranscriptParser:
                                     role="assistant",
                                     text=entry_text,
                                     content_type="tool_result",
+                                    event_kind="tool_output",
                                     tool_use_id=_tuid,
                                     timestamp=entry_timestamp,
                                     image_data=result_images,
@@ -708,6 +718,7 @@ class TranscriptParser:
                                     if result_text
                                     else (tool_summary or ""),
                                     content_type="tool_result",
+                                    event_kind="tool_output",
                                     tool_use_id=_tuid,
                                     timestamp=entry_timestamp,
                                     image_data=result_images,
@@ -731,6 +742,7 @@ class TranscriptParser:
                                 role="user",
                                 text=combined,
                                 content_type="text",
+                                event_kind="user_message",
                                 timestamp=entry_timestamp,
                             )
                         )
@@ -746,6 +758,7 @@ class TranscriptParser:
                         role="assistant",
                         text=tool_info.summary,
                         content_type="tool_use",
+                        event_kind="tool_call",
                         tool_use_id=tool_id,
                     )
                 )

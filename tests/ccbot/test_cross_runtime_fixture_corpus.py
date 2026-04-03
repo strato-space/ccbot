@@ -105,17 +105,34 @@ def test_claude_corpus_is_consumable_without_live_session_state() -> None:
 def test_codex_corpus_reuses_existing_fixtures_and_classifies_prompt_surfaces() -> None:
     manifest = _assert_manifest_is_complete(FIXTURE_ROOT / "codex" / "manifest.json")
     live_stream = _load_jsonl(FIXTURE_ROOT / "codex" / manifest["files"]["live_semantic_stream"])
+    launch = _load_json(
+        FIXTURE_ROOT
+        / "codex"
+        / manifest["files"]["persisted_replay_evidence"]["launch_metadata"]
+    )
     interrupted = _load_jsonl(
         FIXTURE_ROOT / "codex" / manifest["files"]["persisted_replay_evidence"]["degraded_failure_case"]
     )
-    prompt = _load_json(
+    blocked = _load_json(
         FIXTURE_ROOT / "codex" / manifest["files"]["terminal_surface_observation"]["blocked_input"]
+    )
+    prompt_visible = _load_json(
+        FIXTURE_ROOT
+        / "codex"
+        / manifest["files"]["terminal_surface_observation"]["interactive_prompt_visible"]
     )
 
     assert any(item["type"] == "response_item" for item in live_stream)
+    assert launch["thread_id"] == "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9"
+    assert launch["rollout_file"].endswith("fresh_home_thread.jsonl")
     assert any(item.get("payload", {}).get("type") == "turn_aborted" for item in interrupted)
-    assert "codex resume" in prompt["ansi_text"]
-    assert prompt["source"]["tmux_session"] == "0"
+    assert blocked["prompt_name"] == "UsageLimitBlockedInput"
+    assert blocked["should_persist"] is False
+    assert "usage limit" in blocked["prompt_text"].lower()
+    assert prompt_visible["prompt_name"] == "ResumePromptVisible"
+    assert prompt_visible["should_persist"] is False
+    assert "Explain this codebase" in prompt_visible["prompt_text"]
+    assert blocked != prompt_visible
 
 
 def test_fast_agent_corpus_covers_session_resume_progress_and_fail_closed_states() -> None:

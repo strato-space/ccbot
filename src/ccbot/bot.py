@@ -351,6 +351,23 @@ def _get_current_bind_flow_credentials(
     return session_manager.get_topic_bind_flow_credentials(user_id, thread_id)
 
 
+def _resolve_bind_flow_callback_thread_id(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int | None:
+    """Recover the topic id for bind-flow callbacks after unrelated traffic.
+
+    The visible picker message still belongs to the original topic even if
+    `_pending_thread_id` was cleared by text in another topic. Use the callback
+    message context as a safe fallback before treating the callback as stale.
+    """
+    if context.user_data:
+        pending_tid = context.user_data.get("_pending_thread_id")
+        if pending_tid is not None:
+            return pending_tid
+    return _get_thread_id(update)
+
+
 async def _validate_bind_flow_callback(
     query: object,
     *,
@@ -1468,9 +1485,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     # Directory browser handlers
     elif data.startswith(CB_DIR_SELECT):
         # Validate: callback must come from the same topic that started browsing
-        pending_tid = (
-            context.user_data.get("_pending_thread_id") if context.user_data else None
-        )
+        pending_tid = _resolve_bind_flow_callback_thread_id(update, context)
         if not await _validate_bind_flow_callback(
             query,
             user_id=user.id,
@@ -1531,9 +1546,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.answer()
 
     elif data == CB_DIR_UP:
-        pending_tid = (
-            context.user_data.get("_pending_thread_id") if context.user_data else None
-        )
+        pending_tid = _resolve_bind_flow_callback_thread_id(update, context)
         if not await _validate_bind_flow_callback(
             query,
             user_id=user.id,
@@ -1574,9 +1587,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.answer()
 
     elif data.startswith(CB_DIR_PAGE):
-        pending_tid = (
-            context.user_data.get("_pending_thread_id") if context.user_data else None
-        )
+        pending_tid = _resolve_bind_flow_callback_thread_id(update, context)
         if not await _validate_bind_flow_callback(
             query,
             user_id=user.id,
@@ -1624,9 +1635,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             else default_path
         )
         # Check if this was initiated from a thread bind flow
-        pending_thread_id: int | None = (
-            context.user_data.get("_pending_thread_id") if context.user_data else None
-        )
+        pending_thread_id = _resolve_bind_flow_callback_thread_id(update, context)
         if not await _validate_bind_flow_callback(
             query,
             user_id=user.id,
@@ -1674,9 +1683,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
 
     elif data == CB_DIR_CANCEL:
-        pending_tid = (
-            context.user_data.get("_pending_thread_id") if context.user_data else None
-        )
+        pending_tid = _resolve_bind_flow_callback_thread_id(update, context)
         if not await _validate_bind_flow_callback(
             query,
             user_id=user.id,
@@ -1700,13 +1707,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # Thread picker: resume an existing persisted thread.
     elif data.startswith(CB_THREAD_SELECT):
-        pending_tid = (
-            context.user_data.get("_pending_thread_id") if context.user_data else None
-        )
-        # Fallback: if _pending_thread_id was cleared (e.g. by a message in
-        # another topic), recover it from the callback query's message context
-        if pending_tid is None:
-            pending_tid = _get_thread_id(update)
+        pending_tid = _resolve_bind_flow_callback_thread_id(update, context)
         if not await _validate_bind_flow_callback(
             query,
             user_id=user.id,
@@ -1751,11 +1752,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
 
     elif data == CB_THREAD_NEW:
-        pending_tid = (
-            context.user_data.get("_pending_thread_id") if context.user_data else None
-        )
-        if pending_tid is None:
-            pending_tid = _get_thread_id(update)
+        pending_tid = _resolve_bind_flow_callback_thread_id(update, context)
         if not await _validate_bind_flow_callback(
             query,
             user_id=user.id,
@@ -1779,9 +1776,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await _create_and_bind_window(query, context, user, selected_path, pending_tid)
 
     elif data == CB_THREAD_CANCEL:
-        pending_tid = (
-            context.user_data.get("_pending_thread_id") if context.user_data else None
-        )
+        pending_tid = _resolve_bind_flow_callback_thread_id(update, context)
         if not await _validate_bind_flow_callback(
             query,
             user_id=user.id,
@@ -1806,9 +1801,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # Window picker: bind existing window
     elif data.startswith(CB_WIN_BIND):
-        pending_tid = (
-            context.user_data.get("_pending_thread_id") if context.user_data else None
-        )
+        pending_tid = _resolve_bind_flow_callback_thread_id(update, context)
         if not await _validate_bind_flow_callback(
             query,
             user_id=user.id,
@@ -1900,9 +1893,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # Window picker: new session → transition to directory browser
     elif data == CB_WIN_NEW:
-        pending_tid = (
-            context.user_data.get("_pending_thread_id") if context.user_data else None
-        )
+        pending_tid = _resolve_bind_flow_callback_thread_id(update, context)
         if not await _validate_bind_flow_callback(
             query,
             user_id=user.id,
@@ -1935,9 +1926,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # Window picker: cancel
     elif data == CB_WIN_CANCEL:
-        pending_tid = (
-            context.user_data.get("_pending_thread_id") if context.user_data else None
-        )
+        pending_tid = _resolve_bind_flow_callback_thread_id(update, context)
         if not await _validate_bind_flow_callback(
             query,
             user_id=user.id,

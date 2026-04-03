@@ -1387,9 +1387,11 @@ class SessionManager:
                 "content_type": e.content_type,
                 "timestamp": e.timestamp,
                 "event_kind": getattr(e, "event_kind", "message"),
+                "semantic_kind": getattr(e, "semantic_kind", "assistant_final"),
+                "delivery_class": getattr(e, "delivery_class", "history"),
             }
             for e in parsed_entries
-            if getattr(e, "event_kind", "message") != "lifecycle"
+            if getattr(e, "include_in_history", True)
         ]
 
         return all_messages, len(all_messages)

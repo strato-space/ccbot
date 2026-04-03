@@ -68,6 +68,7 @@ class TestBuildResponseParts:
             ("reasoning", "Reasoning"),
             ("command_execution", "Command"),
             ("tool_use", "Tool"),
+            ("tool_progress", "Tool Progress"),
             ("tool_result", "Tool Output"),
             ("file_change", "Files"),
         ],

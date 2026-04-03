@@ -26,8 +26,10 @@ Each runtime manifest contains the same three fixture families:
 
 - Claude Code uses transcript-style live semantic events plus prompt-state
   observations from the terminal surface.
-- Codex reuses the already curated rollout/session-index/pane evidence from the
-  earlier fixture corpus.
+- Codex reuses the already curated rollout evidence from the earlier fixture
+  corpus, but adds cross-runtime launch metadata and classified prompt-state
+  observations so launch, blocked-input, and prompt-visible paths remain
+  independently testable.
 - fast-agent uses ACP-shaped live progress events, session/history replay
   evidence, and prompt-visible terminal observations.
 

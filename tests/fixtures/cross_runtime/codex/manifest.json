@@ -25,15 +25,15 @@
   "files": {
     "live_semantic_stream": "../../codex/rollouts/fresh_home_thread.jsonl",
     "persisted_replay_evidence": {
-      "launch_metadata": "../../codex/thread_metadata.json",
+      "launch_metadata": "persisted_replay_evidence/launch_metadata.json",
       "resume_case": "../../codex/rollouts/resumed_home_thread.jsonl",
       "progress_status_stream": "../../codex/rollouts/nonroot_reasoning_turn.jsonl",
       "tool_transitions": "../../codex/rollouts/root_tool_call_and_output.jsonl",
       "degraded_failure_case": "../../codex/rollouts/interrupted_turn_nonroot.jsonl"
     },
     "terminal_surface_observation": {
-      "blocked_input": "../../codex/panes/tmux_session_0_resume_prompt.json",
-      "interactive_prompt_visible": "../../codex/panes/tmux_session_0_resume_prompt.json"
+      "blocked_input": "terminal_surface_observation/blocked_input.json",
+      "interactive_prompt_visible": "terminal_surface_observation/interactive_prompt_visible.json"
     }
   }
 }

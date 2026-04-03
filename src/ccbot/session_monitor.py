@@ -348,7 +348,11 @@ class SessionMonitor:
                         self._pending_tools.pop(rollout_source.thread_id, None)
 
                 for entry in parsed_entries:
-                    if not entry.text and not entry.image_data and entry.event_kind != "lifecycle":
+                    if (
+                        not entry.text
+                        and not entry.image_data
+                        and entry.delivery_class != "lifecycle"
+                    ):
                         continue
                     # Skip user messages unless show_user_messages is enabled
                     if entry.role == "user" and not config.show_user_messages:
@@ -366,6 +370,11 @@ class SessionMonitor:
                             timestamp=entry.timestamp,
                             runtime_kind=entry.runtime_kind,
                             event_kind=entry.event_kind,
+                            semantic_kind=entry.semantic_kind,
+                            delivery_class=entry.delivery_class,
+                            include_in_history=entry.include_in_history,
+                            dispatch_to_telegram=entry.dispatch_to_telegram,
+                            status_message_eligible=entry.status_message_eligible,
                         )
                     )
 
@@ -496,11 +505,11 @@ class SessionMonitor:
                 new_messages = await self.check_for_updates(active_thread_ids)
 
                 for msg in new_messages:
-                    if msg.event_kind == "lifecycle":
+                    if not msg.dispatch_to_telegram:
                         logger.debug(
                             "Lifecycle marker thread=%s: %s",
                             msg.thread_id,
-                            msg.tool_name or msg.content_type,
+                            msg.tool_name or msg.semantic_kind,
                         )
                         continue
                     status = "complete" if msg.is_complete else "streaming"

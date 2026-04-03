@@ -16,6 +16,63 @@ from typing import Any
 
 from .state_schema import DEFAULT_RUNTIME_KIND, normalize_runtime_kind
 
+LIFECYCLE_SEMANTIC_KIND = "lifecycle"
+USER_ECHO_SEMANTIC_KIND = "user_echo"
+COMMENTARY_SEMANTIC_KIND = "commentary"
+REASONING_SEMANTIC_KIND = "reasoning"
+TOOL_START_SEMANTIC_KIND = "tool_start"
+TOOL_PROGRESS_SEMANTIC_KIND = "tool_progress"
+TOOL_RESULT_SEMANTIC_KIND = "tool_result"
+COMMAND_EXECUTION_SEMANTIC_KIND = "command_execution"
+FILE_CHANGE_SEMANTIC_KIND = "file_change"
+ASSISTANT_FINAL_SEMANTIC_KIND = "assistant_final"
+
+DELIVERY_CLASS_HISTORY = "history"
+DELIVERY_CLASS_PROGRESS = "progress"
+DELIVERY_CLASS_LIFECYCLE = "lifecycle"
+
+
+def infer_semantic_kind(
+    *,
+    role: str,
+    content_type: str,
+    event_kind: str,
+) -> str:
+    """Infer the runtime-neutral semantic kind for a normalized event."""
+    if event_kind == "lifecycle" or content_type == "lifecycle":
+        return LIFECYCLE_SEMANTIC_KIND
+    if role == "user":
+        return USER_ECHO_SEMANTIC_KIND
+    if content_type == "commentary" or event_kind == "commentary":
+        return COMMENTARY_SEMANTIC_KIND
+    if content_type in {"thinking", "reasoning"} or event_kind == "reasoning":
+        return REASONING_SEMANTIC_KIND
+    if content_type == "tool_use" or event_kind == "tool_call":
+        return TOOL_START_SEMANTIC_KIND
+    if content_type == "tool_progress" or event_kind == "tool_progress":
+        return TOOL_PROGRESS_SEMANTIC_KIND
+    if content_type == "tool_result" or event_kind == "tool_output":
+        return TOOL_RESULT_SEMANTIC_KIND
+    if content_type in {"command_execution", "local_command"} or event_kind == "command_execution":
+        return COMMAND_EXECUTION_SEMANTIC_KIND
+    if content_type == "file_change" or event_kind == "file_change":
+        return FILE_CHANGE_SEMANTIC_KIND
+    return ASSISTANT_FINAL_SEMANTIC_KIND
+
+
+def infer_delivery_class(semantic_kind: str) -> str:
+    """Classify a normalized event for Telegram delivery and history policy."""
+    if semantic_kind == LIFECYCLE_SEMANTIC_KIND:
+        return DELIVERY_CLASS_LIFECYCLE
+    if semantic_kind in {
+        COMMENTARY_SEMANTIC_KIND,
+        REASONING_SEMANTIC_KIND,
+        TOOL_START_SEMANTIC_KIND,
+        TOOL_PROGRESS_SEMANTIC_KIND,
+    }:
+        return DELIVERY_CLASS_PROGRESS
+    return DELIVERY_CLASS_HISTORY
+
 
 @dataclass(frozen=True)
 class TopicBinding:
@@ -138,6 +195,30 @@ class NormalizedEvent:
     timestamp: str | None = None
     runtime_kind: str = "claude"
     event_kind: str = "message"
+    semantic_kind: str = ""
+    delivery_class: str = ""
+    include_in_history: bool | None = None
+    dispatch_to_telegram: bool | None = None
+    status_message_eligible: bool | None = None
+
+    def __post_init__(self) -> None:
+        if not self.semantic_kind:
+            self.semantic_kind = infer_semantic_kind(
+                role=self.role,
+                content_type=self.content_type,
+                event_kind=self.event_kind,
+            )
+        if not self.delivery_class:
+            self.delivery_class = infer_delivery_class(self.semantic_kind)
+        if self.include_in_history is None:
+            self.include_in_history = self.semantic_kind not in {
+                LIFECYCLE_SEMANTIC_KIND,
+                TOOL_PROGRESS_SEMANTIC_KIND,
+            }
+        if self.dispatch_to_telegram is None:
+            self.dispatch_to_telegram = self.delivery_class != DELIVERY_CLASS_LIFECYCLE
+        if self.status_message_eligible is None:
+            self.status_message_eligible = self.delivery_class == DELIVERY_CLASS_PROGRESS
 
     @property
     def session_id(self) -> str:
