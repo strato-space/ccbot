@@ -1,0 +1,4 @@
+{"type":"assistant","timestamp":"2026-04-03T10:00:00.000Z","message":{"content":[{"type":"thinking","thinking":"Draft the answer"},{"type":"text","text":"Working through the request"},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"src/app.py"}}]}}
+{"type":"user","timestamp":"2026-04-03T10:00:01.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"line 1\nline 2"}]}]}}
+{"type":"user","timestamp":"2026-04-03T10:00:02.000Z","message":{"content":"<command-name>/status</command-name><local-command-stdout>ok</local-command-stdout>"}}
+{"type":"assistant","timestamp":"2026-04-03T10:00:03.000Z","message":{"content":[{"type":"text","text":"Final answer for the topic chat"}]}}
