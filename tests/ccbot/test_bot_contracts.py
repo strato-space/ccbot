@@ -16,6 +16,7 @@ from ccbot import bot as bot_mod
 from ccbot.handlers.callback_data import append_bind_flow_token
 from ccbot.state_schema import (
     BINDING_STATE_NONE,
+    TOPIC_POLICY_IMPLICIT_BIND_ALLOWED,
     TOPIC_POLICY_MANUAL_BIND_REQUIRED,
 )
 
@@ -257,6 +258,72 @@ class TestCommandSurface:
             await bot_mod.text_handler(update, context)
 
         mock_tmux.list_windows.assert_not_called()
+        mock_reply.assert_awaited_once()
+        assert "manually unbound" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_text_handler_does_not_restart_bind_flow_while_picker_is_active(self):
+        update = _make_topic_update()
+        update.message.text = "hello"
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+            mock_sm.get_topic_binding_state.return_value = bot_mod.BINDING_STATE_BIND_FLOW
+            mock_sm.get_topic_policy.return_value = TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
+
+            await bot_mod.text_handler(update, context)
+
+        mock_tmux.list_windows.assert_not_called()
+        mock_reply.assert_awaited_once_with(update.message, bot_mod.BIND_FLOW_ACTIVE_MESSAGE)
+
+    @pytest.mark.asyncio
+    async def test_unbind_command_on_bound_topic_sets_manual_bind_required(self):
+        update = _make_topic_update()
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.clear_topic_state", new_callable=AsyncMock) as mock_clear,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+
+            await bot_mod.unbind_command(update, context)
+
+        mock_sm.unbind_thread.assert_called_once_with(1, 42)
+        mock_sm.require_manual_bind.assert_called_once_with(1, 42)
+        mock_clear.assert_awaited_once_with(1, 42, context.bot, context.user_data)
+        mock_reply.assert_awaited_once()
+        assert "Use /bind to choose a different window" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_unbind_command_without_binding_keeps_manual_bind_required(self):
+        update = _make_topic_update()
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.clear_topic_state", new_callable=AsyncMock) as mock_clear,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+
+            await bot_mod.unbind_command(update, context)
+
+        mock_sm.require_manual_bind.assert_called_once_with(1, 42)
+        mock_clear.assert_awaited_once_with(1, 42, context.bot, context.user_data)
         mock_reply.assert_awaited_once()
         assert "manually unbound" in mock_reply.await_args.args[1]
 
