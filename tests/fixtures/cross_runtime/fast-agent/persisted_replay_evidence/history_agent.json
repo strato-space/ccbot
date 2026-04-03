@@ -1,0 +1,82 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": [
+        {
+          "type": "text",
+          "text": "[redacted system instructions]"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Summarize the open task list."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "I will inspect the notes first."
+        }
+      ],
+      "channels": {
+        "fast-agent-usage": [
+          {
+            "type": "text",
+            "text": "{\"turn\":{\"input_tokens\":800,\"effective_input_tokens\":800,\"output_tokens\":120,\"total_tokens\":920,\"reasoning_tokens\":40,\"tool_calls\":1,\"cache_usage\":{\"cache_hit_tokens\":0}}}"
+          }
+        ],
+        "fast-agent-provider-diagnostics": [
+          {
+            "type": "text",
+            "text": "{\"transport\":\"stdio\",\"session_id\":\"fa-session-20260403-01\",\"session_title\":\"Daily planner\"}"
+          }
+        ]
+      }
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Calling filesystem/read_file"
+        }
+      ],
+      "tool_calls": {
+        "call_1": {
+          "type": "tool_call",
+          "name": "filesystem/read_file",
+          "arguments": {
+            "path": "notes/todo.md"
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Tool result follows."
+        }
+      ],
+      "tool_results": {
+        "call_1": {
+          "content": [
+            {
+              "type": "text",
+              "text": "- redacted line 1\n- redacted line 2"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

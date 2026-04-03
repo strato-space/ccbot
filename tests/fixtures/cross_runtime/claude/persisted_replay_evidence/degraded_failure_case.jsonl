@@ -1,0 +1,2 @@
+{"phase":"turn_aborted","reason":"interrupted","detail":"The operator stopped the turn before completion."}
+{"phase":"tool_result","tool_use_id":"toolu_2","content":"Permission denied by the visible prompt surface.","is_error":true}

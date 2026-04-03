@@ -1,0 +1,8 @@
+{
+  "runtime_kind": "claude",
+  "surface": "terminal",
+  "prompt_name": "Settings",
+  "visible": true,
+  "should_persist": false,
+  "prompt_text": "Select model\nEnter to confirm\nEsc to exit"
+}

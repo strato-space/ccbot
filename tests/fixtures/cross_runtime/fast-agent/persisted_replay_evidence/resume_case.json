@@ -1,0 +1,9 @@
+{
+  "runtime_kind": "fast-agent",
+  "session_id": "fa-session-20260403-01",
+  "resumed_from": "fa-session-20260402-09",
+  "session_title": "Daily planner",
+  "cwd": "/home/strato-space",
+  "resume_command": "fast-agent --resume fa-session-20260403-01",
+  "history_file": "persisted_replay_evidence/history_agent.json"
+}

@@ -1,0 +1,39 @@
+{
+  "runtime_kind": "codex",
+  "display_name": "Codex",
+  "source_note": "Reuses the existing Codex-only fixture corpus already curated for the first plan.",
+  "coverage": {
+    "live_semantic_stream": [
+      "reasoning",
+      "commentary",
+      "tool_call",
+      "tool_call_output",
+      "turn_aborted"
+    ],
+    "persisted_replay_evidence": [
+      "fresh_launch_metadata",
+      "resume_case",
+      "progress_status_stream",
+      "tool_progress_tool_result_transitions",
+      "degraded_failure_case"
+    ],
+    "terminal_surface_observation": [
+      "blocked_input",
+      "interactive_prompt_visible"
+    ]
+  },
+  "files": {
+    "live_semantic_stream": "../../codex/rollouts/fresh_home_thread.jsonl",
+    "persisted_replay_evidence": {
+      "launch_metadata": "../../codex/thread_metadata.json",
+      "resume_case": "../../codex/rollouts/resumed_home_thread.jsonl",
+      "progress_status_stream": "../../codex/rollouts/nonroot_reasoning_turn.jsonl",
+      "tool_transitions": "../../codex/rollouts/root_tool_call_and_output.jsonl",
+      "degraded_failure_case": "../../codex/rollouts/interrupted_turn_nonroot.jsonl"
+    },
+    "terminal_surface_observation": {
+      "blocked_input": "../../codex/panes/tmux_session_0_resume_prompt.json",
+      "interactive_prompt_visible": "../../codex/panes/tmux_session_0_resume_prompt.json"
+    }
+  }
+}

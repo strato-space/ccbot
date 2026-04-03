@@ -1,0 +1,3 @@
+{"sessionUpdate":"tool_call","tool_call_id":"call_1","title":"filesystem/read_file","kind":"tool","status":"pending","content":[],"rawInput":{"path":"notes/todo.md"}}
+{"sessionUpdate":"tool_call_update","tool_call_id":"call_1","title":"filesystem/read_file [1/2] - Reading chunk 1/2","kind":"tool","status":"in_progress","content":[{"type":"text","text":"redacted chunk 1"}],"rawInput":{"path":"notes/todo.md"}}
+{"sessionUpdate":"tool_call_update","tool_call_id":"call_1","title":"filesystem/read_file","kind":"tool","status":"completed","content":[{"type":"text","text":"redacted chunk 1\nredacted chunk 2"}],"rawInput":{"path":"notes/todo.md"}}

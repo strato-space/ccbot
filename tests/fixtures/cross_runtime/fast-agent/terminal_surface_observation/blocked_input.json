@@ -1,0 +1,8 @@
+{
+  "runtime_kind": "fast-agent",
+  "surface": "terminal",
+  "prompt_name": "PermissionPrompt",
+  "visible": true,
+  "should_persist": false,
+  "prompt_text": "Allow this tool call?\n1. allow once\n2. deny"
+}

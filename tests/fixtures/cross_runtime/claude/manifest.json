@@ -1,0 +1,38 @@
+{
+  "runtime_kind": "claude",
+  "display_name": "Claude Code",
+  "source_note": "Redacted, reproducible corpus shaped from Claude transcript and prompt-surface evidence.",
+  "coverage": {
+    "live_semantic_stream": [
+      "thinking",
+      "tool_use",
+      "tool_result",
+      "final_text"
+    ],
+    "persisted_replay_evidence": [
+      "fresh_launch_metadata",
+      "resume_case",
+      "progress_status_stream",
+      "tool_progress_tool_result_transitions",
+      "degraded_failure_case"
+    ],
+    "terminal_surface_observation": [
+      "blocked_input",
+      "interactive_prompt_visible"
+    ]
+  },
+  "files": {
+    "live_semantic_stream": "live_semantic_stream.jsonl",
+    "persisted_replay_evidence": {
+      "launch_metadata": "persisted_replay_evidence/launch_metadata.json",
+      "resume_case": "persisted_replay_evidence/resume_case.json",
+      "progress_status_stream": "persisted_replay_evidence/progress_status_stream.jsonl",
+      "tool_transitions": "persisted_replay_evidence/tool_transitions.jsonl",
+      "degraded_failure_case": "persisted_replay_evidence/degraded_failure_case.jsonl"
+    },
+    "terminal_surface_observation": {
+      "blocked_input": "terminal_surface_observation/blocked_input.json",
+      "interactive_prompt_visible": "terminal_surface_observation/interactive_prompt_visible.json"
+    }
+  }
+}

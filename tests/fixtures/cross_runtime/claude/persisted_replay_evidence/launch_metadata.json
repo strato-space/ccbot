@@ -1,0 +1,11 @@
+{
+  "runtime_kind": "claude",
+  "session_id": "claude-session-20260403-01",
+  "cwd": "/home/strato-space",
+  "resume_command": "claude --resume claude-session-20260403-01",
+  "source": "transcript_tail",
+  "session_state": {
+    "status": "fresh",
+    "title": "Redacted Claude task"
+  }
+}
