@@ -334,4 +334,38 @@ def test_state_json_persists_topic_policy_and_binding_state(tmp_path, monkeypatc
     assert saved["topic_policies"]["100"]["43"] == TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
     assert saved["topic_binding_states"]["100"]["42"] == BINDING_STATE_NONE
     assert saved["topic_binding_states"]["100"]["43"] == BINDING_STATE_BOUND
+    assert saved["topic_bind_flow_versions"]["100"]["42"] >= 1
+    assert saved["topic_bind_flow_versions"]["100"]["43"] >= 1
+    assert saved["topic_bind_flow_nonces"]["100"]["42"]
+    assert saved["topic_bind_flow_nonces"]["100"]["43"]
     assert saved["thread_bindings"]["100"]["43"] == "@7"
+
+
+def test_legacy_bind_flow_state_migrates_nonce_and_version(tmp_path, monkeypatch):
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "thread_bindings": {},
+                "window_to_session": {},
+                "window_states": {},
+                "user_window_offsets": {},
+                "topic_policies": {"100": {"42": TOPIC_POLICY_MANUAL_BIND_REQUIRED}},
+                "topic_binding_states": {"100": {"42": "bind_flow"}},
+                "window_display_names": {},
+                "group_chat_ids": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(session_module.config, "state_file", state_file)
+
+    manager = SessionManager()
+
+    assert manager.get_topic_binding_state(100, 42) == "bind_flow"
+    assert manager.get_topic_bind_flow_version(100, 42) >= 1
+    assert manager.get_topic_bind_flow_nonce(100, 42)
+
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved["topic_bind_flow_versions"]["100"]["42"] >= 1
+    assert saved["topic_bind_flow_nonces"]["100"]["42"]

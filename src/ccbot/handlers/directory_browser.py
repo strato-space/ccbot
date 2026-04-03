@@ -34,6 +34,7 @@ from .callback_data import (
     CB_WIN_BIND,
     CB_WIN_CANCEL,
     CB_WIN_NEW,
+    append_bind_flow_token,
 )
 
 # Directories per page in directory browser
@@ -85,6 +86,9 @@ def clear_session_picker_state(user_data: dict | None) -> None:
 
 def build_window_picker(
     windows: list[tuple[str, str, str]],
+    *,
+    bind_flow_version: int = 0,
+    bind_flow_nonce: str = "",
 ) -> tuple[str, InlineKeyboardMarkup, list[str]]:
     """Build window picker UI for unbound tmux windows.
 
@@ -112,15 +116,34 @@ def build_window_picker(
             display = name[:12] + "…" if len(name) > 13 else name
             row.append(
                 InlineKeyboardButton(
-                    f"🖥 {display}", callback_data=f"{CB_WIN_BIND}{i + j}"
+                    f"🖥 {display}",
+                    callback_data=append_bind_flow_token(
+                        f"{CB_WIN_BIND}{i + j}",
+                        version=bind_flow_version,
+                        nonce=bind_flow_nonce,
+                    ),
                 )
             )
         buttons.append(row)
 
     buttons.append(
         [
-            InlineKeyboardButton("➕ New Thread", callback_data=CB_WIN_NEW),
-            InlineKeyboardButton("Cancel", callback_data=CB_WIN_CANCEL),
+            InlineKeyboardButton(
+                "➕ New Thread",
+                callback_data=append_bind_flow_token(
+                    CB_WIN_NEW,
+                    version=bind_flow_version,
+                    nonce=bind_flow_nonce,
+                ),
+            ),
+            InlineKeyboardButton(
+                "Cancel",
+                callback_data=append_bind_flow_token(
+                    CB_WIN_CANCEL,
+                    version=bind_flow_version,
+                    nonce=bind_flow_nonce,
+                ),
+            ),
         ]
     )
 
@@ -129,7 +152,11 @@ def build_window_picker(
 
 
 def build_directory_browser(
-    current_path: str, page: int = 0
+    current_path: str,
+    page: int = 0,
+    *,
+    bind_flow_version: int = 0,
+    bind_flow_nonce: str = "",
 ) -> tuple[str, InlineKeyboardMarkup, list[str]]:
     """Build directory browser UI.
 
@@ -165,7 +192,12 @@ def build_directory_browser(
             idx = start + i + j
             row.append(
                 InlineKeyboardButton(
-                    f"📁 {display}", callback_data=f"{CB_DIR_SELECT}{idx}"
+                    f"📁 {display}",
+                    callback_data=append_bind_flow_token(
+                        f"{CB_DIR_SELECT}{idx}",
+                        version=bind_flow_version,
+                        nonce=bind_flow_nonce,
+                    ),
                 )
             )
         buttons.append(row)
@@ -174,23 +206,64 @@ def build_directory_browser(
         nav: list[InlineKeyboardButton] = []
         if page > 0:
             nav.append(
-                InlineKeyboardButton("◀", callback_data=f"{CB_DIR_PAGE}{page - 1}")
+                InlineKeyboardButton(
+                    "◀",
+                    callback_data=append_bind_flow_token(
+                        f"{CB_DIR_PAGE}{page - 1}",
+                        version=bind_flow_version,
+                        nonce=bind_flow_nonce,
+                    ),
+                )
             )
         nav.append(
             InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop")
         )
         if page < total_pages - 1:
             nav.append(
-                InlineKeyboardButton("▶", callback_data=f"{CB_DIR_PAGE}{page + 1}")
+                InlineKeyboardButton(
+                    "▶",
+                    callback_data=append_bind_flow_token(
+                        f"{CB_DIR_PAGE}{page + 1}",
+                        version=bind_flow_version,
+                        nonce=bind_flow_nonce,
+                    ),
+                )
             )
         buttons.append(nav)
 
     action_row: list[InlineKeyboardButton] = []
     # Allow going up unless at filesystem root
     if path != path.parent:
-        action_row.append(InlineKeyboardButton("..", callback_data=CB_DIR_UP))
-    action_row.append(InlineKeyboardButton("Select", callback_data=CB_DIR_CONFIRM))
-    action_row.append(InlineKeyboardButton("Cancel", callback_data=CB_DIR_CANCEL))
+        action_row.append(
+            InlineKeyboardButton(
+                "..",
+                callback_data=append_bind_flow_token(
+                    CB_DIR_UP,
+                    version=bind_flow_version,
+                    nonce=bind_flow_nonce,
+                ),
+            )
+        )
+    action_row.append(
+        InlineKeyboardButton(
+            "Select",
+            callback_data=append_bind_flow_token(
+                CB_DIR_CONFIRM,
+                version=bind_flow_version,
+                nonce=bind_flow_nonce,
+            ),
+        )
+    )
+    action_row.append(
+        InlineKeyboardButton(
+            "Cancel",
+            callback_data=append_bind_flow_token(
+                CB_DIR_CANCEL,
+                version=bind_flow_version,
+                nonce=bind_flow_nonce,
+            ),
+        )
+    )
     buttons.append(action_row)
 
     display_path = str(path).replace(str(Path.home()), "~")
@@ -223,6 +296,9 @@ def _relative_time(file_path: str) -> str:
 
 def build_thread_picker(
     threads: list[ThreadLocator],
+    *,
+    bind_flow_version: int = 0,
+    bind_flow_nonce: str = "",
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Build thread picker UI for resuming an existing persisted thread.
 
@@ -255,15 +331,34 @@ def build_thread_picker(
             )
             row.append(
                 InlineKeyboardButton(
-                    f"↺ {label}", callback_data=f"{CB_THREAD_SELECT}{i + j}"
+                    f"↺ {label}",
+                    callback_data=append_bind_flow_token(
+                        f"{CB_THREAD_SELECT}{i + j}",
+                        version=bind_flow_version,
+                        nonce=bind_flow_nonce,
+                    ),
                 )
             )
         buttons.append(row)
 
     buttons.append(
         [
-            InlineKeyboardButton("➕ Fresh Thread", callback_data=CB_THREAD_NEW),
-            InlineKeyboardButton("Cancel", callback_data=CB_THREAD_CANCEL),
+            InlineKeyboardButton(
+                "➕ Fresh Thread",
+                callback_data=append_bind_flow_token(
+                    CB_THREAD_NEW,
+                    version=bind_flow_version,
+                    nonce=bind_flow_nonce,
+                ),
+            ),
+            InlineKeyboardButton(
+                "Cancel",
+                callback_data=append_bind_flow_token(
+                    CB_THREAD_CANCEL,
+                    version=bind_flow_version,
+                    nonce=bind_flow_nonce,
+                ),
+            ),
         ]
     )
 

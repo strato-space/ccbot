@@ -16,7 +16,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_RUNTIME_KIND = "claude"
 LEGACY_BACKUP_SUFFIX = ".v1.bak"
 SESSION_MAP_ENTRIES_KEY = "entries"
@@ -24,11 +24,14 @@ SCHEMA_VERSION_KEY = "schema_version"
 RUNTIME_KIND_KEY = "runtime_kind"
 TOPIC_POLICIES_KEY = "topic_policies"
 TOPIC_BINDING_STATES_KEY = "topic_binding_states"
+TOPIC_BIND_FLOW_VERSIONS_KEY = "topic_bind_flow_versions"
+TOPIC_BIND_FLOW_NONCES_KEY = "topic_bind_flow_nonces"
 TOPIC_POLICY_IMPLICIT_BIND_ALLOWED = "implicit_bind_allowed"
 TOPIC_POLICY_MANUAL_BIND_REQUIRED = "manual_bind_required"
 BINDING_STATE_NONE = "none"
 BINDING_STATE_BIND_FLOW = "bind_flow"
 BINDING_STATE_BOUND = "bound"
+DEFAULT_TOPIC_BIND_FLOW_VERSION = 0
 
 
 def legacy_backup_path(path: Path) -> Path:
@@ -78,6 +81,20 @@ def normalize_binding_state(binding_state: str | None) -> str:
     if binding_state == BINDING_STATE_BOUND:
         return BINDING_STATE_BOUND
     return BINDING_STATE_NONE
+
+
+def normalize_bind_flow_version(bind_flow_version: Any) -> int:
+    """Normalize bind-flow version counters to a non-negative integer."""
+    try:
+        version = int(bind_flow_version or 0)
+    except (TypeError, ValueError):
+        return DEFAULT_TOPIC_BIND_FLOW_VERSION
+    return max(version, DEFAULT_TOPIC_BIND_FLOW_VERSION)
+
+
+def normalize_bind_flow_nonce(bind_flow_nonce: Any) -> str:
+    """Normalize bind-flow nonces to a stable string representation."""
+    return str(bind_flow_nonce or "")
 
 
 def build_session_map_payload(

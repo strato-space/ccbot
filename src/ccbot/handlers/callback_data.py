@@ -52,5 +52,41 @@ CB_SESSION_SELECT = CB_THREAD_SELECT
 CB_SESSION_NEW = CB_THREAD_NEW
 CB_SESSION_CANCEL = CB_THREAD_CANCEL
 
+# Bind-flow token suffix for restart-safe picker invalidation.
+CB_BIND_FLOW_SUFFIX = ":bf:"
+
 # Screenshot control keys
 CB_KEYS_PREFIX = "kb:"  # kb:<key_id>:<window>
+
+
+def append_bind_flow_token(callback_data: str, *, version: int, nonce: str) -> str:
+    """Attach bind-flow credentials to a callback payload.
+
+    The credentials let the bot invalidate stale picker callbacks after
+    restart, explicit /unbind, or a superseding bind flow.
+    """
+    if version <= 0 or not nonce:
+        return callback_data
+    payload = f"{callback_data}{CB_BIND_FLOW_SUFFIX}{version}:{nonce}"
+    if len(payload) > 64:
+        raise ValueError(f"Callback payload exceeds Telegram limit: {payload!r}")
+    return payload
+
+
+def split_bind_flow_token(callback_data: str) -> tuple[str, int, str]:
+    """Extract bind-flow credentials from a callback payload.
+
+    Returns ``(base_callback, version, nonce)``. Legacy payloads without a
+    token are treated as stale and return ``version=0`` / ``nonce=''``.
+    """
+    base, marker, tail = callback_data.rpartition(CB_BIND_FLOW_SUFFIX)
+    if not marker:
+        return callback_data, 0, ""
+    version_str, sep, nonce = tail.partition(":")
+    if not sep or not nonce:
+        return callback_data, 0, ""
+    try:
+        version = int(version_str)
+    except ValueError:
+        return callback_data, 0, ""
+    return base, version, nonce

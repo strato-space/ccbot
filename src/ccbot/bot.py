@@ -83,6 +83,7 @@ from .handlers.callback_data import (
     CB_WIN_BIND,
     CB_WIN_CANCEL,
     CB_WIN_NEW,
+    split_bind_flow_token,
 )
 from .handlers.directory_browser import (
     BROWSE_DIRS_KEY,
@@ -280,6 +281,9 @@ async def _start_bind_flow(
     if explicit:
         session_manager.allow_implicit_bind(user.id, thread_id)
     session_manager.start_topic_bind_flow(user.id, thread_id)
+    bind_flow_version, bind_flow_nonce = session_manager.get_topic_bind_flow_credentials(
+        user.id, thread_id
+    )
 
     all_windows = await tmux_manager.list_windows()
     bound_ids = {wid for _, _, wid in session_manager.iter_thread_bindings()}
@@ -298,7 +302,11 @@ async def _start_bind_flow(
     )
 
     if unbound:
-        msg_text, keyboard, win_ids = build_window_picker(unbound)
+        msg_text, keyboard, win_ids = build_window_picker(
+            unbound,
+            bind_flow_version=bind_flow_version,
+            bind_flow_nonce=bind_flow_nonce,
+        )
         if context.user_data is not None:
             clear_thread_picker_state(context.user_data)
             clear_window_picker_state(context.user_data)
@@ -314,7 +322,11 @@ async def _start_bind_flow(
         return
 
     start_path = str(Path.cwd())
-    msg_text, keyboard, subdirs = build_directory_browser(start_path)
+    msg_text, keyboard, subdirs = build_directory_browser(
+        start_path,
+        bind_flow_version=bind_flow_version,
+        bind_flow_nonce=bind_flow_nonce,
+    )
     if context.user_data is not None:
         clear_thread_picker_state(context.user_data)
         clear_window_picker_state(context.user_data)
@@ -329,6 +341,37 @@ async def _start_bind_flow(
         else:
             context.user_data.pop("_pending_thread_text", None)
     await safe_reply(update.message, msg_text, reply_markup=keyboard)
+
+
+def _get_current_bind_flow_credentials(
+    user_id: int,
+    thread_id: int,
+) -> tuple[int, str]:
+    """Return the active bind-flow credentials for a topic."""
+    return session_manager.get_topic_bind_flow_credentials(user_id, thread_id)
+
+
+async def _validate_bind_flow_callback(
+    query: object,
+    *,
+    user_id: int,
+    thread_id: int | None,
+    version: int,
+    nonce: str,
+) -> bool:
+    """Fail closed for stale bind-flow callbacks after restart/unbind/cancel."""
+    if thread_id is None:
+        await query.answer("Stale bind flow, use /bind again", show_alert=True)
+        return False
+    if not session_manager.validate_topic_bind_flow_callback(
+        user_id,
+        thread_id,
+        version,
+        nonce,
+    ):
+        await query.answer("Stale bind flow, use /bind again", show_alert=True)
+        return False
+    return True
 
 
 # --- Command handlers ---
@@ -1373,7 +1416,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.answer("Not authorized")
         return
 
-    data = query.data
+    raw_data = query.data
+    data, bind_flow_version, bind_flow_nonce = split_bind_flow_token(raw_data)
 
     # Capture group chat_id for supergroup forum topic routing.
     # Required: Telegram Bot API needs group chat_id (not user_id) to send
@@ -1427,6 +1471,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         pending_tid = (
             context.user_data.get("_pending_thread_id") if context.user_data else None
         )
+        if not await _validate_bind_flow_callback(
+            query,
+            user_id=user.id,
+            thread_id=pending_tid,
+            version=bind_flow_version,
+            nonce=bind_flow_nonce,
+        ):
+            return
         if pending_tid is not None and _get_thread_id(update) != pending_tid:
             await query.answer("Stale browser (topic mismatch)", show_alert=True)
             return
@@ -1465,7 +1517,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             context.user_data[BROWSE_PATH_KEY] = new_path_str
             context.user_data[BROWSE_PAGE_KEY] = 0
 
-        msg_text, keyboard, subdirs = build_directory_browser(new_path_str)
+        current_version, current_nonce = _get_current_bind_flow_credentials(
+            user.id, pending_tid
+        )
+        msg_text, keyboard, subdirs = build_directory_browser(
+            new_path_str,
+            bind_flow_version=current_version,
+            bind_flow_nonce=current_nonce,
+        )
         if context.user_data is not None:
             context.user_data[BROWSE_DIRS_KEY] = subdirs
         await safe_edit(query, msg_text, reply_markup=keyboard)
@@ -1475,6 +1534,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         pending_tid = (
             context.user_data.get("_pending_thread_id") if context.user_data else None
         )
+        if not await _validate_bind_flow_callback(
+            query,
+            user_id=user.id,
+            thread_id=pending_tid,
+            version=bind_flow_version,
+            nonce=bind_flow_nonce,
+        ):
+            return
         if pending_tid is not None and _get_thread_id(update) != pending_tid:
             await query.answer("Stale browser (topic mismatch)", show_alert=True)
             return
@@ -1493,7 +1560,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             context.user_data[BROWSE_PATH_KEY] = parent_path
             context.user_data[BROWSE_PAGE_KEY] = 0
 
-        msg_text, keyboard, subdirs = build_directory_browser(parent_path)
+        current_version, current_nonce = _get_current_bind_flow_credentials(
+            user.id, pending_tid
+        )
+        msg_text, keyboard, subdirs = build_directory_browser(
+            parent_path,
+            bind_flow_version=current_version,
+            bind_flow_nonce=current_nonce,
+        )
         if context.user_data is not None:
             context.user_data[BROWSE_DIRS_KEY] = subdirs
         await safe_edit(query, msg_text, reply_markup=keyboard)
@@ -1503,6 +1577,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         pending_tid = (
             context.user_data.get("_pending_thread_id") if context.user_data else None
         )
+        if not await _validate_bind_flow_callback(
+            query,
+            user_id=user.id,
+            thread_id=pending_tid,
+            version=bind_flow_version,
+            nonce=bind_flow_nonce,
+        ):
+            return
         if pending_tid is not None and _get_thread_id(update) != pending_tid:
             await query.answer("Stale browser (topic mismatch)", show_alert=True)
             return
@@ -1520,7 +1602,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if context.user_data is not None:
             context.user_data[BROWSE_PAGE_KEY] = pg
 
-        msg_text, keyboard, subdirs = build_directory_browser(current_path, pg)
+        current_version, current_nonce = _get_current_bind_flow_credentials(
+            user.id, pending_tid
+        )
+        msg_text, keyboard, subdirs = build_directory_browser(
+            current_path,
+            pg,
+            bind_flow_version=current_version,
+            bind_flow_nonce=current_nonce,
+        )
         if context.user_data is not None:
             context.user_data[BROWSE_DIRS_KEY] = subdirs
         await safe_edit(query, msg_text, reply_markup=keyboard)
@@ -1537,6 +1627,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         pending_thread_id: int | None = (
             context.user_data.get("_pending_thread_id") if context.user_data else None
         )
+        if not await _validate_bind_flow_callback(
+            query,
+            user_id=user.id,
+            thread_id=pending_thread_id,
+            version=bind_flow_version,
+            nonce=bind_flow_nonce,
+        ):
+            return
 
         # Validate: confirm button must come from the same topic that started browsing
         confirm_thread_id = _get_thread_id(update)
@@ -1558,7 +1656,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 context.user_data[STATE_KEY] = STATE_SELECTING_THREAD
                 context.user_data[THREADS_KEY] = threads
                 context.user_data["_selected_path"] = selected_path
-            text, keyboard = build_thread_picker(threads)
+            current_version, current_nonce = _get_current_bind_flow_credentials(
+                user.id, pending_thread_id
+            )
+            text, keyboard = build_thread_picker(
+                threads,
+                bind_flow_version=current_version,
+                bind_flow_nonce=current_nonce,
+            )
             await safe_edit(query, text, reply_markup=keyboard)
             await query.answer()
             return
@@ -1572,6 +1677,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         pending_tid = (
             context.user_data.get("_pending_thread_id") if context.user_data else None
         )
+        if not await _validate_bind_flow_callback(
+            query,
+            user_id=user.id,
+            thread_id=pending_tid,
+            version=bind_flow_version,
+            nonce=bind_flow_nonce,
+        ):
+            return
         if pending_tid is not None and _get_thread_id(update) != pending_tid:
             await query.answer("Stale browser (topic mismatch)", show_alert=True)
             return
@@ -1594,6 +1707,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # another topic), recover it from the callback query's message context
         if pending_tid is None:
             pending_tid = _get_thread_id(update)
+        if not await _validate_bind_flow_callback(
+            query,
+            user_id=user.id,
+            thread_id=pending_tid,
+            version=bind_flow_version,
+            nonce=bind_flow_nonce,
+        ):
+            return
         if pending_tid is not None and _get_thread_id(update) != pending_tid:
             await query.answer("Stale picker (topic mismatch)", show_alert=True)
             return
@@ -1635,6 +1756,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         if pending_tid is None:
             pending_tid = _get_thread_id(update)
+        if not await _validate_bind_flow_callback(
+            query,
+            user_id=user.id,
+            thread_id=pending_tid,
+            version=bind_flow_version,
+            nonce=bind_flow_nonce,
+        ):
+            return
         if pending_tid is not None and _get_thread_id(update) != pending_tid:
             await query.answer("Stale picker (topic mismatch)", show_alert=True)
             return
@@ -1653,6 +1782,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         pending_tid = (
             context.user_data.get("_pending_thread_id") if context.user_data else None
         )
+        if not await _validate_bind_flow_callback(
+            query,
+            user_id=user.id,
+            thread_id=pending_tid,
+            version=bind_flow_version,
+            nonce=bind_flow_nonce,
+        ):
+            return
         if pending_tid is not None and _get_thread_id(update) != pending_tid:
             await query.answer("Stale picker (topic mismatch)", show_alert=True)
             return
@@ -1672,6 +1809,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         pending_tid = (
             context.user_data.get("_pending_thread_id") if context.user_data else None
         )
+        if not await _validate_bind_flow_callback(
+            query,
+            user_id=user.id,
+            thread_id=pending_tid,
+            version=bind_flow_version,
+            nonce=bind_flow_nonce,
+        ):
+            return
         if pending_tid is not None and _get_thread_id(update) != pending_tid:
             await query.answer("Stale picker (topic mismatch)", show_alert=True)
             return
@@ -1758,13 +1903,28 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         pending_tid = (
             context.user_data.get("_pending_thread_id") if context.user_data else None
         )
+        if not await _validate_bind_flow_callback(
+            query,
+            user_id=user.id,
+            thread_id=pending_tid,
+            version=bind_flow_version,
+            nonce=bind_flow_nonce,
+        ):
+            return
         if pending_tid is not None and _get_thread_id(update) != pending_tid:
             await query.answer("Stale picker (topic mismatch)", show_alert=True)
             return
         # Preserve pending thread info, clear only picker state
         clear_window_picker_state(context.user_data)
         start_path = str(Path.cwd())
-        msg_text, keyboard, subdirs = build_directory_browser(start_path)
+        current_version, current_nonce = _get_current_bind_flow_credentials(
+            user.id, pending_tid
+        )
+        msg_text, keyboard, subdirs = build_directory_browser(
+            start_path,
+            bind_flow_version=current_version,
+            bind_flow_nonce=current_nonce,
+        )
         if context.user_data is not None:
             context.user_data[STATE_KEY] = STATE_BROWSING_DIRECTORY
             context.user_data[BROWSE_PATH_KEY] = start_path
@@ -1778,6 +1938,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         pending_tid = (
             context.user_data.get("_pending_thread_id") if context.user_data else None
         )
+        if not await _validate_bind_flow_callback(
+            query,
+            user_id=user.id,
+            thread_id=pending_tid,
+            version=bind_flow_version,
+            nonce=bind_flow_nonce,
+        ):
+            return
         if pending_tid is not None and _get_thread_id(update) != pending_tid:
             await query.answer("Stale picker (topic mismatch)", show_alert=True)
             return

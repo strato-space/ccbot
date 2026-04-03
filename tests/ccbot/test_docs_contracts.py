@@ -78,3 +78,12 @@ def test_execution_review_policy_requires_code_and_ontology_review() -> None:
     assert "independent code review" in policy
     assert "ontology re-check" in policy
     assert "core nouns" in policy
+
+
+def test_topic_policy_migration_doc_captures_nonce_and_stale_callback_rules() -> None:
+    doc = _read("doc/topic-policy-migration.md")
+
+    assert "topic_bind_flow_versions" in doc
+    assert "topic_bind_flow_nonces" in doc
+    assert "Legacy callbacks without credentials are treated as stale." in doc
+    assert "explicit `/unbind`" in doc

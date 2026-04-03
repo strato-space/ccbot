@@ -13,6 +13,7 @@ import pytest
 from telegram import CallbackQuery, User
 
 from ccbot import bot as bot_mod
+from ccbot.handlers.callback_data import append_bind_flow_token
 from ccbot.state_schema import (
     BINDING_STATE_NONE,
     TOPIC_POLICY_MANUAL_BIND_REQUIRED,
@@ -227,6 +228,7 @@ class TestCommandSurface:
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
             mock_sm.get_window_for_thread.return_value = None
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce123")
             mock_tmux.list_windows = AsyncMock(return_value=[])
 
             await bot_mod.bind_command(update, context)
@@ -264,7 +266,11 @@ class TestCommandSurface:
         update.effective_user = MagicMock(id=1)
         update.effective_chat = MagicMock(type="supergroup", id=100)
         update.callback_query = MagicMock()
-        update.callback_query.data = bot_mod.CB_WIN_CANCEL
+        update.callback_query.data = append_bind_flow_token(
+            bot_mod.CB_WIN_CANCEL,
+            version=1,
+            nonce="nonce123",
+        )
         update.callback_query.answer = AsyncMock()
         update.callback_query.message = MagicMock(
             message_thread_id=42,
@@ -282,9 +288,49 @@ class TestCommandSurface:
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.safe_edit", new_callable=AsyncMock),
         ):
+            mock_sm.validate_topic_bind_flow_callback.return_value = True
             await bot_mod.callback_handler(update, context)
 
         mock_sm.require_manual_bind.assert_called_once_with(1, 42)
+
+    @pytest.mark.asyncio
+    async def test_stale_bind_flow_callback_is_rejected(self):
+        update = MagicMock()
+        update.effective_user = MagicMock(id=1)
+        update.effective_chat = MagicMock(type="supergroup", id=100)
+        update.callback_query = MagicMock()
+        update.callback_query.data = append_bind_flow_token(
+            bot_mod.CB_WIN_CANCEL,
+            version=3,
+            nonce="stale999",
+        )
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.message = MagicMock(
+            message_thread_id=42,
+            chat=update.effective_chat,
+        )
+        context = _make_context()
+        context.user_data = {
+            "_pending_thread_id": 42,
+            bot_mod.STATE_KEY: bot_mod.STATE_SELECTING_WINDOW,
+        }
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock) as mock_edit,
+        ):
+            mock_sm.validate_topic_bind_flow_callback.return_value = False
+
+            await bot_mod.callback_handler(update, context)
+
+        mock_edit.assert_not_awaited()
+        mock_sm.require_manual_bind.assert_not_called()
+        update.callback_query.answer.assert_awaited_once_with(
+            "Stale bind flow, use /bind again",
+            show_alert=True,
+        )
 
 
 class TestTopicCleanup:
@@ -626,7 +672,13 @@ class TestThreadPickerFlow:
 
     @pytest.mark.asyncio
     async def test_directory_confirm_switches_to_thread_picker(self):
-        update = self._make_callback_update(bot_mod.CB_DIR_CONFIRM)
+        update = self._make_callback_update(
+            append_bind_flow_token(
+                bot_mod.CB_DIR_CONFIRM,
+                version=2,
+                nonce="nonce123",
+            )
+        )
         context = _make_context()
         context.user_data = {
             "_pending_thread_id": 42,
@@ -646,6 +698,8 @@ class TestThreadPickerFlow:
             patch("ccbot.bot.build_thread_picker", return_value=("picker", MagicMock())),
             patch("ccbot.bot.safe_edit", new_callable=AsyncMock) as mock_edit,
         ):
+            mock_sm.validate_topic_bind_flow_callback.return_value = True
+            mock_sm.get_topic_bind_flow_credentials.return_value = (2, "nonce123")
             mock_sm.list_threads_for_directory = AsyncMock(return_value=[thread])
 
             await bot_mod.callback_handler(update, context)
@@ -657,7 +711,13 @@ class TestThreadPickerFlow:
 
     @pytest.mark.asyncio
     async def test_thread_picker_resume_uses_selected_thread_id(self):
-        update = self._make_callback_update(f"{bot_mod.CB_THREAD_SELECT}0")
+        update = self._make_callback_update(
+            append_bind_flow_token(
+                f"{bot_mod.CB_THREAD_SELECT}0",
+                version=2,
+                nonce="nonce123",
+            )
+        )
         context = _make_context()
         context.user_data = {
             "_pending_thread_id": 42,
@@ -668,8 +728,10 @@ class TestThreadPickerFlow:
         with (
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot._create_and_bind_window", new_callable=AsyncMock) as mock_create,
         ):
+            mock_sm.validate_topic_bind_flow_callback.return_value = True
             await bot_mod.callback_handler(update, context)
 
         mock_create.assert_awaited_once()
@@ -677,7 +739,13 @@ class TestThreadPickerFlow:
 
     @pytest.mark.asyncio
     async def test_thread_picker_fresh_thread_omits_resume_id(self):
-        update = self._make_callback_update(bot_mod.CB_THREAD_NEW)
+        update = self._make_callback_update(
+            append_bind_flow_token(
+                bot_mod.CB_THREAD_NEW,
+                version=2,
+                nonce="nonce123",
+            )
+        )
         context = _make_context()
         context.user_data = {
             "_pending_thread_id": 42,
@@ -687,8 +755,10 @@ class TestThreadPickerFlow:
         with (
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot._create_and_bind_window", new_callable=AsyncMock) as mock_create,
         ):
+            mock_sm.validate_topic_bind_flow_callback.return_value = True
             await bot_mod.callback_handler(update, context)
 
         mock_create.assert_awaited_once()

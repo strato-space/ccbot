@@ -415,12 +415,16 @@ class TestTopicControlStateMachine:
         mgr.set_topic_policy(100, 42, TOPIC_POLICY_MANUAL_BIND_REQUIRED)
         mgr.start_topic_bind_flow(100, 42)
         assert mgr.get_topic_binding_state(100, 42) == BINDING_STATE_BIND_FLOW
+        version, nonce = mgr.get_topic_bind_flow_credentials(100, 42)
+        assert mgr.validate_topic_bind_flow_callback(100, 42, version, nonce)
 
         mgr.bind_thread(100, 42, "@7", window_name="proj")
 
         assert mgr.get_window_for_thread(100, 42) == "@7"
         assert mgr.get_topic_binding_state(100, 42) == BINDING_STATE_BOUND
         assert mgr.get_topic_policy(100, 42) == TOPIC_POLICY_MANUAL_BIND_REQUIRED
+        rotated_version, rotated_nonce = mgr.get_topic_bind_flow_credentials(100, 42)
+        assert (rotated_version, rotated_nonce) != (version, nonce)
 
     def test_unbind_thread_preserves_policy_but_clears_binding_state(
         self, mgr: SessionManager
@@ -443,6 +447,19 @@ class TestTopicControlStateMachine:
         mgr.allow_implicit_bind(100, 42)
         assert mgr.get_topic_policy(100, 42) == TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
         assert mgr.get_topic_binding_state(100, 42) == BINDING_STATE_NONE
+
+    def test_require_manual_bind_invalidates_old_bind_flow_credentials(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.start_topic_bind_flow(100, 42)
+        version, nonce = mgr.get_topic_bind_flow_credentials(100, 42)
+
+        mgr.require_manual_bind(100, 42)
+
+        assert not mgr.validate_topic_bind_flow_callback(100, 42, version, nonce)
+        rotated_version, rotated_nonce = mgr.get_topic_bind_flow_credentials(100, 42)
+        assert rotated_version > version
+        assert rotated_nonce != nonce
 
 
 class TestIsWindowId:

@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import re
+import secrets
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +44,8 @@ from .state_schema import (
     BINDING_STATE_BIND_FLOW,
     BINDING_STATE_BOUND,
     BINDING_STATE_NONE,
+    TOPIC_BIND_FLOW_NONCES_KEY,
+    TOPIC_BIND_FLOW_VERSIONS_KEY,
     TOPIC_BINDING_STATES_KEY,
     TOPIC_POLICIES_KEY,
     TOPIC_POLICY_IMPLICIT_BIND_ALLOWED,
@@ -50,6 +53,8 @@ from .state_schema import (
     build_session_map_payload,
     ensure_legacy_backup,
     infer_runtime_kind,
+    normalize_bind_flow_nonce,
+    normalize_bind_flow_version,
     normalize_binding_state,
     normalize_topic_policy,
     split_session_map_payload,
@@ -86,6 +91,8 @@ class SessionManager:
     thread_bindings: dict[int, dict[int, str]] = field(default_factory=dict)
     topic_policies: dict[int, dict[int, str]] = field(default_factory=dict)
     topic_binding_states: dict[int, dict[int, str]] = field(default_factory=dict)
+    topic_bind_flow_versions: dict[int, dict[int, int]] = field(default_factory=dict)
+    topic_bind_flow_nonces: dict[int, dict[int, str]] = field(default_factory=dict)
     # window_id -> display name (window_name)
     window_display_names: dict[str, str] = field(default_factory=dict)
     # "user_id:thread_id" -> group chat_id (for supergroup forum topic routing)
@@ -125,6 +132,14 @@ class SessionManager:
             "topic_binding_states": {
                 str(uid): {str(tid): state for tid, state in states.items()}
                 for uid, states in self.topic_binding_states.items()
+            },
+            "topic_bind_flow_versions": {
+                str(uid): {str(tid): version for tid, version in versions.items()}
+                for uid, versions in self.topic_bind_flow_versions.items()
+            },
+            "topic_bind_flow_nonces": {
+                str(uid): {str(tid): nonce for tid, nonce in nonces.items()}
+                for uid, nonces in self.topic_bind_flow_nonces.items()
             },
             "window_display_names": self.window_display_names,
             "group_chat_ids": self.group_chat_ids,
@@ -176,6 +191,22 @@ class SessionManager:
                     }
                     for uid, states in state.get(TOPIC_BINDING_STATES_KEY, {}).items()
                 }
+                self.topic_bind_flow_versions = {
+                    int(uid): {
+                        int(tid): normalize_bind_flow_version(version)
+                        for tid, version in versions.items()
+                    }
+                    for uid, versions in state.get(
+                        TOPIC_BIND_FLOW_VERSIONS_KEY, {}
+                    ).items()
+                }
+                self.topic_bind_flow_nonces = {
+                    int(uid): {
+                        int(tid): normalize_bind_flow_nonce(nonce)
+                        for tid, nonce in nonces.items()
+                    }
+                    for uid, nonces in state.get(TOPIC_BIND_FLOW_NONCES_KEY, {}).items()
+                }
                 self.window_display_names = state.get("window_display_names", {})
                 self.group_chat_ids = {
                     k: int(v) for k, v in state.get("group_chat_ids", {}).items()
@@ -210,6 +241,8 @@ class SessionManager:
                 self.thread_bindings = {}
                 self.topic_policies = {}
                 self.topic_binding_states = {}
+                self.topic_bind_flow_versions = {}
+                self.topic_bind_flow_nonces = {}
                 self.window_display_names = {}
                 self.group_chat_ids = {}
                 migrate_legacy = False
@@ -220,6 +253,12 @@ class SessionManager:
                 if TOPIC_BINDING_STATES_KEY not in state:
                     self.topic_binding_states = {}
                     migrate_legacy = True
+                if TOPIC_BIND_FLOW_VERSIONS_KEY not in state:
+                    self.topic_bind_flow_versions = {}
+                    migrate_legacy = True
+                if TOPIC_BIND_FLOW_NONCES_KEY not in state:
+                    self.topic_bind_flow_nonces = {}
+                    migrate_legacy = True
                 if self.topic_policies:
                     for uid, policies in self.topic_policies.items():
                         for tid, policy in list(policies.items()):
@@ -228,6 +267,14 @@ class SessionManager:
                     for uid, states in self.topic_binding_states.items():
                         for tid, binding_state in list(states.items()):
                             states[tid] = normalize_binding_state(binding_state)
+                if self.topic_bind_flow_versions:
+                    for uid, versions in self.topic_bind_flow_versions.items():
+                        for tid, version in list(versions.items()):
+                            versions[tid] = normalize_bind_flow_version(version)
+                if self.topic_bind_flow_nonces:
+                    for uid, nonces in self.topic_bind_flow_nonces.items():
+                        for tid, nonce in list(nonces.items()):
+                            nonces[tid] = normalize_bind_flow_nonce(nonce)
                 for uid, bindings in self.thread_bindings.items():
                     policy_map = self.topic_policies.setdefault(uid, {})
                     state_map = self.topic_binding_states.setdefault(uid, {})
@@ -236,6 +283,18 @@ class SessionManager:
                             tid, TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
                         )
                         state_map[tid] = BINDING_STATE_BOUND
+                for uid, states in self.topic_binding_states.items():
+                    version_map = self.topic_bind_flow_versions.setdefault(uid, {})
+                    nonce_map = self.topic_bind_flow_nonces.setdefault(uid, {})
+                    for tid, binding_state in states.items():
+                        if binding_state != BINDING_STATE_BIND_FLOW:
+                            continue
+                        version = normalize_bind_flow_version(version_map.get(tid))
+                        nonce = normalize_bind_flow_nonce(nonce_map.get(tid))
+                        if version <= 0 or not nonce:
+                            version_map[tid] = version + 1
+                            nonce_map[tid] = secrets.token_urlsafe(16)
+                            migrate_legacy = True
                 if migrate_legacy:
                     self._save_state()
 
@@ -935,6 +994,59 @@ class SessionManager:
 
     # --- Thread binding management ---
 
+    def _rotate_topic_bind_flow_credentials(
+        self, user_id: int, thread_id: int
+    ) -> tuple[int, str]:
+        """Issue fresh bind-flow credentials and persist them."""
+        version_map = self.topic_bind_flow_versions.setdefault(user_id, {})
+        nonce_map = self.topic_bind_flow_nonces.setdefault(user_id, {})
+        version = normalize_bind_flow_version(version_map.get(thread_id)) + 1
+        nonce = secrets.token_urlsafe(16)
+        version_map[thread_id] = version
+        nonce_map[thread_id] = nonce
+        return version, nonce
+
+    def get_topic_bind_flow_version(self, user_id: int, thread_id: int) -> int:
+        """Return the current bind-flow version for a topic."""
+        versions = self.topic_bind_flow_versions.get(user_id)
+        if not versions:
+            return 0
+        return normalize_bind_flow_version(versions.get(thread_id))
+
+    def get_topic_bind_flow_nonce(self, user_id: int, thread_id: int) -> str:
+        """Return the current bind-flow nonce for a topic."""
+        nonces = self.topic_bind_flow_nonces.get(user_id)
+        if not nonces:
+            return ""
+        return normalize_bind_flow_nonce(nonces.get(thread_id))
+
+    def get_topic_bind_flow_credentials(
+        self, user_id: int, thread_id: int
+    ) -> tuple[int, str]:
+        """Return the current bind-flow version and nonce for a topic."""
+        return (
+            self.get_topic_bind_flow_version(user_id, thread_id),
+            self.get_topic_bind_flow_nonce(user_id, thread_id),
+        )
+
+    def validate_topic_bind_flow_callback(
+        self,
+        user_id: int,
+        thread_id: int,
+        version: int,
+        nonce: str,
+    ) -> bool:
+        """Check whether a callback matches the current bind-flow credentials."""
+        current_version, current_nonce = self.get_topic_bind_flow_credentials(
+            user_id, thread_id
+        )
+        return (
+            version > 0
+            and bool(nonce)
+            and current_version == version
+            and current_nonce == nonce
+        )
+
     def bind_thread(
         self, user_id: int, thread_id: int, window_id: str, window_name: str = ""
     ) -> None:
@@ -950,6 +1062,7 @@ class SessionManager:
             self.thread_bindings[user_id] = {}
         self.thread_bindings[user_id][thread_id] = window_id
         self.set_topic_binding_state(user_id, thread_id, BINDING_STATE_BOUND)
+        self._rotate_topic_bind_flow_credentials(user_id, thread_id)
         if window_name:
             self.window_display_names[window_id] = window_name
         self._save_state()
@@ -964,9 +1077,11 @@ class SessionManager:
 
     def unbind_thread(self, user_id: int, thread_id: int) -> str | None:
         """Remove a thread binding. Returns the previously bound window_id, or None."""
+        self._rotate_topic_bind_flow_credentials(user_id, thread_id)
         bindings = self.thread_bindings.get(user_id)
         if not bindings or thread_id not in bindings:
             self.set_topic_binding_state(user_id, thread_id, BINDING_STATE_NONE)
+            self._save_state()
             return None
         window_id = bindings.pop(thread_id)
         if not bindings:
@@ -1043,11 +1158,15 @@ class SessionManager:
     def start_topic_bind_flow(self, user_id: int, thread_id: int) -> None:
         """Mark a topic as being in an active bind flow."""
         self.set_topic_binding_state(user_id, thread_id, BINDING_STATE_BIND_FLOW)
+        self._rotate_topic_bind_flow_credentials(user_id, thread_id)
+        self._save_state()
 
     def require_manual_bind(self, user_id: int, thread_id: int) -> None:
         """Force a topic into manual-bind mode without changing its binding."""
         self.set_topic_policy(user_id, thread_id, TOPIC_POLICY_MANUAL_BIND_REQUIRED)
         self.set_topic_binding_state(user_id, thread_id, BINDING_STATE_NONE)
+        self._rotate_topic_bind_flow_credentials(user_id, thread_id)
+        self._save_state()
 
     def allow_implicit_bind(self, user_id: int, thread_id: int) -> None:
         """Allow implicit binding again for a topic."""
