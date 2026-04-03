@@ -31,11 +31,27 @@ from .codex_threads import (
     CodexThreadResolution,
 )
 from .input_driver import runtime_input_driver
-from .runtime_types import InputAction, LiveProcessDescriptor, ThreadLocator, TopicBinding
+from .runtime_types import (
+    InputAction,
+    LiveProcessDescriptor,
+    RuntimeCapability,
+    ThreadLocator,
+    TopicBinding,
+    runtime_capability_registry,
+)
 from .state_schema import (
+    BINDING_STATE_BIND_FLOW,
+    BINDING_STATE_BOUND,
+    BINDING_STATE_NONE,
+    TOPIC_BINDING_STATES_KEY,
+    TOPIC_POLICIES_KEY,
+    TOPIC_POLICY_IMPLICIT_BIND_ALLOWED,
+    TOPIC_POLICY_MANUAL_BIND_REQUIRED,
     build_session_map_payload,
     ensure_legacy_backup,
     infer_runtime_kind,
+    normalize_binding_state,
+    normalize_topic_policy,
     split_session_map_payload,
 )
 from .terminal_parser import classify_input_surface
@@ -68,6 +84,8 @@ class SessionManager:
     window_states: dict[str, LiveProcessDescriptor] = field(default_factory=dict)
     user_window_offsets: dict[int, dict[str, int]] = field(default_factory=dict)
     thread_bindings: dict[int, dict[int, str]] = field(default_factory=dict)
+    topic_policies: dict[int, dict[int, str]] = field(default_factory=dict)
+    topic_binding_states: dict[int, dict[int, str]] = field(default_factory=dict)
     # window_id -> display name (window_name)
     window_display_names: dict[str, str] = field(default_factory=dict)
     # "user_id:thread_id" -> group chat_id (for supergroup forum topic routing)
@@ -100,6 +118,14 @@ class SessionManager:
                 str(uid): {str(tid): wid for tid, wid in bindings.items()}
                 for uid, bindings in self.thread_bindings.items()
             },
+            "topic_policies": {
+                str(uid): {str(tid): policy for tid, policy in policies.items()}
+                for uid, policies in self.topic_policies.items()
+            },
+            "topic_binding_states": {
+                str(uid): {str(tid): state for tid, state in states.items()}
+                for uid, states in self.topic_binding_states.items()
+            },
             "window_display_names": self.window_display_names,
             "group_chat_ids": self.group_chat_ids,
         }
@@ -119,7 +145,9 @@ class SessionManager:
         if config.state_file.exists():
             try:
                 state = json.loads(config.state_file.read_text())
-                migrate_legacy = "schema_version" not in state
+                migrate_legacy = int(state.get("schema_version", 0) or 0) < (
+                    config.state_schema_version
+                )
                 if migrate_legacy:
                     ensure_legacy_backup(config.state_file)
                 self.window_states = {
@@ -133,6 +161,20 @@ class SessionManager:
                 self.thread_bindings = {
                     int(uid): {int(tid): wid for tid, wid in bindings.items()}
                     for uid, bindings in state.get("thread_bindings", {}).items()
+                }
+                self.topic_policies = {
+                    int(uid): {
+                        int(tid): normalize_topic_policy(policy)
+                        for tid, policy in policies.items()
+                    }
+                    for uid, policies in state.get(TOPIC_POLICIES_KEY, {}).items()
+                }
+                self.topic_binding_states = {
+                    int(uid): {
+                        int(tid): normalize_binding_state(binding_state)
+                        for tid, binding_state in states.items()
+                    }
+                    for uid, states in state.get(TOPIC_BINDING_STATES_KEY, {}).items()
                 }
                 self.window_display_names = state.get("window_display_names", {})
                 self.group_chat_ids = {
@@ -166,10 +208,34 @@ class SessionManager:
                 self.window_states = {}
                 self.user_window_offsets = {}
                 self.thread_bindings = {}
+                self.topic_policies = {}
+                self.topic_binding_states = {}
                 self.window_display_names = {}
                 self.group_chat_ids = {}
                 migrate_legacy = False
             else:
+                if TOPIC_POLICIES_KEY not in state:
+                    self.topic_policies = {}
+                    migrate_legacy = True
+                if TOPIC_BINDING_STATES_KEY not in state:
+                    self.topic_binding_states = {}
+                    migrate_legacy = True
+                if self.topic_policies:
+                    for uid, policies in self.topic_policies.items():
+                        for tid, policy in list(policies.items()):
+                            policies[tid] = normalize_topic_policy(policy)
+                if self.topic_binding_states:
+                    for uid, states in self.topic_binding_states.items():
+                        for tid, binding_state in list(states.items()):
+                            states[tid] = normalize_binding_state(binding_state)
+                for uid, bindings in self.thread_bindings.items():
+                    policy_map = self.topic_policies.setdefault(uid, {})
+                    state_map = self.topic_binding_states.setdefault(uid, {})
+                    for tid in bindings:
+                        policy_map.setdefault(
+                            tid, TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
+                        )
+                        state_map[tid] = BINDING_STATE_BOUND
                 if migrate_legacy:
                     self._save_state()
 
@@ -265,6 +331,7 @@ class SessionManager:
         self.window_states = new_window_states
 
         # --- Migrate thread_bindings ---
+        dropped_bindings: list[tuple[int, int]] = []
         for uid, bindings in self.thread_bindings.items():
             new_bindings: dict[int, str] = {}
             for tid, val in bindings.items():
@@ -284,6 +351,9 @@ class SessionManager:
                             new_bindings[tid] = new_id
                             self.window_display_names[new_id] = display
                             changed = True
+                            self.topic_binding_states.setdefault(uid, {})[tid] = (
+                                BINDING_STATE_BOUND
+                            )
                         else:
                             logger.info(
                                 "Dropping stale thread binding: user=%d, thread=%d, wid=%s",
@@ -291,6 +361,7 @@ class SessionManager:
                                 tid,
                                 val,
                             )
+                            dropped_bindings.append((uid, tid))
                             changed = True
                 else:
                     # Old format: val is window_name
@@ -299,6 +370,9 @@ class SessionManager:
                         logger.info("Migrating thread binding %s -> %s", val, new_id)
                         new_bindings[tid] = new_id
                         self.window_display_names[new_id] = val
+                        self.topic_binding_states.setdefault(uid, {})[tid] = (
+                            BINDING_STATE_BOUND
+                        )
                         changed = True
                     else:
                         logger.info(
@@ -307,6 +381,7 @@ class SessionManager:
                             tid,
                             val,
                         )
+                        dropped_bindings.append((uid, tid))
                         changed = True
             self.thread_bindings[uid] = new_bindings
 
@@ -314,6 +389,17 @@ class SessionManager:
         empty_users = [uid for uid, b in self.thread_bindings.items() if not b]
         for uid in empty_users:
             del self.thread_bindings[uid]
+
+        for uid, tid in dropped_bindings:
+            self.topic_binding_states.setdefault(uid, {})[tid] = BINDING_STATE_NONE
+
+        # Ensure every live binding has an explicit policy/state record.
+        for uid, bindings in self.thread_bindings.items():
+            policy_map = self.topic_policies.setdefault(uid, {})
+            state_map = self.topic_binding_states.setdefault(uid, {})
+            for tid in bindings:
+                policy_map.setdefault(tid, TOPIC_POLICY_IMPLICIT_BIND_ALLOWED)
+                state_map[tid] = BINDING_STATE_BOUND
 
         # --- Migrate user_window_offsets ---
         for uid, offsets in self.user_window_offsets.items():
@@ -567,6 +653,14 @@ class SessionManager:
             self.window_states[window_id] = LiveProcessDescriptor()
         return self.window_states[window_id]
 
+    def get_runtime_capability(
+        self, runtime_kind: str | None = None
+    ) -> RuntimeCapability:
+        """Return the capability profile for the requested runtime kind."""
+        return runtime_capability_registry.get(
+            runtime_kind or config.default_runtime_kind
+        )
+
     def get_window_state(self, window_id: str) -> WindowState:
         """Backward-compatible alias for get_process_descriptor()."""
         return self.get_process_descriptor(window_id)
@@ -772,7 +866,12 @@ class SessionManager:
         if not state.cwd:
             return None
 
-        if state.runtime_kind == "codex" and self.codex_thread_catalog is not None:
+        capability = self.get_runtime_capability(state.runtime_kind)
+
+        if (
+            capability.replay_evidence_discovery == "rollout_jsonl"
+            and self.codex_thread_catalog is not None
+        ):
             if state.thread_id:
                 candidate = self.codex_thread_catalog.get_candidate_fast(state.thread_id)
                 if candidate is not None:
@@ -796,7 +895,11 @@ class SessionManager:
                 registered_at=state.registered_at,
             )
 
-        if state.thread_id and state.cwd:
+        if (
+            capability.replay_evidence_discovery == "transcript_jsonl"
+            and state.thread_id
+            and state.cwd
+        ):
             session = await self._get_thread_locator_direct(state.thread_id, state.cwd)
             if session:
                 return CodexThreadResolution(
@@ -846,6 +949,7 @@ class SessionManager:
         if user_id not in self.thread_bindings:
             self.thread_bindings[user_id] = {}
         self.thread_bindings[user_id][thread_id] = window_id
+        self.set_topic_binding_state(user_id, thread_id, BINDING_STATE_BOUND)
         if window_name:
             self.window_display_names[window_id] = window_name
         self._save_state()
@@ -862,10 +966,12 @@ class SessionManager:
         """Remove a thread binding. Returns the previously bound window_id, or None."""
         bindings = self.thread_bindings.get(user_id)
         if not bindings or thread_id not in bindings:
+            self.set_topic_binding_state(user_id, thread_id, BINDING_STATE_NONE)
             return None
         window_id = bindings.pop(thread_id)
         if not bindings:
             del self.thread_bindings[user_id]
+        self.set_topic_binding_state(user_id, thread_id, BINDING_STATE_NONE)
         self._save_state()
         logger.info(
             "Unbound thread %d (was %s) for user %d",
@@ -881,6 +987,71 @@ class SessionManager:
         if not bindings:
             return None
         return bindings.get(thread_id)
+
+    def get_topic_policy(self, user_id: int, thread_id: int) -> str:
+        """Return the persisted topic policy for a user/topic pair."""
+        policies = self.topic_policies.get(user_id)
+        if not policies:
+            return TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
+        return normalize_topic_policy(policies.get(thread_id))
+
+    def set_topic_policy(self, user_id: int, thread_id: int, policy: str) -> None:
+        """Persist the topic policy without changing the binding itself."""
+        normalized = normalize_topic_policy(policy)
+        if user_id not in self.topic_policies:
+            self.topic_policies[user_id] = {}
+        if self.topic_policies[user_id].get(thread_id) == normalized:
+            return
+        self.topic_policies[user_id][thread_id] = normalized
+        self._save_state()
+        logger.info(
+            "Set topic policy for user %d thread %d -> %s",
+            user_id,
+            thread_id,
+            normalized,
+        )
+
+    def get_topic_binding_state(self, user_id: int, thread_id: int) -> str:
+        """Return the persisted binding state for a user/topic pair."""
+        states = self.topic_binding_states.get(user_id)
+        if states and thread_id in states:
+            return normalize_binding_state(states[thread_id])
+        return (
+            BINDING_STATE_BOUND
+            if self.get_window_for_thread(user_id, thread_id)
+            else BINDING_STATE_NONE
+        )
+
+    def set_topic_binding_state(
+        self, user_id: int, thread_id: int, binding_state: str
+    ) -> None:
+        """Persist the binding state without changing the topic policy."""
+        normalized = normalize_binding_state(binding_state)
+        if user_id not in self.topic_binding_states:
+            self.topic_binding_states[user_id] = {}
+        if self.topic_binding_states[user_id].get(thread_id) == normalized:
+            return
+        self.topic_binding_states[user_id][thread_id] = normalized
+        self._save_state()
+        logger.info(
+            "Set topic binding state for user %d thread %d -> %s",
+            user_id,
+            thread_id,
+            normalized,
+        )
+
+    def start_topic_bind_flow(self, user_id: int, thread_id: int) -> None:
+        """Mark a topic as being in an active bind flow."""
+        self.set_topic_binding_state(user_id, thread_id, BINDING_STATE_BIND_FLOW)
+
+    def require_manual_bind(self, user_id: int, thread_id: int) -> None:
+        """Force a topic into manual-bind mode without changing its binding."""
+        self.set_topic_policy(user_id, thread_id, TOPIC_POLICY_MANUAL_BIND_REQUIRED)
+        self.set_topic_binding_state(user_id, thread_id, BINDING_STATE_NONE)
+
+    def allow_implicit_bind(self, user_id: int, thread_id: int) -> None:
+        """Allow implicit binding again for a topic."""
+        self.set_topic_policy(user_id, thread_id, TOPIC_POLICY_IMPLICIT_BIND_ALLOWED)
 
     def resolve_window_for_thread(
         self,
@@ -965,17 +1136,21 @@ class SessionManager:
         if not window:
             return False, "Window not found (may have been closed)"
 
-        pane_text = await tmux_manager.capture_pane(window.window_id)
-        if pane_text:
-            surface = classify_input_surface(pane_text)
-            if surface.kind == "blocked_prompt":
-                return False, BLOCKED_PROMPT_SEND_MESSAGE
-
         runtime_kind = (
             self.window_states[window_id].runtime_kind
             if window_id in self.window_states
             else config.default_runtime_kind
         )
+        capability = self.get_runtime_capability(runtime_kind)
+        pane_text = await tmux_manager.capture_pane(window.window_id)
+        if pane_text:
+            surface = classify_input_surface(pane_text)
+            if (
+                capability.blocked_input_policy == "fail_closed_on_visible_prompt"
+                and surface.kind == "blocked_prompt"
+            ):
+                return False, BLOCKED_PROMPT_SEND_MESSAGE
+
         trimmed = text.lstrip()
         if trimmed.startswith("/"):
             success, message = await runtime_input_driver.send_raw_slash_command(
@@ -1006,6 +1181,12 @@ class SessionManager:
             if window_id in self.window_states
             else config.default_runtime_kind
         )
+        capability = self.get_runtime_capability(runtime_kind)
+        if not capability.interactive_control_supported:
+            return (
+                False,
+                f"Interactive control is not supported for {capability.display_name}",
+            )
         return await runtime_input_driver.send_special_key(
             window.window_id,
             key,

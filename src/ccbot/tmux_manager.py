@@ -24,6 +24,7 @@ import libtmux
 
 from .config import SENSITIVE_ENV_VARS, config
 from .launcher_registration import infer_runtime_kind_from_command
+from .runtime_types import runtime_capability_registry
 
 logger = logging.getLogger(__name__)
 
@@ -321,6 +322,8 @@ class TmuxManager:
         window_name: str | None = None,
         start_claude: bool = True,
         resume_session_id: str | None = None,
+        runtime_kind: str | None = None,
+        launch_command: str | None = None,
     ) -> tuple[bool, str, str, str]:
         """Create a new tmux window and optionally start the configured runtime.
 
@@ -329,6 +332,8 @@ class TmuxManager:
             window_name: Optional window name (defaults to directory name)
             start_claude: Whether to start the configured runtime command
             resume_session_id: If set, resume the persisted thread/session id
+            runtime_kind: Optional explicit runtime kind for the launch
+            launch_command: Optional explicit runtime launch command override
 
         Returns:
             Tuple of (success, message, window_name, window_id)
@@ -371,13 +376,27 @@ class TmuxManager:
                 if start_claude:
                     pane = window.active_pane
                     if pane:
-                        cmd = config.claude_command
-                        runtime_kind = infer_runtime_kind_from_command(cmd)
-                        if resume_session_id:
-                            if runtime_kind == "codex":
-                                cmd = f"{cmd} resume {shlex.quote(resume_session_id)}"
-                            else:
-                                cmd = f"{cmd} --resume {shlex.quote(resume_session_id)}"
+                        configured_runtime_kind = infer_runtime_kind_from_command(
+                            config.claude_command
+                        )
+                        source_command = launch_command or config.claude_command
+                        inferred_runtime_kind = (
+                            runtime_kind
+                            or infer_runtime_kind_from_command(source_command)
+                        )
+                        cmd = runtime_capability_registry.build_launch_command(
+                            inferred_runtime_kind,
+                            base_command=(
+                                launch_command
+                                or (
+                                    config.claude_command
+                                    if runtime_kind is None
+                                    or inferred_runtime_kind == configured_runtime_kind
+                                    else None
+                                )
+                            ),
+                            resume_session_id=resume_session_id,
+                        )
                         launch_cmd = f"cd {shlex.quote(str(path))} && {cmd}"
                         pane.send_keys(launch_cmd, enter=True)
 

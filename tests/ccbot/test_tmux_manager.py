@@ -86,3 +86,32 @@ async def test_create_window_keeps_legacy_resume_flag_for_claude(
     assert pane.commands == [
         (f"cd {workspace} && claude --resume session-456", True)
     ]
+
+
+@pytest.mark.asyncio
+async def test_create_window_uses_registry_resume_flag_for_fast_agent(
+    monkeypatch, tmp_path
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    pane = _FakePane()
+    window = _FakeWindow(pane)
+    session = _FakeSession(window)
+    manager = TmuxManager(session_name="ccbot-test")
+
+    async def _no_conflict(_name: str):
+        return None
+
+    monkeypatch.setattr(manager, "find_window_by_name", _no_conflict)
+    monkeypatch.setattr(manager, "get_or_create_session", lambda: session)
+
+    ok, _message, _window_name, _window_id = await manager.create_window(
+        str(workspace),
+        resume_session_id="session-789",
+        runtime_kind="fast-agent",
+    )
+
+    assert ok is True
+    assert pane.commands == [
+        (f"cd {workspace} && fast-agent --resume session-789", True)
+    ]

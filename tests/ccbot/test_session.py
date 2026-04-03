@@ -10,6 +10,13 @@ import pytest
 from ccbot.codex_threads import CodexThreadCatalog
 from ccbot.session import SessionManager
 from ccbot.runtime_types import LiveProcessDescriptor
+from ccbot.state_schema import (
+    BINDING_STATE_BIND_FLOW,
+    BINDING_STATE_BOUND,
+    BINDING_STATE_NONE,
+    TOPIC_POLICY_IMPLICIT_BIND_ALLOWED,
+    TOPIC_POLICY_MANUAL_BIND_REQUIRED,
+)
 
 
 @pytest.fixture
@@ -125,6 +132,20 @@ class TestGroupChatId:
         assert mgr.resolve_chat_id(100, None) == 100
         # The stored key is "100:0", only accessible with explicit thread_id=0
         assert mgr.group_chat_ids.get("100:0") == -999
+
+
+class TestRuntimeCapabilityRegistryIntegration:
+    def test_session_manager_exposes_runtime_capabilities(
+        self, mgr: SessionManager
+    ) -> None:
+        claude = mgr.get_runtime_capability("claude")
+        codex = mgr.get_runtime_capability("codex")
+        fast_agent = mgr.get_runtime_capability("fast-agent")
+
+        assert claude.tmux_stdio_cli_first is True
+        assert codex.resume_style == "subcommand"
+        assert fast_agent.replay_evidence_discovery == "acp_log_jsonl"
+        assert fast_agent.supports_message_routing_mode("steer")
 
 
 class TestWindowState:
@@ -383,6 +404,45 @@ class TestRuntimeInputDriverIntegration:
             "Escape",
             runtime_kind="codex",
         )
+
+
+class TestTopicControlStateMachine:
+    def test_defaults_allow_implicit_bind(self, mgr: SessionManager) -> None:
+        assert mgr.get_topic_policy(100, 42) == TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
+        assert mgr.get_topic_binding_state(100, 42) == BINDING_STATE_NONE
+
+    def test_bind_thread_marks_bound_without_touching_policy(self, mgr: SessionManager) -> None:
+        mgr.set_topic_policy(100, 42, TOPIC_POLICY_MANUAL_BIND_REQUIRED)
+        mgr.start_topic_bind_flow(100, 42)
+        assert mgr.get_topic_binding_state(100, 42) == BINDING_STATE_BIND_FLOW
+
+        mgr.bind_thread(100, 42, "@7", window_name="proj")
+
+        assert mgr.get_window_for_thread(100, 42) == "@7"
+        assert mgr.get_topic_binding_state(100, 42) == BINDING_STATE_BOUND
+        assert mgr.get_topic_policy(100, 42) == TOPIC_POLICY_MANUAL_BIND_REQUIRED
+
+    def test_unbind_thread_preserves_policy_but_clears_binding_state(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.set_topic_policy(100, 42, TOPIC_POLICY_MANUAL_BIND_REQUIRED)
+        mgr.bind_thread(100, 42, "@7", window_name="proj")
+
+        assert mgr.unbind_thread(100, 42) == "@7"
+        assert mgr.get_window_for_thread(100, 42) is None
+        assert mgr.get_topic_binding_state(100, 42) == BINDING_STATE_NONE
+        assert mgr.get_topic_policy(100, 42) == TOPIC_POLICY_MANUAL_BIND_REQUIRED
+
+    def test_manual_and_implicit_policy_updates_are_independent(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.require_manual_bind(100, 42)
+        assert mgr.get_topic_policy(100, 42) == TOPIC_POLICY_MANUAL_BIND_REQUIRED
+        assert mgr.get_topic_binding_state(100, 42) == BINDING_STATE_NONE
+
+        mgr.allow_implicit_bind(100, 42)
+        assert mgr.get_topic_policy(100, 42) == TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
+        assert mgr.get_topic_binding_state(100, 42) == BINDING_STATE_NONE
 
 
 class TestIsWindowId:

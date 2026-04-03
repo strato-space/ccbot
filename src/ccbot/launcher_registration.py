@@ -7,27 +7,9 @@ continues to rely on the legacy hook path.
 
 from __future__ import annotations
 
-import shlex
-from pathlib import Path
-
-from .state_schema import DEFAULT_RUNTIME_KIND
+from .runtime_types import runtime_capability_registry
 
 
 def infer_runtime_kind_from_command(command: str) -> str:
     """Infer the runtime kind launched in a new tmux window."""
-    command = (command or "").strip().casefold()
-    if not command:
-        return DEFAULT_RUNTIME_KIND
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        tokens = command.split()
-    for token in tokens:
-        if "=" in token and not token.startswith(("/", "./", "../")):
-            name, _, value = token.partition("=")
-            if name and value:
-                continue
-        executable = Path(token).name
-        if "codex" in executable:
-            return "codex"
-    return DEFAULT_RUNTIME_KIND
+    return runtime_capability_registry.infer_runtime_kind_from_command(command)

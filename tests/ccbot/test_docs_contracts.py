@@ -43,6 +43,17 @@ def test_runtime_ontology_note_uses_runtime_neutral_terms() -> None:
     assert "literal ACP-protocol-over-stdio" in ontology
 
 
+def test_runtime_capability_registry_doc_describes_supported_profiles() -> None:
+    doc = _read("doc/runtime-capabilities.md")
+
+    assert "tmux is the live human control surface" in doc
+    assert "Claude Code" in doc
+    assert "Codex" in doc
+    assert "fast-agent" in doc
+    assert "queue" in doc
+    assert "steer" in doc
+
+
 def test_russian_readme_matches_codex_fork_positioning() -> None:
     readme_ru = _read("README_RU.md")
 

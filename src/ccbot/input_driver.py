@@ -20,6 +20,7 @@ import logging
 from dataclasses import dataclass
 
 from .runtime_types import InputAction
+from .runtime_types import RuntimeCapability, runtime_capability_registry
 from .state_schema import DEFAULT_RUNTIME_KIND, normalize_runtime_kind
 from .tmux_manager import TmuxManager, tmux_manager
 
@@ -126,6 +127,26 @@ class RuntimeInputDriver:
         self._submit_delay = submit_delay
         self._shell_transition_delay = shell_transition_delay
 
+    def get_runtime_capability(self, runtime_kind: str = DEFAULT_RUNTIME_KIND) -> RuntimeCapability:
+        """Return the capability profile for a runtime kind."""
+        return runtime_capability_registry.get(runtime_kind)
+
+    def supports_message_routing_mode(
+        self, runtime_kind: str, routing_mode: str
+    ) -> bool:
+        """Check whether a runtime supports the requested routing mode."""
+        return runtime_capability_registry.supports_message_routing_mode(
+            runtime_kind, routing_mode
+        )
+
+    def supports_interactive_control(self, runtime_kind: str) -> bool:
+        """Check whether a runtime supports operator control through tmux."""
+        return runtime_capability_registry.supports_interactive_control(runtime_kind)
+
+    def blocked_input_policy(self, runtime_kind: str) -> str:
+        """Return the runtime's blocked-input policy."""
+        return self.get_runtime_capability(runtime_kind).blocked_input_policy
+
     async def send_text(
         self,
         window_id: str,
@@ -178,6 +199,7 @@ class RuntimeInputDriver:
 
         runtime_kind = normalize_runtime_kind(action.runtime_kind)
         action_type = action.action_type
+        capability = self.get_runtime_capability(runtime_kind)
 
         if action_type in {"submit_text", "paste_text", "raw_slash_command"}:
             return await self._send_text(
@@ -189,6 +211,11 @@ class RuntimeInputDriver:
             )
 
         if action_type == "special_key":
+            if not capability.interactive_control_supported:
+                return (
+                    False,
+                    f"Interactive control is not supported for {capability.display_name}",
+                )
             return await self._send_special_key(
                 window.window_id,
                 action.payload,
