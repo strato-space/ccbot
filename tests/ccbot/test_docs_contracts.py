@@ -26,6 +26,9 @@ def test_strato_ops_runbook_captures_cutover_and_rollback_contract() -> None:
     assert "/home/tools/codex-tools/codex-session-scout" in runbook
     assert "runtime process -> runtime conversation identity -> replay evidence" in runbook
     assert "`voice`, `task`, and `ACP-module`" in runbook
+    assert "voice" in runbook
+    assert "raw `/task`" in runbook
+    assert "raw `/ACP`" in runbook
 
 
 def test_runtime_ontology_note_uses_runtime_neutral_terms() -> None:
