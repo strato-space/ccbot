@@ -157,11 +157,13 @@ uv run ccbot
 | `/start`      | Show welcome message |
 | `/history`    | Message history for this topic |
 | `/screenshot` | Capture terminal screenshot |
-| `/esc`        | Send Escape to interrupt Codex |
+| `/esc`        | Send Escape to interrupt the active runtime |
+| `/bind`       | Start an explicit bind flow for this topic |
 | `/unbind`     | Detach this topic from its live window |
-| `/usage`      | Legacy Claude-only helper; Codex users should prefer `/status` |
+| `/resume`     | Bind this topic to a persisted runtime thread when the configured lane supports deterministic explicit resume |
+| `/rename`     | Rename the current tmux window and sync the topic title |
 
-**Supported Codex commands shown in the Telegram menu:**
+**Supported Codex core-lane commands shown in the Telegram menu when the configured launch lane is Codex:**
 
 | Command    | Description                  |
 | ---------- | ---------------------------- |
@@ -172,25 +174,41 @@ uv run ccbot
 | `/review`  | Review current changes |
 | `/status`  | Show Codex session status |
 
-Other raw `/command` inputs are still forwarded best-effort to the Codex TUI, but they are not part of the supported Telegram command surface unless documented above. This is intentional: commands that depend on prompt selection or other unsupported remote controls are not advertised in the menu even if Codex can handle them locally. Claude-only commands such as `/cost`, `/help`, `/memory`, and `/usage` are not part of the supported Codex lane.
+Other raw `/command` inputs are still forwarded best-effort to the active tmux-hosted runtime, but they are not part of the supported Telegram command surface unless documented above. This is intentional: commands that depend on prompt selection or other unsupported remote controls are not advertised in the menu even if a runtime can handle them locally. Claude-only commands such as `/cost`, `/help`, `/memory`, and `/usage` are not part of the supported Codex lane.
 
 ### Topic Workflow
 
 **1 Topic = 1 live tmux binding at a time.** The bot runs in Telegram Forum (topics) mode.
 
-Each topic controls one tmux window at a time. The process inside that window may start a fresh conversation or resume an existing persisted identity.
+Each topic controls one tmux window at a time. The process inside that window may start a fresh conversation or resume an existing persisted identity. The concrete runtime lane depends on `CLAUDE_COMMAND`.
 
 **Creating a new session:**
 
 1. Create a new topic in the Telegram group
-2. Send any message in the topic
+2. Send any plain text message in the topic
 3. A directory browser appears — select the project directory
 4. If the directory has existing Codex identities, an identity picker appears — choose one to resume or start fresh
-5. A tmux window is created, `codex` starts (with resume wiring if resuming), and your pending message is forwarded
+5. A tmux window is created, the configured runtime starts there (with resume wiring if resuming), and your pending message is forwarded
+
+**Explicit bind, explicit resume, and manual unbind:**
+
+- The first plain text message in a fresh topic may still trigger the bind flow automatically.
+- After an explicit `/unbind` or a picker cancel, the topic enters `manual_bind_required`.
+- In `manual_bind_required`, plain messages do not restart binding implicitly.
+- Use `/bind` to choose a live window or workspace again.
+- Use `/resume <thread-name|id>` only when the configured runtime lane supports deterministic explicit resume from an unbound topic.
+  - Codex: supported by exact persisted thread id or exact thread name.
+  - Claude Code: degraded from an unbound topic because transcript ids do not prove the workspace path.
+  - fast-agent: degraded from an unbound topic because session ids are scoped by the workspace `.fast-agent` root.
 
 **Sending messages:**
 
-Once a topic is bound to a window, just send text or voice messages in that topic — text gets forwarded to Codex via tmux keystrokes, and voice messages are automatically transcribed and forwarded as text.
+Once a topic is bound to a window, plain text and voice messages are forwarded to the active tmux-hosted runtime. Voice is transcribed first, then routed like plain text.
+
+Routing note:
+- Telegram text and voice inputs enter the equal message layer in `queue` mode by default.
+- `steer` is a routing semantic for runtime-aware control flows; it is not the same thing as raw terminal takeover.
+- Raw terminal control in tmux remains a separate operator layer and is never modeled as an ordinary queued message.
 
 **Killing a session:**
 

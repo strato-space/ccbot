@@ -95,8 +95,9 @@ class TestBotRegistration:
         assert "topic_edited_handler" in callbacks
 
     def test_build_bot_commands_advertises_only_codex_core_lane(self):
-        commands = bot_mod.build_bot_commands()
-        names = [command.command for command in commands]
+        with patch.object(bot_mod.config, "claude_command", "codex"):
+            commands = bot_mod.build_bot_commands()
+            names = [command.command for command in commands]
 
         assert names == [
             "start",
@@ -105,16 +106,34 @@ class TestBotRegistration:
             "esc",
             "bind",
             "unbind",
+            "resume",
+            "rename",
             "clear",
             "compact",
             "diff",
             "init",
             "review",
-            "rename",
             "status",
         ]
         assert "kill" not in names
         assert "usage" not in names
+
+    def test_build_bot_commands_hides_codex_passthrough_for_non_codex_lane(self):
+        with patch.object(bot_mod.config, "claude_command", "fast-agent"):
+            commands = bot_mod.build_bot_commands()
+            names = [command.command for command in commands]
+
+        assert names == [
+            "start",
+            "history",
+            "screenshot",
+            "esc",
+            "bind",
+            "unbind",
+            "resume",
+            "rename",
+        ]
+        assert "status" not in names
 
     @pytest.mark.asyncio
     async def test_post_init_registers_codex_core_lane_commands(self):
@@ -141,6 +160,7 @@ class TestBotRegistration:
             return dummy_task
 
         with (
+            patch.object(bot_mod.config, "claude_command", "codex"),
             patch("ccbot.bot.session_manager.resolve_stale_ids", new_callable=AsyncMock),
             patch("ccbot.bot.SessionMonitor", return_value=_StubMonitor()),
             patch("ccbot.bot.asyncio.create_task", side_effect=_capture_task),
@@ -154,6 +174,8 @@ class TestBotRegistration:
         assert "status" in command_names
         assert "diff" in command_names
         assert "review" in command_names
+        assert "resume" in command_names
+        assert "rename" in command_names
         assert "usage" not in command_names
         assert "model" not in command_names
 
@@ -165,6 +187,7 @@ class TestCommandSurface:
         context = _make_context()
 
         with (
+            patch.object(bot_mod.config, "claude_command", "codex"),
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
@@ -172,9 +195,14 @@ class TestCommandSurface:
 
         mock_reply.assert_awaited_once()
         text = mock_reply.await_args.args[1]
-        assert "Codex tmux control" in text
+        assert "tmux runtime control" in text
         assert "Each topic controls one live tmux window" in text
-        assert "core lane" in text
+        assert "Codex" in text
+        assert "queue mode" in text
+        assert "steer" in text
+        assert "/bind or a supported /resume" in text
+        assert "After /unbind or Cancel" in text
+        assert "raw tmux terminal control" in text
         assert "Claude Code Monitor" not in text
 
     @pytest.mark.asyncio
@@ -262,6 +290,7 @@ class TestCommandSurface:
         mock_tmux.list_windows.assert_not_called()
         mock_reply.assert_awaited_once()
         assert "manually unbound" in mock_reply.await_args.args[1]
+        assert "/bind" in mock_reply.await_args.args[1]
 
     @pytest.mark.asyncio
     async def test_text_handler_does_not_restart_bind_flow_while_picker_is_active(self):
@@ -291,6 +320,7 @@ class TestCommandSurface:
         context = _make_context()
 
         with (
+            patch.object(bot_mod.config, "claude_command", "codex"),
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot._get_thread_id", return_value=42),
             patch("ccbot.bot.session_manager") as mock_sm,
@@ -306,7 +336,7 @@ class TestCommandSurface:
         mock_sm.require_manual_bind.assert_called_once_with(1, 42)
         mock_clear.assert_awaited_once_with(1, 42, context.bot, context.user_data)
         mock_reply.assert_awaited_once()
-        assert "Use /bind to choose a different window" in mock_reply.await_args.args[1]
+        assert "/resume <thread-name|id>" in mock_reply.await_args.args[1]
 
     @pytest.mark.asyncio
     async def test_unbind_command_without_binding_keeps_manual_bind_required(self):
@@ -314,6 +344,7 @@ class TestCommandSurface:
         context = _make_context()
 
         with (
+            patch.object(bot_mod.config, "claude_command", "fast-agent"),
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot._get_thread_id", return_value=42),
             patch("ccbot.bot.session_manager") as mock_sm,
@@ -328,6 +359,84 @@ class TestCommandSurface:
         mock_clear.assert_awaited_once_with(1, 42, context.bot, context.user_data)
         mock_reply.assert_awaited_once()
         assert "manually unbound" in mock_reply.await_args.args[1]
+        assert "workspace `.fast-agent` root" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_resume_command_uses_codex_resolution_and_binds_topic(self):
+        update = _make_topic_update()
+        update.message.text = "/resume planning-thread"
+        context = _make_context()
+
+        with (
+            patch.object(bot_mod.config, "claude_command", "codex"),
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.clear_topic_state", new_callable=AsyncMock),
+            patch("ccbot.bot._register_bound_window", new_callable=AsyncMock) as mock_register,
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+            mock_sm.codex_thread_catalog = MagicMock()
+            mock_sm.codex_thread_catalog.resolve_resume_target.return_value = SimpleNamespace(
+                status="selected",
+                selected=SimpleNamespace(
+                    thread_id="thread-1",
+                    summary="Planning thread",
+                    cwd="/tmp/project",
+                ),
+            )
+            mock_sm.get_runtime_capability.return_value = SimpleNamespace(
+                display_name="Codex"
+            )
+            mock_tmux.create_or_reuse_window = AsyncMock(
+                return_value=(True, "Reused window 'project' at /tmp/project", "project", "@7", True)
+            )
+
+            await bot_mod.resume_command(update, context)
+
+        mock_tmux.create_or_reuse_window.assert_awaited_once_with(
+            "/tmp/project",
+            start_claude=True,
+            resume_session_id="thread-1",
+            runtime_kind="codex",
+            reuse_existing=True,
+        )
+        mock_register.assert_awaited_once_with(
+            context,
+            update.effective_user,
+            42,
+            window_id="@7",
+            window_name="project",
+            selected_path="/tmp/project",
+            runtime_kind="codex",
+            resume_session_id="thread-1",
+        )
+        mock_sm.allow_implicit_bind.assert_called_once_with(1, 42)
+        reply_text = mock_reply.await_args.args[1]
+        assert "Reused Codex window for 'Planning thread'" in reply_text
+        assert "resumed Codex thread" in reply_text
+
+    @pytest.mark.asyncio
+    async def test_resume_command_reports_fast_agent_degraded_mode(self):
+        update = _make_topic_update()
+        update.message.text = "/resume abc123"
+        context = _make_context()
+
+        with (
+            patch.object(bot_mod.config, "claude_command", "fast-agent"),
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+
+            await bot_mod.resume_command(update, context)
+
+        mock_reply.assert_awaited_once()
+        assert "workspace `.fast-agent` root" in mock_reply.await_args.args[1]
 
     @pytest.mark.asyncio
     async def test_rename_command_updates_window_topic_and_supported_identity(self):

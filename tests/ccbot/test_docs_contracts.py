@@ -15,6 +15,14 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "/home/tools/codex-tools/codex-session-scout" in readme
     assert "runtime conversation identity" in readme
     assert "replay evidence" in readme
+    assert "/resume <thread-name|id>" in readme
+    assert "manual_bind_required" in readme
+    assert "queue" in readme
+    assert "steer" in readme
+    assert "/resume" in readme
+    assert "manual_bind_required" in readme
+    assert "`queue` mode" in readme
+    assert "Raw terminal control" in readme
 
 
 def test_strato_ops_runbook_captures_cutover_and_rollback_contract() -> None:
@@ -52,6 +60,7 @@ def test_runtime_capability_registry_doc_describes_supported_profiles() -> None:
     assert "fast-agent" in doc
     assert "queue" in doc
     assert "steer" in doc
+    assert "safe degraded-mode behavior" in doc
 
 
 def test_codex_command_semantics_doc_captures_resume_and_rename_contract() -> None:
@@ -123,6 +132,16 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "Raw terminal control is not part of this equal message layer." in doc
 
 
+def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> None:
+    doc = _read("doc/telegram-bot-features.md")
+
+    assert "/resume <token>" in doc
+    assert "manual_bind_required" in doc
+    assert "queue" in doc
+    assert "steer" in doc
+    assert "workspace `.fast-agent` root" in doc
+
+
 def test_claude_runtime_adapter_doc_describes_first_class_adapter() -> None:
     doc = _read("doc/claude-runtime-adapter.md")
 
@@ -139,3 +158,14 @@ def test_fast_agent_runtime_adapter_doc_describes_title_only_semantics() -> None
     assert "acp_log.jsonl" in doc
     assert "title-only rename semantics" in doc
     assert "session_id` rename is unsupported" in doc
+
+
+def test_telegram_features_doc_captures_runtime_specific_command_surface() -> None:
+    doc = _read("doc/telegram-bot-features.md")
+
+    assert "/resume <token>" in doc
+    assert "/rename <name>" in doc
+    assert "manual_bind_required" in doc
+    assert "queue" in doc
+    assert "steer" in doc
+    assert "workspace `.fast-agent` root" in doc

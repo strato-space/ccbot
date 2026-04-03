@@ -36,6 +36,7 @@ import asyncio
 import io
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from telegram import (
@@ -163,7 +164,6 @@ CODEX_MENU_COMMANDS: dict[str, str] = {
     "diff": "↗ Show git diff in the current workspace",
     "init": "↗ Create AGENTS.md for Codex",
     "review": "↗ Review current changes",
-    "rename": "↗ Rename the current tmux window and topic",
     "status": "↗ Show Codex session status",
 }
 
@@ -175,13 +175,140 @@ CLAUDE_ONLY_COMMAND_HINTS: dict[str, str] = {
     ),
 }
 
-UNBOUND_TOPIC_MESSAGE = "❌ No Codex window is bound to this topic."
-MANUAL_BIND_REQUIRED_MESSAGE = (
-    "❌ This topic is manually unbound. Use /bind to choose a window."
-)
+UNBOUND_TOPIC_MESSAGE = "❌ No live tmux window is bound to this topic."
 BIND_FLOW_ACTIVE_MESSAGE = (
     "⚠️ This topic is already in a bind flow. Use the picker or /unbind to cancel it."
 )
+
+
+@dataclass(frozen=True)
+class _ResumeCommandTarget:
+    runtime_kind: str
+    thread_id: str
+    summary: str
+    cwd: str
+
+
+def _default_launch_runtime_kind() -> str:
+    """Return the configured runtime lane for new explicit launches."""
+    return infer_runtime_kind_from_command(config.claude_command)
+
+
+def _build_resume_usage(runtime_kind: str) -> str:
+    if runtime_kind == "codex":
+        return "❌ Usage: /resume <thread-name|id>"
+    if runtime_kind == "claude":
+        return "❌ Usage: /resume <session-id>"
+    return "❌ Usage: /resume <session-id>"
+
+
+def _build_manual_bind_required_message(runtime_kind: str) -> str:
+    if runtime_kind == "codex":
+        return (
+            "❌ This topic is manually unbound. Use /bind to choose a window, "
+            "or /resume <thread-name|id> to bind a persisted Codex thread explicitly."
+        )
+    if runtime_kind == "claude":
+        return (
+            "❌ This topic is manually unbound. Use /bind to choose a workspace. "
+            "Claude explicit /resume from an unbound topic is degraded because the "
+            "persisted transcript id does not prove the workspace path."
+        )
+    if runtime_kind == "fast-agent":
+        return (
+            "❌ This topic is manually unbound. Use /bind to choose a workspace. "
+            "fast-agent explicit /resume from an unbound topic is degraded because "
+            "session ids are scoped by the workspace `.fast-agent` root."
+        )
+    return "❌ This topic is manually unbound. Use /bind to choose a window."
+
+
+def _build_resume_degraded_message(runtime_kind: str) -> str:
+    if runtime_kind == "claude":
+        return (
+            "⚠️ Claude explicit `/resume` is not available from an unbound topic. "
+            "Claude transcript ids do not carry a reversible workspace path, so "
+            "ccbot cannot launch the correct tmux window safely. Use /bind to "
+            "choose the workspace first."
+        )
+    if runtime_kind == "fast-agent":
+        return (
+            "⚠️ fast-agent explicit `/resume` is not available from an unbound topic. "
+            "Persisted sessions are scoped by the workspace `.fast-agent` root, so "
+            "ccbot must see the workspace first. Use /bind to choose the workspace."
+        )
+    return "⚠️ Explicit /resume is not available for the configured runtime lane."
+
+
+def _build_unbound_input_message(user_id: int, thread_id: int | None) -> str:
+    """Explain how to re-enter the bind flow for unbound topics."""
+    runtime_kind = _default_launch_runtime_kind()
+    if (
+        thread_id is not None
+        and session_manager.get_topic_policy(user_id, thread_id)
+        == TOPIC_POLICY_MANUAL_BIND_REQUIRED
+    ):
+        return _build_manual_bind_required_message(runtime_kind)
+    return (
+        f"{UNBOUND_TOPIC_MESSAGE} "
+        "Send a plain text message to start the bind flow, or use /bind."
+    )
+
+
+def _clear_same_thread_picker_state(
+    user_data: dict | None,
+    thread_id: int | None,
+) -> None:
+    """Clear bind-flow UI state for the active topic before an explicit action."""
+    if user_data is None or thread_id is None:
+        return
+    if user_data.get("_pending_thread_id") != thread_id:
+        return
+    clear_window_picker_state(user_data)
+    clear_browse_state(user_data)
+    clear_thread_picker_state(user_data)
+    user_data.pop("_pending_thread_id", None)
+    user_data.pop("_pending_thread_text", None)
+    user_data.pop("_selected_path", None)
+
+
+async def _resolve_resume_command_target(
+    runtime_kind: str,
+    token: str,
+) -> tuple[_ResumeCommandTarget | None, str | None]:
+    """Resolve an explicit `/resume` token for the configured runtime lane."""
+    normalized_runtime = runtime_kind or _default_launch_runtime_kind()
+
+    if normalized_runtime == "codex":
+        if session_manager.codex_thread_catalog is None:
+            return None, "❌ Codex thread catalog is unavailable."
+        session_manager.codex_thread_catalog.refresh()
+        resolution = await asyncio.to_thread(
+            session_manager.codex_thread_catalog.resolve_resume_target,
+            token,
+        )
+        if resolution.status == "selected" and resolution.selected is not None:
+            candidate = resolution.selected
+            return (
+                _ResumeCommandTarget(
+                    runtime_kind="codex",
+                    thread_id=candidate.thread_id,
+                    summary=candidate.summary,
+                    cwd=candidate.cwd,
+                ),
+                None,
+            )
+        if resolution.status == "ambiguous":
+            return (
+                None,
+                "❌ Codex resume target is ambiguous. Use the exact persisted thread id.",
+            )
+        return (
+            None,
+            f"❌ No Codex thread matched '{token}'. Use the exact thread id or exact thread name.",
+        )
+
+    return None, _build_resume_degraded_message(normalized_runtime)
 
 
 def is_user_allowed(user_id: int | None) -> bool:
@@ -225,17 +352,25 @@ def _get_window_runtime_kind(window_id: str) -> str | None:
 
 
 def build_bot_commands() -> list[BotCommand]:
-    """Build the advertised Telegram command surface for the Codex core lane."""
+    """Build the advertised Telegram command surface.
+
+    The stable bot-level surface is always present. Codex passthrough commands
+    are only advertised when the configured default launch lane is Codex.
+    """
+    default_runtime_kind = _default_launch_runtime_kind()
     commands = [
-        BotCommand("start", "Show the Codex topic workflow"),
+        BotCommand("start", "Show the tmux topic workflow"),
         BotCommand("history", "Show thread history for this topic"),
         BotCommand("screenshot", "Capture the active tmux pane"),
-        BotCommand("esc", "Interrupt the active Codex task"),
+        BotCommand("esc", "Interrupt the active runtime task"),
         BotCommand("bind", "Start or resume the topic bind flow"),
         BotCommand("unbind", "Detach this topic from its live window"),
+        BotCommand("resume", "Resume a persisted thread or session in this topic"),
+        BotCommand("rename", "Rename the current tmux window and topic"),
     ]
-    for cmd_name, desc in CODEX_MENU_COMMANDS.items():
-        commands.append(BotCommand(cmd_name, desc))
+    if default_runtime_kind == "codex":
+        for cmd_name, desc in CODEX_MENU_COMMANDS.items():
+            commands.append(BotCommand(cmd_name, desc))
     return commands
 
 
@@ -450,14 +585,23 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     clear_browse_state(context.user_data)
 
+    capability = session_manager.get_runtime_capability(_default_launch_runtime_kind())
+
     if update.message:
         await safe_reply(
             update.message,
-            "🤖 *Codex tmux control*\n\n"
+            "🤖 *tmux runtime control*\n\n"
             "Each topic controls one live tmux window.\n"
-            "Create a topic, use /bind when you want to choose a window explicitly, "
-            "and CCBot will start or resume a Codex thread there.\n"
-            "The menu only advertises the supported core lane. Other raw Codex slash commands can still be typed manually.",
+            f"This bot launches the configured runtime lane in tmux: {capability.display_name}.\n"
+            "The first plain message in a fresh topic may trigger implicit bind. "
+            "After /unbind or Cancel, plain messages stop rebinding until you use "
+            "/bind or a supported /resume.\n"
+            "Telegram text enters the equal message layer in queue mode by default. "
+            "steer changes routing semantics for explicit runtime controls; raw "
+            "tmux terminal control stays separate and is never treated as a queued message.\n"
+            "Use /bind when you want to choose a workspace explicitly, and use "
+            "/resume when the current runtime lane supports deterministic explicit resume.\n"
+            "The menu only advertises the stable bot surface and any supported runtime core lane.",
         )
 
 
@@ -527,13 +671,15 @@ async def unbind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await safe_reply(update.message, "❌ This command only works in a topic.")
         return
 
+    runtime_kind = _default_launch_runtime_kind()
     wid = session_manager.get_window_for_thread(user.id, thread_id)
     if not wid:
         session_manager.require_manual_bind(user.id, thread_id)
         await clear_topic_state(user.id, thread_id, context.bot, context.user_data)
+        _clear_same_thread_picker_state(context.user_data, thread_id)
         await safe_reply(
             update.message,
-            MANUAL_BIND_REQUIRED_MESSAGE,
+            _build_manual_bind_required_message(runtime_kind),
         )
         return
 
@@ -545,8 +691,83 @@ async def unbind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await safe_reply(
         update.message,
         f"✅ Topic unbound from window '{display}'.\n"
-        "The Codex window is still running in tmux.\n"
-        "Use /bind to choose a different window or thread.",
+        "The live tmux window is still running.\n"
+        f"{_build_manual_bind_required_message(runtime_kind)}",
+    )
+
+
+async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Bind the current topic to a persisted runtime thread when supported."""
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        return
+    if not update.message:
+        return
+
+    thread_id = _get_thread_id(update)
+    if thread_id is None:
+        await safe_reply(update.message, "❌ This command only works in a topic.")
+        return
+
+    wid = session_manager.get_window_for_thread(user.id, thread_id)
+    if wid is not None:
+        display = session_manager.get_display_name(wid)
+        await safe_reply(
+            update.message,
+            f"ℹ️ This topic is already bound to '{display}'. Use /unbind first if you want to /resume a different persisted thread.",
+        )
+        return
+
+    runtime_kind = _default_launch_runtime_kind()
+    raw_text = (update.message.text or "").strip()
+    parts = raw_text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await safe_reply(update.message, _build_resume_usage(runtime_kind))
+        return
+
+    token = " ".join(parts[1].split())
+    target, error_message = await _resolve_resume_command_target(runtime_kind, token)
+    if target is None:
+        await safe_reply(update.message, error_message or _build_resume_degraded_message(runtime_kind))
+        return
+
+    await clear_topic_state(user.id, thread_id, context.bot, context.user_data)
+    _clear_same_thread_picker_state(context.user_data, thread_id)
+    session_manager.allow_implicit_bind(user.id, thread_id)
+
+    success, message, final_name, created_wid, reused_existing = await tmux_manager.create_or_reuse_window(
+        target.cwd,
+        start_claude=True,
+        resume_session_id=target.thread_id,
+        runtime_kind=target.runtime_kind,
+        reuse_existing=True,
+    )
+    if not success or not created_wid:
+        await safe_reply(update.message, f"❌ {message}")
+        return
+
+    await _register_bound_window(
+        context,
+        user,
+        thread_id,
+        window_id=created_wid,
+        window_name=final_name or Path(target.cwd).name,
+        selected_path=target.cwd,
+        runtime_kind=target.runtime_kind,
+        resume_session_id=target.thread_id,
+    )
+
+    capability = session_manager.get_runtime_capability(target.runtime_kind)
+    action = "Reused" if reused_existing else "Created"
+    await safe_reply(
+        update.message,
+        "\n".join(
+            [
+                f"✅ {message}",
+                f"✅ {action} {capability.display_name} window for '{target.summary}'.",
+                f"ℹ️ Topic is now bound to the resumed {capability.display_name} thread.",
+            ]
+        ),
     )
 
 
@@ -976,10 +1197,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     wid = session_manager.get_window_for_thread(user.id, thread_id)
     if wid is None:
-        await safe_reply(
-            update.message,
-            f"{UNBOUND_TOPIC_MESSAGE} Send a text message first to create one.",
-        )
+        await safe_reply(update.message, _build_unbound_input_message(user.id, thread_id))
         return
 
     w = await tmux_manager.find_window_by_id(wid)
@@ -1063,10 +1281,7 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     wid = session_manager.get_window_for_thread(user.id, thread_id)
     if wid is None:
-        await safe_reply(
-            update.message,
-            f"{UNBOUND_TOPIC_MESSAGE} Send a text message first to create one.",
-        )
+        await safe_reply(update.message, _build_unbound_input_message(user.id, thread_id))
         return
 
     w = await tmux_manager.find_window_by_id(wid)
@@ -1207,6 +1422,61 @@ async def _capture_bash_output(
         _bash_capture_tasks.pop((user_id, thread_id), None)
 
 
+async def _register_bound_window(
+    context: ContextTypes.DEFAULT_TYPE,
+    user: object,
+    thread_id: int,
+    *,
+    window_id: str,
+    window_name: str,
+    selected_path: str,
+    runtime_kind: str,
+    resume_session_id: str | None = None,
+) -> bool:
+    """Register a launched window, then bind the Telegram topic to it."""
+    session_manager.register_live_process(
+        window_id,
+        selected_path,
+        window_name=window_name,
+        runtime_kind=runtime_kind,
+        thread_id=resume_session_id or "",
+    )
+
+    if runtime_kind == "claude":
+        hook_timeout = 15.0 if resume_session_id else 5.0
+        hook_ok = await session_manager.wait_for_session_map_entry(
+            window_id, timeout=hook_timeout
+        )
+        if resume_session_id:
+            ws = session_manager.get_window_state(window_id)
+            if not hook_ok:
+                logger.warning(
+                    "Hook timed out for resume window %s, manually setting session_id=%s cwd=%s",
+                    window_id,
+                    resume_session_id,
+                    selected_path,
+                )
+                ws.session_id = resume_session_id
+                ws.cwd = str(selected_path)
+                ws.window_name = window_name
+                session_manager._save_state()
+            elif ws.session_id != resume_session_id:
+                logger.info(
+                    "Resume override: window %s session_id %s -> %s",
+                    window_id,
+                    ws.session_id,
+                    resume_session_id,
+                )
+                ws.session_id = resume_session_id
+                session_manager._save_state()
+
+    session_manager.allow_implicit_bind(user.id, thread_id)
+    session_manager.bind_thread(
+        user.id, thread_id, window_id, window_name=window_name
+    )
+    return await _sync_topic_title(context.bot, user.id, thread_id, window_name)
+
+
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
@@ -1307,7 +1577,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             binding_state = BINDING_STATE_NONE
 
         if topic_policy == TOPIC_POLICY_MANUAL_BIND_REQUIRED:
-            await safe_reply(update.message, MANUAL_BIND_REQUIRED_MESSAGE)
+            await safe_reply(
+                update.message,
+                _build_manual_bind_required_message(_default_launch_runtime_kind()),
+            )
             return
 
         logger.info(
@@ -1407,6 +1680,10 @@ async def _create_and_bind_window(
     selected_path: str,
     pending_thread_id: int | None,
     resume_session_id: str | None = None,
+    *,
+    runtime_kind: str | None = None,
+    launch_command: str | None = None,
+    reuse_existing: bool = False,
 ) -> None:
     """Create a tmux window, bind it to a topic, and forward pending text.
 
@@ -1417,9 +1694,25 @@ async def _create_and_bind_window(
     assert isinstance(query, CallbackQuery)
     assert isinstance(user, User)
 
-    success, message, created_wname, created_wid = await tmux_manager.create_window(
-        selected_path, resume_session_id=resume_session_id
-    )
+    resolved_runtime_kind = runtime_kind or _default_launch_runtime_kind()
+    if reuse_existing:
+        success, message, created_wname, created_wid, _reused_existing = (
+            await tmux_manager.create_or_reuse_window(
+                selected_path,
+                start_claude=True,
+                resume_session_id=resume_session_id,
+                runtime_kind=resolved_runtime_kind,
+                launch_command=launch_command,
+                reuse_existing=True,
+            )
+        )
+    else:
+        success, message, created_wname, created_wid = await tmux_manager.create_window(
+            selected_path,
+            resume_session_id=resume_session_id,
+            runtime_kind=resolved_runtime_kind,
+            launch_command=launch_command,
+        )
     if success:
         logger.info(
             "Window created: %s (id=%s) at %s (user=%d, thread=%s, resume=%s)",
@@ -1430,77 +1723,39 @@ async def _create_and_bind_window(
             pending_thread_id,
             resume_session_id,
         )
-        runtime_kind = infer_runtime_kind_from_command(config.claude_command)
-        session_manager.register_live_process(
-            created_wid,
-            selected_path,
-            window_name=created_wname,
-            runtime_kind=runtime_kind,
-            thread_id=resume_session_id or "",
-        )
-
-        # Claude windows still rely on SessionStart hook registration.
-        hook_ok = True
-        if runtime_kind != "codex":
-            # Wait for Claude Code's SessionStart hook to register in session_map.
-            # Resume sessions take longer to start (loading session state), so use
-            # a longer timeout to avoid silently dropping messages.
-            hook_timeout = 15.0 if resume_session_id else 5.0
-            hook_ok = await session_manager.wait_for_session_map_entry(
-                created_wid, timeout=hook_timeout
+        if pending_thread_id is None:
+            session_manager.register_live_process(
+                created_wid,
+                selected_path,
+                window_name=created_wname,
+                runtime_kind=resolved_runtime_kind,
+                thread_id=resume_session_id or "",
             )
-
-        # Claude resume may create a new session_id in the hook, but messages
-        # continue writing to the resumed session's JSONL file. Override the
-        # live descriptor to track the original resumed thread.
-        if resume_session_id and runtime_kind != "codex":
-            ws = session_manager.get_window_state(created_wid)
-            if not hook_ok:
-                # Hook timed out — manually populate window_state so the
-                # monitor can still route messages back to this topic.
-                logger.warning(
-                    "Hook timed out for resume window %s, "
-                    "manually setting session_id=%s cwd=%s",
-                    created_wid,
-                    resume_session_id,
-                    selected_path,
+            if resolved_runtime_kind == "claude":
+                hook_timeout = 15.0 if resume_session_id else 5.0
+                await session_manager.wait_for_session_map_entry(
+                    created_wid, timeout=hook_timeout
                 )
-                ws.session_id = resume_session_id
-                ws.cwd = str(selected_path)
-                ws.window_name = created_wname
-                session_manager._save_state()
-            elif ws.session_id != resume_session_id:
-                logger.info(
-                    "Resume override: window %s session_id %s -> %s",
-                    created_wid,
-                    ws.session_id,
-                    resume_session_id,
-                )
-                ws.session_id = resume_session_id
-                session_manager._save_state()
-
         if pending_thread_id is not None:
-            # Thread bind flow: bind thread to newly created window
-            session_manager.bind_thread(
-                user.id, pending_thread_id, created_wid, window_name=created_wname
+            topic_synced = await _register_bound_window(
+                context,
+                user,
+                pending_thread_id,
+                window_id=created_wid,
+                window_name=created_wname,
+                selected_path=selected_path,
+                runtime_kind=resolved_runtime_kind,
+                resume_session_id=resume_session_id,
             )
-
-            # Rename the topic to match the window name
             resolved_chat = session_manager.resolve_chat_id(user.id, pending_thread_id)
-            try:
-                await context.bot.edit_forum_topic(
-                    chat_id=resolved_chat,
-                    message_thread_id=pending_thread_id,
-                    name=created_wname,
-                )
-            except Exception as e:
-                logger.debug(f"Failed to rename topic: {e}")
 
             status = "Resumed thread" if resume_session_id else "Started fresh thread"
-            await safe_edit(
-                query,
-                f"✅ {message}\n\n{status}. Send messages here.",
-            )
+            response_lines = [f"✅ {message}", "", f"{status}. Send messages here."]
+            if not topic_synced:
+                response_lines.append(
+                    f"⚠️ Telegram topic title could not be synced; tmux window is '{created_wname}'."
+                )
+            await safe_edit(query, "\n".join(response_lines))
 
             # Send pending text if any
             pending_text = (
@@ -2503,6 +2758,7 @@ def create_bot() -> Application:
     application.add_handler(CommandHandler("esc", esc_command))
     application.add_handler(CommandHandler("bind", bind_command))
     application.add_handler(CommandHandler("unbind", unbind_command))
+    application.add_handler(CommandHandler("resume", resume_command))
     application.add_handler(CommandHandler("rename", rename_command))
     application.add_handler(CommandHandler("usage", usage_command))
     application.add_handler(CallbackQueryHandler(callback_handler))

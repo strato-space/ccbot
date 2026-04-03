@@ -162,7 +162,17 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 
 ### Currently Advertised by ccbot
 
-These commands are registered in the Telegram bot menu and forwarded to Codex via tmux:
+These commands are registered in the Telegram bot menu as the stable topic-control surface:
+
+| Command | Bot Menu Description | Function |
+|---------|---------------------|----------|
+| `/bind` | Start or resume the topic bind flow | Explicitly choose a live window or workspace for this topic |
+| `/unbind` | Detach this topic from its live window | Leaves the tmux window running but moves the topic to `manual_bind_required` |
+| `/resume <token>` | Bind this topic to a persisted runtime thread | Works only when the configured launch lane supports deterministic explicit resume from an unbound topic |
+| `/rename <name>` | Rename the current tmux window and topic | Sync the live tmux label, forum topic title, and supported runtime title metadata |
+| `/esc` | Interrupt the active runtime task | Sends Escape to the current tmux pane |
+
+When the configured launch lane is Codex, ccbot also advertises the Codex core lane:
 
 | Command | Bot Menu Description | Function |
 |---------|---------------------|----------|
@@ -171,8 +181,8 @@ These commands are registered in the Telegram bot menu and forwarded to Codex vi
 | `/diff` | ↗ Show git diff | Show the current workspace diff |
 | `/init` | ↗ Create AGENTS.md for Codex | Bootstrap project instructions for Codex |
 | `/review` | ↗ Review current changes | Start a code review against the current workspace |
-| `/rename <name>` | ↗ Rename the current tmux window and topic | Sync the live tmux label, forum topic title, and supported runtime title metadata |
 | `/status` | ↗ Show Codex session status | Display current session configuration and token usage |
+
 `/usage` still exists as a legacy Claude helper, but it is intentionally not advertised in the Telegram menu. In Codex windows the bot now points users to `/status` instead of rewriting the command silently.
 
 ### Other Codex Commands (Raw Passthrough, Not Menu-Supported)
@@ -191,9 +201,28 @@ These commands are registered in the Telegram bot menu and forwarded to Codex vi
 
 ### Surface Policy
 
-- Registered bot commands should describe only the supported Codex Telegram workflow.
+- Registered bot commands should describe only the stable topic-control surface and the configured runtime lane.
 - Prompt-driven commands stay out of the advertised menu unless the prompt parser can positively identify and drive the resulting TUI state.
 - Raw passthrough remains available for expert use, but undocumented commands are best-effort rather than release-contract behavior.
+
+### Topic Control Policy
+
+- A fresh topic may still start with implicit bind from the first plain message.
+- After explicit `/unbind` or picker cancel, the topic moves to `manual_bind_required`.
+- In `manual_bind_required`, plain messages do not re-trigger bind implicitly.
+- Only explicit `/bind` or explicit `/resume` may re-enter a bind-capable flow.
+
+### queue vs steer
+
+- Telegram text enters the equal message layer in `queue` mode by default.
+- `steer` is a routing semantic for runtime-aware control actions, not a claim that tmux keystrokes are ordinary chat messages.
+- Raw terminal control remains a separate operator layer. A human typing directly in tmux is not modeled as an equal queued message channel.
+
+### Runtime-specific `/resume` notes
+
+- Codex: explicit `/resume <thread-name|id>` is supported by exact persisted identity resolution and launches `codex resume <resolved-thread-id>` in tmux.
+- Claude Code: explicit `/resume` from an unbound topic is degraded because the persisted transcript id does not prove a reversible workspace path.
+- fast-agent: explicit `/resume` from an unbound topic is degraded because persisted sessions are scoped by the workspace `.fast-agent` root.
 
 ---
 
