@@ -23,9 +23,18 @@ In fact, CCBot itself was built this way — iterating on itself through termina
 
 ## Runtime Model
 
-The Codex adaptation work uses an explicit runtime ontology to avoid collapsing
-live tmux control, persisted conversation identity, and on-disk rollout evidence
-into a single "session" concept.
+The adaptation work uses an explicit runtime ontology to avoid collapsing live
+tmux control, persisted conversation identity, and on-disk replay evidence into
+a single "session" concept.
+
+The maintainer note is:
+- [`doc/runtime-ontology.md`](doc/runtime-ontology.md)
+- [`doc/state-migration.md`](doc/state-migration.md)
+- [`doc/strato-ops-codex.md`](doc/strato-ops-codex.md)
+
+The canonical shape is:
+
+`Telegram topic -> binding -> tmux window -> runtime process -> runtime conversation identity -> replay evidence`
 
 Maintainer reference:
 - [`doc/runtime-ontology.md`](doc/runtime-ontology.md)
@@ -37,23 +46,23 @@ Maintainer reference:
 For the Strato fork, use the operator runbook in
 [`doc/strato-ops-codex.md`](doc/strato-ops-codex.md). It documents:
 
-- the live `tmux -> Codex -> rollout log` operating path
+- the live `tmux -> runtime process -> replay evidence` operating path
 - the legacy `CLAUDE_COMMAND` env var name that now launches `codex`
 - one-time state migration and reversible rollback via `*.v1.bak`
 - the operator tooling path `/home/tools/codex-tools/codex-session-scout`
-- the release-scope boundary: `voice`, `task`, and `ACP` are preserved but not expanded in this Codex release
+- the release-scope boundary: `voice`, `task`, and `ACP-module` are preserved but not expanded in this release
 
 ## Features
 
-- **Topic-based control** — Each Telegram topic binds to one tmux window at a time, while the live process in that window may start or resume a persisted conversation
+- **Topic-based control** — Each Telegram topic binds to one tmux window at a time, while the live process in that window may start or resume a persisted conversation identity
 - **Real-time notifications** — Get Telegram messages for assistant responses, thinking content, tool use/result, and local command output
 - **Prompt-safe control lane** — Detect `input ready`, `busy`, and `blocked prompt` terminal states before sending input
 - **Voice messages** — Voice messages are transcribed via OpenAI and forwarded as text
 - **Send messages** — Forward text to Codex via tmux keystrokes
 - **Codex command forwarding** — Forward raw Codex slash commands, with a small supported menu surface for `/clear`, `/compact`, `/diff`, `/init`, `/review`, and `/status`
-- **Create new sessions** — Start Codex sessions from Telegram via directory browser
-- **Resume sessions** — Pick up where you left off by resuming an existing Codex thread in a directory
-- **Kill sessions** — Close a topic to auto-kill the associated tmux window
+- **Create new conversations** — Start Codex conversations from Telegram via directory browser
+- **Resume conversations** — Pick up where you left off by resuming an existing Codex identity in a directory
+- **Kill bindings** — Close a topic to auto-kill the associated tmux window
 - **Message history** — Browse conversation history with pagination (newest first)
 - **Explicit process registration** — Auto-associates tmux windows with Codex processes at launch time
 - **Persistent state** — Thread bindings and read offsets survive restarts
@@ -127,7 +136,7 @@ There is no runtime formatter switch to MarkdownV2.
 
 ## Launch Behavior
 
-CCBot registers live processes at launch time and then resolves them onto persisted Codex threads. The tmux window is the live write target; the thread and rollout log remain separate persisted identities.
+CCBot registers live processes at launch time and then resolves them onto runtime conversation identities. The tmux window is the live write target; the runtime conversation identity and replay evidence remain separate persisted objects.
 
 ## Usage
 
@@ -169,14 +178,14 @@ Other raw `/command` inputs are still forwarded best-effort to the Codex TUI, bu
 
 **1 Topic = 1 live tmux binding at a time.** The bot runs in Telegram Forum (topics) mode.
 
-Each topic controls one tmux window at a time. The process inside that window may start a fresh conversation or resume an existing persisted thread.
+Each topic controls one tmux window at a time. The process inside that window may start a fresh conversation or resume an existing persisted identity.
 
 **Creating a new session:**
 
 1. Create a new topic in the Telegram group
 2. Send any message in the topic
 3. A directory browser appears — select the project directory
-4. If the directory has existing Codex threads, a thread picker appears — choose one to resume or start fresh
+4. If the directory has existing Codex identities, an identity picker appears — choose one to resume or start fresh
 5. A tmux window is created, `codex` starts (with resume wiring if resuming), and your pending message is forwarded
 
 **Sending messages:**
@@ -207,14 +216,14 @@ I'll look into the login bug...
 
 ### Notifications
 
-The monitor polls session JSONL files every 2 seconds and sends notifications for:
+The monitor polls replay evidence every 2 seconds and sends notifications for:
 
 - **Assistant responses** — Codex text replies
 - **Thinking content** — Shown as expandable blockquotes
 - **Tool use/result** — Summarized with stats (e.g. "Read 42 lines", "Found 5 matches")
 - **Local command output** — stdout from commands like `git status`, prefixed with `❯ command_name`
 
-Notifications are delivered to the topic bound to the session's window.
+Notifications are delivered to the topic bound to the window.
 
 Formatting note:
 - Telegram messages are rendered with parse mode `HTML` using `chatgpt-md-converter`
@@ -237,17 +246,17 @@ tmux new-window -n myproject -c ~/Code/myproject
 codex
 ```
 
-The window must be in the `ccbot` tmux session (configurable via `TMUX_SESSION_NAME`). CCBot registers the live process when it launches the window and then resolves the persisted thread from local Codex state.
+The window must be in the `ccbot` tmux session (configurable via `TMUX_SESSION_NAME`). CCBot registers the live process when it launches the window and then resolves the persisted identity from local Codex state.
 
 ## Data Storage
 
 | Path                            | Description                                                             |
 | ------------------------------- | ----------------------------------------------------------------------- |
-| `$CCBOT_DIR/state.json`         | Thread bindings, window states, display names, and per-user read offsets |
-| `$CCBOT_DIR/session_map.json`   | Versioned live process registrations and thread hints per tmux window |
-| `$CCBOT_DIR/monitor_state.json` | Monitor byte offsets per session (prevents duplicate notifications)     |
-| `~/.codex/session_index.jsonl`  | Persisted Codex thread index (read-only)                                |
-| `~/.codex/sessions/`            | Codex rollout logs and thread state (read-only)                         |
+| `$CCBOT_DIR/state.json`         | Topic bindings, window states, display names, and per-user read offsets |
+| `$CCBOT_DIR/session_map.json`   | Versioned live process registrations and identity hints per tmux window |
+| `$CCBOT_DIR/monitor_state.json` | Monitor byte offsets per replay source (prevents duplicate notifications) |
+| `~/.codex/session_index.jsonl`  | Persisted Codex identity index (read-only)                               |
+| `~/.codex/sessions/`            | Codex rollout logs and persisted identity state (read-only)             |
 
 ## File Structure
 

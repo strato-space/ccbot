@@ -5,20 +5,20 @@ This runbook is the operator path for the Strato fork of `ccbot`.
 Scope:
 
 - Ship the Codex core lane: create, bind, monitor, send input, inspect history, resume.
-- Keep `voice`, `task`, and `ACP` behavior stable, but do not expand them in this release.
+- Keep `voice`, `task`, and `ACP-module` behavior stable, but do not expand them in this release.
 - Do not rely on interactive approval prompts as part of the required operating path.
 
 ## Runtime Model
 
 Use this chain when reasoning about the system:
 
-`Telegram topic -> binding -> tmux window -> Codex process -> Codex thread -> rollout log`
+`Telegram topic -> binding -> tmux window -> runtime process -> runtime conversation identity -> replay evidence`
 
 Operational consequences:
 
 - Telegram writes to the live tmux window.
-- History and monitor notifications are read from Codex rollout logs under `~/.codex`.
-- Resume attaches a live process to an existing thread; it does not resurrect an old process.
+- History and monitor notifications are read from replay evidence under `~/.codex`.
+- Resume attaches a live process to an existing identity; it does not resurrect an old process.
 
 ## Preflight
 
@@ -167,7 +167,7 @@ export CLAUDE_COMMAND=claude
 
 Rollback notes:
 
-- Restoring the backups reverts only bot-side persisted state, not Codex thread files.
+- Restoring the backups reverts only bot-side persisted state, not Codex identity files.
 - Do not delete `~/.codex`; it is read-only evidence for the Codex lane.
 
 ## Release Boundary
@@ -176,7 +176,7 @@ This release does not expand:
 
 - `voice`
 - `task`
-- `ACP`
+- `ACP-module`
 
 Those surfaces are preserved by regression coverage, but they are not part of the new Codex core-lane contract.
 
@@ -186,9 +186,9 @@ Before declaring the bot ready:
 
 1. Start the bot with the production-like `CLAUDE_COMMAND=codex` configuration.
 2. Create a fresh Telegram topic and bind it to a project directory.
-3. Start a fresh Codex thread and verify output reaches Telegram.
+3. Start a fresh Codex identity and verify output reaches Telegram.
 4. Send a follow-up text message and verify it reaches the same live tmux window.
 5. Open `/history` and confirm rollout-backed history rendering.
-6. Resume an existing thread from the picker and verify the new live process binds to the persisted thread.
+6. Resume an existing identity from the picker and verify the new live process binds to the persisted identity.
 7. Restart the bot process and confirm bindings plus monitor offsets survive.
 8. Check that `voice`, raw `/task`, and raw `/ACP` behavior still matches the preserved compatibility surface.

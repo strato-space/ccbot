@@ -1,8 +1,8 @@
 # State Migration And Cutover
 
-This note describes the persisted-state cutover used by the Codex adaptation
-work. The goal is to make the old Claude-era files readable while the bot
-starts writing versioned envelopes.
+This note describes the persisted-state cutover used by the multi-runtime
+adaptation work. The goal is to make the old Claude-era files readable while
+the bot starts writing versioned envelopes.
 
 ## Files
 
@@ -32,6 +32,6 @@ reversed.
 ## Guarantees
 
 - Existing topic bindings are preserved during migration.
-- Existing monitor offsets are preserved during migration.
+- Existing replay offsets are preserved during migration.
 - Legacy files remain recoverable through the backup sidecar.
 - Readers continue to accept legacy and versioned shapes during cutover.
