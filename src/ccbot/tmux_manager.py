@@ -29,6 +29,28 @@ from .runtime_types import runtime_capability_registry
 logger = logging.getLogger(__name__)
 
 
+def _known_runtime_kind_from_command(command: str) -> str | None:
+    """Return a known runtime kind for an active command, or None for shell/unknown."""
+    normalized = (command or "").strip()
+    if not normalized:
+        return None
+    try:
+        tokens = shlex.split(normalized)
+    except ValueError:
+        tokens = normalized.split()
+    if not tokens:
+        return None
+    executable = Path(tokens[0]).name.casefold()
+    for runtime_kind, capability in runtime_capability_registry.items():
+        aliases = {
+            capability.launch_command_name.casefold(),
+            *(alias.casefold() for alias in capability.command_aliases),
+        }
+        if executable in aliases:
+            return runtime_kind
+    return None
+
+
 @dataclass
 class TmuxWindow:
     """Information about a tmux window."""
@@ -296,6 +318,38 @@ class TmuxManager:
 
         return await asyncio.to_thread(_sync_rename)
 
+    def _build_runtime_launch_command(
+        self,
+        path: Path,
+        *,
+        start_runtime: bool,
+        resume_session_id: str | None = None,
+        runtime_kind: str | None = None,
+        launch_command: str | None = None,
+    ) -> str:
+        """Build the exact shell command used to start or resume a runtime."""
+        if not start_runtime:
+            return ""
+        configured_runtime_kind = infer_runtime_kind_from_command(config.claude_command)
+        source_command = launch_command or config.claude_command
+        inferred_runtime_kind = (
+            runtime_kind or infer_runtime_kind_from_command(source_command)
+        )
+        cmd = runtime_capability_registry.build_launch_command(
+            inferred_runtime_kind,
+            base_command=(
+                launch_command
+                or (
+                    config.claude_command
+                    if runtime_kind is None
+                    or inferred_runtime_kind == configured_runtime_kind
+                    else None
+                )
+            ),
+            resume_session_id=resume_session_id,
+        )
+        return f"cd {shlex.quote(str(path))} && {cmd}"
+
     async def kill_window(self, window_id: str) -> bool:
         """Kill a tmux window by its ID."""
 
@@ -376,28 +430,13 @@ class TmuxManager:
                 if start_claude:
                     pane = window.active_pane
                     if pane:
-                        configured_runtime_kind = infer_runtime_kind_from_command(
-                            config.claude_command
-                        )
-                        source_command = launch_command or config.claude_command
-                        inferred_runtime_kind = (
-                            runtime_kind
-                            or infer_runtime_kind_from_command(source_command)
-                        )
-                        cmd = runtime_capability_registry.build_launch_command(
-                            inferred_runtime_kind,
-                            base_command=(
-                                launch_command
-                                or (
-                                    config.claude_command
-                                    if runtime_kind is None
-                                    or inferred_runtime_kind == configured_runtime_kind
-                                    else None
-                                )
-                            ),
+                        launch_cmd = self._build_runtime_launch_command(
+                            path,
+                            start_runtime=start_claude,
                             resume_session_id=resume_session_id,
+                            runtime_kind=runtime_kind,
+                            launch_command=launch_command,
                         )
-                        launch_cmd = f"cd {shlex.quote(str(path))} && {cmd}"
                         pane.send_keys(launch_cmd, enter=True)
 
                 logger.info(
@@ -418,6 +457,117 @@ class TmuxManager:
                 return False, f"Failed to create window: {e}", "", ""
 
         return await asyncio.to_thread(_create_and_start)
+
+    async def create_or_reuse_window(
+        self,
+        work_dir: str,
+        window_name: str | None = None,
+        start_claude: bool = True,
+        resume_session_id: str | None = None,
+        runtime_kind: str | None = None,
+        launch_command: str | None = None,
+        reuse_existing: bool = True,
+    ) -> tuple[bool, str, str, str, bool]:
+        """Create a new tmux window or reuse an exact live match.
+
+        Reuse is fail-closed: the live window must match by exact name and
+        directory, and any active runtime command must match the requested
+        runtime kind when one is supplied.
+        """
+        path = Path(work_dir).expanduser().resolve()
+        if not path.exists():
+            return False, f"Directory does not exist: {work_dir}", "", "", False
+        if not path.is_dir():
+            return False, f"Not a directory: {work_dir}", "", "", False
+
+        final_window_name = window_name if window_name else path.name
+
+        if reuse_existing:
+            existing = await self.find_window_by_name(final_window_name)
+            if existing:
+                try:
+                    existing_cwd = str(Path(existing.cwd).expanduser().resolve(strict=False))
+                except (OSError, RuntimeError, ValueError):
+                    existing_cwd = str(Path(existing.cwd).expanduser()) if existing.cwd else ""
+                if existing_cwd and existing_cwd != str(path):
+                    return (
+                        False,
+                        (
+                            f"Existing window '{final_window_name}' is bound to "
+                            f"{existing_cwd}, not {path}"
+                        ),
+                        "",
+                        "",
+                        False,
+                    )
+
+                active_runtime = _known_runtime_kind_from_command(
+                    existing.pane_current_command
+                )
+                requested_runtime = runtime_kind or infer_runtime_kind_from_command(
+                    launch_command or config.claude_command
+                )
+                if active_runtime and active_runtime != requested_runtime:
+                    return (
+                        False,
+                        (
+                            f"Existing window '{final_window_name}' is running "
+                            f"{active_runtime}, not {requested_runtime}"
+                        ),
+                        "",
+                        "",
+                        False,
+                    )
+
+                if start_claude and active_runtime is None:
+                    launch_cmd = self._build_runtime_launch_command(
+                        path,
+                        start_runtime=start_claude,
+                        resume_session_id=resume_session_id,
+                        runtime_kind=runtime_kind,
+                        launch_command=launch_command,
+                    )
+                    if not await self.send_literal_text(existing.window_id, launch_cmd):
+                        return (
+                            False,
+                            f"Failed to inject resume command into '{final_window_name}'",
+                            "",
+                            "",
+                            False,
+                        )
+                    if not await self.send_enter(existing.window_id):
+                        return (
+                            False,
+                            f"Failed to submit resume command into '{final_window_name}'",
+                            "",
+                            "",
+                            False,
+                        )
+                    return (
+                        True,
+                        f"Reused window '{final_window_name}' at {path} and launched runtime",
+                        existing.window_name,
+                        existing.window_id,
+                        True,
+                    )
+
+                return (
+                    True,
+                    f"Reused window '{final_window_name}' at {path}",
+                    existing.window_name,
+                    existing.window_id,
+                    True,
+                )
+
+        success, message, created_name, created_id = await self.create_window(
+            str(path),
+            window_name=window_name,
+            start_claude=start_claude,
+            resume_session_id=resume_session_id,
+            runtime_kind=runtime_kind,
+            launch_command=launch_command,
+        )
+        return success, message, created_name, created_id, False
 
 
 # Global instance with default session name

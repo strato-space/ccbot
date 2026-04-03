@@ -1,6 +1,6 @@
 import pytest
 
-from ccbot.tmux_manager import TmuxManager
+from ccbot.tmux_manager import TmuxManager, TmuxWindow
 
 
 class _FakePane:
@@ -115,3 +115,83 @@ async def test_create_window_uses_registry_resume_flag_for_fast_agent(
     assert pane.commands == [
         (f"cd {workspace} && fast-agent --resume session-789", True)
     ]
+
+
+@pytest.mark.asyncio
+async def test_create_or_reuse_window_reuses_exact_match_and_launches_codex_resume(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    existing = TmuxWindow(
+        window_id="@7",
+        window_name="workspace",
+        cwd=str(workspace),
+        pane_current_command="bash",
+    )
+    manager = TmuxManager(session_name="ccbot-test")
+    sent: list[tuple[str, str]] = []
+
+    async def _find_window_by_name(window_name: str):
+        return existing if window_name == "workspace" else None
+
+    async def _send_literal_text(window_id: str, text: str) -> bool:
+        sent.append((window_id, text))
+        return True
+
+    async def _send_enter(window_id: str) -> bool:
+        sent.append((window_id, "<enter>"))
+        return True
+
+    monkeypatch.setattr(manager, "find_window_by_name", _find_window_by_name)
+    monkeypatch.setattr(manager, "send_literal_text", _send_literal_text)
+    monkeypatch.setattr(manager, "send_enter", _send_enter)
+
+    ok, message, window_name, window_id, reused = await manager.create_or_reuse_window(
+        str(workspace),
+        window_name="workspace",
+        resume_session_id="thread-123",
+        runtime_kind="codex",
+    )
+
+    assert ok is True
+    assert reused is True
+    assert window_name == "workspace"
+    assert window_id == "@7"
+    assert "Reused window 'workspace'" in message
+    assert sent == [
+        ("@7", f"cd {workspace} && codex resume thread-123"),
+        ("@7", "<enter>"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_create_or_reuse_window_fails_closed_on_runtime_or_cwd_mismatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    manager = TmuxManager(session_name="ccbot-test")
+
+    async def _runtime_mismatch(window_name: str):
+        return TmuxWindow(
+            window_id="@8",
+            window_name=window_name,
+            cwd=str(workspace),
+            pane_current_command="claude --resume session-456",
+        )
+
+    monkeypatch.setattr(manager, "find_window_by_name", _runtime_mismatch)
+
+    ok, message, window_name, window_id, reused = await manager.create_or_reuse_window(
+        str(workspace),
+        window_name="workspace",
+        resume_session_id="thread-123",
+        runtime_kind="codex",
+    )
+
+    assert ok is False
+    assert "running claude, not codex" in message
+    assert window_name == ""
+    assert window_id == ""
+    assert reused is False

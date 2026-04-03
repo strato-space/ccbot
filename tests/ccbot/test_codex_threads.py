@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from ccbot.codex_threads import CodexThreadCatalog
+from ccbot.fast_agent_sessions import FastAgentSessionCatalog
 from ccbot.session import SessionManager
 
 
@@ -126,7 +127,12 @@ def session_manager(monkeypatch: pytest.MonkeyPatch, fixture_catalog: CodexThrea
         "ccbot.session.config.claude_projects_path",
         fixture_catalog.codex_home / "empty-claude-projects",
     )
-    return SessionManager(codex_thread_catalog=fixture_catalog)
+    return SessionManager(
+        codex_thread_catalog=fixture_catalog,
+        fast_agent_session_catalog=FastAgentSessionCatalog(
+            environment_root=fixture_catalog.codex_home / "empty-fast-agent"
+        ),
+    )
 
 
 def test_catalog_enumerates_available_candidates_and_orphans(
@@ -184,6 +190,97 @@ def test_catalog_resolution_prefers_explicit_ids_then_launcher_then_cwd(
     assert root_resolution.selected is not None
     assert root_resolution.selected.thread_id == "019d3932-39e4-74e3-9e72-136b65c3841a"
     assert root_resolution.reason == "normalized_cwd"
+
+
+def test_codex_resume_and_rename_resolve_exact_name_and_id(
+    fixture_catalog: CodexThreadCatalog,
+) -> None:
+    by_name = fixture_catalog.resolve_resume_target("Investigate ccbot bug")
+    assert by_name.status == "selected"
+    assert by_name.selected is not None
+    assert by_name.selected.thread_id == "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9"
+    assert by_name.reason == "resume_explicit_thread_name"
+
+    by_id = fixture_catalog.resolve_rename_target(
+        "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9"
+    )
+    assert by_id.status == "selected"
+    assert by_id.selected is not None
+    assert by_id.selected.thread_name == "Investigate ccbot bug"
+    assert by_id.reason == "rename_explicit_thread_id"
+
+
+def test_codex_resume_and_rename_fail_closed_for_duplicate_names(tmp_path: Path) -> None:
+    codex_home = _build_fixture_codex_home(tmp_path)
+    _write_codex_thread(
+        codex_home,
+        thread_id="019d5000-0000-7000-8000-dupe-name00001",
+        cwd="/home/alpha",
+        thread_name="Shared Codex Name",
+        updated_at="2026-04-02T23:59:59Z",
+    )
+    _write_codex_thread(
+        codex_home,
+        thread_id="019d5000-0000-7000-8000-dupe-name00002",
+        cwd="/home/beta",
+        thread_name="Shared Codex Name",
+        updated_at="2026-04-03T00:00:59Z",
+    )
+    catalog = CodexThreadCatalog(codex_home=codex_home)
+
+    resume = catalog.resolve_resume_target("Shared Codex Name")
+    rename = catalog.resolve_rename_target("Shared Codex Name")
+
+    assert resume.status == "ambiguous"
+    assert resume.reason == "resume_explicit_thread_name_ambiguous"
+    assert {candidate.thread_id for candidate in resume.candidates} == {
+        "019d5000-0000-7000-8000-dupe-name00001",
+        "019d5000-0000-7000-8000-dupe-name00002",
+    }
+
+    assert rename.status == "ambiguous"
+    assert rename.reason == "rename_explicit_thread_name_ambiguous"
+    assert {candidate.thread_id for candidate in rename.candidates} == {
+        "019d5000-0000-7000-8000-dupe-name00001",
+        "019d5000-0000-7000-8000-dupe-name00002",
+    }
+
+
+def test_codex_resume_and_rename_fail_closed_for_id_name_collision(tmp_path: Path) -> None:
+    codex_home = _build_fixture_codex_home(tmp_path)
+    thread_id = "019d5000-0000-7000-8000-collision00001"
+    _write_codex_thread(
+        codex_home,
+        thread_id=thread_id,
+        cwd="/home/alpha",
+        thread_name="Collision primary thread",
+        updated_at="2026-04-02T23:59:59Z",
+    )
+    _write_codex_thread(
+        codex_home,
+        thread_id="019d5000-0000-7000-8000-collision00002",
+        cwd="/home/beta",
+        thread_name=thread_id,
+        updated_at="2026-04-03T00:00:59Z",
+    )
+    catalog = CodexThreadCatalog(codex_home=codex_home)
+
+    resume = catalog.resolve_resume_target(thread_id)
+    rename = catalog.resolve_rename_target(thread_id)
+
+    assert resume.status == "ambiguous"
+    assert resume.reason == "resume_token_id_name_collision"
+    assert {candidate.thread_id for candidate in resume.candidates} == {
+        thread_id,
+        "019d5000-0000-7000-8000-collision00002",
+    }
+
+    assert rename.status == "ambiguous"
+    assert rename.reason == "rename_token_id_name_collision"
+    assert {candidate.thread_id for candidate in rename.candidates} == {
+        thread_id,
+        "019d5000-0000-7000-8000-collision00002",
+    }
 
 
 def test_catalog_fails_closed_on_missing_rollout_and_session_manager_uses_catalog(
@@ -265,11 +362,11 @@ async def test_session_manager_lists_codex_candidates_for_directory(
     session_manager: SessionManager,
 ) -> None:
     sessions = await session_manager.list_threads_for_directory("/home")
-    assert [session.thread_id for session in sessions] == [
+    assert [session.thread_id for session in sessions[:2]] == [
         "019d4e76-7fae-7a90-bc40-2290ee269660",
         "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9",
     ]
-    assert [session.summary for session in sessions] == [
+    assert [session.summary for session in sessions[:2]] == [
         "Capture Codex evidence fixtures",
         "Investigate ccbot bug",
     ]
@@ -290,12 +387,15 @@ async def test_session_manager_preserves_legacy_claude_threads_in_mixed_director
 
     sessions = await session_manager.list_threads_for_directory("/home")
 
-    assert [session.thread_id for session in sessions] == [
+    assert [session.thread_id for session in sessions[:2]] == [
         "019d4e76-7fae-7a90-bc40-2290ee269660",
         "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9",
-        "legacy-claude-thread",
     ]
-    assert sessions[-1].summary == "Legacy Claude thread"
+    assert any(session.thread_id == "legacy-claude-thread" for session in sessions)
+    legacy = next(
+        session for session in sessions if session.thread_id == "legacy-claude-thread"
+    )
+    assert legacy.summary == "Legacy Claude thread"
 
 
 @pytest.mark.asyncio

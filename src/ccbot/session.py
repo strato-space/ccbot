@@ -31,6 +31,10 @@ from .codex_threads import (
     CodexThreadCatalog,
     CodexThreadResolution,
 )
+from .fast_agent_sessions import (
+    FastAgentSessionCatalog,
+    FastAgentSessionResolution,
+)
 from .input_driver import runtime_input_driver
 from .runtime_types import (
     InputAction,
@@ -105,10 +109,15 @@ class SessionManager:
     # restored in PR #23.
     group_chat_ids: dict[str, int] = field(default_factory=dict)
     codex_thread_catalog: CodexThreadCatalog | None = field(default=None, repr=False)
+    fast_agent_session_catalog: FastAgentSessionCatalog | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.codex_thread_catalog is None:
             self.codex_thread_catalog = CodexThreadCatalog()
+        if self.fast_agent_session_catalog is None:
+            self.fast_agent_session_catalog = FastAgentSessionCatalog()
         self._load_state()
 
     def _save_state(self) -> None:
@@ -834,7 +843,8 @@ class SessionManager:
     async def list_threads_for_directory(self, cwd: str) -> list[ThreadLocator]:
         """List persisted threads for a directory.
 
-        Returns Codex candidates plus any legacy Claude threads for the same cwd.
+        Returns Codex candidates, fast-agent sessions, plus any legacy Claude
+        threads for the same cwd.
 
         Mixed-runtime directories must not hide older Claude transcripts simply
         because Codex candidates exist for the same path.
@@ -849,6 +859,19 @@ class SessionManager:
             )
             for candidate in candidates:
                 locator = candidate.to_locator()
+                sessions.append(locator)
+                seen_thread_ids.add(locator.thread_id)
+
+        if self.fast_agent_session_catalog is not None:
+            self.fast_agent_session_catalog.refresh()
+            fast_agent_candidates = await asyncio.to_thread(
+                self.fast_agent_session_catalog.list_candidates_for_directory,
+                cwd,
+            )
+            for candidate in fast_agent_candidates:
+                locator = candidate.to_locator()
+                if locator.thread_id in seen_thread_ids:
+                    continue
                 sessions.append(locator)
                 seen_thread_ids.add(locator.thread_id)
 
@@ -919,8 +942,8 @@ class SessionManager:
 
     async def resolve_thread_candidate(
         self, window_id: str
-    ) -> CodexThreadResolution | None:
-        """Resolve a live window to a Codex thread candidate without mutating state."""
+    ) -> CodexThreadResolution | FastAgentSessionResolution | None:
+        """Resolve a live window to a runtime-specific thread candidate."""
         state = self.get_process_descriptor(window_id)
         if not state.cwd:
             return None
@@ -950,6 +973,17 @@ class SessionManager:
             self.codex_thread_catalog.refresh()
             return self.codex_thread_catalog.resolve_for_registration(
                 registered_thread_id=state.thread_id or None,
+                cwd=state.cwd,
+                registered_at=state.registered_at,
+            )
+
+        if capability.replay_evidence_discovery == "acp_log_jsonl":
+            if self.fast_agent_session_catalog is None:
+                return None
+            self.fast_agent_session_catalog.refresh()
+            return await asyncio.to_thread(
+                self.fast_agent_session_catalog.resolve_for_registration,
+                registered_session_id=state.thread_id or None,
                 cwd=state.cwd,
                 registered_at=state.registered_at,
             )

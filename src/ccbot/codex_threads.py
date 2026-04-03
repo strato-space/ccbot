@@ -416,6 +416,17 @@ class CodexThreadCatalog:
             if candidate.normalized_cwd == normalized
         ]
 
+    def list_candidates_for_name(self, thread_name: str) -> list[CodexThreadCandidate]:
+        """List available rollout-backed candidates whose name matches exactly."""
+        normalized = thread_name.strip().casefold()
+        if not normalized:
+            return []
+        return [
+            candidate
+            for candidate in self.candidates
+            if candidate.thread_name.strip().casefold() == normalized
+        ]
+
     def get_candidate(self, thread_id: str) -> CodexThreadCandidate | None:
         """Return a rollout-backed candidate by thread id."""
         if not thread_id:
@@ -443,6 +454,92 @@ class CodexThreadCatalog:
                 continue
             return full_lookup.to_candidate(index_by_id.get(thread_id))
         return None
+
+    def _resolve_explicit_token(
+        self,
+        token: str,
+        *,
+        operation: str,
+    ) -> CodexThreadResolution:
+        """Resolve an explicit resume/rename token by exact id or exact name."""
+        normalized_token = token.strip()
+        if not normalized_token:
+            return CodexThreadResolution(
+                status="not_found",
+                selected=None,
+                reason=f"{operation}_token_missing",
+            )
+
+        by_id = [candidate for candidate in self.candidates if candidate.thread_id == normalized_token]
+        by_name = self.list_candidates_for_name(normalized_token)
+
+        if by_id and by_name:
+            same_candidate = (
+                len(by_id) == 1
+                and len(by_name) == 1
+                and by_id[0].thread_id == by_name[0].thread_id
+            )
+            if same_candidate:
+                return CodexThreadResolution(
+                    status="selected",
+                    selected=by_id[0],
+                    candidates=(by_id[0],),
+                    reason=f"{operation}_explicit_thread_id",
+                )
+            combined = tuple(
+                {
+                    candidate.thread_id: candidate
+                    for candidate in (*by_id, *by_name)
+                }.values()
+            )
+            return CodexThreadResolution(
+                status="ambiguous",
+                selected=None,
+                candidates=combined,
+                reason=f"{operation}_token_id_name_collision",
+            )
+
+        if by_id:
+            if len(by_id) == 1:
+                return CodexThreadResolution(
+                    status="selected",
+                    selected=by_id[0],
+                    candidates=(by_id[0],),
+                    reason=f"{operation}_explicit_thread_id",
+                )
+            return CodexThreadResolution(
+                status="ambiguous",
+                selected=None,
+                candidates=tuple(by_id),
+                reason=f"{operation}_explicit_thread_id_ambiguous",
+            )
+
+        if by_name:
+            if len(by_name) == 1:
+                return CodexThreadResolution(
+                    status="selected",
+                    selected=by_name[0],
+                    candidates=(by_name[0],),
+                    reason=f"{operation}_explicit_thread_name",
+                )
+            return CodexThreadResolution(
+                status="ambiguous",
+                selected=None,
+                candidates=tuple(by_name),
+                reason=f"{operation}_explicit_thread_name_ambiguous",
+            )
+
+        if _UUID_RE.fullmatch(normalized_token):
+            return CodexThreadResolution(
+                status="not_found",
+                selected=None,
+                reason=f"{operation}_explicit_thread_id_not_found",
+            )
+        return CodexThreadResolution(
+            status="not_found",
+            selected=None,
+            reason=f"{operation}_explicit_thread_name_not_found",
+        )
 
     def resolve_recent_for_registration(
         self,
@@ -618,6 +715,57 @@ class CodexThreadCatalog:
             )
 
         return self.resolve(cwd=cwd)
+
+    def resolve_resume_target(
+        self,
+        token: str | None,
+        *,
+        cwd: str | None = None,
+        registered_thread_id: str | None = None,
+    ) -> CodexThreadResolution:
+        """Resolve a Codex `/resume` token deterministically.
+
+        The explicit token must match exactly by thread id or exact thread name.
+        Ambiguity is fail-closed and does not fall back to cwd guessing.
+        """
+        if token:
+            return self._resolve_explicit_token(token, operation="resume")
+        if registered_thread_id or cwd:
+            return self.resolve_for_registration(
+                registered_thread_id=registered_thread_id,
+                cwd=cwd,
+            )
+        return CodexThreadResolution(
+            status="not_found",
+            selected=None,
+            reason="resume_token_missing",
+        )
+
+    def resolve_rename_target(
+        self,
+        token: str | None,
+        *,
+        cwd: str | None = None,
+        registered_thread_id: str | None = None,
+    ) -> CodexThreadResolution:
+        """Resolve a Codex `/rename` target deterministically.
+
+        Rename uses the same explicit token rules as resume. If a runtime cannot
+        safely rename persisted identity, callers should treat the returned
+        target as tmux-only and document the degraded mode explicitly.
+        """
+        if token:
+            return self._resolve_explicit_token(token, operation="rename")
+        if registered_thread_id or cwd:
+            return self.resolve_for_registration(
+                registered_thread_id=registered_thread_id,
+                cwd=cwd,
+            )
+        return CodexThreadResolution(
+            status="not_found",
+            selected=None,
+            reason="rename_token_missing",
+        )
 
     def exact_locator(self, thread_id: str, cwd: str) -> ThreadLocator | None:
         """Return a locator only when thread id and cwd match exactly."""

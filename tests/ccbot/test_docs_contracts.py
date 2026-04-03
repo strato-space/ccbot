@@ -54,6 +54,17 @@ def test_runtime_capability_registry_doc_describes_supported_profiles() -> None:
     assert "steer" in doc
 
 
+def test_codex_command_semantics_doc_captures_resume_and_rename_contract() -> None:
+    doc = _read("doc/codex-command-semantics.md")
+
+    assert "/resume <thread-name|id>" in doc
+    assert "codex resume <resolved-thread-id>" in doc
+    assert "/rename" in doc
+    assert "unsupported_degraded" in doc
+    assert "duplicate thread names" in doc
+    assert "tmux is the authoritative operator intervention surface" in doc
+
+
 def test_russian_readme_matches_codex_fork_positioning() -> None:
     readme_ru = _read("README_RU.md")
 
@@ -105,3 +116,12 @@ def test_claude_runtime_adapter_doc_describes_first_class_adapter() -> None:
     assert "SessionStart hook" in doc
     assert "transcript JSONL" in doc
     assert "tmux is the live human control surface" in doc
+
+
+def test_fast_agent_runtime_adapter_doc_describes_title_only_semantics() -> None:
+    doc = _read("doc/fast-agent-runtime-adapter.md")
+
+    assert "fast-agent --resume <session-id>" in doc
+    assert "acp_log.jsonl" in doc
+    assert "title-only rename semantics" in doc
+    assert "session_id` rename is unsupported" in doc
