@@ -4,8 +4,8 @@ Registers all command/callback/message handlers and manages the bot lifecycle.
 Each Telegram topic maps 1:1 to a tmux window running a live agent process.
 
 Core responsibilities:
-  - Command handlers: /start, /history, /screenshot, /esc, /kill, /unbind,
-    plus forwarding supported raw /commands to Codex via tmux.
+  - Command handlers: /start, /history, /screenshot, /esc, /bind, /kill,
+    /unbind, plus forwarding supported raw /commands to Codex via tmux.
   - Callback query handler: directory browser, history pagination,
     interactive UI navigation, screenshot refresh.
   - Topic-based routing: each named topic binds to one tmux window.
@@ -131,6 +131,12 @@ from .markdown_v2 import convert_markdown
 from .handlers.response_builder import build_response_parts
 from .handlers.status_polling import status_poll_loop
 from .screenshot import text_to_image
+from .state_schema import (
+    BINDING_STATE_BIND_FLOW,
+    BINDING_STATE_BOUND,
+    BINDING_STATE_NONE,
+    TOPIC_POLICY_MANUAL_BIND_REQUIRED,
+)
 from .session import BLOCKED_PROMPT_SEND_MESSAGE, session_manager
 from .session_monitor import NewMessage, SessionMonitor
 from .terminal_parser import classify_input_surface, extract_bash_output
@@ -168,6 +174,12 @@ CLAUDE_ONLY_COMMAND_HINTS: dict[str, str] = {
 }
 
 UNBOUND_TOPIC_MESSAGE = "❌ No Codex window is bound to this topic."
+MANUAL_BIND_REQUIRED_MESSAGE = (
+    "❌ This topic is manually unbound. Use /bind to choose a window."
+)
+BIND_FLOW_ACTIVE_MESSAGE = (
+    "⚠️ This topic is already in a bind flow. Use the picker or /unbind to cancel it."
+)
 
 
 def is_user_allowed(user_id: int | None) -> bool:
@@ -217,6 +229,7 @@ def build_bot_commands() -> list[BotCommand]:
         BotCommand("history", "Show thread history for this topic"),
         BotCommand("screenshot", "Capture the active tmux pane"),
         BotCommand("esc", "Interrupt the active Codex task"),
+        BotCommand("bind", "Start or resume the topic bind flow"),
         BotCommand("unbind", "Detach this topic from its live window"),
     ]
     for cmd_name, desc in CODEX_MENU_COMMANDS.items():
@@ -251,7 +264,100 @@ async def _surface_blocked_prompt_state(
         )
 
 
+async def _start_bind_flow(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    user: object,
+    thread_id: int,
+    *,
+    explicit: bool,
+    pending_text: str | None = None,
+) -> None:
+    """Open the bind chooser and mark the topic as being in a bind flow."""
+    if update.message is None:
+        return
+
+    if explicit:
+        session_manager.allow_implicit_bind(user.id, thread_id)
+    session_manager.start_topic_bind_flow(user.id, thread_id)
+
+    all_windows = await tmux_manager.list_windows()
+    bound_ids = {wid for _, _, wid in session_manager.iter_thread_bindings()}
+    unbound = [
+        (w.window_id, w.window_name, w.cwd)
+        for w in all_windows
+        if w.window_id not in bound_ids
+    ]
+
+    logger.debug(
+        "Bind flow start (explicit=%s): all=%s, bound=%s, unbound=%s",
+        explicit,
+        [w.window_name for w in all_windows],
+        bound_ids,
+        [name for _, name, _ in unbound],
+    )
+
+    if unbound:
+        msg_text, keyboard, win_ids = build_window_picker(unbound)
+        if context.user_data is not None:
+            clear_thread_picker_state(context.user_data)
+            clear_window_picker_state(context.user_data)
+            clear_browse_state(context.user_data)
+            context.user_data[STATE_KEY] = STATE_SELECTING_WINDOW
+            context.user_data[UNBOUND_WINDOWS_KEY] = win_ids
+            context.user_data["_pending_thread_id"] = thread_id
+            if pending_text is not None:
+                context.user_data["_pending_thread_text"] = pending_text
+            else:
+                context.user_data.pop("_pending_thread_text", None)
+        await safe_reply(update.message, msg_text, reply_markup=keyboard)
+        return
+
+    start_path = str(Path.cwd())
+    msg_text, keyboard, subdirs = build_directory_browser(start_path)
+    if context.user_data is not None:
+        clear_thread_picker_state(context.user_data)
+        clear_window_picker_state(context.user_data)
+        clear_browse_state(context.user_data)
+        context.user_data[STATE_KEY] = STATE_BROWSING_DIRECTORY
+        context.user_data[BROWSE_PATH_KEY] = start_path
+        context.user_data[BROWSE_PAGE_KEY] = 0
+        context.user_data[BROWSE_DIRS_KEY] = subdirs
+        context.user_data["_pending_thread_id"] = thread_id
+        if pending_text is not None:
+            context.user_data["_pending_thread_text"] = pending_text
+        else:
+            context.user_data.pop("_pending_thread_text", None)
+    await safe_reply(update.message, msg_text, reply_markup=keyboard)
+
+
 # --- Command handlers ---
+
+
+async def bind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Explicitly start a bind flow for the current topic."""
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        return
+    if not update.message:
+        return
+
+    thread_id = _get_thread_id(update)
+    if thread_id is None:
+        await safe_reply(update.message, "❌ This command only works in a topic.")
+        return
+
+    wid = session_manager.get_window_for_thread(user.id, thread_id)
+    if wid is not None:
+        display = session_manager.get_display_name(wid)
+        await safe_reply(
+            update.message,
+            f"ℹ️ This topic is already bound to '{display}'. "
+            "Use /unbind first if you want to bind a different window.",
+        )
+        return
+
+    await _start_bind_flow(update, context, user, thread_id, explicit=True)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -268,7 +374,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             update.message,
             "🤖 *Codex tmux control*\n\n"
             "Each topic controls one live tmux window.\n"
-            "Create a topic, pick a directory, and CCBot will start or resume a Codex thread there.\n"
+            "Create a topic, use /bind when you want to choose a window explicitly, "
+            "and CCBot will start or resume a Codex thread there.\n"
             "The menu only advertises the supported core lane. Other raw Codex slash commands can still be typed manually.",
         )
 
@@ -341,18 +448,24 @@ async def unbind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     wid = session_manager.get_window_for_thread(user.id, thread_id)
     if not wid:
-        await safe_reply(update.message, UNBOUND_TOPIC_MESSAGE)
+        session_manager.require_manual_bind(user.id, thread_id)
+        await clear_topic_state(user.id, thread_id, context.bot, context.user_data)
+        await safe_reply(
+            update.message,
+            MANUAL_BIND_REQUIRED_MESSAGE,
+        )
         return
 
     display = session_manager.get_display_name(wid)
     session_manager.unbind_thread(user.id, thread_id)
+    session_manager.require_manual_bind(user.id, thread_id)
     await clear_topic_state(user.id, thread_id, context.bot, context.user_data)
 
     await safe_reply(
         update.message,
         f"✅ Topic unbound from window '{display}'.\n"
         "The Codex window is still running in tmux.\n"
-        "Send a message to bind this topic to a different window or thread.",
+        "Use /bind to choose a different window or thread.",
     )
 
 
@@ -983,54 +1096,42 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     wid = session_manager.get_window_for_thread(user.id, thread_id)
     if wid is None:
-        # Unbound topic — check for unbound windows first
-        all_windows = await tmux_manager.list_windows()
-        bound_ids = {wid for _, _, wid in session_manager.iter_thread_bindings()}
-        unbound = [
-            (w.window_id, w.window_name, w.cwd)
-            for w in all_windows
-            if w.window_id not in bound_ids
-        ]
-        logger.debug(
-            "Window picker check: all=%s, bound=%s, unbound=%s",
-            [w.window_name for w in all_windows],
-            bound_ids,
-            [name for _, name, _ in unbound],
-        )
+        binding_state = session_manager.get_topic_binding_state(user.id, thread_id)
+        topic_policy = session_manager.get_topic_policy(user.id, thread_id)
 
-        if unbound:
-            # Show window picker
+        if binding_state == BINDING_STATE_BIND_FLOW:
+            await safe_reply(update.message, BIND_FLOW_ACTIVE_MESSAGE)
+            return
+
+        if binding_state == BINDING_STATE_BOUND:
             logger.info(
-                "Unbound topic: showing window picker (%d unbound windows, user=%d, thread=%d)",
-                len(unbound),
+                "Detected stale bound state without a live window, clearing state "
+                "(user=%d, thread=%d)",
                 user.id,
                 thread_id,
             )
-            msg_text, keyboard, win_ids = build_window_picker(unbound)
-            if context.user_data is not None:
-                context.user_data[STATE_KEY] = STATE_SELECTING_WINDOW
-                context.user_data[UNBOUND_WINDOWS_KEY] = win_ids
-                context.user_data["_pending_thread_id"] = thread_id
-                context.user_data["_pending_thread_text"] = text
-            await safe_reply(update.message, msg_text, reply_markup=keyboard)
+            session_manager.set_topic_binding_state(
+                user.id, thread_id, BINDING_STATE_NONE
+            )
+            binding_state = BINDING_STATE_NONE
+
+        if topic_policy == TOPIC_POLICY_MANUAL_BIND_REQUIRED:
+            await safe_reply(update.message, MANUAL_BIND_REQUIRED_MESSAGE)
             return
 
-        # No unbound windows — show directory browser to create a new session
         logger.info(
-            "Unbound topic: showing directory browser (user=%d, thread=%d)",
+            "Implicit bind allowed: showing bind flow (user=%d, thread=%d)",
             user.id,
             thread_id,
         )
-        start_path = str(Path.cwd())
-        msg_text, keyboard, subdirs = build_directory_browser(start_path)
-        if context.user_data is not None:
-            context.user_data[STATE_KEY] = STATE_BROWSING_DIRECTORY
-            context.user_data[BROWSE_PATH_KEY] = start_path
-            context.user_data[BROWSE_PAGE_KEY] = 0
-            context.user_data[BROWSE_DIRS_KEY] = subdirs
-            context.user_data["_pending_thread_id"] = thread_id
-            context.user_data["_pending_thread_text"] = text
-        await safe_reply(update.message, msg_text, reply_markup=keyboard)
+        await _start_bind_flow(
+            update,
+            context,
+            user,
+            thread_id,
+            explicit=False,
+            pending_text=text,
+        )
         return
 
     # Bound topic — forward to bound window
@@ -1474,10 +1575,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if pending_tid is not None and _get_thread_id(update) != pending_tid:
             await query.answer("Stale browser (topic mismatch)", show_alert=True)
             return
+        active_tid = pending_tid if pending_tid is not None else _get_thread_id(update)
         clear_browse_state(context.user_data)
         if context.user_data is not None:
             context.user_data.pop("_pending_thread_id", None)
             context.user_data.pop("_pending_thread_text", None)
+        if active_tid is not None:
+            session_manager.require_manual_bind(user.id, active_tid)
         await safe_edit(query, "Cancelled")
         await query.answer("Cancelled")
 
@@ -1552,11 +1656,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if pending_tid is not None and _get_thread_id(update) != pending_tid:
             await query.answer("Stale picker (topic mismatch)", show_alert=True)
             return
+        active_tid = pending_tid if pending_tid is not None else _get_thread_id(update)
         clear_thread_picker_state(context.user_data)
         if context.user_data is not None:
             context.user_data.pop("_pending_thread_id", None)
             context.user_data.pop("_pending_thread_text", None)
             context.user_data.pop("_selected_path", None)
+        if active_tid is not None:
+            session_manager.require_manual_bind(user.id, active_tid)
         await safe_edit(query, "Cancelled")
         await query.answer("Cancelled")
 
@@ -1674,10 +1781,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if pending_tid is not None and _get_thread_id(update) != pending_tid:
             await query.answer("Stale picker (topic mismatch)", show_alert=True)
             return
+        active_tid = pending_tid if pending_tid is not None else _get_thread_id(update)
         clear_window_picker_state(context.user_data)
         if context.user_data is not None:
             context.user_data.pop("_pending_thread_id", None)
             context.user_data.pop("_pending_thread_text", None)
+        if active_tid is not None:
+            session_manager.require_manual_bind(user.id, active_tid)
         await safe_edit(query, "Cancelled")
         await query.answer("Cancelled")
 
@@ -2076,6 +2186,7 @@ def create_bot() -> Application:
     application.add_handler(CommandHandler("history", history_command))
     application.add_handler(CommandHandler("screenshot", screenshot_command))
     application.add_handler(CommandHandler("esc", esc_command))
+    application.add_handler(CommandHandler("bind", bind_command))
     application.add_handler(CommandHandler("unbind", unbind_command))
     application.add_handler(CommandHandler("usage", usage_command))
     application.add_handler(CallbackQueryHandler(callback_handler))

@@ -15,7 +15,14 @@ from ccbot.codex_threads import CodexThreadCatalog
 from ccbot.monitor_state import MonitorState, TrackedSession
 from ccbot.session import SessionManager
 from ccbot.session_monitor import SessionMonitor
-from ccbot.state_schema import legacy_backup_path, split_session_map_payload
+from ccbot.state_schema import (
+    BINDING_STATE_BOUND,
+    BINDING_STATE_NONE,
+    TOPIC_POLICY_IMPLICIT_BIND_ALLOWED,
+    TOPIC_POLICY_MANUAL_BIND_REQUIRED,
+    legacy_backup_path,
+    split_session_map_payload,
+)
 
 
 @pytest.mark.asyncio
@@ -308,3 +315,23 @@ async def test_monitor_recovers_codex_binding_from_persisted_registration(
     current_map = await monitor._load_current_session_map()
 
     assert current_map == {"@9": thread_id}
+
+
+def test_state_json_persists_topic_policy_and_binding_state(tmp_path, monkeypatch):
+    state_file = tmp_path / "state.json"
+    monkeypatch.setattr(session_module.config, "state_file", state_file)
+    monkeypatch.setattr(session_module.SessionManager, "_load_state", lambda self: None)
+
+    manager = SessionManager()
+    manager.require_manual_bind(100, 42)
+    manager.allow_implicit_bind(100, 43)
+    manager.start_topic_bind_flow(100, 43)
+    manager.bind_thread(100, 43, "@7", window_name="proj")
+
+    saved = json.loads(state_file.read_text())
+    assert saved["schema_version"] == session_module.config.state_schema_version
+    assert saved["topic_policies"]["100"]["42"] == TOPIC_POLICY_MANUAL_BIND_REQUIRED
+    assert saved["topic_policies"]["100"]["43"] == TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
+    assert saved["topic_binding_states"]["100"]["42"] == BINDING_STATE_NONE
+    assert saved["topic_binding_states"]["100"]["43"] == BINDING_STATE_BOUND
+    assert saved["thread_bindings"]["100"]["43"] == "@7"

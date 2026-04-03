@@ -2,6 +2,12 @@
 
 The migration work keeps legacy Claude-era files readable while writing the new
 versioned envelope that Codex work will rely on.
+
+Topic control now has two distinct axes:
+  - topic_policy: whether implicit bind is allowed or an explicit /bind is
+    required
+  - binding_state: whether a topic currently has no binding, is in a bind flow,
+    or is bound
 """
 
 from __future__ import annotations
@@ -10,12 +16,19 @@ import shutil
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_RUNTIME_KIND = "claude"
 LEGACY_BACKUP_SUFFIX = ".v1.bak"
 SESSION_MAP_ENTRIES_KEY = "entries"
 SCHEMA_VERSION_KEY = "schema_version"
 RUNTIME_KIND_KEY = "runtime_kind"
+TOPIC_POLICIES_KEY = "topic_policies"
+TOPIC_BINDING_STATES_KEY = "topic_binding_states"
+TOPIC_POLICY_IMPLICIT_BIND_ALLOWED = "implicit_bind_allowed"
+TOPIC_POLICY_MANUAL_BIND_REQUIRED = "manual_bind_required"
+BINDING_STATE_NONE = "none"
+BINDING_STATE_BIND_FLOW = "bind_flow"
+BINDING_STATE_BOUND = "bound"
 
 
 def legacy_backup_path(path: Path) -> Path:
@@ -49,6 +62,22 @@ def infer_runtime_kind(runtime_kinds: Iterable[str]) -> str:
     if len(kinds) == 1:
         return next(iter(kinds))
     return "mixed"
+
+
+def normalize_topic_policy(topic_policy: str | None) -> str:
+    """Normalize topic policy labels to the supported policy vocabulary."""
+    if topic_policy == TOPIC_POLICY_MANUAL_BIND_REQUIRED:
+        return TOPIC_POLICY_MANUAL_BIND_REQUIRED
+    return TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
+
+
+def normalize_binding_state(binding_state: str | None) -> str:
+    """Normalize topic binding state labels to the supported state vocabulary."""
+    if binding_state == BINDING_STATE_BIND_FLOW:
+        return BINDING_STATE_BIND_FLOW
+    if binding_state == BINDING_STATE_BOUND:
+        return BINDING_STATE_BOUND
+    return BINDING_STATE_NONE
 
 
 def build_session_map_payload(

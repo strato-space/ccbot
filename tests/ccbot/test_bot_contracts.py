@@ -13,6 +13,10 @@ import pytest
 from telegram import CallbackQuery, User
 
 from ccbot import bot as bot_mod
+from ccbot.state_schema import (
+    BINDING_STATE_NONE,
+    TOPIC_POLICY_MANUAL_BIND_REQUIRED,
+)
 
 
 def _make_topic_update(
@@ -96,6 +100,7 @@ class TestBotRegistration:
             "history",
             "screenshot",
             "esc",
+            "bind",
             "unbind",
             "clear",
             "compact",
@@ -208,6 +213,78 @@ class TestCommandSurface:
         mock_reply.assert_awaited_once()
         assert "registered runtime metadata" in mock_reply.await_args.args[1]
         assert "/status" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_bind_command_re_enables_implicit_bind_and_starts_flow(self):
+        update = _make_topic_update()
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+            mock_tmux.list_windows = AsyncMock(return_value=[])
+
+            await bot_mod.bind_command(update, context)
+
+        mock_sm.allow_implicit_bind.assert_called_once_with(1, 42)
+        mock_sm.start_topic_bind_flow.assert_called_once_with(1, 42)
+        mock_reply.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_text_handler_manual_policy_blocks_implicit_bind(self):
+        update = _make_topic_update()
+        update.message.text = "hello"
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+            mock_sm.get_topic_policy.return_value = TOPIC_POLICY_MANUAL_BIND_REQUIRED
+            mock_sm.get_topic_binding_state.return_value = BINDING_STATE_NONE
+
+            await bot_mod.text_handler(update, context)
+
+        mock_tmux.list_windows.assert_not_called()
+        mock_reply.assert_awaited_once()
+        assert "manually unbound" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_window_picker_cancel_sets_manual_bind_required(self):
+        update = MagicMock()
+        update.effective_user = MagicMock(id=1)
+        update.effective_chat = MagicMock(type="supergroup", id=100)
+        update.callback_query = MagicMock()
+        update.callback_query.data = bot_mod.CB_WIN_CANCEL
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.message = MagicMock(
+            message_thread_id=42,
+            chat=update.effective_chat,
+        )
+        context = _make_context()
+        context.user_data = {
+            "_pending_thread_id": 42,
+            bot_mod.STATE_KEY: bot_mod.STATE_SELECTING_WINDOW,
+        }
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock),
+        ):
+            await bot_mod.callback_handler(update, context)
+
+        mock_sm.require_manual_bind.assert_called_once_with(1, 42)
 
 
 class TestTopicCleanup:
