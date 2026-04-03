@@ -1355,6 +1355,36 @@ class SessionManager:
             return False, "Window not found (may have been closed)"
         return await runtime_input_driver.send_dispatch(window.window_id, action)
 
+    async def rename_runtime_identity_for_window(
+        self,
+        window_id: str,
+        new_name: str,
+    ) -> tuple[bool, str]:
+        """Rename the persisted runtime identity when the runtime supports it."""
+        state = self.get_process_descriptor(window_id)
+        capability = self.get_runtime_capability(state.runtime_kind)
+
+        if capability.rename_identity_mode != "title_only":
+            return False, "persisted identity unchanged"
+
+        if self.fast_agent_session_catalog is None:
+            return False, "fast-agent session catalog unavailable"
+        if not state.thread_id or not state.cwd:
+            return False, "fast-agent session metadata unavailable"
+
+        self.fast_agent_session_catalog.refresh()
+        result = await asyncio.to_thread(
+            self.fast_agent_session_catalog.rename_title,
+            session_id=state.thread_id,
+            cwd=state.cwd,
+            title=new_name,
+        )
+        if result.status == "selected":
+            return True, "fast-agent session title metadata updated"
+        if result.reason == "title_rename_write_failed":
+            return False, "fast-agent session title metadata update failed"
+        return False, "fast-agent session title metadata not found"
+
     # --- Message history ---
 
     async def get_recent_messages(

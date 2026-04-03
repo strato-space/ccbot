@@ -171,6 +171,7 @@ These commands are registered in the Telegram bot menu and forwarded to Codex vi
 | `/diff` | ↗ Show git diff | Show the current workspace diff |
 | `/init` | ↗ Create AGENTS.md for Codex | Bootstrap project instructions for Codex |
 | `/review` | ↗ Review current changes | Start a code review against the current workspace |
+| `/rename <name>` | ↗ Rename the current tmux window and topic | Sync the live tmux label, forum topic title, and supported runtime title metadata |
 | `/status` | ↗ Show Codex session status | Display current session configuration and token usage |
 `/usage` still exists as a legacy Claude helper, but it is intentionally not advertised in the Telegram menu. In Codex windows the bot now points users to `/status` instead of rewriting the command silently.
 
@@ -179,7 +180,7 @@ These commands are registered in the Telegram bot menu and forwarded to Codex vi
 | Command | Parameterless | Interactive | Suitable for Telegram | Notes |
 |---------|:---:|:---:|:---:|-------|
 | `/new` | ✅ | No | ⚠️ Possible | Starts a fresh chat in the same live window; useful but not necessary in the Telegram menu |
-| `/rename <name>` | ❌ | No | ⚠️ Possible | Safe when sent with explicit inline args |
+| `/rename <name>` | ✅ | No | ✅ Supported | Renames the tmux window, syncs the topic title, and updates supported runtime title metadata |
 | `/init` | ✅ | No | ✅ Supported in menu | Creates `AGENTS.md` for Codex projects |
 | `/plan` | ✅ / args | No | ⚠️ Caution | Useful, but may create long plan output |
 | `/model` | ✅ | Yes | ✅ Optional lane only | Requires positively identified model picker prompt and remote prompt controls |

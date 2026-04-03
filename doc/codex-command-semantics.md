@@ -4,6 +4,25 @@ This document defines the Codex-specific control semantics used by `ccbot`.
 The goal is determinism: the bot must resolve a single Codex thread or fail
 closed with an explicit error or picker.
 
+## Naming Precedence
+
+`ccbot` keeps the following layers separate:
+
+- Telegram topic title: the visible forum label
+- tmux window display name: the live operator-facing terminal label
+- persisted runtime identity: the resumable thread/session id or title
+
+The precedence is:
+
+1. explicit `/rename` updates the tmux window and syncs the Telegram topic
+   title to the final tmux name
+2. Telegram topic rename events update the tmux window display name
+3. persisted runtime identity changes only when the runtime explicitly supports
+   them
+
+When collision suffixes are required, the applied tmux name is authoritative
+and the Telegram topic title is normalized to that suffix-applied name.
+
 ## `/resume <thread-name|id>`
 
 - The token must match exactly by persisted thread id or by exact thread name.
@@ -20,13 +39,18 @@ closed with an explicit error or picker.
 ## `/rename <new-name>`
 
 - `/rename` always renames the tmux window.
+- The visible Telegram topic title is synchronized to the final tmux window
+  name.
 - Persisted Codex identity rename is only allowed through a stable public or
   proven-safe surface.
 - If no safe persisted rename surface is available, the bot must document the
   degraded mode explicitly and leave the persisted Codex identity unchanged.
 - For Codex, the current safe answer is degraded mode:
   - tmux window rename: yes
+  - Telegram topic title sync: yes
   - persisted identity rename: unsupported / unsupported_degraded
+- For fast-agent, `/rename` updates the tmux title and also updates the
+  persisted session title metadata, but not the persisted session id.
 
 ## Fail-Closed Rules
 

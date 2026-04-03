@@ -163,6 +163,34 @@ class TmuxManager:
 
         return await asyncio.to_thread(_sync_list_windows)
 
+    async def _resolve_unique_window_name(
+        self,
+        desired_name: str,
+        *,
+        exclude_window_id: str | None = None,
+    ) -> tuple[str, bool]:
+        """Resolve a deterministic tmux window name with collision suffixes.
+
+        Returns ``(final_name, collision_suffix_applied)``.
+        """
+        base_name = desired_name.strip()
+        if not base_name:
+            base_name = config.tmux_main_window_name
+
+        windows = await self.list_windows()
+        existing_names = {
+            window.window_name
+            for window in windows
+            if window.window_name and window.window_id != exclude_window_id
+        }
+        if base_name not in existing_names:
+            return base_name, False
+
+        counter = 2
+        while f"{base_name}-{counter}" in existing_names:
+            counter += 1
+        return f"{base_name}-{counter}", True
+
     async def find_window_by_name(self, window_name: str) -> TmuxWindow | None:
         """Find a window by its name.
 
@@ -317,6 +345,40 @@ class TmuxManager:
                 return False
 
         return await asyncio.to_thread(_sync_rename)
+
+    async def rename_window_with_suffixes(
+        self,
+        window_id: str,
+        desired_name: str,
+    ) -> tuple[bool, str, str]:
+        """Rename a window with deterministic collision suffixes.
+
+        Returns ``(success, message, final_name)``.
+        """
+        window = await self.find_window_by_id(window_id)
+        if not window:
+            return False, "Window not found (may have been closed)", ""
+
+        final_name, collision_suffix_applied = await self._resolve_unique_window_name(
+            desired_name,
+            exclude_window_id=window_id,
+        )
+        current_name = window.window_name or ""
+        if current_name == final_name:
+            return True, f"Window already named '{final_name}'", final_name
+
+        renamed = await self.rename_window(window_id, final_name)
+        if not renamed:
+            return False, f"Failed to rename window '{current_name or window_id}'", ""
+
+        if collision_suffix_applied and final_name != desired_name.strip():
+            return (
+                True,
+                f"Renamed window '{current_name or window_id}' to '{final_name}' "
+                f"(collision with '{desired_name.strip()}')",
+                final_name,
+            )
+        return True, f"Renamed window to '{final_name}'", final_name
 
     def _build_runtime_launch_command(
         self,

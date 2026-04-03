@@ -129,7 +129,7 @@ from .handlers.message_sender import (
     send_with_fallback,
 )
 from .markdown_v2 import convert_markdown
-from .handlers.response_builder import build_response_parts
+from .handlers.response_builder import build_response_parts, build_status_text
 from .handlers.status_polling import status_poll_loop
 from .screenshot import text_to_image
 from .state_schema import (
@@ -163,6 +163,7 @@ CODEX_MENU_COMMANDS: dict[str, str] = {
     "diff": "↗ Show git diff in the current workspace",
     "init": "↗ Create AGENTS.md for Codex",
     "review": "↗ Review current changes",
+    "rename": "↗ Rename the current tmux window and topic",
     "status": "↗ Show Codex session status",
 }
 
@@ -263,6 +264,26 @@ async def _surface_blocked_prompt_state(
             notice,
             message_thread_id=thread_id,
         )
+
+
+async def _sync_topic_title(
+    bot: Bot,
+    user_id: int,
+    thread_id: int,
+    topic_title: str,
+) -> bool:
+    """Best-effort sync of a forum topic title to the new window name."""
+    resolved_chat = session_manager.resolve_chat_id(user_id, thread_id)
+    try:
+        await bot.edit_forum_topic(
+            chat_id=resolved_chat,
+            message_thread_id=thread_id,
+            name=topic_title,
+        )
+        return True
+    except Exception as e:
+        logger.debug("Failed to sync forum topic title: %s", e)
+        return False
 
 
 async def _start_bind_flow(
@@ -529,6 +550,82 @@ async def unbind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
+async def rename_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Rename the current bound window and sync the visible topic title."""
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        return
+    if not update.message:
+        return
+
+    thread_id = _get_thread_id(update)
+    if thread_id is None:
+        await safe_reply(update.message, "❌ This command only works in a topic.")
+        return
+
+    wid = session_manager.resolve_window_for_thread(user.id, thread_id)
+    if not wid:
+        await safe_reply(update.message, UNBOUND_TOPIC_MESSAGE)
+        return
+
+    raw_text = (update.message.text or "").strip()
+    parts = raw_text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await safe_reply(update.message, "❌ Usage: /rename <new-name>")
+        return
+
+    desired_name = " ".join(parts[1].split())
+    w = await tmux_manager.find_window_by_id(wid)
+    if not w:
+        display = session_manager.get_display_name(wid)
+        await safe_reply(update.message, f"❌ Window '{display}' no longer exists.")
+        return
+
+    success, message, final_name = await tmux_manager.rename_window_with_suffixes(
+        wid,
+        desired_name,
+    )
+    if not success or not final_name:
+        await safe_reply(update.message, f"❌ {message}")
+        return
+
+    session_manager.update_display_name(wid, final_name)
+    topic_synced = await _sync_topic_title(context.bot, user.id, thread_id, final_name)
+
+    runtime_kind = _get_window_runtime_kind(wid)
+    capability = session_manager.get_runtime_capability(runtime_kind)
+    identity_changed, identity_note = await session_manager.rename_runtime_identity_for_window(
+        wid,
+        final_name,
+    )
+
+    response_lines = [f"✅ {message}"]
+    if topic_synced:
+        response_lines.append(f"✅ Telegram topic title synced to '{final_name}'.")
+    else:
+        response_lines.append(
+            f"⚠️ Telegram topic title could not be synced; tmux window is '{final_name}'."
+        )
+
+    if capability.rename_identity_mode == "title_only" and identity_changed:
+        response_lines.append(
+            f"✅ Persisted {capability.display_name} title metadata updated to '{final_name}'."
+        )
+        response_lines.append("ℹ Persisted conversation id stayed the same.")
+    else:
+        if capability.rename_identity_mode in {"unsupported", "unsupported_degraded"}:
+            response_lines.append("ℹ Persisted runtime identity was not changed.")
+        else:
+            response_lines.append(f"ℹ {identity_note}.")
+
+    if final_name != desired_name:
+        response_lines.append(
+            f"ℹ Requested name '{desired_name}' was adjusted deterministically."
+        )
+
+    await safe_reply(update.message, "\n".join(response_lines))
+
+
 async def esc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send Escape key to interrupt the active runtime."""
     user = update.effective_user
@@ -717,12 +814,46 @@ async def topic_edited_handler(
         return
 
     old_name = session_manager.get_display_name(wid)
-    await tmux_manager.rename_window(wid, new_name)
-    session_manager.update_display_name(wid, new_name)
+    success, message, final_name = await tmux_manager.rename_window_with_suffixes(
+        wid,
+        new_name,
+    )
+    if not success or not final_name:
+        logger.debug(
+            "Topic edited rename failed (user=%d, thread=%d, window=%s): %s",
+            user.id,
+            thread_id,
+            wid,
+            message,
+        )
+        return
+
+    session_manager.update_display_name(wid, final_name)
+    if final_name != new_name:
+        await _sync_topic_title(context.bot, user.id, thread_id, final_name)
+    runtime_kind = _get_window_runtime_kind(wid)
+    capability = session_manager.get_runtime_capability(runtime_kind)
+    identity_changed, identity_note = await session_manager.rename_runtime_identity_for_window(
+        wid,
+        final_name,
+    )
+    if identity_changed:
+        logger.info(
+            "Runtime identity renamed for topic edit (runtime=%s, window=%s)",
+            capability.display_name,
+            wid,
+        )
+    else:
+        logger.debug(
+            "Runtime identity unchanged for topic edit (runtime=%s, window=%s): %s",
+            capability.display_name,
+            wid,
+            identity_note,
+        )
     logger.info(
         "Topic renamed: '%s' -> '%s' (window=%s, user=%d, thread=%d)",
         old_name,
-        new_name,
+        final_name,
         wid,
         user.id,
         thread_id,
@@ -2191,6 +2322,14 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         f"text_len={len(msg.text)}"
     )
 
+    if not msg.dispatch_to_telegram:
+        logger.debug(
+            "Skipping non-dispatched event thread=%s semantic=%s",
+            msg.thread_id,
+            msg.semantic_kind,
+        )
+        return
+
     # Find users whose thread-bound window matches this session
     active_users = await session_manager.find_users_for_session(msg.session_id)
 
@@ -2232,6 +2371,25 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
 
         # Skip tool call notifications when CCBOT_SHOW_TOOL_CALLS=false
         if not config.show_tool_calls and msg.content_type in ("tool_use", "tool_result"):
+            continue
+
+        if (
+            msg.status_message_eligible
+            and (not msg.is_complete or msg.content_type == "tool_progress")
+        ):
+            status_text = build_status_text(
+                msg.text,
+                is_complete=msg.is_complete,
+                content_type=msg.content_type,
+                role=msg.role,
+            )
+            await enqueue_status_update(
+                bot,
+                user_id,
+                wid,
+                status_text,
+                thread_id=thread_id,
+            )
             continue
 
         parts = build_response_parts(
@@ -2345,6 +2503,7 @@ def create_bot() -> Application:
     application.add_handler(CommandHandler("esc", esc_command))
     application.add_handler(CommandHandler("bind", bind_command))
     application.add_handler(CommandHandler("unbind", unbind_command))
+    application.add_handler(CommandHandler("rename", rename_command))
     application.add_handler(CommandHandler("usage", usage_command))
     application.add_handler(CallbackQueryHandler(callback_handler))
     # Topic closed event — auto-kill associated window

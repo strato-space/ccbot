@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -554,4 +556,78 @@ class FastAgentSessionCatalog:
             selected=session,
             candidates=(session,),
             reason="session_id_rename_unsupported",
+        )
+
+    def rename_title(
+        self,
+        *,
+        session_id: str,
+        cwd: str,
+        title: str,
+    ) -> FastAgentSessionResolution:
+        """Rename only the persisted fast-agent title metadata.
+
+        The persisted session id remains unchanged. This is the only rename mode
+        currently considered supported for fast-agent.
+        """
+        candidate = self.get_candidate(session_id, cwd=cwd)
+        if candidate is None:
+            return FastAgentSessionResolution(
+                status="not_found",
+                selected=None,
+                reason="title_rename_not_found",
+            )
+
+        session_json = candidate.session_file
+        payload = _load_json(session_json)
+        if not payload:
+            return FastAgentSessionResolution(
+                status="not_found",
+                selected=None,
+                candidates=(candidate,),
+                reason="title_rename_metadata_unavailable",
+            )
+
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata["title"] = title
+        payload["metadata"] = metadata
+        payload["last_activity"] = datetime.now(timezone.utc).isoformat()
+
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                delete=False,
+                dir=session_json.parent,
+                prefix=f".{session_json.name}.",
+                suffix=".tmp",
+            ) as handle:
+                json.dump(payload, handle, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+                temp_path = Path(handle.name)
+            os.replace(temp_path, session_json)
+        except OSError:
+            return FastAgentSessionResolution(
+                status="not_found",
+                selected=None,
+                candidates=(candidate,),
+                reason="title_rename_write_failed",
+            )
+        finally:
+            try:
+                if temp_path is not None:
+                    temp_path.unlink()
+            except Exception:
+                pass
+
+        self.refresh()
+        return FastAgentSessionResolution(
+            status="selected",
+            selected=self.get_candidate(session_id, cwd=cwd),
+            candidates=(candidate,),
+            reason="title_rename_supported",
         )

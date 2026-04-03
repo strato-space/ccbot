@@ -14,6 +14,7 @@ from telegram import CallbackQuery, User
 
 from ccbot import bot as bot_mod
 from ccbot.handlers.callback_data import append_bind_flow_token
+from ccbot.runtime_types import NormalizedEvent
 from ccbot.state_schema import (
     BINDING_STATE_NONE,
     TOPIC_POLICY_IMPLICIT_BIND_ALLOWED,
@@ -109,6 +110,7 @@ class TestBotRegistration:
             "diff",
             "init",
             "review",
+            "rename",
             "status",
         ]
         assert "kill" not in names
@@ -328,6 +330,83 @@ class TestCommandSurface:
         assert "manually unbound" in mock_reply.await_args.args[1]
 
     @pytest.mark.asyncio
+    async def test_rename_command_updates_window_topic_and_supported_identity(self):
+        update = _make_topic_update()
+        update.message.text = "/rename Daily planner"
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._get_window_runtime_kind", return_value="fast-agent"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.resolve_window_for_thread.return_value = "@7"
+            mock_sm.get_runtime_capability.return_value = SimpleNamespace(
+                rename_identity_mode="title_only",
+                display_name="fast-agent",
+            )
+            mock_sm.rename_runtime_identity_for_window = AsyncMock(
+                return_value=(True, "fast-agent session title metadata updated")
+            )
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.rename_window_with_suffixes = AsyncMock(
+                return_value=(True, "Renamed window to 'Daily planner'", "Daily planner")
+            )
+
+            await bot_mod.rename_command(update, context)
+
+        mock_tmux.rename_window_with_suffixes.assert_awaited_once_with("@7", "Daily planner")
+        mock_sm.update_display_name.assert_called_once_with("@7", "Daily planner")
+        mock_sm.rename_runtime_identity_for_window.assert_awaited_once_with(
+            "@7",
+            "Daily planner",
+        )
+        mock_reply.assert_awaited_once()
+        reply_text = mock_reply.await_args.args[1]
+        assert "Renamed window to 'Daily planner'" in reply_text
+        assert "Telegram topic title synced to 'Daily planner'" in reply_text
+        assert "Persisted fast-agent title metadata updated" in reply_text
+        assert "Persisted conversation id stayed the same" in reply_text
+
+    @pytest.mark.asyncio
+    async def test_rename_command_reports_unsupported_identity_mode_clearly(self):
+        update = _make_topic_update()
+        update.message.text = "/rename core"
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._get_window_runtime_kind", return_value="codex"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.resolve_window_for_thread.return_value = "@7"
+            mock_sm.get_runtime_capability.return_value = SimpleNamespace(
+                rename_identity_mode="unsupported_degraded",
+                display_name="Codex",
+            )
+            mock_sm.rename_runtime_identity_for_window = AsyncMock(
+                return_value=(False, "persisted identity unchanged")
+            )
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.rename_window_with_suffixes = AsyncMock(
+                return_value=(True, "Renamed window to 'core'", "core")
+            )
+
+            await bot_mod.rename_command(update, context)
+
+        mock_reply.assert_awaited_once()
+        reply_text = mock_reply.await_args.args[1]
+        assert "Renamed window to 'core'" in reply_text
+        assert "Persisted runtime identity was not changed" in reply_text
+        assert "Telegram topic title synced to 'core'" in reply_text
+
+    @pytest.mark.asyncio
     async def test_window_picker_cancel_sets_manual_bind_required(self):
         update = MagicMock()
         update.effective_user = MagicMock(id=1)
@@ -498,12 +577,28 @@ class TestTopicCleanup:
         ):
             mock_sm.get_window_for_thread.return_value = "@7"
             mock_sm.get_display_name.return_value = "old-topic-name"
-            mock_tmux.rename_window = AsyncMock(return_value=True)
+            mock_sm.get_runtime_capability.return_value = SimpleNamespace(
+                rename_identity_mode="title_only",
+                display_name="fast-agent",
+            )
+            mock_sm.rename_runtime_identity_for_window = AsyncMock(
+                return_value=(True, "fast-agent session title metadata updated")
+            )
+            mock_tmux.rename_window_with_suffixes = AsyncMock(
+                return_value=(True, "Renamed window to 'new-topic-name'", "new-topic-name")
+            )
 
             await bot_mod.topic_edited_handler(update, context)
 
-            mock_tmux.rename_window.assert_called_once_with("@7", "new-topic-name")
+            mock_tmux.rename_window_with_suffixes.assert_awaited_once_with(
+                "@7",
+                "new-topic-name",
+            )
             mock_sm.update_display_name.assert_called_once_with("@7", "new-topic-name")
+            mock_sm.rename_runtime_identity_for_window.assert_awaited_once_with(
+                "@7",
+                "new-topic-name",
+            )
 
 
 class TestMediaForwarding:
@@ -869,3 +964,87 @@ class TestThreadPickerFlow:
 
         mock_create.assert_awaited_once()
         assert mock_create.await_args.kwargs == {}
+
+
+class TestTelegramDelivery:
+    @pytest.mark.asyncio
+    async def test_handle_new_message_routes_incomplete_progress_to_status(self):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="Inspecting the repository layout",
+            is_complete=False,
+            content_type="commentary",
+            role="assistant",
+            event_kind="commentary",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
+            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch("ccbot.bot.get_interactive_msg_id", return_value=None),
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_status.assert_awaited_once()
+        assert "Commentary" in mock_status.await_args.args[3]
+        mock_content.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_handle_new_message_keeps_complete_tool_use_as_content(self):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="Read src/app.py",
+            is_complete=True,
+            content_type="tool_use",
+            tool_use_id="toolu_1",
+            role="assistant",
+            event_kind="tool_call",
+            runtime_kind="claude",
+        )
+
+        with (
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
+            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch("ccbot.bot.get_interactive_msg_id", return_value=None),
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_status.assert_not_awaited()
+        mock_content.assert_awaited_once()
+        assert mock_content.await_args.kwargs["tool_use_id"] == "toolu_1"
+
+    @pytest.mark.asyncio
+    async def test_handle_new_message_skips_lifecycle_only_events(self):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="started",
+            is_complete=True,
+            content_type="lifecycle",
+            role="assistant",
+            event_kind="lifecycle",
+            runtime_kind="codex",
+            dispatch_to_telegram=False,
+        )
+
+        with (
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
+            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_status.assert_not_awaited()
+        mock_content.assert_not_awaited()

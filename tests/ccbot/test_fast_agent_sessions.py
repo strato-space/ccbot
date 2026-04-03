@@ -79,6 +79,18 @@ def test_fast_agent_catalog_resolves_resume_and_title_rename(tmp_path: Path) -> 
     assert session_id_rename.status == "unsupported"
     assert session_id_rename.reason == "session_id_rename_unsupported"
 
+    rename = catalog.rename_title(
+        session_id="fa-session-20260403-01",
+        cwd=cwd,
+        title="Daily planner v2",
+    )
+    assert rename.status == "selected"
+
+    refreshed = catalog.get_candidate("fa-session-20260403-01", cwd=cwd)
+    assert refreshed is not None
+    assert refreshed.session_title == "Daily planner v2"
+    assert refreshed.session_id == "fa-session-20260403-01"
+
 
 @pytest.mark.asyncio
 async def test_session_manager_lists_and_resolves_fast_agent_sessions(

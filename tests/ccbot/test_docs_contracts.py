@@ -60,6 +60,9 @@ def test_codex_command_semantics_doc_captures_resume_and_rename_contract() -> No
     assert "/resume <thread-name|id>" in doc
     assert "codex resume <resolved-thread-id>" in doc
     assert "/rename" in doc
+    assert "Naming Precedence" in doc
+    assert "Telegram topic title" in doc
+    assert "fast-agent" in doc
     assert "unsupported_degraded" in doc
     assert "duplicate thread names" in doc
     assert "tmux is the authoritative operator intervention surface" in doc
@@ -107,6 +110,17 @@ def test_runtime_event_contract_doc_names_semantic_and_delivery_layers() -> None
     assert "delivery_class" in doc
     assert "status_message_eligible" in doc
     assert "ACP-protocol" in doc
+
+
+def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> None:
+    doc = _read("doc/telegram-delivery-pipeline.md")
+
+    assert "status artifact" in doc
+    assert "tool_result may edit the earlier `tool_use` message in place" in doc
+    assert "Late delivery must fail closed." in doc
+    assert "queue" in doc
+    assert "steer" in doc
+    assert "Raw terminal control is not part of this equal message layer." in doc
 
 
 def test_claude_runtime_adapter_doc_describes_first_class_adapter() -> None:
