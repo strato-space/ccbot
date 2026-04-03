@@ -8,10 +8,11 @@ Runs an async polling loop that:
 
 Optimizations: mtime cache skips unchanged files; byte offset avoids re-reading.
 
-In the current Codex implementation the monitor observes the live semantic
-stream by tailing the same append-only artifact that also serves as persisted
-replay evidence. Legacy Claude-shaped names remain as compatibility aliases for
-the wider codebase.
+The monitor observes the live semantic stream of each runtime by tailing the
+runtime's replay evidence artifact. For Claude this is the transcript tail,
+for Codex it is rollout JSONL, and for fast-agent it is the ACP-equivalent
+side-channel mirror. Legacy Claude-shaped names remain as compatibility
+aliases for the wider codebase.
 """
 
 import asyncio

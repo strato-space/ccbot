@@ -1,8 +1,9 @@
 """JSONL transcript parser for runtime rollout logs.
 
-Parses Claude-shaped JSONL today, but emits runtime-neutral normalized events so
-later runtime adapters can distinguish persisted thread history from the live
-process that produced it.
+Claude-shaped JSONL is the current baseline adapter input, but the parser
+emits runtime-neutral normalized events so later runtime adapters can
+distinguish persisted conversation identity from the live process that
+produced it.
 
 Shared by both session.py (history) and session_monitor.py (real-time).
 Format reference: https://github.com/desis123/claude-code-viewer

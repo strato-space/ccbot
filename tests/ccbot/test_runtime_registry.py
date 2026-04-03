@@ -8,7 +8,9 @@ def test_registry_exposes_runtime_specific_capabilities() -> None:
 
     assert claude.launch_command_name == "claude"
     assert claude.resume_style == "flag"
+    assert claude.live_stream_discovery == "transcript_tail"
     assert claude.replay_evidence_discovery == "transcript_jsonl"
+    assert claude.rename_identity_mode == "unsupported"
     assert claude.supports_message_routing_mode("queue")
 
     assert codex.launch_command_name == "codex"
@@ -42,3 +44,6 @@ def test_registry_infers_runtime_kind_from_command_aliases() -> None:
         )
         == "fast-agent"
     )
+    assert runtime_capability_registry.infer_runtime_kind_from_command(
+        "claude-code --dangerously-skip-permissions"
+    ) == "claude"

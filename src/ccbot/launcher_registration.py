@@ -1,8 +1,9 @@
 """Launcher-side process registration helpers.
 
-Codex windows must be registered by the bot as soon as the tmux window exists,
-before any persisted thread id appears in Codex storage. Claude compatibility
-continues to rely on the legacy hook path.
+Claude remains a first-class runtime adapter through its SessionStart hook and
+transcript replay evidence. Codex windows are registered by the bot as soon as
+the tmux window exists, before any persisted thread id appears in Codex
+storage.
 """
 
 from __future__ import annotations

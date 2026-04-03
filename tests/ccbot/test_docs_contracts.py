@@ -96,3 +96,12 @@ def test_runtime_event_contract_doc_names_semantic_and_delivery_layers() -> None
     assert "delivery_class" in doc
     assert "status_message_eligible" in doc
     assert "ACP-protocol" in doc
+
+
+def test_claude_runtime_adapter_doc_describes_first_class_adapter() -> None:
+    doc = _read("doc/claude-runtime-adapter.md")
+
+    assert "first-class runtime adapter" in doc
+    assert "SessionStart hook" in doc
+    assert "transcript JSONL" in doc
+    assert "tmux is the live human control surface" in doc
