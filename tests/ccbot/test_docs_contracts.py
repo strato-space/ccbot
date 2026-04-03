@@ -116,7 +116,7 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     doc = _read("doc/telegram-delivery-pipeline.md")
 
     assert "status artifact" in doc
-    assert "tool_result may edit the earlier `tool_use` message in place" in doc
+    assert "`tool_result` may edit the earlier `tool_use` message in place" in doc
     assert "Late delivery must fail closed." in doc
     assert "queue" in doc
     assert "steer" in doc

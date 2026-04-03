@@ -109,3 +109,28 @@ def build_response_parts(
     for i, chunk in enumerate(text_chunks, 1):
         parts.append(f"{chunk}\n\n[{i}/{total}]")
     return parts
+
+
+def build_status_text(
+    text: str,
+    *,
+    is_complete: bool,
+    content_type: str = "text",
+    role: str = "assistant",
+) -> str:
+    """Build a single Telegram status/progress string.
+
+    Status messages are ephemeral. Keep them compact and strip expandable-quote
+    sentinels so the mutable status artifact stays plain and editable.
+    """
+    formatted = format_response_text(
+        text,
+        is_complete=is_complete,
+        content_type=content_type,
+        role=role,
+    )
+    formatted = formatted.replace(TranscriptParser.EXPANDABLE_QUOTE_START, "")
+    formatted = formatted.replace(TranscriptParser.EXPANDABLE_QUOTE_END, "")
+    if len(formatted) > 3000:
+        formatted = formatted[:3000].rstrip() + "…"
+    return formatted

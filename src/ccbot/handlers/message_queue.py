@@ -29,6 +29,7 @@ from telegram.error import RetryAfter
 
 from ..markdown_v2 import convert_markdown
 from ..session import session_manager
+from ..state_schema import BINDING_STATE_BOUND
 from ..terminal_parser import parse_status_line
 from ..tmux_manager import tmux_manager
 from .message_sender import (
@@ -301,10 +302,40 @@ async def _send_task_images(bot: Bot, chat_id: int, task: MessageTask) -> None:
     )
 
 
+async def _is_task_binding_active(
+    user_id: int,
+    window_id: str,
+    thread_id: int | None,
+) -> bool:
+    """Check whether a queued task still targets the current live binding."""
+    if await tmux_manager.find_window_by_id(window_id) is None:
+        return False
+    if thread_id is None:
+        return True
+    current_window_id = session_manager.get_window_for_thread(user_id, thread_id)
+    if current_window_id != window_id:
+        return False
+    return (
+        session_manager.get_topic_binding_state(user_id, thread_id)
+        == BINDING_STATE_BOUND
+    )
+
+
 async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> None:
     """Process a content message task."""
     wid = task.window_id or ""
     tid = task.thread_id or 0
+    if not await _is_task_binding_active(user_id, wid, task.thread_id):
+        logger.debug(
+            "Dropping stale content task: user=%d window=%s thread=%s type=%s",
+            user_id,
+            wid,
+            task.thread_id,
+            task.content_type,
+        )
+        await _do_clear_status_message(bot, user_id, tid)
+        clear_tool_msg_ids_for_topic(user_id, task.thread_id)
+        return
     chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
 
     # 1. Handle tool_result editing (merged parts are edited together)
@@ -452,6 +483,15 @@ async def _process_status_update_task(
     """Process a status update task."""
     wid = task.window_id or ""
     tid = task.thread_id or 0
+    if not await _is_task_binding_active(user_id, wid, task.thread_id):
+        logger.debug(
+            "Dropping stale status task: user=%d window=%s thread=%s",
+            user_id,
+            wid,
+            task.thread_id,
+        )
+        await _do_clear_status_message(bot, user_id, tid)
+        return
     chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
     skey = (user_id, tid)
     status_text = task.text or ""
@@ -669,6 +709,18 @@ def clear_status_msg_info(user_id: int, thread_id: int | None = None) -> None:
     """Clear status message tracking for a user (and optionally a specific thread)."""
     skey = (user_id, thread_id or 0)
     _status_msg_info.pop(skey, None)
+
+
+async def clear_status_message(
+    bot: Bot | None,
+    user_id: int,
+    thread_id: int | None = None,
+) -> None:
+    """Delete any tracked status message for a topic when a bot handle is available."""
+    if bot is None:
+        clear_status_msg_info(user_id, thread_id)
+        return
+    await _do_clear_status_message(bot, user_id, thread_id or 0)
 
 
 def clear_tool_msg_ids_for_topic(user_id: int, thread_id: int | None = None) -> None:

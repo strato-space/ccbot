@@ -1,6 +1,15 @@
-"""Focused tests for message queue merge invariants."""
+"""Focused tests for message queue merge invariants and stale-delivery guards."""
 
-from ccbot.handlers.message_queue import MessageTask, _can_merge_tasks
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from ccbot.handlers.message_queue import (
+    MessageTask,
+    _can_merge_tasks,
+    _process_content_task,
+    _process_status_update_task,
+)
 
 
 def test_can_merge_tasks_rejects_mixed_content_types():
@@ -39,3 +48,51 @@ def test_can_merge_tasks_rejects_different_topics_for_same_window():
     )
 
     assert _can_merge_tasks(base, candidate) is False
+
+
+@pytest.mark.asyncio
+async def test_process_content_task_drops_stale_binding() -> None:
+    task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["final answer"],
+        content_type="text",
+    )
+
+    with (
+        patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        patch("ccbot.handlers.message_queue.send_with_fallback", new_callable=AsyncMock) as mock_send,
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+        mock_sm.get_window_for_thread.return_value = None
+        mock_sm.get_topic_binding_state.return_value = "none"
+
+        await _process_content_task(AsyncMock(), 1, task)
+
+    mock_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_status_task_drops_stale_binding() -> None:
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="Thinking…",
+    )
+
+    with (
+        patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+        mock_sm.get_window_for_thread.return_value = "@9"
+        mock_sm.get_topic_binding_state.return_value = "bound"
+
+        bot = AsyncMock()
+        await _process_status_update_task(bot, 1, task)
+
+    bot.edit_message_text.assert_not_awaited()
+    bot.send_message.assert_not_awaited()
