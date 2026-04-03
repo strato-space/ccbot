@@ -22,7 +22,9 @@ def test_strato_ops_runbook_captures_cutover_and_rollback_contract() -> None:
     assert "~/.codex" in runbook
     assert "*.v1.bak" in runbook
     assert "/home/tools/codex-tools/codex-session-scout" in runbook
-    assert "`voice`, `task`, and `ACP`" in runbook
+    assert "voice" in runbook
+    assert "raw `/task`" in runbook
+    assert "raw `/ACP`" in runbook
 
 
 def test_russian_readme_matches_codex_fork_positioning() -> None:
@@ -31,3 +33,12 @@ def test_russian_readme_matches_codex_fork_positioning() -> None:
     assert "codex" in readme_ru
     assert "doc/strato-ops-codex.md" in readme_ru
     assert "CLAUDE_COMMAND" in readme_ru
+
+
+def test_execution_review_policy_requires_code_and_ontology_review() -> None:
+    policy = _read("doc/execution-review-policy.md")
+
+    assert "self-review" in policy
+    assert "independent code review" in policy
+    assert "ontology re-check" in policy
+    assert "core nouns" in policy
