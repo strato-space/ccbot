@@ -31,6 +31,7 @@ from .runtime_types import (
 _INTERNAL_USER_ECHO_RE = re.compile(
     r"^\s*<("
     r"skill|command-name|local-command-stdout|bash-input|bash-stdout|bash-stderr|"
+    r"subagent_notification|"
     r"local-command-caveat|system-reminder"
     r")\b",
     re.IGNORECASE,

@@ -17,6 +17,7 @@ The default Telegram surface is `compact`, not `verbose`.
 `compact` is the production-facing policy:
 
 - human-facing final answers stay as ordinary content
+- human-facing orchestration milestones stay as ordinary content
 - the latest human-facing commentary remains visible as a dedicated artifact so
   progress narrative does not disappear under mutable status churn
 - reasoning and thinking summaries are routed through the mutable status
@@ -107,6 +108,7 @@ In the production-facing `compact` mode, durable Telegram content bubbles are
 deliberately narrow:
 
 - user-visible user echo
+- orchestration milestones such as spawned/waiting/completed subagent summaries
 - final assistant text
 
 In addition to those durable bubbles, `compact` keeps one latest-only visible
@@ -123,6 +125,15 @@ bubbles in `compact` mode:
 - tool lifecycle
 - command execution / local command
 - file-change summaries
+
+Subagent and orchestration milestones are different. They are not raw tool
+surface, and they are not volatile commentary churn. In compact mode they
+should be rendered as human-facing milestone bubbles modeled after Codex
+multi-agent history rows:
+
+- spawned agent
+- waiting for agent(s)
+- completed / failed / shutdown agent summaries
 
 Those classes must either:
 

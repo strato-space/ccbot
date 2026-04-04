@@ -149,6 +149,7 @@ def test_runtime_event_contract_doc_names_semantic_and_delivery_layers() -> None
     assert "ACP-protocol" in doc
     assert "semantic eligibility in the runtime-neutral contract" in doc
     assert "product projection onto the Telegram delivery surface" in doc
+    assert "orchestration" in doc
     assert "history-worthy semantic facts" in doc
     assert "product surface chooses to" in doc
     assert "collapse them into compact status delivery" in doc
@@ -160,6 +161,7 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "status artifact" in doc
     assert "The default Telegram surface is `compact`, not `verbose`." in doc
     assert "latest human-facing commentary remains visible as a dedicated artifact" in doc
+    assert "human-facing orchestration milestones stay as ordinary content" in doc
     assert "reasoning and thinking summaries are routed through the mutable status" in doc
     assert "artifact" in doc
     assert "including Claude-style `local_command`" in doc
@@ -175,6 +177,7 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "durable Telegram content bubbles are" in doc
     assert "deliberately narrow" in doc
     assert "latest-only visible commentary artifact" in doc
+    assert "spawned/waiting/completed subagent summaries" in doc
     assert "Late delivery must fail closed." in doc
     assert "queue" in doc
     assert "steer" in doc
@@ -191,7 +194,7 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
     assert "steer" in doc
     assert "workspace `.fast-agent` root" in doc
     assert "**Compact delivery policy**" in doc
-    assert "user echo and final assistant text as durable bubbles" in doc
+    assert "user echo, orchestration milestones, and final assistant text as durable bubbles" in doc
     assert "latest commentary stays visible as a dedicated artifact" in doc
     assert "Expandable blockquote for debug reasoning" in doc
 

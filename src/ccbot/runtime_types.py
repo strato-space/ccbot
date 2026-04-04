@@ -19,6 +19,7 @@ from .state_schema import DEFAULT_RUNTIME_KIND, normalize_runtime_kind
 LIFECYCLE_SEMANTIC_KIND = "lifecycle"
 USER_ECHO_SEMANTIC_KIND = "user_echo"
 COMMENTARY_SEMANTIC_KIND = "commentary"
+ORCHESTRATION_SEMANTIC_KIND = "orchestration"
 REASONING_SEMANTIC_KIND = "reasoning"
 TOOL_START_SEMANTIC_KIND = "tool_start"
 TOOL_PROGRESS_SEMANTIC_KIND = "tool_progress"
@@ -43,6 +44,8 @@ def infer_semantic_kind(
         return LIFECYCLE_SEMANTIC_KIND
     if role == "user":
         return USER_ECHO_SEMANTIC_KIND
+    if content_type == "orchestration" or event_kind == "orchestration":
+        return ORCHESTRATION_SEMANTIC_KIND
     if content_type == "commentary" or event_kind == "commentary":
         return COMMENTARY_SEMANTIC_KIND
     if content_type in {"thinking", "reasoning"} or event_kind == "reasoning":

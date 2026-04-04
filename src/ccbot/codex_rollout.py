@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 import os
 import shlex
+from dataclasses import dataclass
+import re
 from typing import Any, Iterable
 
 from .runtime_types import NormalizedEvent
@@ -155,6 +157,28 @@ def _compact_multiline(text: str, *, max_chars: int = 160) -> str:
 
 
 _SHELL_NAMES = {"sh", "bash", "zsh", "fish"}
+_SUBAGENT_NOTIFICATION_RE = re.compile(
+    r"^\s*<subagent_notification>\s*(\{.*\})\s*</subagent_notification>\s*$",
+    re.DOTALL,
+)
+
+
+@dataclass
+class _SpawnCall:
+    role: str
+    model: str
+    reasoning_effort: str
+    prompt: str
+
+
+@dataclass
+class _AgentDescriptor:
+    agent_id: str
+    nickname: str
+    role: str
+    model: str
+    reasoning_effort: str
+    prompt: str
 
 
 def _extract_shell_payload(command: str) -> str:
@@ -191,6 +215,18 @@ def _command_code_block(command: str, *, max_lines: int = 4, max_chars: int = 14
     if len(lines) > max_lines:
         clipped.append(f"... (+{len(lines) - max_lines} more lines)")
     return "```sh\n" + "\n".join(clipped) + "\n```"
+
+
+def _structured_json(value: Any) -> Any:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return {}
+        try:
+            return json.loads(stripped)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return value
+    return value
 
 
 def _tool_text_code_block(
@@ -321,6 +357,165 @@ def _tool_output_summary(tool_name: str | None, text: str) -> str:
 
     label = tool_name or "Tool output"
     return f"{label}: {len(lines)} line(s)"
+
+
+def _truncate_preview_lines(
+    text: str,
+    *,
+    max_lines: int = 4,
+    max_chars: int = 220,
+) -> list[str]:
+    lines = _nonempty_lines(text)
+    if not lines:
+        return []
+
+    clipped = [_compact_inline(line, max_chars=max_chars) for line in lines[:max_lines]]
+    if len(lines) > max_lines:
+        clipped.append(f"... (+{len(lines) - max_lines} more lines)")
+    return clipped
+
+
+def _prefixed_detail_block(text: str) -> str:
+    lines = _truncate_preview_lines(text)
+    if not lines:
+        return ""
+    first, *rest = lines
+    result = [f"  └ {first}"]
+    result.extend(f"    {line}" for line in rest)
+    return "\n".join(result)
+
+
+def _parse_subagent_notification(text: str) -> dict[str, Any] | None:
+    match = _SUBAGENT_NOTIFICATION_RE.match(text.strip())
+    if not match:
+        return None
+    try:
+        payload = json.loads(match.group(1))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _spawn_prompt(arguments: dict[str, Any]) -> str:
+    message = _as_text(arguments.get("message")).strip()
+    if message:
+        return message
+    items = arguments.get("items")
+    if not isinstance(items, list):
+        return ""
+    texts: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if _as_text(item.get("type")).strip() != "text":
+            continue
+        text = _as_text(item.get("text")).strip()
+        if text:
+            texts.append(text)
+    return "\n".join(texts).strip()
+
+
+def _agent_label(agent: _AgentDescriptor | None, fallback_id: str) -> str:
+    nickname = (agent.nickname if agent else "").strip()
+    role = (agent.role if agent else "").strip()
+    base = nickname or fallback_id
+    if role:
+        return f"{base} [{role}]"
+    return base
+
+
+def _spawn_request_suffix(agent: _AgentDescriptor | None) -> str:
+    if agent is None:
+        return ""
+    model = agent.model.strip()
+    effort = agent.reasoning_effort.strip()
+    if model and effort:
+        return f" ({model} {effort})"
+    if model:
+        return f" ({model})"
+    if effort:
+        return f" ({effort})"
+    return ""
+
+
+def _orchestration_event(
+    *,
+    thread_id: str,
+    text: str,
+    timestamp: str | None,
+    runtime_kind: str = "codex",
+) -> NormalizedEvent:
+    return NormalizedEvent(
+        thread_id=thread_id,
+        text=text,
+        is_complete=True,
+        content_type="orchestration",
+        role="assistant",
+        timestamp=timestamp,
+        runtime_kind=runtime_kind,
+        event_kind="orchestration",
+    )
+
+
+def _spawned_agent_text(agent: _AgentDescriptor) -> str:
+    title = f"• Spawned {_agent_label(agent, agent.agent_id)}{_spawn_request_suffix(agent)}"
+    detail = _prefixed_detail_block(agent.prompt)
+    return "\n".join(part for part in (title, detail) if part)
+
+
+def _waiting_for_targets_text(
+    target_ids: list[str],
+    agents_by_id: dict[str, _AgentDescriptor],
+) -> str:
+    if not target_ids:
+        return "• Waiting for agents"
+    if len(target_ids) == 1:
+        target_id = target_ids[0]
+        return f"• Waiting for {_agent_label(agents_by_id.get(target_id), target_id)}"
+
+    details = [
+        _agent_label(agents_by_id.get(target_id), target_id) for target_id in target_ids
+    ]
+    first, *rest = details
+    lines = [f"• Waiting for {len(target_ids)} agents", f"  └ {first}"]
+    lines.extend(f"    {line}" for line in rest)
+    return "\n".join(lines)
+
+
+def _agent_status_preview(status: Any) -> tuple[str, str]:
+    if isinstance(status, str):
+        return (status.replace("_", " "), "")
+    if not isinstance(status, dict):
+        return ("status updated", _compact_inline(_json_fragment(status), max_chars=200))
+
+    for key in ("completed", "failed", "error", "cancelled", "timed_out", "shutdown"):
+        if key not in status:
+            continue
+        raw = _as_text(status.get(key)).strip()
+        verb = key.replace("_", " ")
+        if raw and raw.lower() != verb:
+            return (verb, raw)
+        return (verb, "")
+
+    return ("status updated", _compact_inline(_json_fragment(status), max_chars=200))
+
+
+def _agent_status_text(
+    *,
+    agent_id: str,
+    status: Any,
+    agents_by_id: dict[str, _AgentDescriptor],
+) -> str:
+    label = _agent_label(agents_by_id.get(agent_id), agent_id)
+    verb, preview = _agent_status_preview(status)
+    title = f"• {label} {verb}"
+    detail = _prefixed_detail_block(preview)
+    return "\n".join(part for part in (title, detail) if part)
+
+
+def _status_signature(agent_id: str, status: Any) -> tuple[str, str, str]:
+    verb, preview = _agent_status_preview(status)
+    return (agent_id, verb, _compact_inline(reflow_whitespace(preview), max_chars=200))
 
 
 def _command_execution_summary(
@@ -1011,6 +1206,11 @@ class CodexRolloutNormalizer:
         entry_list = list(entries)
         current_thread_id = thread_id or ""
         result: list[NormalizedEvent] = []
+        pending_spawns: dict[str, _SpawnCall] = {}
+        pending_waits: dict[str, list[str]] = {}
+        active_waits: set[tuple[str, ...]] = set()
+        agents_by_id: dict[str, _AgentDescriptor] = {}
+        seen_statuses: set[tuple[str, str, str]] = set()
         for data in entry_list:
             if not isinstance(data, dict):
                 continue
@@ -1023,6 +1223,128 @@ class CodexRolloutNormalizer:
                 data,
                 thread_id=current_thread_id,
             )
+            timestamp = _timestamp(data)
+            if isinstance(payload, dict) and _as_text(data.get("type")).strip() == "response_item":
+                response_type = _as_text(payload.get("type")).strip()
+                if response_type == "function_call":
+                    tool_name = _as_text(payload.get("name")).strip()
+                    call_id = _as_text(payload.get("call_id")).strip()
+                    arguments = _structured_json(payload.get("arguments") or payload.get("input"))
+                    if tool_name == "spawn_agent":
+                        if call_id and isinstance(arguments, dict):
+                            pending_spawns[call_id] = _SpawnCall(
+                                role=_as_text(arguments.get("agent_type")).strip(),
+                                model=_as_text(arguments.get("model")).strip(),
+                                reasoning_effort=_as_text(arguments.get("reasoning_effort")).strip(),
+                                prompt=_spawn_prompt(arguments),
+                            )
+                        events = [_suppress_history_delivery(event) for event in events]
+                    elif tool_name == "wait_agent":
+                        if call_id and isinstance(arguments, dict):
+                            targets = [
+                                _as_text(target).strip()
+                                for target in (arguments.get("targets") or [])
+                                if _as_text(target).strip()
+                            ]
+                            pending_waits[call_id] = targets
+                            wait_key = tuple(sorted(targets))
+                            if wait_key and wait_key not in active_waits:
+                                active_waits.add(wait_key)
+                                events = [_suppress_history_delivery(event) for event in events]
+                                events.append(
+                                    _orchestration_event(
+                                        thread_id=current_thread_id,
+                                        text=_waiting_for_targets_text(targets, agents_by_id),
+                                        timestamp=timestamp,
+                                    )
+                                )
+                            else:
+                                events = [_suppress_history_delivery(event) for event in events]
+                elif response_type == "function_call_output":
+                    call_id = _as_text(payload.get("call_id")).strip()
+                    raw_output = payload.get("output")
+                    parsed_output = _structured_json(raw_output)
+                    spawn_request = pending_spawns.pop(call_id, None)
+                    targets = pending_waits.pop(call_id, [])
+                    if isinstance(parsed_output, dict) and spawn_request and "agent_id" in parsed_output:
+                        agent_id = _as_text(parsed_output.get("agent_id")).strip()
+                        if agent_id:
+                            descriptor = _AgentDescriptor(
+                                agent_id=agent_id,
+                                nickname=_as_text(parsed_output.get("nickname")).strip(),
+                                role=spawn_request.role,
+                                model=spawn_request.model,
+                                reasoning_effort=spawn_request.reasoning_effort,
+                                prompt=spawn_request.prompt,
+                            )
+                            agents_by_id[agent_id] = descriptor
+                            events = [_suppress_history_delivery(event) for event in events]
+                            events.append(
+                                _orchestration_event(
+                                    thread_id=current_thread_id,
+                                    text=_spawned_agent_text(descriptor),
+                                    timestamp=timestamp,
+                                )
+                            )
+                    elif call_id in pending_spawns or spawn_request is not None:
+                        events = [_suppress_history_delivery(event) for event in events]
+
+                    if targets:
+                        wait_key = tuple(sorted(targets))
+                        if wait_key and isinstance(parsed_output, dict):
+                            statuses = parsed_output.get("status")
+                            timed_out = bool(parsed_output.get("timed_out"))
+                            if isinstance(statuses, dict) and statuses:
+                                active_waits.discard(wait_key)
+                                events = [_suppress_history_delivery(event) for event in events]
+                                for agent_id, status in statuses.items():
+                                    signature = _status_signature(agent_id, status)
+                                    if signature in seen_statuses:
+                                        continue
+                                    seen_statuses.add(signature)
+                                    events.append(
+                                        _orchestration_event(
+                                            thread_id=current_thread_id,
+                                            text=_agent_status_text(
+                                                agent_id=agent_id,
+                                                status=status,
+                                                agents_by_id=agents_by_id,
+                                            ),
+                                            timestamp=timestamp,
+                                        )
+                                    )
+                            elif timed_out:
+                                events = [_suppress_history_delivery(event) for event in events]
+                            elif wait_key:
+                                active_waits.discard(wait_key)
+                                events = [_suppress_history_delivery(event) for event in events]
+                elif response_type == "message" and _as_text(payload.get("role")).strip() == "user":
+                    text = _text_from_content(payload.get("content")).strip()
+                    notification = _parse_subagent_notification(text)
+                    if notification is not None:
+                        events = [_suppress_history_delivery(event) for event in events]
+                        agent_id = _as_text(notification.get("agent_path")).strip()
+                        status = notification.get("status")
+                        if agent_id:
+                            active_waits = {
+                                wait_key
+                                for wait_key in active_waits
+                                if agent_id not in wait_key
+                            }
+                            signature = _status_signature(agent_id, status)
+                            if signature not in seen_statuses:
+                                seen_statuses.add(signature)
+                                events.append(
+                                    _orchestration_event(
+                                        thread_id=current_thread_id,
+                                        text=_agent_status_text(
+                                            agent_id=agent_id,
+                                            status=status,
+                                            agents_by_id=agents_by_id,
+                                        ),
+                                        timestamp=timestamp,
+                                    )
+                                )
             if _should_suppress_event_msg_duplicate(data, entry_list):
                 events = [_suppress_history_delivery(event) for event in events]
             result.extend(events)

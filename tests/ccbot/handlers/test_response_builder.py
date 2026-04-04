@@ -133,3 +133,15 @@ class TestBuildResponseParts:
         assert "Files" in formatted
         assert "```sh" in formatted
         assert "modified src/ccbot/bot.py" in formatted
+
+    def test_orchestration_content_keeps_codex_style_text_without_prefix(self):
+        formatted = format_response_text(
+            "• Spawned Mill [explorer] (gpt-5.4 medium)\n  └ Review this implementation plan",
+            is_complete=True,
+            content_type="orchestration",
+            role="assistant",
+        )
+
+        assert formatted.startswith("• Spawned Mill [explorer]")
+        assert "Commentary" not in formatted
+        assert "Tool" not in formatted

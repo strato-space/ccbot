@@ -421,3 +421,166 @@ def test_codex_rollout_tool_output_exec_command_uses_compact_output_count() -> N
     assert len(events) == 1
     assert events[0].content_type == "tool_result"
     assert events[0].text == "completed · output 3 line(s)"
+
+
+def test_codex_rollout_synthesizes_spawn_and_wait_orchestration_events() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-04T12:00:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "spawn_agent",
+                "call_id": "call_spawn",
+                "arguments": json.dumps(
+                    {
+                        "agent_type": "explorer",
+                        "model": "gpt-5.4",
+                        "reasoning_effort": "medium",
+                        "message": "Review this implementation plan for:\n1. Missing dependencies\n2. Ordering issues",
+                    }
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-04-04T12:00:00.100Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_spawn",
+                "output": json.dumps(
+                    {"agent_id": "agent-1", "nickname": "Mill"}
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-04-04T12:00:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "wait_agent",
+                "call_id": "call_wait",
+                "arguments": json.dumps(
+                    {"targets": ["agent-1"], "timeout_ms": 30000}
+                ),
+            },
+        },
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    dispatchable = [event for event in events if event.dispatch_to_telegram]
+    assert [(event.content_type, event.event_kind) for event in dispatchable] == [
+        ("orchestration", "orchestration"),
+        ("orchestration", "orchestration"),
+    ]
+    assert dispatchable[0].text.startswith("• Spawned Mill [explorer] (gpt-5.4 medium)")
+    assert "Review this implementation plan for:" in dispatchable[0].text
+    assert dispatchable[1].text == "• Waiting for Mill [explorer]"
+
+    suppressed = [event for event in events if not event.dispatch_to_telegram]
+    assert [event.content_type for event in suppressed] == [
+        "tool_use",
+        "tool_result",
+        "tool_use",
+    ]
+
+
+def test_codex_rollout_deduplicates_wait_completion_against_subagent_notification() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-04T12:01:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "spawn_agent",
+                "call_id": "call_spawn",
+                "arguments": json.dumps(
+                    {
+                        "agent_type": "explorer",
+                        "model": "gpt-5.4",
+                        "reasoning_effort": "medium",
+                        "message": "Review the implementation plan.",
+                    }
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-04-04T12:01:00.050Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_spawn",
+                "output": json.dumps(
+                    {"agent_id": "agent-1", "nickname": "Mill"}
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-04-04T12:01:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "wait_agent",
+                "call_id": "call_wait",
+                "arguments": json.dumps(
+                    {"targets": ["agent-1"], "timeout_ms": 30000}
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-04-04T12:01:05.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_wait",
+                "output": json.dumps(
+                    {
+                        "status": {
+                            "agent-1": {
+                                "completed": "Findings\n1. Missing dependency\n2. Missing rollback"
+                            }
+                        },
+                        "timed_out": False,
+                    }
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-04-04T12:01:05.100Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "<subagent_notification>\n"
+                            "{\"agent_path\":\"agent-1\",\"status\":{\"completed\":\"Findings\\n1. Missing dependency\\n2. Missing rollback\"}}\n"
+                            "</subagent_notification>"
+                        ),
+                    }
+                ],
+            },
+        },
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    dispatchable = [event for event in events if event.dispatch_to_telegram]
+    assert [event.content_type for event in dispatchable] == [
+        "orchestration",
+        "orchestration",
+        "orchestration",
+    ]
+    assert dispatchable[2].text.startswith("• Mill [explorer] completed")
+    assert dispatchable[2].text.count("Findings") == 1
+
+    suppressed_user = [
+        event
+        for event in events
+        if not event.dispatch_to_telegram and event.role == "user"
+    ]
+    assert len(suppressed_user) == 1
+    assert "<subagent_notification>" in suppressed_user[0].text

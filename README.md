@@ -62,12 +62,13 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
 ## Features
 
 - **Topic-based control** — Each Telegram topic binds to one tmux window at a time, while the live process in that window may start or resume a persisted conversation identity
-- **Compact Telegram delivery** — In the default production surface, user echo
-  and final assistant answers remain ordinary content bubbles, the latest
-  human-facing commentary stays visible as a dedicated artifact, and technical
-  reasoning/tool/command/file-change churn stays in the mutable status artifact.
-  Once the final assistant answer lands, the commentary lane closes until the
-  next user turn so no late commentary appears below the final answer
+- **Compact Telegram delivery** — In the default production surface, user echo,
+  orchestration milestones, and final assistant answers remain ordinary content
+  bubbles, the latest human-facing commentary stays visible as a dedicated
+  artifact, and technical reasoning/tool/command/file-change churn stays in
+  the mutable status artifact. Once the final assistant answer lands, the
+  commentary lane closes until the next user turn so no late commentary
+  appears below the final answer
 - **Prompt-safe control lane** — Detect `input ready`, `busy`, and `blocked prompt` terminal states before sending input
 - **Voice messages** — Voice messages are transcribed via OpenAI and forwarded as text
 - **Send messages** — Forward text to Codex via tmux keystrokes
@@ -253,6 +254,9 @@ In the default production-facing `compact` mode, the visible bubble surface is
 intentionally narrow:
 
 - **User echo** — The submitted Telegram message is echoed back into the topic
+- **Orchestration milestones** — Spawned/waiting/completed subagent status is
+  rendered as Codex-style human-facing milestone bubbles instead of raw
+  `spawn_agent` / `wait_agent` / `<subagent_notification>` payloads
 - **Commentary** — Human-facing progress narrative remains visible as ordinary
   content so execution context does not disappear under mutable status churn
 - **Final assistant responses** — The completed assistant answer lands as

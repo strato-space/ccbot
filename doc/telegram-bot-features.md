@@ -131,7 +131,7 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | **InlineKeyboardMarkup** | ✅ | Used extensively: thread picker, history pagination, directory browser, prompt snapshots, screenshot refresh |
 | **callback_query.answer()** | ✅ | Instant feedback on all callback button clicks |
 | **editMessageText** | ✅ | Status-to-content conversion in compact mode, plus verbose/fallback `tool_result` editing into `tool_use` messages |
-| **Compact delivery policy** | ✅ | Default production surface keeps only user echo and final assistant text as durable bubbles; the latest commentary stays visible as a dedicated artifact while technical execution classes collapse into mutable status |
+| **Compact delivery policy** | ✅ | Default production surface keeps user echo, orchestration milestones, and final assistant text as durable bubbles; the latest commentary stays visible as a dedicated artifact while technical execution classes collapse into mutable status |
 | **editMessageMedia** | ✅ | Screenshot refresh replaces image in-place |
 | **deleteMessage** | ✅ | Status message cleanup, interactive UI cleanup |
 | **BotCommand + set_my_commands** | ✅ | Bot menu is limited to the supported Codex core lane plus a small passthrough subset |

@@ -35,6 +35,7 @@ The contract is semantic, not transport-specific. It does not require literal
 Required semantic kinds:
 
 - `user_echo`
+- `orchestration`
 - `commentary`
 - `reasoning`
 - `tool_start`
@@ -73,7 +74,7 @@ At the contract level:
   - not included in `/history`
 - `commentary`, `reasoning`, `tool_start`, `tool_progress`
   - eligible to drive status/progress handling
-- `user_echo`, `commentary`, `assistant_final`
+- `user_echo`, `orchestration`, `commentary`, `assistant_final`
   - user-facing content candidates
 - `tool_result`, `command_execution`, `file_change`
   - history-worthy semantic facts even when the product surface chooses to
@@ -83,6 +84,10 @@ At the default product-facing `compact` Telegram surface:
 
 - `user_echo` and `assistant_final`
   - remain ordinary content bubbles
+- `orchestration`
+  - remains a durable human-facing milestone bubble for multi-agent and
+    supervisor coordination events such as spawned agent, waiting, and
+    completed subagent summaries
 - `commentary`
   - remains visible as a latest-only human-facing commentary artifact
 - `reasoning`, `tool_start`, `tool_result`, `command_execution`, `file_change`
