@@ -115,6 +115,8 @@ def test_codex_rollout_handles_command_and_file_change_turns() -> None:
     ]
     assert events[0].content_type == "command_execution"
     assert "codex run --help" in events[0].text
+    assert "output 1 line(s)" in events[0].text
+    assert "ok" not in events[0].text
     assert events[1].content_type == "file_change"
     assert "src/ccbot/session_monitor.py" in events[1].text
     assert events[2].tool_name == "turn_completed"
@@ -177,3 +179,61 @@ def test_codex_rollout_suppresses_duplicate_event_msg_history_delivery() -> None
         ("user", "ping 4"),
         ("assistant", "На месте."),
     ]
+
+
+def test_codex_rollout_suppresses_empty_reasoning_summary() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-04T07:00:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "reasoning",
+                "summary": [],
+                "content": [{"type": "output_text", "text": "raw private reasoning"}],
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].text == "[reasoning]"
+    assert events[0].dispatch_to_telegram is False
+    assert events[0].include_in_history is False
+
+
+def test_codex_rollout_compacts_large_tool_call_and_file_change_payloads() -> None:
+    patch_text = "*** Begin Patch\n" + "\n".join(f"+line {i}" for i in range(40))
+    records = [
+        {
+            "timestamp": "2026-04-04T07:01:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "apply_patch",
+                "arguments": patch_text,
+            },
+        },
+        {
+            "timestamp": "2026-04-04T07:01:01.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "patch_apply_end",
+                "status": "completed",
+                "changes": {
+                    "/tmp/a.txt": {"type": "add", "content": "alpha"},
+                    "/tmp/b.txt": {"type": "modify", "content": "beta"},
+                },
+            },
+        },
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert events[0].content_type == "tool_use"
+    assert events[0].text == "apply_patch(patch 41 lines)"
+    assert events[1].content_type == "file_change"
+    assert "add /tmp/a.txt" in events[1].text
+    assert "modify /tmp/b.txt" in events[1].text
+    assert "alpha" not in events[1].text
+    assert "beta" not in events[1].text

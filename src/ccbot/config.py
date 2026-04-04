@@ -100,6 +100,18 @@ class Config:
             os.getenv("CCBOT_SHOW_TOOL_CALLS", "true").lower() != "false"
         )
 
+        # Telegram delivery policy:
+        # - compact: human-facing chat output only (default)
+        # - verbose: expose more raw execution surface for debugging
+        delivery_mode = os.getenv("CCBOT_TELEGRAM_DELIVERY_MODE", "compact").lower()
+        if delivery_mode not in {"compact", "verbose"}:
+            logger.warning(
+                "Unknown CCBOT_TELEGRAM_DELIVERY_MODE=%s, falling back to compact",
+                delivery_mode,
+            )
+            delivery_mode = "compact"
+        self.telegram_delivery_mode = delivery_mode
+
         # Show hidden (dot) directories in directory browser
         self.show_hidden_dirs = (
             os.getenv("CCBOT_SHOW_HIDDEN_DIRS", "").lower() == "true"

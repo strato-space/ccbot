@@ -143,6 +143,7 @@ from .state_schema import (
 )
 from .session import BLOCKED_PROMPT_SEND_MESSAGE, session_manager
 from .session_monitor import NewMessage, SessionMonitor
+from .telegram_delivery_policy import apply_telegram_delivery_policy
 from .terminal_parser import classify_input_surface, extract_bash_output
 from .tmux_manager import tmux_manager
 from .transcribe import close_client as close_transcribe_client
@@ -2643,6 +2644,11 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
     Messages are queued per-user to ensure status messages always appear last.
     Routes via thread_bindings to deliver to the correct topic.
     """
+    msg = apply_telegram_delivery_policy(
+        msg,
+        mode=config.telegram_delivery_mode,
+    )
+
     status = "complete" if msg.is_complete else "streaming"
     logger.info(
         f"handle_new_message [{status}]: session={msg.session_id}, "

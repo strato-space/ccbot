@@ -32,6 +32,22 @@ _LIFECYCLE_ITEM_TYPES = {
     "exitedReviewMode",
     "contextCompaction",
 }
+_TOOL_SUMMARY_KEYS = (
+    "file_path",
+    "path",
+    "url",
+    "query",
+    "description",
+    "command",
+    "cmd",
+    "shell_command",
+    "pattern",
+    "title",
+    "session_id",
+    "ticket_id",
+    "issue",
+    "project",
+)
 
 
 def _as_text(value: Any) -> str:
@@ -109,6 +125,105 @@ def _text_from_content(content: Any) -> str:
                     parts.append(text)
         return "\n".join(parts).strip()
     return _as_text(content).strip()
+
+
+def _nonempty_lines(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _compact_inline(text: str, *, max_chars: int = 160) -> str:
+    text = reflow_whitespace(text).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
+
+
+def reflow_whitespace(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _compact_multiline(text: str, *, max_chars: int = 160) -> str:
+    lines = _nonempty_lines(text)
+    if not lines:
+        return ""
+    head = _compact_inline(lines[0], max_chars=max_chars)
+    if len(lines) == 1:
+        return head
+    return f"{head} (+{len(lines) - 1} more lines)"
+
+
+def _tool_call_summary(name: str, arguments: Any) -> str:
+    lowered = name.lower()
+
+    if isinstance(arguments, str):
+        text = arguments.strip()
+        if lowered == "apply_patch":
+            line_count = len(text.splitlines())
+            return f"{name}(patch {line_count} lines)"
+        summary = _compact_multiline(text)
+        return f"{name}({summary})" if summary else name
+
+    if isinstance(arguments, dict):
+        if lowered == "apply_patch":
+            patch_text = _as_text(arguments.get("patch") or arguments.get("input")).strip()
+            if patch_text:
+                return f"{name}(patch {len(patch_text.splitlines())} lines)"
+        for key in _TOOL_SUMMARY_KEYS:
+            value = arguments.get(key)
+            if isinstance(value, str) and value.strip():
+                return f"{name}({_compact_multiline(value)})"
+        for key in ("paths", "files", "todos", "questions"):
+            value = arguments.get(key)
+            if isinstance(value, list) and value:
+                return f"{name}({len(value)} item(s))"
+        summary = _compact_inline(_json_fragment(arguments), max_chars=120)
+        return f"{name}({summary})" if summary else name
+
+    summary = _compact_inline(_json_fragment(arguments), max_chars=120)
+    return f"{name}({summary})" if summary else name
+
+
+def _tool_output_summary(tool_name: str | None, text: str) -> str:
+    text = text.strip()
+    if not text:
+        return "[tool_output]"
+
+    lines = _nonempty_lines(text)
+    if not lines:
+        return "[tool_output]"
+
+    if len(lines) == 1 and len(lines[0]) <= 200:
+        return lines[0]
+
+    head = lines[0]
+    if head.lower().startswith("success. updated the following files:"):
+        file_count = max(0, len(lines) - 1)
+        return f"Updated {file_count} file(s)"
+
+    label = tool_name or "Tool output"
+    return f"{label}: {len(lines)} line(s)"
+
+
+def _command_execution_summary(
+    *,
+    command: str,
+    cwd: str,
+    status: str,
+    output: str,
+) -> str:
+    parts: list[str] = []
+    if command:
+        parts.append(_compact_multiline(command))
+    if status:
+        parts.append(status)
+    elif output:
+        parts.append("completed")
+    lines = _nonempty_lines(output)
+    if lines:
+        parts.append(f"output {len(lines)} line(s)")
+    if cwd and len(parts) < 3:
+        parts.append(_compact_inline(cwd, max_chars=120))
+    return "\n".join(part for part in parts if part) or "[command_execution]"
 
 
 def _thread_id_from_payload(payload: Any) -> str:
@@ -219,16 +334,10 @@ def _reasoning_event(
     runtime_kind: str = "codex",
 ) -> NormalizedEvent:
     summary = payload.get("summary")
-    content = payload.get("content")
-    encrypted_content = payload.get("encrypted_content")
-    text = _text_from_content(summary) or _text_from_content(content)
-    if not text and encrypted_content:
-        text = "[reasoning]"
-    if not text:
-        text = "[reasoning]"
-    return NormalizedEvent(
+    text = _text_from_content(summary) or _as_text(payload.get("text")).strip()
+    event = NormalizedEvent(
         thread_id=thread_id,
-        text=text,
+        text=text or "[reasoning]",
         is_complete=True,
         content_type="reasoning",
         role="assistant",
@@ -236,6 +345,9 @@ def _reasoning_event(
         runtime_kind=runtime_kind,
         event_kind="reasoning",
     )
+    if not text:
+        return _suppress_history_delivery(event)
+    return event
 
 
 def _command_execution_event(
@@ -259,8 +371,12 @@ def _command_execution_event(
         or payload.get("stderr")
     )
     status = _as_text(payload.get("status")).strip()
-    parts = [part for part in (command, cwd, status, output) if part]
-    text = "\n".join(parts) if parts else "[command_execution]"
+    text = _command_execution_summary(
+        command=command,
+        cwd=cwd,
+        status=status,
+        output=output,
+    )
     return NormalizedEvent(
         thread_id=thread_id,
         text=text,
@@ -276,6 +392,20 @@ def _command_execution_event(
 
 
 def _file_change_text(changes: Any) -> str:
+    if isinstance(changes, dict):
+        lines: list[str] = []
+        entries = list(changes.items())
+        for path, change in entries[:5]:
+            kind = ""
+            if isinstance(change, dict):
+                kind = _as_text(change.get("kind") or change.get("type") or change.get("change_kind")).strip()
+            if kind and path:
+                lines.append(f"{kind} {path}")
+            elif path:
+                lines.append(path)
+        if len(entries) > 5:
+            lines.append(f"+{len(entries) - 5} more files")
+        return "\n".join(lines).strip()
     if not isinstance(changes, list):
         return _text_from_content(changes)
     lines: list[str] = []
@@ -337,8 +467,7 @@ def _tool_call_event(
     arguments = payload.get("arguments")
     if arguments is None:
         arguments = payload.get("input")
-    arg_text = _json_fragment(arguments).strip()
-    text = f"{name}({arg_text})" if arg_text else name
+    text = _tool_call_summary(name, arguments)
     return NormalizedEvent(
         thread_id=thread_id,
         text=text,
@@ -361,15 +490,15 @@ def _tool_output_event(
     runtime_kind: str = "codex",
 ) -> NormalizedEvent:
     call_id = _as_text(payload.get("call_id") or payload.get("id") or "").strip()
+    tool_name = _as_text(payload.get("name") or payload.get("tool")).strip() or None
     content = (
         payload.get("content")
         or payload.get("output")
         or payload.get("result")
         or payload.get("data")
     )
-    text = _text_from_content(content)
-    if not text:
-        text = "[tool_output]"
+    raw_text = _text_from_content(content)
+    text = _tool_output_summary(tool_name, raw_text)
     return NormalizedEvent(
         thread_id=thread_id,
         text=text,
@@ -379,7 +508,7 @@ def _tool_output_event(
         timestamp=timestamp,
         runtime_kind=runtime_kind,
         event_kind="tool_output",
-        tool_name=_as_text(payload.get("name") or payload.get("tool")).strip() or None,
+        tool_name=tool_name,
         tool_use_id=call_id or None,
     )
 

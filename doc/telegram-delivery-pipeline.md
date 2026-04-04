@@ -10,6 +10,23 @@ behavior while remaining runtime-neutral.
 The pipeline consumes `NormalizedEvent` objects and applies delivery rules
 based on semantic meaning, not on the source runtime.
 
+## Default Delivery Mode
+
+The default Telegram surface is `compact`, not `verbose`.
+
+`compact` is the production-facing policy:
+
+- human-facing final answers stay as ordinary content
+- live commentary, reasoning summaries, command execution summaries, and
+  file-change summaries are routed through the mutable status artifact
+- internal injected user payloads such as `<skill>...</skill>` never appear as
+  ordinary chat content
+- placeholder reasoning such as `[reasoning]` is suppressed
+- raw tool payloads, giant command stdout dumps, and full file bodies must be summarized before they reach Telegram
+
+`verbose` is a debug policy for operators. It may expose more raw execution
+surface, but it is not the default product-facing mode.
+
 ## Ordering Rules
 
 The delivery pipeline keeps one mutable progress/status artifact per
@@ -50,6 +67,18 @@ In other words:
 - complete content remains content
 - incomplete progress becomes mutable status
 - lifecycle-only events are never delivered as normal content
+
+For the default `compact` Telegram surface, some complete events are
+intentionally projected into the mutable status artifact instead of becoming
+permanent content bubbles:
+
+- `commentary`
+- `reasoning` summaries
+- `command_execution` summaries
+- `file_change` summaries
+
+This keeps the chat human-readable while preserving the live CLI and replay
+evidence as the authoritative technical surfaces.
 
 ## Teardown And Stale-Delivery Rules
 
