@@ -6,7 +6,8 @@ chat mode.
 
 `compact` is the production default:
 - hide internal injected user payloads (`<skill>`, local command XML, etc.)
-- keep commentary/reasoning/command/file-change updates in the mutable status
+- keep commentary as visible human-facing progress content
+- keep reasoning/tool/command/file-change updates in the mutable status
   artifact instead of as permanent content bubbles
 - suppress placeholder reasoning with no human-readable summary
 
@@ -29,7 +30,6 @@ _INTERNAL_USER_ECHO_RE = re.compile(
 )
 _PLACEHOLDER_REASONING = {"[reasoning]", "(thinking)"}
 _STATUS_ONLY_CONTENT_TYPES = {
-    "commentary",
     "reasoning",
     "tool_use",
     "tool_result",

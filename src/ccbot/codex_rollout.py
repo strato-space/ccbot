@@ -707,7 +707,7 @@ def _normalize_event_msg_payload(
             timestamp=timestamp,
             runtime_kind=runtime_kind,
         )
-        if phase == "final_answer":
+        if phase in {"final_answer", "commentary"}:
             return [_suppress_history_delivery(event)]
         return [event]
 

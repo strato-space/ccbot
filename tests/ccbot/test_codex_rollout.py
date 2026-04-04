@@ -207,6 +207,42 @@ def test_codex_rollout_suppresses_duplicate_event_msg_history_delivery() -> None
     ]
 
 
+def test_codex_rollout_suppresses_duplicate_event_msg_commentary_delivery() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-04T10:20:00.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "phase": "commentary",
+                "message": "Wave A1 уже идёт.",
+            },
+        },
+        {
+            "timestamp": "2026-04-04T10:20:00.001Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "commentary",
+                "content": [{"type": "output_text", "text": "Wave A1 уже идёт."}],
+            },
+        },
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    dispatchable = [event for event in events if event.dispatch_to_telegram]
+    assert [(event.event_kind, event.text) for event in dispatchable] == [
+        ("commentary", "Wave A1 уже идёт."),
+    ]
+
+    suppressed = [event for event in events if not event.dispatch_to_telegram]
+    assert [(event.event_kind, event.text) for event in suppressed] == [
+        ("commentary", "Wave A1 уже идёт."),
+    ]
+
+
 def test_codex_rollout_suppresses_empty_reasoning_summary() -> None:
     records = [
         {

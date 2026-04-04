@@ -17,9 +17,10 @@ The default Telegram surface is `compact`, not `verbose`.
 `compact` is the production-facing policy:
 
 - human-facing final answers stay as ordinary content
-- live commentary, reasoning summaries, tool lifecycle summaries, command
-  execution summaries, and file-change summaries are routed through the
-  mutable status artifact
+- human-facing commentary stays as ordinary content so progress narrative does
+  not disappear under mutable status churn
+- reasoning summaries, tool lifecycle summaries, command execution summaries,
+  and file-change summaries are routed through the mutable status artifact
 - internal injected user payloads such as `<skill>...</skill>` never appear as
   ordinary chat content
 - placeholder reasoning such as `[reasoning]` is suppressed
@@ -74,12 +75,15 @@ For the default `compact` Telegram surface, some complete events are
 intentionally projected into the mutable status artifact instead of becoming
 permanent content bubbles:
 
-- `commentary`
 - `reasoning` summaries
 - `tool_use` summaries
 - `tool_result` summaries
 - `command_execution` summaries
 - `file_change` summaries
+
+Compact mode keeps commentary visible as ordinary content, because it is the
+human-readable execution narrative. The mutable status artifact is reserved for
+ephemeral technical execution surface that would otherwise churn too quickly.
 
 This keeps the chat human-readable while preserving the live CLI and replay
 evidence as the authoritative technical surfaces.

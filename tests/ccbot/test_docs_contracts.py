@@ -148,6 +148,7 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
 
     assert "status artifact" in doc
     assert "The default Telegram surface is `compact`, not `verbose`." in doc
+    assert "commentary stays as ordinary content" in doc
     assert "placeholder reasoning such as `[reasoning]` is suppressed" in doc
     assert "raw tool payloads, giant command stdout dumps, and full file bodies must be summarized before they reach Telegram" in doc
     assert "`tool_use` summaries" in doc
