@@ -195,6 +195,22 @@ def _message_event(
     )
 
 
+def _suppress_history_delivery(event: NormalizedEvent) -> NormalizedEvent:
+    """Keep the event in taxonomy, but suppress Telegram/history delivery.
+
+    Codex rollout emits some message content twice:
+      - lightweight ``event_msg`` records for live UI/status surfaces
+      - canonical ``response_item.message`` records for persisted turn history
+
+    We preserve the normalized event for semantic inspection, but only the
+    canonical ``response_item`` version should reach Telegram/history.
+    """
+    event.dispatch_to_telegram = False
+    event.include_in_history = False
+    event.status_message_eligible = False
+    return event
+
+
 def _reasoning_event(
     *,
     thread_id: str,
@@ -505,28 +521,29 @@ def _normalize_event_msg_payload(
         return []
 
     if payload_type == "agent_message":
-        return [
-            _message_event(
-                thread_id=thread_id,
-                role="assistant",
-                phase=_as_text(payload.get("phase")).strip() or "commentary",
-                text=_as_text(payload.get("message") or payload.get("text")).strip(),
-                timestamp=timestamp,
-                runtime_kind=runtime_kind,
-            )
-        ]
+        phase = _as_text(payload.get("phase")).strip() or "commentary"
+        event = _message_event(
+            thread_id=thread_id,
+            role="assistant",
+            phase=phase,
+            text=_as_text(payload.get("message") or payload.get("text")).strip(),
+            timestamp=timestamp,
+            runtime_kind=runtime_kind,
+        )
+        if phase == "final_answer":
+            return [_suppress_history_delivery(event)]
+        return [event]
 
     if payload_type == "user_message":
-        return [
-            _message_event(
-                thread_id=thread_id,
-                role="user",
-                phase=None,
-                text=_as_text(payload.get("message") or payload.get("text")).strip(),
-                timestamp=timestamp,
-                runtime_kind=runtime_kind,
-            )
-        ]
+        event = _message_event(
+            thread_id=thread_id,
+            role="user",
+            phase=None,
+            text=_as_text(payload.get("message") or payload.get("text")).strip(),
+            timestamp=timestamp,
+            runtime_kind=runtime_kind,
+        )
+        return [_suppress_history_delivery(event)]
 
     if payload_type in {"turn_started", "turn_completed", "turn_aborted"}:
         return [

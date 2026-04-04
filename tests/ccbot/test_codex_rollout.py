@@ -118,3 +118,62 @@ def test_codex_rollout_handles_command_and_file_change_turns() -> None:
     assert events[1].content_type == "file_change"
     assert "src/ccbot/session_monitor.py" in events[1].text
     assert events[2].tool_name == "turn_completed"
+
+
+def test_codex_rollout_suppresses_duplicate_event_msg_history_delivery() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-04T06:56:12.157Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "ping 4"}],
+            },
+        },
+        {
+            "timestamp": "2026-04-04T06:56:12.157Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": "ping 4",
+            },
+        },
+        {
+            "timestamp": "2026-04-04T06:56:15.705Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "message": "На месте.",
+                "phase": "final_answer",
+            },
+        },
+        {
+            "timestamp": "2026-04-04T06:56:15.706Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "На месте."}],
+            },
+        },
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    dispatchable = [event for event in events if event.dispatch_to_telegram]
+    assert [(event.role, event.text) for event in dispatchable] == [
+        ("user", "ping 4"),
+        ("assistant", "На месте."),
+    ]
+
+    suppressed = [
+        event
+        for event in events
+        if not event.dispatch_to_telegram and event.event_kind in {"user_message", "assistant_message"}
+    ]
+    assert [(event.role, event.text) for event in suppressed] == [
+        ("user", "ping 4"),
+        ("assistant", "На месте."),
+    ]
