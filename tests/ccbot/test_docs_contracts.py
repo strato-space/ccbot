@@ -150,7 +150,9 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "The default Telegram surface is `compact`, not `verbose`." in doc
     assert "placeholder reasoning such as `[reasoning]` is suppressed" in doc
     assert "raw tool payloads, giant command stdout dumps, and full file bodies must be summarized before they reach Telegram" in doc
-    assert "`tool_result` may edit the earlier `tool_use` message in place" in doc
+    assert "`tool_use` summaries" in doc
+    assert "`tool_result` summaries" in doc
+    assert "when tool lifecycle is materialized as content, `tool_result` may edit the earlier `tool_use` message in place" in doc
     assert "Late delivery must fail closed." in doc
     assert "queue" in doc
     assert "steer" in doc

@@ -28,8 +28,30 @@ _INTERNAL_USER_ECHO_RE = re.compile(
     re.IGNORECASE,
 )
 _PLACEHOLDER_REASONING = {"[reasoning]", "(thinking)"}
-_STATUS_ONLY_CONTENT_TYPES = {"commentary", "reasoning", "command_execution", "file_change"}
+_STATUS_ONLY_CONTENT_TYPES = {
+    "commentary",
+    "reasoning",
+    "tool_use",
+    "tool_result",
+    "command_execution",
+    "file_change",
+}
 _COMPACT_STATUS_LIMIT = 280
+
+
+def _is_internal_user_payload(text: str) -> bool:
+    stripped = text.strip()
+    if _INTERNAL_USER_ECHO_RE.match(stripped):
+        return True
+    if stripped.startswith("<turn_aborted>"):
+        return True
+    if stripped.startswith("# AGENTS.md instructions for "):
+        return True
+    if stripped.startswith("# Repository Guidelines"):
+        return True
+    if "\n<INSTRUCTIONS>\n" in stripped:
+        return True
+    return False
 
 
 def _compact_single_block(text: str, *, max_chars: int = _COMPACT_STATUS_LIMIT) -> str:
@@ -58,7 +80,7 @@ def apply_telegram_delivery_policy(
     projected = replace(event)
     text = projected.text.strip()
 
-    if projected.role == "user" and _INTERNAL_USER_ECHO_RE.match(text):
+    if projected.role == "user" and _is_internal_user_payload(text):
         return _suppress(projected)
 
     if projected.content_type == "reasoning":
@@ -79,6 +101,7 @@ def apply_telegram_delivery_policy(
         projected.text = _compact_single_block(text)
         projected.status_message_eligible = True
         projected.is_complete = False
+        projected.include_in_history = False
         return projected
 
     return projected

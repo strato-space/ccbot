@@ -17,8 +17,9 @@ The default Telegram surface is `compact`, not `verbose`.
 `compact` is the production-facing policy:
 
 - human-facing final answers stay as ordinary content
-- live commentary, reasoning summaries, command execution summaries, and
-  file-change summaries are routed through the mutable status artifact
+- live commentary, reasoning summaries, tool lifecycle summaries, command
+  execution summaries, and file-change summaries are routed through the
+  mutable status artifact
 - internal injected user payloads such as `<skill>...</skill>` never appear as
   ordinary chat content
 - placeholder reasoning such as `[reasoning]` is suppressed
@@ -36,7 +37,7 @@ Ordering guarantees:
 
 1. progress/status updates may appear while a turn is still running
 2. the first real content part may convert the status artifact into content
-3. `tool_result` may edit the earlier `tool_use` message in place
+3. when tool lifecycle is materialized as content, `tool_result` may edit the earlier `tool_use` message in place
 4. final assistant content lands in the topic after the progress/tool lifecycle
 
 This preserves the upstream Claude shape:
@@ -45,9 +46,10 @@ This preserves the upstream Claude shape:
 - tool lifecycle edits in order
 - final answer last
 
-This pipeline keeps the exact upstream-style rule that `tool_result` may edit
-the earlier `tool_use` message in place when the runtime emits a follow-up
-result.
+This pipeline keeps the upstream-style rule that `tool_result` may edit the
+earlier `tool_use` message in place when the runtime and delivery mode expose
+tool lifecycle as ordinary content. In the default `compact` mode, that same
+tool lifecycle is typically collapsed into the mutable status artifact instead.
 
 ## Progress Routing
 
@@ -74,6 +76,8 @@ permanent content bubbles:
 
 - `commentary`
 - `reasoning` summaries
+- `tool_use` summaries
+- `tool_result` summaries
 - `command_execution` summaries
 - `file_change` summaries
 
