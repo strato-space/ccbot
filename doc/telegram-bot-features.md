@@ -132,6 +132,9 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | **callback_query.answer()** | ✅ | Instant feedback on all callback button clicks |
 | **editMessageText** | ✅ | Status-to-content conversion in compact mode, plus verbose/fallback `tool_result` editing into `tool_use` messages |
 | **Compact delivery policy** | ✅ | Default production surface keeps user echo, orchestration milestones, and final assistant text as durable bubbles; the latest commentary stays visible as a dedicated artifact while technical execution classes collapse into mutable status |
+| **Pre-final terminal surface barrier** | ✅ | `commentary`, orchestration milestones, any surfaced preview bubble, and the mutable technical status artifact may appear before `assistant_final`, but never below it for the same turn |
+| **Codex-style command/tool previews** | ✅ | When command/tool/file previews are surfaced, they prefer extracted shell payloads, fenced `sh` / `json` blocks, truncation footers outside the code block body, and non-redundant outcome footers |
+| **Codex-style orchestration milestones** | ✅ | Subagent spawn/wait/finished-waiting/completion is rendered as human-facing milestones instead of raw `spawn_agent` / `wait_agent` / `<subagent_notification>` payloads |
 | **editMessageMedia** | ✅ | Screenshot refresh replaces image in-place |
 | **deleteMessage** | ✅ | Status message cleanup, interactive UI cleanup |
 | **BotCommand + set_my_commands** | ✅ | Bot menu is limited to the supported Codex core lane plus a small passthrough subset |
@@ -146,7 +149,7 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 
 | # | Feature | Impact | Effort | Notes |
 |---|---------|--------|--------|-------|
-| 1 | **sendMessageDraft (streaming)** | High | Medium | Stream Codex responses progressively instead of waiting for complete messages. Bot API 9.3+ required. Would significantly improve perceived responsiveness |
+| 1 | **Draft answer artifact** | High | Medium | Stream partial assistant answers progressively. In private chats this may use `sendMessageDraft`; in forum topics the safer contract is a normal message plus `editMessageText` so topic-mode behavior does not depend on a private-only transport primitive |
 | 2 | **Expandable blockquote for debug reasoning** | Medium | Low | Use `<blockquote expandable>` only in verbose/debug lanes where reasoning is intentionally exposed; the default compact surface should stay quiet |
 | 3 | **reply_parameters with quote** | Medium | Low | Quote the specific user message when replying, providing clear message association |
 | 4 | **copy_text button** | Medium | Low | Add "Copy" button to code block messages for one-tap clipboard copy |
@@ -205,6 +208,36 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
 - Registered bot commands should describe only the stable topic-control surface and the configured runtime lane.
 - Prompt-driven commands stay out of the advertised menu unless the prompt parser can positively identify and drive the resulting TUI state.
 - Raw passthrough remains available for expert use, but undocumented commands are best-effort rather than release-contract behavior.
+- In compact delivery, the visible pre-final surface is deliberately narrow:
+  - latest commentary artifact
+  - orchestration milestone bubbles
+  - any future surfaced preview bubble explicitly promoted by product policy
+- Once the final assistant answer lands, that whole pre-final visible surface is
+  closed until the next user turn, and the mutable technical status artifact
+  are both closed with it. In other words, the mutable technical status artifact
+  are both closed until the next user turn once the terminal assistant bubble lands.
+- Exact invariant: `mutable technical status artifact are both closed` once the
+  terminal assistant bubble lands for that turn.
+
+### Compact Telegram Delivery Contract
+
+- Durable bubbles in compact mode are intentionally narrow:
+  - user echo
+  - orchestration milestones
+  - final assistant text
+- Latest commentary remains visible as a dedicated artifact, but it is not a
+  durable ordinary content bubble.
+- Technical execution classes stay out of permanent bubbles by default:
+  - reasoning / thinking
+  - tool lifecycle
+  - command execution
+  - file-change churn
+- When compact/verbose lanes surface command or tool previews, they follow the
+  Codex-style preview contract:
+  - code block body contains only preview lines
+  - truncation footer lives outside the fenced block
+  - outcome footer is separate and should not redundantly say
+    `completed · output 1 line(s)` when the preview already conveys the result
 
 ### Topic Control Policy
 
@@ -218,6 +251,17 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
 - Telegram text enters the equal message layer in `queue` mode by default.
 - `steer` is a routing semantic for runtime-aware control actions, not a claim that tmux keystrokes are ordinary chat messages.
 - Raw terminal control remains a separate operator layer. A human typing directly in tmux is not modeled as an equal queued message channel.
+
+### Compact Bubble Semantics
+
+- `assistant_final` is the terminal turn artifact.
+- `commentary`, orchestration milestones, and any future surfaced preview
+  bubble belong to the broader `pre-final visible artifact` class.
+- Once the terminal assistant bubble lands, no later member of that class may
+  appear below it for the same turn.
+- The same turn boundary also closes the mutable technical status artifact.
+- If a visible multipart send has already started when the boundary closes, the
+  remaining parts fail closed rather than leaking below the final answer.
 
 ### Runtime-specific `/resume` notes
 

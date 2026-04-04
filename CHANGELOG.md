@@ -28,6 +28,13 @@
 - **12:00-12:13** A queue-serialized commentary-close primitive was added so
   already-queued human narrative can still land before the final answer, while
   any later commentary is suppressed until the next user turn.
+- **13:00-13:20** Added a dedicated `ontology/` source-of-truth folder so
+  runtime nouns, delivery-surface nouns, and ACP/human-control boundaries no
+  longer depend on scattered maintainer notes alone.
+- **17:10-17:20** Fixed two remaining turn-order correctness bugs: final
+  surface closure now waits for full multipart final delivery, and hidden
+  internal payloads no longer reopen turns unless they are real hidden turn
+  openers.
 
 ### CHANGES
 
@@ -54,3 +61,16 @@
   `src/ccbot/bot.py` from immediate lane closure to queued commentary fencing,
   tightened teardown in `src/ccbot/handlers/cleanup.py`, and extended delivery
   contract tests for the no-commentary-after-final invariant.
+- **13:00-13:20** Added `ontology/README.md`, `ontology/runtime.md`,
+  `ontology/delivery-surface.md`, and `ontology/boundaries.md`; updated
+  `README.md`, `doc/runtime-ontology.md`, `doc/runtime-event-contract.md`,
+  `doc/telegram-delivery-pipeline.md`, and doc-contract tests so the ontology
+  layer is explicit and discoverable.
+- **17:10-17:20** Tightened delivery ordering in
+  `src/ccbot/handlers/message_queue.py`, narrowed hidden turn-opening policy in
+  `src/ccbot/telegram_delivery_policy.py` and `src/ccbot/bot.py`, prevented
+  hidden `<subagent_notification>` from mutating Codex user-turn state in
+  `src/ccbot/codex_rollout.py`, and added regressions in
+  `tests/ccbot/handlers/test_message_queue.py`,
+  `tests/ccbot/test_bot_contracts.py`, and
+  `tests/ccbot/test_codex_rollout.py`.

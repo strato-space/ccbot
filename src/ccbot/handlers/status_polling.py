@@ -32,7 +32,11 @@ from .interactive_ui import (
     handle_interactive_ui,
 )
 from .cleanup import clear_topic_state
-from .message_queue import enqueue_status_update, get_message_queue
+from .message_queue import (
+    current_turn_generation,
+    enqueue_status_update,
+    get_message_queue,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,11 +64,17 @@ async def update_status_message(
     interactive mode when found.
     """
     w = await tmux_manager.find_window_by_id(window_id)
+    turn_generation = current_turn_generation(user_id, thread_id)
     if not w:
         # Window gone, enqueue clear (unless skipping status)
         if not skip_status:
             await enqueue_status_update(
-                bot, user_id, window_id, None, thread_id=thread_id
+                bot,
+                user_id,
+                window_id,
+                None,
+                thread_id=thread_id,
+                turn_generation=turn_generation,
             )
         return
 
@@ -113,6 +123,7 @@ async def update_status_message(
             window_id,
             surface.status_line,
             thread_id=thread_id,
+            turn_generation=turn_generation,
         )
     # If no status line, keep existing status message (don't clear on transient state)
 

@@ -15,6 +15,7 @@ from telegram import CallbackQuery, User
 from ccbot import bot as bot_mod
 from ccbot.handlers.callback_data import append_bind_flow_token
 from ccbot.runtime_types import NormalizedEvent
+from ccbot.telegram_delivery_policy import apply_telegram_delivery_policy
 from ccbot.state_schema import (
     BINDING_STATE_NONE,
     TOPIC_POLICY_IMPLICIT_BIND_ALLOWED,
@@ -1267,7 +1268,7 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_compact_mode_enqueues_commentary_close_before_final_answer(self):
+    async def test_handle_new_message_compact_mode_does_not_preclose_surface_before_final_answer(self):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -1281,9 +1282,6 @@ class TestTelegramDelivery:
 
         call_order: list[str] = []
 
-        async def _record_commentary_close(*args, **kwargs):
-            call_order.append("commentary_close")
-
         async def _record_content(*args, **kwargs):
             call_order.append("content")
 
@@ -1291,7 +1289,6 @@ class TestTelegramDelivery:
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_commentary_close", side_effect=_record_commentary_close) as mock_commentary_close,
             patch("ccbot.bot.enqueue_content_message", side_effect=_record_content) as mock_content,
             patch("ccbot.bot.get_interactive_msg_id", return_value=None),
         ):
@@ -1301,9 +1298,8 @@ class TestTelegramDelivery:
             await bot_mod.handle_new_message(msg, bot)
 
         mock_status.assert_not_awaited()
-        assert mock_commentary_close.call_count == 1
         assert mock_content.call_count == 1
-        assert call_order == ["commentary_close", "content"]
+        assert call_order == ["content"]
 
     @pytest.mark.asyncio
     async def test_handle_new_message_compact_mode_suppresses_internal_skill_user_echo(self):
@@ -1321,6 +1317,8 @@ class TestTelegramDelivery:
         with (
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.current_turn_generation", return_value=0),
+            patch("ccbot.bot.open_new_turn_generation", return_value=1) as mock_open_turn,
             patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
             patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
         ):
@@ -1328,6 +1326,7 @@ class TestTelegramDelivery:
 
             await bot_mod.handle_new_message(msg, bot)
 
+        mock_open_turn.assert_called_once_with(1, 42)
         mock_status.assert_not_awaited()
         mock_content.assert_not_awaited()
 
@@ -1347,6 +1346,8 @@ class TestTelegramDelivery:
         with (
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.current_turn_generation", return_value=0),
+            patch("ccbot.bot.open_new_turn_generation", return_value=1) as mock_open_turn,
             patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
             patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
         ):
@@ -1354,6 +1355,7 @@ class TestTelegramDelivery:
 
             await bot_mod.handle_new_message(msg, bot)
 
+        mock_open_turn.assert_called_once_with(1, 42)
         mock_status.assert_not_awaited()
         mock_content.assert_not_awaited()
 
@@ -1373,6 +1375,8 @@ class TestTelegramDelivery:
         with (
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.current_turn_generation", return_value=0),
+            patch("ccbot.bot.open_new_turn_generation", return_value=1) as mock_open_turn,
             patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
             patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
         ):
@@ -1380,6 +1384,7 @@ class TestTelegramDelivery:
 
             await bot_mod.handle_new_message(msg, bot)
 
+        mock_open_turn.assert_not_called()
         mock_status.assert_not_awaited()
         mock_content.assert_not_awaited()
 
@@ -1661,3 +1666,181 @@ class TestTelegramDelivery:
 
         mock_status.assert_not_awaited()
         mock_content.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_handle_new_message_reopens_pre_final_lane_for_hidden_user_echo(self):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="hidden user turn boundary",
+            is_complete=True,
+            content_type="text",
+            role="user",
+            event_kind="user_message",
+            runtime_kind="codex",
+            dispatch_to_telegram=False,
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.current_turn_generation", return_value=0),
+            patch("ccbot.bot.open_new_turn_generation", return_value=1) as mock_open_turn,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
+            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_open_turn.assert_called_once_with(1, 42)
+        mock_status.assert_not_awaited()
+        mock_content.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_handle_new_message_does_not_reopen_pre_final_lane_for_subagent_notification(self):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text='<subagent_notification>\n{"agent_path":"agent-1","status":{"completed":"done"}}\n</subagent_notification>',
+            is_complete=True,
+            content_type="text",
+            role="user",
+            event_kind="user_message",
+            runtime_kind="codex",
+            dispatch_to_telegram=False,
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.current_turn_generation", return_value=0),
+            patch("ccbot.bot.open_new_turn_generation", return_value=1) as mock_open_turn,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
+            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_open_turn.assert_not_called()
+        mock_status.assert_not_awaited()
+        mock_content.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "<system-reminder>secret instructions</system-reminder>",
+            "<bash-stdout>line 1</bash-stdout>",
+            "<bash-stderr>line 1</bash-stderr>",
+            "<local-command-caveat>caveat</local-command-caveat>",
+            "<command-name>/status</command-name>",
+            "<bash-input>ls -la</bash-input>",
+        ],
+    )
+    async def test_handle_new_message_does_not_reopen_pre_final_lane_for_hidden_internal_non_turn_payloads(self, text: str):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text=text,
+            is_complete=True,
+            content_type="text",
+            role="user",
+            event_kind="user_message",
+            runtime_kind="codex",
+            dispatch_to_telegram=False,
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.current_turn_generation", return_value=0),
+            patch("ccbot.bot.open_new_turn_generation", return_value=1) as mock_open_turn,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
+            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_open_turn.assert_not_called()
+        mock_status.assert_not_awaited()
+        mock_content.assert_not_awaited()
+
+    def test_compact_policy_keeps_code_fences_balanced_when_truncating_status(self):
+        event = NormalizedEvent(
+            thread_id="thread-1",
+            text="```sh\n" + "\n".join(f"line {i}" for i in range(40)) + "\n```",
+            is_complete=True,
+            content_type="command_execution",
+            role="assistant",
+            event_kind="command_execution",
+        )
+
+        projected = apply_telegram_delivery_policy(event, mode="compact")
+
+        assert projected.status_message_eligible is True
+        assert projected.text.count("```") % 2 == 0
+        assert "\n```\n\npreview " in projected.text
+        assert len(projected.text) <= 280
+
+    def test_compact_policy_clips_oversized_first_code_line_within_budget(self):
+        event = NormalizedEvent(
+            thread_id="thread-1",
+            text="```sh\n"
+            + "python3 - <<'PY' " + ("x" * 500)
+            + "\nprint('done')\n```\ncompleted",
+            is_complete=True,
+            content_type="command_execution",
+            role="assistant",
+            event_kind="command_execution",
+        )
+
+        projected = apply_telegram_delivery_policy(event, mode="compact")
+
+        assert projected.status_message_eligible is True
+        assert projected.text.count("```") % 2 == 0
+        assert len(projected.text) <= 280
+        assert "\n```\n\npreview " in projected.text
+
+    def test_compact_policy_keeps_balanced_code_fence_with_prefix_line(self):
+        event = NormalizedEvent(
+            thread_id="thread-1",
+            text="completed\n```sh\n"
+            + "\n".join(f"line {i}" for i in range(40))
+            + "\n```\nextra footer line",
+            is_complete=False,
+            content_type="tool_result",
+            role="assistant",
+            event_kind="tool_output",
+        )
+
+        projected = apply_telegram_delivery_policy(event, mode="compact")
+
+        assert projected.status_message_eligible is True
+        assert projected.text.startswith("completed\n```sh\n")
+        assert projected.text.count("```") % 2 == 0
+        assert "\n```\n\npreview " in projected.text
+        assert len(projected.text) <= 280
+
+    def test_compact_policy_overflow_fallback_never_leaves_unbalanced_fence(self):
+        event = NormalizedEvent(
+            thread_id="thread-1",
+            text=(
+                "completed " + ("very long prefix " * 20) + "\n```sh\n"
+                + "\n".join(f"line {i}" for i in range(20))
+                + "\n```\n"
+                + ("very long suffix " * 20)
+            ),
+            is_complete=False,
+            content_type="tool_result",
+            role="assistant",
+            event_kind="tool_output",
+        )
+
+        projected = apply_telegram_delivery_policy(event, mode="compact")
+
+        assert projected.status_message_eligible is True
+        assert len(projected.text) <= 280
+        assert projected.text.count("```") in {0, 2}

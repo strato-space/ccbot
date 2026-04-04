@@ -1,5 +1,7 @@
 """Tests for response_builder.build_response_parts."""
 
+import json
+
 import pytest
 
 from ccbot.handlers.response_builder import build_response_parts, format_response_text
@@ -121,6 +123,17 @@ class TestBuildResponseParts:
         assert "Tool Output" in formatted
         assert "```json" in formatted
         assert '"count": 2' in formatted
+
+    def test_tool_result_json_truncation_footer_stays_outside_code_block(self):
+        formatted = format_response_text(
+            json.dumps({"items": list(range(40))}),
+            is_complete=True,
+            content_type="tool_result",
+            role="assistant",
+        )
+
+        assert "```json" in formatted
+        assert "\n```\n\npreview " in formatted
 
     def test_file_change_multiline_renders_as_shell_block(self):
         formatted = format_response_text(

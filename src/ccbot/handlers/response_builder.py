@@ -38,16 +38,21 @@ _FILE_CHANGE_STATUSES = {"applied", "pending", "completed", "failed"}
 def _clip_code_lines(
     lines: list[str],
     *,
-    max_lines: int = 12,
+    max_lines: int = 5,
     max_chars: int = 140,
-) -> list[str]:
+) -> tuple[list[str], int]:
     clipped = [
         line if len(line) <= max_chars else line[: max_chars - 1].rstrip() + "…"
         for line in lines[:max_lines]
     ]
-    if len(lines) > max_lines:
-        clipped.append(f"... (+{len(lines) - max_lines} more lines)")
-    return clipped
+    return clipped, len(lines)
+
+
+def _preview_footer(total_lines: int, shown_lines: int) -> str:
+    remaining = max(0, total_lines - shown_lines)
+    if remaining <= 0:
+        return ""
+    return f"preview {shown_lines}/{total_lines} lines"
 
 
 def _format_json_code_block(
@@ -66,9 +71,14 @@ def _format_json_code_block(
 
     pretty = json.dumps(parsed, ensure_ascii=False, indent=2, sort_keys=True)
     lines = pretty.splitlines()
-    return "```json\n" + "\n".join(
-        _clip_code_lines(lines, max_lines=max_lines, max_chars=max_chars)
-    ) + "\n```"
+    clipped, total_lines = _clip_code_lines(
+        lines,
+        max_lines=max_lines,
+        max_chars=max_chars,
+    )
+    block = "```json\n" + "\n".join(clipped) + "\n```"
+    footer = _preview_footer(total_lines, len(clipped))
+    return "\n\n".join(part for part in (block, footer) if part)
 
 
 def _format_function_call_json(text: str) -> str | None:
@@ -91,10 +101,26 @@ def _format_file_change_block(text: str) -> str:
         return stripped
     first = lines[0].strip().lower()
     if first in _FILE_CHANGE_STATUSES and len(lines) > 1:
-        body = "\n".join(_clip_code_lines(lines[1:], max_lines=12, max_chars=140))
-        return f"{lines[0]}\n```sh\n{body}\n```"
-    body = "\n".join(_clip_code_lines(lines, max_lines=12, max_chars=140))
-    return f"```sh\n{body}\n```"
+        clipped, total_lines = _clip_code_lines(
+            lines[1:],
+            max_lines=12,
+            max_chars=140,
+        )
+        body = "\n".join(clipped)
+        footer = _preview_footer(total_lines, len(clipped))
+        result = [lines[0], f"```sh\n{body}\n```"]
+        if footer:
+            result.append("")
+            result.append(footer)
+        return "\n".join(result)
+    clipped, total_lines = _clip_code_lines(lines, max_lines=12, max_chars=140)
+    body = "\n".join(clipped)
+    footer = _preview_footer(total_lines, len(clipped))
+    result = [f"```sh\n{body}\n```"]
+    if footer:
+        result.append("")
+        result.append(footer)
+    return "\n".join(result)
 
 
 def _format_tool_like_text(text: str, *, content_type: str) -> str:

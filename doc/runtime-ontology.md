@@ -4,6 +4,15 @@ This note defines the entities that the multi-runtime adaptation work must keep
 distinct. It is the contract for implementation tasks in
 `/home/ccbot-codex-adaptation-plan-2.md`.
 
+The compact ontology index for maintainers now lives in:
+
+- [`/home/tools/ccbot/ontology/README.md`](/home/tools/ccbot/ontology/README.md)
+- [`/home/tools/ccbot/ontology/runtime.md`](/home/tools/ccbot/ontology/runtime.md)
+- [`/home/tools/ccbot/ontology/delivery-surface.md`](/home/tools/ccbot/ontology/delivery-surface.md)
+- [`/home/tools/ccbot/ontology/boundaries.md`](/home/tools/ccbot/ontology/boundaries.md)
+
+This file remains the expanded maintainer note for the runtime layer.
+
 ## Why this exists
 
 The current implementation history is still full of the word `session`, but the

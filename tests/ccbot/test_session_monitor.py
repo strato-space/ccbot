@@ -6,10 +6,12 @@ import json
 from pathlib import Path
 
 import pytest
+from unittest.mock import patch
 
 from ccbot.runtime_types import RolloutSource
 from ccbot.monitor_state import TrackedSession
 from ccbot.session_monitor import SessionMonitor
+from ccbot.transcript_parser import TranscriptParser
 
 
 class TestReadNewLinesOffsetRecovery:
@@ -151,6 +153,25 @@ class TestReadNewLinesOffsetRecovery:
         assert session.last_byte_offset == jsonl_file.stat().st_size
         assert len(result) == 1
 
+    @pytest.mark.asyncio
+    async def test_truncation_detection_resets_codex_rollout_state(
+        self, monitor, tmp_path, make_jsonl_entry
+    ):
+        jsonl_file = tmp_path / "session.jsonl"
+        entry = make_jsonl_entry(msg_type="assistant", content="content")
+        jsonl_file.write_text(json.dumps(entry) + "\n", encoding="utf-8")
+
+        session = TrackedSession(
+            session_id="test-session",
+            file_path=str(jsonl_file),
+            last_byte_offset=9999,
+        )
+        monitor._codex_rollout_states["test-session"] = object()  # type: ignore[assignment]
+
+        await monitor._read_new_lines(session, jsonl_file)
+
+        assert "test-session" not in monitor._codex_rollout_states
+
 
 class TestCheckForUpdatesCodexRollout:
     @pytest.fixture
@@ -231,3 +252,258 @@ class TestCheckForUpdatesCodexRollout:
             "tool_output",
             "lifecycle",
         }
+
+    @pytest.mark.asyncio
+    async def test_hydrate_codex_rollout_state_preserves_active_turn_user_duplicate_buffer(
+        self, monitor, tmp_path
+    ):
+        rollout = tmp_path / "thread.jsonl"
+        rollout.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-04-04T12:08:00.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": "$parallel flux2-plan.md",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        tracked = TrackedSession(
+            session_id="thread-1",
+            file_path=str(rollout),
+            last_byte_offset=rollout.stat().st_size,
+        )
+
+        hydrated = await monitor._hydrate_codex_rollout_state(
+            tracked,
+            rollout,
+            up_to_offset=rollout.stat().st_size,
+        )
+
+        assert hydrated.pending_event_messages == []
+        assert len(hydrated.recent_user_event_messages) == 1
+        assert next(iter(hydrated.recent_user_event_messages.keys()))[0] == "surrogate:1"
+
+        canonical = TranscriptParser.parse_codex_rollout_entries(
+            [
+                {
+                    "timestamp": "2026-04-04T12:08:01.000Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "$parallel flux2-plan.md",
+                            }
+                        ],
+                    },
+                }
+            ],
+            thread_id="thread-1",
+            state=hydrated,
+        )
+
+        assert canonical == []
+
+    @pytest.mark.asyncio
+    async def test_check_for_updates_preserves_hidden_user_echo_turn_boundaries(
+        self, monitor, tmp_path
+    ):
+        copied = tmp_path / "user-echo.jsonl"
+        copied.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-04-04T12:03:00.000Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "ping"}],
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        thread_id = "thread-user-hidden"
+        monitor._active_rollout_sources = {
+            thread_id: RolloutSource(thread_id=thread_id, file_path=copied, runtime_kind="codex")
+        }
+        tracked = TrackedSession(
+            session_id=thread_id,
+            file_path=str(copied),
+            last_byte_offset=0,
+        )
+        monitor.state.update_session(tracked)
+
+        with patch("ccbot.session_monitor.config.show_user_messages", False):
+            events = await monitor.check_for_updates({thread_id})
+
+        assert len(events) == 1
+        assert events[0].role == "user"
+        assert events[0].dispatch_to_telegram is False
+
+    @pytest.mark.asyncio
+    async def test_check_for_updates_carries_codex_spawn_state_across_poll_slices(
+        self, monitor, tmp_path
+    ):
+        copied = tmp_path / "spawn-stateful.jsonl"
+        thread_id = "thread-spawn-stateful"
+        monitor._active_rollout_sources = {
+            thread_id: RolloutSource(thread_id=thread_id, file_path=copied, runtime_kind="codex")
+        }
+        tracked = TrackedSession(
+            session_id=thread_id,
+            file_path=str(copied),
+            last_byte_offset=0,
+        )
+        monitor.state.update_session(tracked)
+
+        spawn_call = {
+            "timestamp": "2026-04-04T12:04:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "spawn_agent",
+                "call_id": "call_spawn",
+                "arguments": json.dumps(
+                    {
+                        "agent_type": "explorer",
+                        "model": "gpt-5.4",
+                        "reasoning_effort": "medium",
+                        "message": "Review the implementation plan.",
+                    }
+                ),
+            },
+        }
+        spawn_output = {
+            "timestamp": "2026-04-04T12:04:00.100Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_spawn",
+                "output": json.dumps({"agent_id": "agent-1", "nickname": "Mill"}),
+            },
+        }
+
+        copied.write_text(json.dumps(spawn_call) + "\n", encoding="utf-8")
+        first = await monitor.check_for_updates({thread_id})
+        assert all(not event.dispatch_to_telegram for event in first)
+
+        copied.write_text(
+            json.dumps(spawn_call) + "\n" + json.dumps(spawn_output) + "\n",
+            encoding="utf-8",
+        )
+        second = await monitor.check_for_updates({thread_id})
+
+        dispatchable = [event for event in second if event.dispatch_to_telegram]
+        assert len(dispatchable) == 1
+        assert dispatchable[0].text.startswith("• Spawned Mill [explorer] (gpt-5.4 medium)")
+
+    @pytest.mark.asyncio
+    async def test_check_for_updates_flushes_pending_codex_event_msg_without_file_change(
+        self, monitor, tmp_path
+    ):
+        copied = tmp_path / "pending-commentary.jsonl"
+        thread_id = "thread-pending-commentary"
+        monitor._active_rollout_sources = {
+            thread_id: RolloutSource(
+                thread_id=thread_id,
+                file_path=copied,
+                runtime_kind="codex",
+            )
+        }
+        tracked = TrackedSession(
+            session_id=thread_id,
+            file_path=str(copied),
+            last_byte_offset=0,
+        )
+        monitor.state.update_session(tracked)
+
+        copied.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-04-04T12:05:00.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "agent_message",
+                        "phase": "commentary",
+                        "message": "Wave B2 уже идёт.",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with patch(
+            "ccbot.codex_rollout._now_seconds",
+            side_effect=[500.0, 501.0],
+        ):
+            first = await monitor.check_for_updates({thread_id})
+            second = await monitor.check_for_updates({thread_id})
+
+        assert first == []
+        assert [event.text for event in second if event.dispatch_to_telegram] == [
+            "Wave B2 уже идёт."
+        ]
+
+    @pytest.mark.asyncio
+    async def test_check_for_updates_does_not_replay_hydrated_historical_event_msg(
+        self, monitor, tmp_path
+    ):
+        copied = tmp_path / "historical-commentary.jsonl"
+        thread_id = "thread-historical-commentary"
+        old_commentary = {
+            "timestamp": "2026-04-04T12:05:00.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "phase": "commentary",
+                "message": "Old commentary already consumed.",
+            },
+        }
+        new_lifecycle = {
+            "timestamp": "2026-04-04T12:06:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "local_shell_call",
+                "action": "started",
+            },
+        }
+
+        copied.write_text(json.dumps(old_commentary) + "\n", encoding="utf-8")
+        consumed_size = copied.stat().st_size
+        copied.write_text(
+            json.dumps(old_commentary) + "\n" + json.dumps(new_lifecycle) + "\n",
+            encoding="utf-8",
+        )
+
+        monitor._active_rollout_sources = {
+            thread_id: RolloutSource(
+                thread_id=thread_id,
+                file_path=copied,
+                runtime_kind="codex",
+            )
+        }
+        tracked = TrackedSession(
+            session_id=thread_id,
+            file_path=str(copied),
+            last_byte_offset=consumed_size,
+        )
+        monitor.state.update_session(tracked)
+        monitor._file_mtimes[thread_id] = copied.stat().st_mtime - 1
+
+        first = await monitor.check_for_updates({thread_id})
+        second = await monitor.check_for_updates({thread_id})
+
+        assert [event.text for event in first if event.dispatch_to_telegram] == []
+        assert second == []

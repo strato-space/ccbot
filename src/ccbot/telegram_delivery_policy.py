@@ -47,7 +47,7 @@ _STATUS_ONLY_SEMANTIC_KINDS = {
 _COMPACT_STATUS_LIMIT = 280
 
 
-def _is_internal_user_payload(text: str) -> bool:
+def is_internal_user_payload(text: str) -> bool:
     stripped = text.strip()
     if _INTERNAL_USER_ECHO_RE.match(stripped):
         return True
@@ -62,10 +62,112 @@ def _is_internal_user_payload(text: str) -> bool:
     return False
 
 
+def is_non_turn_user_notification(text: str) -> bool:
+    """Return True for hidden user payloads that do not open a new turn."""
+    stripped = text.strip()
+    if stripped.startswith("<turn_aborted>"):
+        return True
+    if stripped.startswith("# AGENTS.md instructions for "):
+        return False
+    if stripped.startswith("# Repository Guidelines"):
+        return False
+    if "\n<INSTRUCTIONS>\n" in stripped:
+        return False
+    if _INTERNAL_USER_ECHO_RE.match(stripped):
+        tag = _INTERNAL_USER_ECHO_RE.match(stripped)
+        if tag:
+            return tag.group(1).lower() not in {"skill"}
+    return False
+
+
+def _clip_inline(text: str, *, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
+
+
 def _compact_single_block(text: str, *, max_chars: int = _COMPACT_STATUS_LIMIT) -> str:
     text = text.strip()
     if len(text) <= max_chars:
         return text
+    if "```" in text:
+        lines = text.splitlines()
+        fence_start = next(
+            (index for index, line in enumerate(lines) if line.startswith("```")),
+            None,
+        )
+        if fence_start is not None:
+            close_index = next(
+                (
+                    index
+                    for index, line in enumerate(
+                        lines[fence_start + 1 :],
+                        start=fence_start + 1,
+                    )
+                    if line.startswith("```")
+                ),
+                None,
+            )
+            if close_index is None:
+                body = lines[fence_start + 1 :]
+                trailing: list[str] = []
+            else:
+                body = lines[fence_start + 1 : close_index]
+                trailing = lines[close_index + 1 :]
+            prefix_lines = [
+                _clip_inline(line, max_chars=80)
+                for line in lines[:fence_start]
+                if line.strip()
+            ][:2]
+            clipped_body = [
+                _clip_inline(line, max_chars=72) for line in body[:5]
+            ]
+            compact_lines = [*prefix_lines, lines[fence_start], *clipped_body, "```"]
+            omitted = (
+                max(
+                    0,
+                    len([line for line in lines[:fence_start] if line.strip()])
+                    - len(prefix_lines),
+                )
+                + max(0, len(body) - len(clipped_body))
+                + len([line for line in trailing if line.strip()])
+            )
+            if omitted > 0:
+                compact_lines.extend(
+                    ["", f"preview {len(clipped_body)}/{len(clipped_body) + omitted} lines"]
+                )
+            compact = "\n".join(compact_lines)
+            if len(compact) <= max_chars:
+                return compact
+            trailing_nonempty = [line for line in trailing if line.strip()]
+            fallback_lines = prefix_lines[:1]
+            if body:
+                fallback_lines.append(_clip_inline(body[0], max_chars=80))
+            elif trailing_nonempty:
+                fallback_lines.append(_clip_inline(trailing_nonempty[0], max_chars=80))
+            omitted_plain = (
+                max(
+                    0,
+                    len([line for line in lines[:fence_start] if line.strip()])
+                    - len(prefix_lines[:1]),
+                )
+                + max(0, len(body) - (1 if body else 0))
+                + max(0, len(trailing_nonempty) - (0 if body else 1 if trailing_nonempty else 0))
+            )
+            plain = "\n".join(line for line in fallback_lines if line)
+            if omitted_plain > 0:
+                shown_plain = 1 if (body or trailing_nonempty) else 0
+                plain = "\n".join(
+                    part
+                    for part in (
+                        plain,
+                        f"preview {shown_plain}/{shown_plain + omitted_plain} lines",
+                    )
+                    if part
+                )
+            if len(plain) <= max_chars:
+                return plain
+            return _clip_inline(" ".join(plain.split()), max_chars=max_chars)
     return text[: max_chars - 1].rstrip() + "…"
 
 
@@ -88,7 +190,7 @@ def apply_telegram_delivery_policy(
     projected = replace(event)
     text = projected.text.strip()
 
-    if projected.role == "user" and _is_internal_user_payload(text):
+    if projected.role == "user" and is_internal_user_payload(text):
         return _suppress(projected)
 
     if projected.semantic_kind == REASONING_SEMANTIC_KIND:

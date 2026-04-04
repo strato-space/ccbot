@@ -89,9 +89,13 @@ class TestStatusPollerSettingsDetection:
                 new_callable=AsyncMock,
             ) as mock_handle_ui,
             patch(
+                "ccbot.handlers.status_polling.current_turn_generation",
+                return_value=3,
+            ),
+            patch(
                 "ccbot.handlers.status_polling.enqueue_status_update",
                 new_callable=AsyncMock,
-            ),
+            ) as mock_status,
         ):
             mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
             mock_tmux.capture_pane = AsyncMock(return_value=normal_pane)
@@ -101,6 +105,8 @@ class TestStatusPollerSettingsDetection:
             )
 
             mock_handle_ui.assert_not_called()
+            mock_status.assert_awaited_once()
+            assert mock_status.await_args.kwargs["turn_generation"] == 3
 
     @pytest.mark.asyncio
     async def test_settings_ui_end_to_end_sends_read_only_prompt_snapshot(
@@ -178,3 +184,27 @@ class TestStatusPollerSettingsDetection:
         call_kwargs = mock_bot.send_message.call_args.kwargs
         assert call_kwargs["reply_markup"] is not None
         assert "Would you like to run the following command?" in call_kwargs["text"]
+
+    @pytest.mark.asyncio
+    async def test_missing_window_clear_status_preserves_current_generation(
+        self, mock_bot: AsyncMock
+    ):
+        with (
+            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+            patch(
+                "ccbot.handlers.status_polling.current_turn_generation",
+                return_value=4,
+            ),
+            patch(
+                "ccbot.handlers.status_polling.enqueue_status_update",
+                new_callable=AsyncMock,
+            ) as mock_status,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=None)
+
+            await update_status_message(
+                mock_bot, user_id=1, window_id="@5", thread_id=42
+            )
+
+        mock_status.assert_awaited_once()
+        assert mock_status.await_args.kwargs["turn_generation"] == 4

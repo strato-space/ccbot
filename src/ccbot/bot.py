@@ -117,12 +117,12 @@ from .handlers.interactive_ui import (
 )
 from .handlers.message_queue import (
     clear_status_msg_info,
-    enqueue_commentary_close,
+    current_turn_generation,
     enqueue_commentary_update,
     enqueue_content_message,
     enqueue_status_update,
     get_message_queue,
-    reopen_commentary_lane,
+    open_new_turn_generation,
     shutdown_workers,
 )
 from .launcher_registration import infer_runtime_kind_from_command
@@ -137,7 +137,6 @@ from .markdown_v2 import convert_markdown
 from .handlers.response_builder import build_response_parts, build_status_text
 from .handlers.status_polling import status_poll_loop
 from .runtime_types import (
-    ASSISTANT_FINAL_SEMANTIC_KIND,
     USER_ECHO_SEMANTIC_KIND,
     runtime_capability_registry,
 )
@@ -151,6 +150,7 @@ from .state_schema import (
 from .session import BLOCKED_PROMPT_SEND_MESSAGE, session_manager
 from .session_monitor import NewMessage, SessionMonitor
 from .telegram_delivery_policy import apply_telegram_delivery_policy
+from .telegram_delivery_policy import is_non_turn_user_notification
 from .terminal_parser import classify_input_surface, extract_bash_output
 from .tmux_manager import tmux_manager
 from .transcribe import close_client as close_transcribe_client
@@ -2656,19 +2656,16 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         mode=config.telegram_delivery_mode,
     )
 
+    opens_new_turn = (
+        msg.semantic_kind == USER_ECHO_SEMANTIC_KIND
+        and not is_non_turn_user_notification(msg.text)
+    )
+
     status = "complete" if msg.is_complete else "streaming"
     logger.info(
         f"handle_new_message [{status}]: session={msg.session_id}, "
         f"text_len={len(msg.text)}"
     )
-
-    if not msg.dispatch_to_telegram:
-        logger.debug(
-            "Skipping non-dispatched event thread=%s semantic=%s",
-            msg.thread_id,
-            msg.semantic_kind,
-        )
-        return
 
     # Find users whose thread-bound window matches this session
     active_users = await session_manager.find_users_for_session(msg.session_id)
@@ -2678,8 +2675,17 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         return
 
     for user_id, wid, thread_id in active_users:
-        if msg.semantic_kind == USER_ECHO_SEMANTIC_KIND:
-            reopen_commentary_lane(user_id, thread_id)
+        turn_generation = current_turn_generation(user_id, thread_id)
+        if opens_new_turn:
+            turn_generation = open_new_turn_generation(user_id, thread_id)
+
+        if not msg.dispatch_to_telegram:
+            logger.debug(
+                "Skipping non-dispatched event thread=%s semantic=%s",
+                msg.thread_id,
+                msg.semantic_kind,
+            )
+            continue
 
         # Handle interactive tools specially - capture terminal and send UI
         if msg.tool_name in INTERACTIVE_TOOL_NAMES and msg.content_type == "tool_use":
@@ -2732,6 +2738,7 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 wid,
                 status_text,
                 thread_id=thread_id,
+                turn_generation=turn_generation,
             )
             continue
 
@@ -2752,6 +2759,7 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 wid,
                 commentary_text,
                 thread_id=thread_id,
+                turn_generation=turn_generation,
             )
 
             session = await session_manager.resolve_session_for_window(wid)
@@ -2771,15 +2779,6 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         )
 
         if msg.is_complete:
-            if (
-                config.telegram_delivery_mode == "compact"
-                and msg.semantic_kind == ASSISTANT_FINAL_SEMANTIC_KIND
-            ):
-                await enqueue_commentary_close(
-                    bot,
-                    user_id,
-                    thread_id=thread_id,
-                )
             # Enqueue content message task
             # Note: tool_result editing is handled inside _process_content_task
             # to ensure sequential processing with tool_use message sending
@@ -2790,9 +2789,11 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 parts=parts,
                 tool_use_id=msg.tool_use_id,
                 content_type=msg.content_type,
+                semantic_kind=msg.semantic_kind,
                 text=msg.text,
                 thread_id=thread_id,
                 image_data=msg.image_data,
+                turn_generation=turn_generation,
             )
 
             # Update user's read offset to current file position

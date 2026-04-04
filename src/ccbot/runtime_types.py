@@ -77,6 +77,20 @@ def infer_delivery_class(semantic_kind: str) -> str:
     return DELIVERY_CLASS_HISTORY
 
 
+def is_terminal_turn_artifact(semantic_kind: str) -> bool:
+    """Return True when the semantic kind closes the visible turn surface."""
+    return semantic_kind == ASSISTANT_FINAL_SEMANTIC_KIND
+
+
+def is_pre_final_visible_semantic_kind(semantic_kind: str) -> bool:
+    """Return True for visible assistant-side artifacts that must precede final."""
+    return semantic_kind not in {
+        USER_ECHO_SEMANTIC_KIND,
+        ASSISTANT_FINAL_SEMANTIC_KIND,
+        LIFECYCLE_SEMANTIC_KIND,
+    }
+
+
 @dataclass(frozen=True)
 class TopicBinding:
     """Persisted association from a Telegram topic to a tmux window."""

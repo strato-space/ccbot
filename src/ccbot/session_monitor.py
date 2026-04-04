@@ -25,9 +25,9 @@ import aiofiles
 
 from .config import config
 from .codex_threads import normalize_cwd
-from .codex_rollout import CodexRolloutNormalizer
+from .codex_rollout import CodexRolloutNormalizer, CodexRolloutState
 from .monitor_state import MonitorState, TrackedSession
-from .runtime_types import NormalizedEvent, RolloutSource
+from .runtime_types import NormalizedEvent, RolloutSource, USER_ECHO_SEMANTIC_KIND
 from .tmux_manager import tmux_manager
 from .transcript_parser import TranscriptParser
 from .utils import read_cwd_from_jsonl
@@ -69,6 +69,8 @@ class SessionMonitor:
         self._last_binding_map: dict[str, str] = {}  # window_key -> thread_id
         # Active runtime-resolved replay sources for the current binding map.
         self._active_rollout_sources: dict[str, RolloutSource] = {}
+        # Per-thread Codex rollout synthesis state carried across poll cycles.
+        self._codex_rollout_states: dict[str, CodexRolloutState] = {}
         # In-memory mtime cache for quick file change detection (not persisted)
         self._file_mtimes: dict[str, float] = {}  # thread_id -> last_seen_mtime
 
@@ -200,6 +202,7 @@ class SessionMonitor:
                         file_size,
                     )
                     tracked_source.last_byte_offset = 0
+                    self._codex_rollout_states.pop(tracked_source.thread_id, None)
 
                 # Seek to last read position for incremental reading
                 await f.seek(tracked_source.last_byte_offset)
@@ -255,6 +258,89 @@ class SessionMonitor:
         except OSError as e:
             logger.error("Error reading replay evidence %s: %s", file_path, e)
         return new_entries
+
+    async def _hydrate_codex_rollout_state(
+        self,
+        tracked_source: TrackedSession,
+        file_path: Path,
+        *,
+        up_to_offset: int | None = None,
+    ) -> CodexRolloutState:
+        """Rebuild cross-poll Codex synthesis state up to the tracked offset."""
+        state = CodexRolloutState()
+        target_offset = tracked_source.last_byte_offset if up_to_offset is None else up_to_offset
+        if target_offset <= 0:
+            return state
+
+        def _read_prefix() -> list[dict]:
+            entries: list[dict] = []
+            with file_path.open("r", encoding="utf-8") as handle:
+                while handle.tell() < target_offset:
+                    line = handle.readline()
+                    if not line:
+                        break
+                    if handle.tell() > target_offset and not line.endswith("\n"):
+                        break
+                    data = TranscriptParser.parse_line(line)
+                    if data:
+                        entries.append(data)
+            return entries
+
+        try:
+            prefix_entries = await asyncio.to_thread(_read_prefix)
+        except OSError as e:
+            logger.debug(
+                "Failed to hydrate Codex rollout state for %s: %s",
+                tracked_source.thread_id,
+                e,
+            )
+            return state
+
+        if prefix_entries:
+            TranscriptParser.parse_codex_rollout_entries(
+                prefix_entries,
+                thread_id=tracked_source.thread_id,
+                state=state,
+            )
+            # Historical replay rebuilds long-lived synthesis state, not
+            # in-flight duplicate buffers. Otherwise unmatched historical
+            # `event_msg` copies can flush again after restart/state eviction.
+            state.pending_event_messages.clear()
+            # Preserve duplicate-suppression buffers only for the active turn.
+            # This lets the later canonical user copy for the same turn collapse
+            # correctly after restart, while still preventing historical
+            # unmatched event_msg fallbacks from re-flushing.
+            active_turn_key = state.current_turn_key or f"surrogate:{state.turn_generation}"
+            state.recent_user_event_messages = {
+                signature: emitted_at
+                for signature, emitted_at in state.recent_user_event_messages.items()
+                if signature[0] == active_turn_key
+            }
+            state.canonical_message_signatures = {
+                signature
+                for signature in state.canonical_message_signatures
+                if signature[0] == active_turn_key
+            }
+        return state
+
+    async def _codex_rollout_state_for_thread(
+        self,
+        tracked_source: TrackedSession,
+        rollout_source: RolloutSource,
+        *,
+        up_to_offset: int | None = None,
+    ) -> CodexRolloutState:
+        """Return the incremental Codex rollout state for a thread."""
+        existing = self._codex_rollout_states.get(tracked_source.thread_id)
+        if existing is not None:
+            return existing
+        state = await self._hydrate_codex_rollout_state(
+            tracked_source,
+            rollout_source.file_path,
+            up_to_offset=up_to_offset,
+        )
+        self._codex_rollout_states[tracked_source.thread_id] = state
+        return state
 
     async def check_for_updates(
         self, active_thread_ids: set[str]
@@ -329,10 +415,57 @@ class SessionMonitor:
                     current_mtime <= last_mtime
                     and current_size <= tracked.last_byte_offset
                 ):
+                    if rollout_source.runtime_kind == "codex":
+                        codex_state = self._codex_rollout_states.get(
+                            rollout_source.thread_id
+                        )
+                        if (
+                            codex_state is not None
+                            and codex_state.pending_event_messages
+                        ):
+                            parsed_entries = TranscriptParser.parse_codex_rollout_entries(
+                                [],
+                                thread_id=rollout_source.thread_id,
+                                state=codex_state,
+                            )
+                            for entry in parsed_entries:
+                                if (
+                                    not entry.text
+                                    and not entry.image_data
+                                    and entry.delivery_class != "lifecycle"
+                                ):
+                                    continue
+                                if (
+                                    entry.role == "user"
+                                    and not config.show_user_messages
+                                    and entry.dispatch_to_telegram
+                                ):
+                                    entry.dispatch_to_telegram = False
+                                new_messages.append(
+                                    NormalizedEvent(
+                                        thread_id=rollout_source.thread_id,
+                                        text=entry.text,
+                                        is_complete=entry.is_complete,
+                                        content_type=entry.content_type,
+                                        tool_use_id=entry.tool_use_id,
+                                        role=entry.role,
+                                        tool_name=entry.tool_name,
+                                        image_data=entry.image_data,
+                                        timestamp=entry.timestamp,
+                                        runtime_kind=entry.runtime_kind,
+                                        event_kind=entry.event_kind,
+                                        semantic_kind=entry.semantic_kind,
+                                        delivery_class=entry.delivery_class,
+                                        include_in_history=entry.include_in_history,
+                                        dispatch_to_telegram=entry.dispatch_to_telegram,
+                                        status_message_eligible=entry.status_message_eligible,
+                                    )
+                                )
                     # File hasn't changed, skip reading
                     continue
 
                 # File changed, read new content from last offset
+                previous_offset = tracked.last_byte_offset
                 new_entries = await self._read_new_lines(tracked, rollout_source.file_path)
                 self._file_mtimes[rollout_source.thread_id] = current_mtime
 
@@ -349,9 +482,15 @@ class SessionMonitor:
                     for entry in new_entries
                     if isinstance(entry, dict)
                 ):
+                    codex_state = await self._codex_rollout_state_for_thread(
+                        tracked,
+                        rollout_source,
+                        up_to_offset=previous_offset,
+                    )
                     parsed_entries = TranscriptParser.parse_codex_rollout_entries(
                         new_entries,
                         thread_id=rollout_source.thread_id,
+                        state=codex_state,
                     )
                     self._pending_tools.pop(rollout_source.thread_id, None)
                 else:
@@ -372,9 +511,12 @@ class SessionMonitor:
                         and entry.delivery_class != "lifecycle"
                     ):
                         continue
-                    # Skip user messages unless show_user_messages is enabled
-                    if entry.role == "user" and not config.show_user_messages:
-                        continue
+                    if (
+                        entry.role == "user"
+                        and not config.show_user_messages
+                        and entry.dispatch_to_telegram
+                    ):
+                        entry.dispatch_to_telegram = False
                     new_messages.append(
                         NormalizedEvent(
                             thread_id=rollout_source.thread_id,
@@ -456,6 +598,7 @@ class SessionMonitor:
             for session_id in stale_sessions:
                 self.state.remove_tracked_source(session_id)
                 self._file_mtimes.pop(session_id, None)
+                self._codex_rollout_states.pop(session_id, None)
             self.state.save_if_dirty()
 
     async def _detect_and_cleanup_changes(self) -> dict[str, str]:
@@ -498,6 +641,7 @@ class SessionMonitor:
             for session_id in sessions_to_remove:
                 self.state.remove_tracked_source(session_id)
                 self._file_mtimes.pop(session_id, None)
+                self._codex_rollout_states.pop(session_id, None)
             self.state.save_if_dirty()
 
         # Update last known map
@@ -533,7 +677,10 @@ class SessionMonitor:
                 new_messages = await self.check_for_updates(active_thread_ids)
 
                 for msg in new_messages:
-                    if not msg.dispatch_to_telegram:
+                    if (
+                        not msg.dispatch_to_telegram
+                        and msg.semantic_kind != USER_ECHO_SEMANTIC_KIND
+                    ):
                         logger.debug(
                             "Lifecycle marker thread=%s: %s",
                             msg.thread_id,

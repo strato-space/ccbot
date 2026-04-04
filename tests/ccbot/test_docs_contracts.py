@@ -11,7 +11,13 @@ def _read(relpath: str) -> str:
 def test_readme_points_to_strato_ops_runbook() -> None:
     readme = _read("README.md")
 
+    assert "ontology/README.md" in readme
+    assert "ontology/runtime.md" in readme
+    assert "ontology/delivery-surface.md" in readme
+    assert "ontology/boundaries.md" in readme
     assert "doc/strato-ops-codex.md" in readme
+    assert "doc/runtime-event-contract.md" in readme
+    assert "doc/telegram-delivery-pipeline.md" in readme
     assert "doc/multi-runtime-regression-matrix.md" in readme
     assert "doc/multi-runtime-rollout.md" in readme
     assert "/home/tools/codex-tools/codex-session-scout" in readme
@@ -28,6 +34,10 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "Commentary" in readme
     assert "Final assistant responses" in readme
     assert "Technical execution classes stay out of permanent bubbles by default" in readme
+    assert "whole pre-final visible surface closes until the next user turn" in readme
+    assert "mutable technical status surface" in readme
+    assert "no pre-final visible artifact" in readme
+    assert "late technical status" in readme
     assert "Verbose/debug paths may expose more raw execution surface" in readme
 
 
@@ -70,6 +80,10 @@ def test_multi_runtime_rollout_doc_requires_explicit_staged_enablement() -> None
 def test_runtime_ontology_note_uses_runtime_neutral_terms() -> None:
     ontology = _read("doc/runtime-ontology.md")
 
+    assert "ontology/README.md" in ontology
+    assert "ontology/runtime.md" in ontology
+    assert "ontology/delivery-surface.md" in ontology
+    assert "ontology/boundaries.md" in ontology
     assert "topic control policy" in ontology
     assert "semantic emitter / supervisor" in ontology
     assert "live semantic stream" in ontology
@@ -77,6 +91,27 @@ def test_runtime_ontology_note_uses_runtime_neutral_terms() -> None:
     assert "queue" in ontology
     assert "steer" in ontology
     assert "literal ACP-protocol-over-stdio" in ontology
+
+
+def test_ontology_folder_collects_project_core_nouns() -> None:
+    index = _read("ontology/README.md")
+    runtime = _read("ontology/runtime.md")
+    delivery = _read("ontology/delivery-surface.md")
+    boundaries = _read("ontology/boundaries.md")
+
+    assert "compact source of truth" in index
+    assert "ontology/runtime.md" in index
+    assert "ontology/delivery-surface.md" in index
+    assert "ontology/boundaries.md" in index
+    assert "semantic emitter / supervisor" in runtime
+    assert "runtime conversation identity" in runtime
+    assert "persisted replay evidence" in runtime
+    assert "terminal turn artifact" in delivery
+    assert "pre-final visible artifact" in delivery
+    assert "technical status artifact" in delivery
+    assert "ACP-protocol" in boundaries
+    assert "ACP-module" in boundaries
+    assert "Replay evidence is written by" in boundaries
 
 
 def test_runtime_capability_registry_doc_describes_supported_profiles() -> None:
@@ -143,6 +178,7 @@ def test_topic_policy_migration_doc_captures_nonce_and_stale_callback_rules() ->
 def test_runtime_event_contract_doc_names_semantic_and_delivery_layers() -> None:
     doc = _read("doc/runtime-event-contract.md")
 
+    assert "ontology/delivery-surface.md" in doc
     assert "semantic_kind" in doc
     assert "delivery_class" in doc
     assert "status_message_eligible" in doc
@@ -153,11 +189,24 @@ def test_runtime_event_contract_doc_names_semantic_and_delivery_layers() -> None
     assert "history-worthy semantic facts" in doc
     assert "product surface chooses to" in doc
     assert "collapse them into compact status delivery" in doc
+    assert "terminal turn artifact" in doc
+    assert "pre-final visible artifact" in doc
+    assert "technical status artifact" in doc
+    assert "user turn opener" in doc
+    assert "turn generation" in doc
+    assert "must be suppressed or dropped if they would otherwise appear below" in doc
+    assert "canonical `response_item.message` wins over duplicate lightweight `event_msg`" in doc
+    assert "buffer lightweight `event_msg` copies" in doc
+    assert "later idle poll" in doc
+    assert "event_msg.user_message" in doc
+    assert "reopening the turn a second time" in doc
 
 
 def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> None:
     doc = _read("doc/telegram-delivery-pipeline.md")
 
+    assert "ontology/delivery-surface.md" in doc
+    assert "ontology/boundaries.md" in doc
     assert "status artifact" in doc
     assert "The default Telegram surface is `compact`, not `verbose`." in doc
     assert "latest human-facing commentary remains visible as a dedicated artifact" in doc
@@ -169,11 +218,20 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "raw tool payloads, giant command stdout dumps, and full file bodies must be summarized before they reach Telegram" in doc
     assert "fenced `sh` blocks" in doc
     assert "fenced `json` blocks" in doc
+    assert "truncation footers outside the fenced block" in doc
+    assert "outcome metadata rendered as a separate footer" in doc
     assert "`tool_use` summaries" in doc
     assert "`tool_result` summaries" in doc
     assert "when tool lifecycle is materialized as content, `tool_result` may edit the earlier `tool_use` message in place" in doc
-    assert "commentary lane is closed until" in doc
-    assert "must not reappear below the final answer" in doc
+    assert "pre-final visible surface" in doc
+    assert "Telegram/history prefers the canonical copy." in doc
+    assert "lightweight copy may be buffered briefly" in doc
+    assert "idle poll rather than on an unrelated non-idle poll" in doc
+    assert "whole pre-final visible" in doc
+    assert "mutable technical status" in doc
+    assert "turn generation" in doc
+    assert "hidden internal prompt scaffold" in doc
+    assert "orchestration milestone, or surfaced preview bubble" in doc
     assert "durable Telegram content bubbles are" in doc
     assert "deliberately narrow" in doc
     assert "latest-only visible commentary artifact" in doc
@@ -196,6 +254,11 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
     assert "**Compact delivery policy**" in doc
     assert "user echo, orchestration milestones, and final assistant text as durable bubbles" in doc
     assert "latest commentary stays visible as a dedicated artifact" in doc
+    assert "**Pre-final terminal surface barrier**" in doc
+    assert "Codex-style command/tool previews" in doc
+    assert "whole pre-final visible surface is" in doc
+    assert "mutable technical status artifact are both closed" in doc
+    assert "Draft answer artifact" in doc
     assert "Expandable blockquote for debug reasoning" in doc
 
 

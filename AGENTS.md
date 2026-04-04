@@ -6,16 +6,22 @@ runtimes without surrendering the live terminal surface.
 ## Core invariants
 
 - `tmux` is the live human control surface.
+- `ontology/` is the compact source-of-truth for runtime nouns, delivery-surface
+  nouns, and boundary claims.
 - Runtime semantics come from replay evidence and runtime-native event
   normalization, not from pane scraping as the primary source of truth.
 - The default Telegram surface is `compact`.
-- In `compact`, only user echo and final assistant text should survive as
-  ordinary content bubbles.
+- In `compact`, user echo, orchestration milestones, and final assistant text
+  are the durable ordinary content bubbles.
 - In `compact`, the latest human-facing commentary should stay visible as a
   dedicated artifact without accumulating a long stack of commentary bubbles.
-- In `compact`, once the final assistant answer is delivered, the commentary
-  lane must close until the next user turn and no late commentary may appear
-  below the final answer.
+- In `compact`, once the final assistant answer is delivered successfully in
+  full, the whole pre-final visible surface and the mutable technical status
+  surface must close until the next user turn.
+- No late pre-final visible artifact and no late technical status artifact may
+  appear below the final answer for the same turn.
+- Hidden internal user payloads do not reopen a turn unless they are explicit
+  hidden turn openers.
 - Reasoning, tool lifecycle, command execution, and file-change summaries
   belong in the mutable status artifact unless a debug/verbose path explicitly
   opts into richer delivery.
@@ -23,6 +29,8 @@ runtimes without surrendering the live terminal surface.
 ## When changing delivery behavior
 
 - Update [`doc/telegram-delivery-pipeline.md`](doc/telegram-delivery-pipeline.md).
+- Update [`ontology/`](ontology/README.md) when core nouns or boundary claims
+  change.
 - Update any affected public docs in [`README.md`](README.md) and
   [`doc/telegram-bot-features.md`](doc/telegram-bot-features.md).
 - Keep [`tests/ccbot/test_docs_contracts.py`](tests/ccbot/test_docs_contracts.py)

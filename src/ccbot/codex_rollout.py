@@ -18,9 +18,13 @@ import json
 import os
 import shlex
 from dataclasses import dataclass
+from dataclasses import field
+from datetime import datetime
 import re
+import time
 from typing import Any, Iterable
 
+from .config import config
 from .runtime_types import NormalizedEvent
 
 CODEX_ROLLOUT_TYPES = {
@@ -161,6 +165,27 @@ _SUBAGENT_NOTIFICATION_RE = re.compile(
     r"^\s*<subagent_notification>\s*(\{.*\})\s*</subagent_notification>\s*$",
     re.DOTALL,
 )
+_PENDING_EVENT_FLUSH_WINDOW_SECONDS = 0.5
+_USER_MESSAGE_DUPLICATE_WINDOW_SECONDS = 0.5
+
+
+def _pending_event_flush_window_seconds() -> float:
+    """Delay fallback event_msg flushes only long enough to prefer canonicals."""
+    return _PENDING_EVENT_FLUSH_WINDOW_SECONDS
+
+
+def _user_duplicate_window_seconds() -> float:
+    """Use a duplicate window that is large enough to survive cross-poll delivery.
+
+    The incremental monitor polls every ``monitor_poll_interval`` seconds, so a
+    duplicate window shorter than one poll cycle cannot safely suppress later
+    canonical copies that arrive on the next poll. We keep at least one full
+    quiet poll between the lightweight copy and any fallback flush.
+    """
+    return max(
+        _USER_MESSAGE_DUPLICATE_WINDOW_SECONDS,
+        config.monitor_poll_interval * 2.0,
+    )
 
 
 @dataclass
@@ -179,6 +204,37 @@ class _AgentDescriptor:
     model: str
     reasoning_effort: str
     prompt: str
+
+
+@dataclass
+class _PendingMessageEvent:
+    signature: tuple[str, str, str | None, str]
+    timestamp_seconds: float
+    events: list[NormalizedEvent]
+
+
+@dataclass
+class CodexRolloutState:
+    """Per-thread incremental normalization state for poll-sliced rollout tails."""
+
+    pending_spawns: dict[str, _SpawnCall] = field(default_factory=dict)
+    pending_waits: dict[str, list[str]] = field(default_factory=dict)
+    active_waits: set[tuple[str, ...]] = field(default_factory=set)
+    agents_by_id: dict[str, _AgentDescriptor] = field(default_factory=dict)
+    wait_generations: dict[str, int] = field(default_factory=dict)
+    seen_statuses_by_generation: dict[tuple[str, int], set[tuple[str, str, str]]] = (
+        field(default_factory=dict)
+    )
+    pending_event_messages: list[_PendingMessageEvent] = field(default_factory=list)
+    canonical_message_signatures: set[tuple[str, str, str | None, str]] = field(
+        default_factory=set
+    )
+    recent_user_event_messages: dict[
+        tuple[str, str, str | None, str], list[float]
+    ] = field(default_factory=dict)
+    turn_generation: int = 0
+    current_turn_key: str = ""
+    active_turn_user_opened: bool = False
 
 
 def _extract_shell_payload(command: str) -> str:
@@ -205,16 +261,24 @@ def _extract_shell_payload(command: str) -> str:
     return stripped
 
 
-def _command_code_block(command: str, *, max_lines: int = 4, max_chars: int = 140) -> str:
+def _preview_footer(total_lines: int, shown_lines: int) -> str:
+    """Human-facing preview metadata kept outside the code block body."""
+    remaining = max(0, total_lines - shown_lines)
+    if remaining <= 0:
+        return ""
+    return f"preview {shown_lines}/{total_lines} lines"
+
+
+def _command_code_block(command: str, *, max_lines: int = 5, max_chars: int = 140) -> str:
     payload = _extract_shell_payload(command)
     lines = _nonempty_lines(payload)
     if not lines:
         return ""
 
     clipped = [_compact_inline(line, max_chars=max_chars) for line in lines[:max_lines]]
-    if len(lines) > max_lines:
-        clipped.append(f"... (+{len(lines) - max_lines} more lines)")
-    return "```sh\n" + "\n".join(clipped) + "\n```"
+    block = "```sh\n" + "\n".join(clipped) + "\n```"
+    footer = _preview_footer(len(lines), len(clipped))
+    return "\n\n".join(part for part in (block, footer) if part)
 
 
 def _structured_json(value: Any) -> Any:
@@ -233,7 +297,7 @@ def _tool_text_code_block(
     text: str,
     *,
     language: str = "text",
-    max_lines: int = 4,
+    max_lines: int = 5,
     max_chars: int = 140,
 ) -> str:
     lines = _nonempty_lines(text)
@@ -241,9 +305,9 @@ def _tool_text_code_block(
         return ""
 
     clipped = [_compact_inline(line, max_chars=max_chars) for line in lines[:max_lines]]
-    if len(lines) > max_lines:
-        clipped.append(f"... (+{len(lines) - max_lines} more lines)")
-    return f"```{language}\n" + "\n".join(clipped) + "\n```"
+    block = f"```{language}\n" + "\n".join(clipped) + "\n```"
+    footer = _preview_footer(len(lines), len(clipped))
+    return "\n\n".join(part for part in (block, footer) if part)
 
 
 def _tool_json_code_block(
@@ -263,9 +327,9 @@ def _tool_json_code_block(
     pretty = json.dumps(parsed, ensure_ascii=False, indent=2, sort_keys=True)
     lines = pretty.splitlines()
     clipped = [_compact_inline(line, max_chars=max_chars) for line in lines[:max_lines]]
-    if len(lines) > max_lines:
-        clipped.append(f"... (+{len(lines) - max_lines} more lines)")
-    return "```json\n" + "\n".join(clipped) + "\n```"
+    block = "```json\n" + "\n".join(clipped) + "\n```"
+    footer = _preview_footer(len(lines), len(clipped))
+    return "\n\n".join(part for part in (block, footer) if part)
 
 
 def _tool_call_summary(name: str, arguments: Any) -> str:
@@ -344,8 +408,22 @@ def _tool_output_summary(tool_name: str | None, text: str) -> str:
 
     lowered = (tool_name or "").lower()
     if lowered == "exec_command":
-        return f"completed · output {len(lines)} line(s)"
+        preview = _tool_json_code_block(text, max_lines=5) or _tool_text_code_block(
+            text,
+            language="sh",
+            max_lines=5,
+        )
+        if preview:
+            return preview
+        return f"output {len(lines)} line(s)"
     if lowered == "write_stdin":
+        preview = _tool_json_code_block(text, max_lines=5) or _tool_text_code_block(
+            text,
+            language="text",
+            max_lines=5,
+        )
+        if preview:
+            return preview
         return f"output {len(lines)} line(s)"
 
     json_block = _tool_json_code_block(text)
@@ -354,6 +432,10 @@ def _tool_output_summary(tool_name: str | None, text: str) -> str:
 
     if len(lines) == 1 and len(lines[0]) <= 200:
         return lines[0]
+
+    preview = _tool_text_code_block(text, language="text", max_lines=5)
+    if preview:
+        return preview
 
     label = tool_name or "Tool output"
     return f"{label}: {len(lines)} line(s)"
@@ -364,25 +446,39 @@ def _truncate_preview_lines(
     *,
     max_lines: int = 4,
     max_chars: int = 220,
-) -> list[str]:
+) -> tuple[list[str], int]:
     lines = _nonempty_lines(text)
     if not lines:
-        return []
+        return [], 0
 
     clipped = [_compact_inline(line, max_chars=max_chars) for line in lines[:max_lines]]
-    if len(lines) > max_lines:
-        clipped.append(f"... (+{len(lines) - max_lines} more lines)")
-    return clipped
+    return clipped, len(lines)
 
 
 def _prefixed_detail_block(text: str) -> str:
-    lines = _truncate_preview_lines(text)
+    lines, total_lines = _truncate_preview_lines(text)
     if not lines:
         return ""
     first, *rest = lines
     result = [f"  └ {first}"]
     result.extend(f"    {line}" for line in rest)
+    footer = _preview_footer(total_lines, len(lines))
+    if footer:
+        result.append(f"    {footer}")
     return "\n".join(result)
+
+
+def _timestamp_seconds(timestamp: str | None) -> float | None:
+    if not timestamp:
+        return None
+    try:
+        return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _now_seconds() -> float:
+    return time.monotonic()
 
 
 def _parse_subagent_notification(text: str) -> dict[str, Any] | None:
@@ -463,6 +559,13 @@ def _spawned_agent_text(agent: _AgentDescriptor) -> str:
     return "\n".join(part for part in (title, detail) if part)
 
 
+def _spawn_failed_text(spawn_request: _SpawnCall, output: Any) -> str:
+    role = spawn_request.role.strip() or "agent"
+    title = f"• Failed to spawn {role}"
+    detail = _prefixed_detail_block(_json_fragment(output))
+    return "\n".join(part for part in (title, detail) if part)
+
+
 def _waiting_for_targets_text(
     target_ids: list[str],
     agents_by_id: dict[str, _AgentDescriptor],
@@ -478,6 +581,48 @@ def _waiting_for_targets_text(
     ]
     first, *rest = details
     lines = [f"• Waiting for {len(target_ids)} agents", f"  └ {first}"]
+    lines.extend(f"    {line}" for line in rest)
+    return "\n".join(lines)
+
+
+def _wait_timeout_text(
+    target_ids: list[str],
+    agents_by_id: dict[str, _AgentDescriptor],
+) -> str:
+    if not target_ids:
+        return "• Timed out waiting for agents"
+    if len(target_ids) == 1:
+        target_id = target_ids[0]
+        return (
+            "• Timed out waiting for "
+            f"{_agent_label(agents_by_id.get(target_id), target_id)}"
+        )
+    details = [
+        _agent_label(agents_by_id.get(target_id), target_id) for target_id in target_ids
+    ]
+    first, *rest = details
+    lines = [f"• Timed out waiting for {len(target_ids)} agents", f"  └ {first}"]
+    lines.extend(f"    {line}" for line in rest)
+    return "\n".join(lines)
+
+
+def _finished_waiting_text(
+    target_ids: list[str],
+    agents_by_id: dict[str, _AgentDescriptor],
+) -> str:
+    if not target_ids:
+        return "• Finished waiting"
+    if len(target_ids) == 1:
+        target_id = target_ids[0]
+        return (
+            "• Finished waiting for "
+            f"{_agent_label(agents_by_id.get(target_id), target_id)}"
+        )
+    details = [
+        _agent_label(agents_by_id.get(target_id), target_id) for target_id in target_ids
+    ]
+    first, *rest = details
+    lines = [f"• Finished waiting for {len(target_ids)} agents", f"  └ {first}"]
     lines.extend(f"    {line}" for line in rest)
     return "\n".join(lines)
 
@@ -518,6 +663,240 @@ def _status_signature(agent_id: str, status: Any) -> tuple[str, str, str]:
     return (agent_id, verb, _compact_inline(reflow_whitespace(preview), max_chars=200))
 
 
+def _next_wait_generation(state: CodexRolloutState, agent_id: str) -> int:
+    generation = state.wait_generations.get(agent_id, 0) + 1
+    state.wait_generations[agent_id] = generation
+    state.seen_statuses_by_generation = {
+        key: value
+        for key, value in state.seen_statuses_by_generation.items()
+        if key[0] != agent_id
+    }
+    return generation
+
+
+def _status_seen_in_current_generation(
+    state: CodexRolloutState,
+    *,
+    agent_id: str,
+    status: Any,
+) -> bool:
+    generation = state.wait_generations.get(agent_id, 0)
+    if generation <= 0:
+        return False
+    signature = _status_signature(agent_id, status)
+    key = (agent_id, generation)
+    seen = state.seen_statuses_by_generation.setdefault(key, set())
+    if signature in seen:
+        return True
+    seen.add(signature)
+    return False
+
+def _flush_pending_event_messages(
+    state: CodexRolloutState,
+    *,
+    current_time: float | None,
+) -> list[NormalizedEvent]:
+    if current_time is None or not state.pending_event_messages:
+        return []
+    ready_before = current_time - _pending_event_flush_window_seconds()
+    ready = [
+        pending
+        for pending in state.pending_event_messages
+        if pending.timestamp_seconds <= ready_before
+    ]
+    state.pending_event_messages = [
+        pending
+        for pending in state.pending_event_messages
+        if pending.timestamp_seconds > ready_before
+    ]
+    ready.sort(key=lambda item: item.timestamp_seconds)
+    flushed: list[NormalizedEvent] = []
+    for pending in ready:
+        flushed.extend(pending.events)
+    return flushed
+
+
+def _flush_all_pending_event_messages(state: CodexRolloutState) -> list[NormalizedEvent]:
+    """Flush all buffered fallback message events in FIFO order.
+
+    A newly opened user turn is a semantic boundary. Pending assistant-side
+    fallback copies from the previous turn must flush before that boundary so
+    they cannot leak below the next turn opener or collide with same-text
+    canonicals from the next turn.
+    """
+    if not state.pending_event_messages:
+        return []
+    pending = sorted(
+        state.pending_event_messages,
+        key=lambda item: item.timestamp_seconds,
+    )
+    state.pending_event_messages = []
+    flushed: list[NormalizedEvent] = []
+    for item in pending:
+        flushed.extend(item.events)
+    return flushed
+
+
+def _open_next_turn_generation(state: CodexRolloutState) -> int:
+    """Advance the surrogate turn generation for duplicate suppression."""
+    state.turn_generation += 1
+    return state.turn_generation
+
+
+def _active_turn_key(state: CodexRolloutState) -> str:
+    if state.current_turn_key:
+        return state.current_turn_key
+    return f"surrogate:{state.turn_generation}"
+
+
+def _is_surrogate_turn_key(turn_key: str) -> bool:
+    return turn_key.startswith("surrogate:")
+
+
+def _message_turn_signature(
+    turn_key: str,
+    signature: tuple[str, str | None, str],
+) -> tuple[str, str, str | None, str]:
+    return (turn_key, signature[0], signature[1], signature[2])
+
+
+def _drain_pending_event_messages(
+    state: CodexRolloutState,
+    signature: tuple[str, str, str | None, str],
+) -> list[NormalizedEvent]:
+    kept: list[_PendingMessageEvent] = []
+    drained: list[NormalizedEvent] = []
+    for pending in state.pending_event_messages:
+        if pending.signature == signature:
+            drained.extend(_suppress_history_delivery(event) for event in pending.events)
+            continue
+        kept.append(pending)
+    state.pending_event_messages = kept
+    return drained
+
+
+def _consume_recent_user_event_duplicate(
+    state: CodexRolloutState,
+    signature: tuple[str, str, str | None, str],
+) -> bool:
+    """Consume a matching live user-message duplicate for the active turn."""
+    emitted_at = state.recent_user_event_messages.get(signature)
+    if not emitted_at:
+        return False
+    emitted_at.pop(0)
+    if not emitted_at:
+        state.recent_user_event_messages.pop(signature, None)
+    return True
+
+
+def _drop_recent_user_event_messages_for_other_turns(
+    state: CodexRolloutState,
+    *,
+    keep_turn_key: str,
+) -> None:
+    """Keep only duplicate-suppression entries for the active turn."""
+    for signature in list(state.recent_user_event_messages.keys()):
+        if signature[0] != keep_turn_key:
+            state.recent_user_event_messages.pop(signature, None)
+    state.canonical_message_signatures = {
+        signature
+        for signature in state.canonical_message_signatures
+        if signature[0] == keep_turn_key
+    }
+
+
+def _rewrite_turn_key(
+    state: CodexRolloutState,
+    *,
+    old_turn_key: str,
+    new_turn_key: str,
+) -> None:
+    """Rewrite buffered signatures from a surrogate turn key to the real key."""
+    if old_turn_key == new_turn_key:
+        return
+
+    rewritten_pending: list[_PendingMessageEvent] = []
+    for pending in state.pending_event_messages:
+        if pending.signature[0] == old_turn_key:
+            rewritten_pending.append(
+                _PendingMessageEvent(
+                    signature=(new_turn_key, *pending.signature[1:]),
+                    timestamp_seconds=pending.timestamp_seconds,
+                    events=pending.events,
+                )
+            )
+        else:
+            rewritten_pending.append(pending)
+    state.pending_event_messages = rewritten_pending
+
+    rewritten_recent: dict[tuple[str, str, str | None, str], list[float]] = {}
+    for signature, emitted_at in state.recent_user_event_messages.items():
+        rewritten_signature = signature
+        if signature[0] == old_turn_key:
+            rewritten_signature = (new_turn_key, *signature[1:])
+        rewritten_recent.setdefault(rewritten_signature, []).extend(emitted_at)
+    state.recent_user_event_messages = rewritten_recent
+    rewritten_canonicals: set[tuple[str, str, str | None, str]] = set()
+    for signature in state.canonical_message_signatures:
+        if signature[0] == old_turn_key:
+            rewritten_canonicals.add((new_turn_key, *signature[1:]))
+        else:
+            rewritten_canonicals.add(signature)
+    state.canonical_message_signatures = rewritten_canonicals
+
+
+def _activate_real_turn_key(
+    state: CodexRolloutState,
+    *,
+    turn_key: str,
+) -> list[NormalizedEvent]:
+    """Switch to a real turn id, preserving surrogate buffers for the same turn."""
+    if not turn_key:
+        return []
+    if not state.current_turn_key:
+        state.current_turn_key = turn_key
+        state.active_turn_user_opened = False
+        return []
+    if state.current_turn_key == turn_key:
+        return []
+    if _is_surrogate_turn_key(state.current_turn_key):
+        _rewrite_turn_key(
+            state,
+            old_turn_key=state.current_turn_key,
+            new_turn_key=turn_key,
+        )
+        state.current_turn_key = turn_key
+        _drop_recent_user_event_messages_for_other_turns(
+            state,
+            keep_turn_key=turn_key,
+        )
+        return []
+
+    flushed = _flush_all_pending_event_messages(state)
+    state.current_turn_key = turn_key
+    state.active_turn_user_opened = False
+    _drop_recent_user_event_messages_for_other_turns(
+        state,
+        keep_turn_key=turn_key,
+    )
+    return flushed
+
+
+def _open_surrogate_turn(
+    state: CodexRolloutState,
+) -> tuple[str, list[NormalizedEvent]]:
+    """Open a new turn before a concrete turn id is known."""
+    flushed = _flush_all_pending_event_messages(state)
+    turn_key = f"surrogate:{_open_next_turn_generation(state)}"
+    state.current_turn_key = turn_key
+    state.active_turn_user_opened = False
+    _drop_recent_user_event_messages_for_other_turns(
+        state,
+        keep_turn_key=turn_key,
+    )
+    return turn_key, flushed
+
+
 def _command_execution_summary(
     *,
     command: str,
@@ -532,16 +911,25 @@ def _command_execution_summary(
             parts.append(command_block)
         else:
             parts.append(_compact_multiline(command))
-    if status:
-        parts.append(status)
-    elif output:
-        parts.append("completed")
     lines = _nonempty_lines(output)
     if lines:
-        if parts and parts[-1] in {"completed", "failed", "declined", "in_progress"}:
-            parts[-1] = f"{parts[-1]} · output {len(lines)} line(s)"
+        preview = _tool_json_code_block(output, max_lines=5) or _tool_text_code_block(
+            output,
+            language="sh",
+            max_lines=5,
+        )
+        if preview:
+            parts.append(preview)
+            normalized_status = status.lower()
+            if status and normalized_status not in {"completed", "success", "succeeded"}:
+                parts.append(status)
         else:
-            parts.append(f"output {len(lines)} line(s)")
+            if status:
+                parts.append(f"{status} · output {len(lines)} line(s)")
+            else:
+                parts.append(f"output {len(lines)} line(s)")
+    elif status:
+        parts.append(status)
     elif cwd and len(parts) < 3:
         parts.append(_compact_inline(cwd, max_chars=120))
     return "\n".join(part for part in parts if part) or "[command_execution]"
@@ -557,6 +945,22 @@ def _thread_id_from_payload(payload: Any) -> str:
     meta = payload.get("meta")
     if isinstance(meta, dict):
         for key in ("id", "thread_id", "threadId"):
+            value = meta.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return ""
+
+
+def _turn_key_from_payload(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("turn_id", "turnId"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    meta = payload.get("meta")
+    if isinstance(meta, dict):
+        for key in ("turn_id", "turnId"):
             value = meta.get(key)
             if isinstance(value, str) and value:
                 return value
@@ -671,7 +1075,7 @@ def _reasoning_event(
     return event
 
 
-def _response_message_signature(payload: Any) -> tuple[str, str | None, str] | None:
+def _response_message_base_signature(payload: Any) -> tuple[str, str | None, str] | None:
     if not isinstance(payload, dict):
         return None
     if _as_text(payload.get("type")).strip() != "message":
@@ -684,7 +1088,7 @@ def _response_message_signature(payload: Any) -> tuple[str, str | None, str] | N
     return (role, phase, text)
 
 
-def _event_msg_message_signature(payload: Any) -> tuple[str, str | None, str] | None:
+def _event_msg_message_base_signature(payload: Any) -> tuple[str, str | None, str] | None:
     if not isinstance(payload, dict):
         return None
     payload_type = _as_text(payload.get("type")).strip()
@@ -707,13 +1111,13 @@ def _should_suppress_event_msg_duplicate(
 ) -> bool:
     if _as_text(entry.get("type")).strip() != "event_msg":
         return False
-    signature = _event_msg_message_signature(entry.get("payload"))
+    signature = _event_msg_message_base_signature(entry.get("payload"))
     if signature is None:
         return False
     for candidate in all_entries:
         if _as_text(candidate.get("type")).strip() != "response_item":
             continue
-        if _response_message_signature(candidate.get("payload")) == signature:
+        if _response_message_base_signature(candidate.get("payload")) == signature:
             return True
     return False
 
@@ -1202,29 +1606,36 @@ class CodexRolloutNormalizer:
         entries: Iterable[dict[str, Any]],
         *,
         thread_id: str | None = None,
+        state: CodexRolloutState | None = None,
     ) -> list[NormalizedEvent]:
         entry_list = list(entries)
         current_thread_id = thread_id or ""
         result: list[NormalizedEvent] = []
-        pending_spawns: dict[str, _SpawnCall] = {}
-        pending_waits: dict[str, list[str]] = {}
-        active_waits: set[tuple[str, ...]] = set()
-        agents_by_id: dict[str, _AgentDescriptor] = {}
-        seen_statuses: set[tuple[str, str, str]] = set()
+        incremental_mode = state is not None
+        state = state or CodexRolloutState()
+        current_time = _now_seconds()
         for data in entry_list:
             if not isinstance(data, dict):
                 continue
             payload = data.get("payload")
+            timestamp = _timestamp(data)
+            record_type = _as_text(data.get("type")).strip()
             if not current_thread_id:
                 current_thread_id = _thread_id_from_payload(payload) or current_thread_id
-            if data.get("type") == "session_meta":
+            if record_type == "session_meta":
                 current_thread_id = _thread_id_from_payload(payload) or current_thread_id
+            if record_type == "turn_context":
+                flushed_before_turn = _activate_real_turn_key(
+                    state,
+                    turn_key=_turn_key_from_payload(payload),
+                )
+                if flushed_before_turn:
+                    result.extend(flushed_before_turn)
             events = cls.normalize_record(
                 data,
                 thread_id=current_thread_id,
             )
-            timestamp = _timestamp(data)
-            if isinstance(payload, dict) and _as_text(data.get("type")).strip() == "response_item":
+            if isinstance(payload, dict) and record_type == "response_item":
                 response_type = _as_text(payload.get("type")).strip()
                 if response_type == "function_call":
                     tool_name = _as_text(payload.get("name")).strip()
@@ -1232,7 +1643,7 @@ class CodexRolloutNormalizer:
                     arguments = _structured_json(payload.get("arguments") or payload.get("input"))
                     if tool_name == "spawn_agent":
                         if call_id and isinstance(arguments, dict):
-                            pending_spawns[call_id] = _SpawnCall(
+                            state.pending_spawns[call_id] = _SpawnCall(
                                 role=_as_text(arguments.get("agent_type")).strip(),
                                 model=_as_text(arguments.get("model")).strip(),
                                 reasoning_effort=_as_text(arguments.get("reasoning_effort")).strip(),
@@ -1246,15 +1657,19 @@ class CodexRolloutNormalizer:
                                 for target in (arguments.get("targets") or [])
                                 if _as_text(target).strip()
                             ]
-                            pending_waits[call_id] = targets
+                            for target in targets:
+                                _next_wait_generation(state, target)
+                            state.pending_waits[call_id] = targets
                             wait_key = tuple(sorted(targets))
-                            if wait_key and wait_key not in active_waits:
-                                active_waits.add(wait_key)
+                            if wait_key and wait_key not in state.active_waits:
+                                state.active_waits.add(wait_key)
                                 events = [_suppress_history_delivery(event) for event in events]
                                 events.append(
                                     _orchestration_event(
                                         thread_id=current_thread_id,
-                                        text=_waiting_for_targets_text(targets, agents_by_id),
+                                        text=_waiting_for_targets_text(
+                                            targets, state.agents_by_id
+                                        ),
                                         timestamp=timestamp,
                                     )
                                 )
@@ -1264,9 +1679,13 @@ class CodexRolloutNormalizer:
                     call_id = _as_text(payload.get("call_id")).strip()
                     raw_output = payload.get("output")
                     parsed_output = _structured_json(raw_output)
-                    spawn_request = pending_spawns.pop(call_id, None)
-                    targets = pending_waits.pop(call_id, [])
-                    if isinstance(parsed_output, dict) and spawn_request and "agent_id" in parsed_output:
+                    spawn_request = state.pending_spawns.pop(call_id, None)
+                    targets = state.pending_waits.pop(call_id, [])
+                    if (
+                        isinstance(parsed_output, dict)
+                        and spawn_request
+                        and "agent_id" in parsed_output
+                    ):
                         agent_id = _as_text(parsed_output.get("agent_id")).strip()
                         if agent_id:
                             descriptor = _AgentDescriptor(
@@ -1277,7 +1696,7 @@ class CodexRolloutNormalizer:
                                 reasoning_effort=spawn_request.reasoning_effort,
                                 prompt=spawn_request.prompt,
                             )
-                            agents_by_id[agent_id] = descriptor
+                            state.agents_by_id[agent_id] = descriptor
                             events = [_suppress_history_delivery(event) for event in events]
                             events.append(
                                 _orchestration_event(
@@ -1286,37 +1705,78 @@ class CodexRolloutNormalizer:
                                     timestamp=timestamp,
                                 )
                             )
-                    elif call_id in pending_spawns or spawn_request is not None:
+                    elif spawn_request is not None:
                         events = [_suppress_history_delivery(event) for event in events]
+                        events.append(
+                            _orchestration_event(
+                                thread_id=current_thread_id,
+                                text=_spawn_failed_text(spawn_request, parsed_output),
+                                timestamp=timestamp,
+                            )
+                        )
 
                     if targets:
                         wait_key = tuple(sorted(targets))
                         if wait_key and isinstance(parsed_output, dict):
                             statuses = parsed_output.get("status")
                             timed_out = bool(parsed_output.get("timed_out"))
-                            if isinstance(statuses, dict) and statuses:
-                                active_waits.discard(wait_key)
+                            emitted_finished = False
+                            if wait_key in state.active_waits:
+                                state.active_waits.discard(wait_key)
                                 events = [_suppress_history_delivery(event) for event in events]
+                                events.append(
+                                    _orchestration_event(
+                                        thread_id=current_thread_id,
+                                        text=_finished_waiting_text(
+                                            targets, state.agents_by_id
+                                        ),
+                                        timestamp=timestamp,
+                                    )
+                                )
+                                emitted_finished = True
+                            elif statuses or timed_out:
+                                events = [_suppress_history_delivery(event) for event in events]
+                            if isinstance(statuses, dict) and statuses:
                                 for agent_id, status in statuses.items():
-                                    signature = _status_signature(agent_id, status)
-                                    if signature in seen_statuses:
+                                    if _status_seen_in_current_generation(
+                                        state,
+                                        agent_id=agent_id,
+                                        status=status,
+                                    ):
                                         continue
-                                    seen_statuses.add(signature)
                                     events.append(
                                         _orchestration_event(
                                             thread_id=current_thread_id,
                                             text=_agent_status_text(
                                                 agent_id=agent_id,
                                                 status=status,
-                                                agents_by_id=agents_by_id,
+                                                agents_by_id=state.agents_by_id,
+                                            ),
+                                            timestamp=timestamp,
+                                        )
+                                    )
+                                if timed_out:
+                                    events.append(
+                                        _orchestration_event(
+                                            thread_id=current_thread_id,
+                                            text=_wait_timeout_text(
+                                                targets, state.agents_by_id
                                             ),
                                             timestamp=timestamp,
                                         )
                                     )
                             elif timed_out:
-                                events = [_suppress_history_delivery(event) for event in events]
-                            elif wait_key:
-                                active_waits.discard(wait_key)
+                                events.append(
+                                    _orchestration_event(
+                                        thread_id=current_thread_id,
+                                        text=_wait_timeout_text(
+                                            targets, state.agents_by_id
+                                            ),
+                                            timestamp=timestamp,
+                                        )
+                                    )
+                            elif wait_key and not emitted_finished:
+                                state.active_waits.discard(wait_key)
                                 events = [_suppress_history_delivery(event) for event in events]
                 elif response_type == "message" and _as_text(payload.get("role")).strip() == "user":
                     text = _text_from_content(payload.get("content")).strip()
@@ -1326,28 +1786,134 @@ class CodexRolloutNormalizer:
                         agent_id = _as_text(notification.get("agent_path")).strip()
                         status = notification.get("status")
                         if agent_id:
-                            active_waits = {
-                                wait_key
-                                for wait_key in active_waits
-                                if agent_id not in wait_key
-                            }
-                            signature = _status_signature(agent_id, status)
-                            if signature not in seen_statuses:
-                                seen_statuses.add(signature)
+                            if not _status_seen_in_current_generation(
+                                state,
+                                agent_id=agent_id,
+                                status=status,
+                            ):
                                 events.append(
                                     _orchestration_event(
                                         thread_id=current_thread_id,
                                         text=_agent_status_text(
                                             agent_id=agent_id,
                                             status=status,
-                                            agents_by_id=agents_by_id,
+                                            agents_by_id=state.agents_by_id,
                                         ),
                                         timestamp=timestamp,
                                     )
                                 )
-            if _should_suppress_event_msg_duplicate(data, entry_list):
-                events = [_suppress_history_delivery(event) for event in events]
+                        result.extend(events)
+                        continue
+            base_message_signature: tuple[str, str | None, str] | None = None
+            if record_type == "response_item":
+                base_message_signature = _response_message_base_signature(payload)
+            elif record_type == "event_msg":
+                base_message_signature = _event_msg_message_base_signature(payload)
+
+            if (
+                base_message_signature is not None
+                and base_message_signature[0] == "user"
+            ):
+                turn_key = _active_turn_key(state)
+                flushed_before_turn: list[NormalizedEvent] = []
+                if record_type == "event_msg":
+                    existing_signature = _message_turn_signature(
+                        turn_key,
+                        base_message_signature,
+                    )
+                    if existing_signature in state.canonical_message_signatures:
+                        result.extend(
+                            _suppress_history_delivery(event) for event in events
+                        )
+                        continue
+                    if not state.current_turn_key or state.active_turn_user_opened:
+                        turn_key, flushed_before_turn = _open_surrogate_turn(state)
+                    user_signature = _message_turn_signature(
+                        turn_key,
+                        base_message_signature,
+                    )
+                    state.recent_user_event_messages.setdefault(
+                        user_signature,
+                        [],
+                    ).append(current_time)
+                    state.active_turn_user_opened = True
+                    if flushed_before_turn:
+                        result.extend(flushed_before_turn)
+                    result.extend(events)
+                    continue
+
+                if not state.current_turn_key:
+                    turn_key, flushed_before_turn = _open_surrogate_turn(state)
+                user_signature = _message_turn_signature(
+                    turn_key,
+                    base_message_signature,
+                )
+                duplicate = _consume_recent_user_event_duplicate(
+                    state,
+                    user_signature,
+                )
+                if state.active_turn_user_opened and not duplicate:
+                    turn_key, flushed_before_turn = _open_surrogate_turn(state)
+                    user_signature = _message_turn_signature(
+                        turn_key,
+                        base_message_signature,
+                    )
+                elif duplicate:
+                    state.canonical_message_signatures.add(user_signature)
+                    state.active_turn_user_opened = True
+                    if flushed_before_turn:
+                        result.extend(flushed_before_turn)
+                    continue
+                state.canonical_message_signatures.add(user_signature)
+                state.active_turn_user_opened = True
+                if flushed_before_turn:
+                    result.extend(flushed_before_turn)
+                result.extend(events)
+                continue
+
+            message_signature: tuple[str, str, str | None, str] | None = None
+            if base_message_signature is not None:
+                message_signature = _message_turn_signature(
+                    _active_turn_key(state),
+                    base_message_signature,
+                )
+
+            if message_signature is not None and record_type == "response_item":
+                suppressed = _drain_pending_event_messages(state, message_signature)
+                if suppressed:
+                    result.extend(suppressed)
+                state.canonical_message_signatures.add(message_signature)
+            elif message_signature is not None and record_type == "event_msg":
+                if message_signature in state.canonical_message_signatures:
+                    result.extend(
+                        _suppress_history_delivery(event) for event in events
+                    )
+                    continue
+                state.pending_event_messages.append(
+                    _PendingMessageEvent(
+                        signature=message_signature,
+                        timestamp_seconds=current_time,
+                        events=events,
+                    )
+                )
+                continue
             result.extend(events)
+        # In incremental monitor mode, keep lightweight event_msg duplicates
+        # buffered until an idle poll. Flushing them on an unrelated non-idle
+        # poll can still let a later canonical response_item.message duplicate
+        # land within the same turn, so only idle polls or explicit turn
+        # boundaries may flush the active-turn fallback queue.
+        if not incremental_mode:
+            flushed = _flush_all_pending_event_messages(state)
+        elif not entry_list:
+            flushed = _flush_pending_event_messages(
+                state,
+                current_time=current_time,
+            )
+        else:
+            flushed = []
+        if flushed:
+            return flushed + result
         return result
 
     @classmethod

@@ -29,6 +29,10 @@ from telegram.error import RetryAfter
 
 from ..markdown_v2 import convert_markdown
 from ..session import session_manager
+from ..runtime_types import (
+    ASSISTANT_FINAL_SEMANTIC_KIND,
+    is_pre_final_visible_semantic_kind,
+)
 from ..state_schema import BINDING_STATE_BOUND
 from ..terminal_parser import parse_status_line
 from ..tmux_manager import tmux_manager
@@ -63,6 +67,7 @@ class MessageTask:
         "commentary_update",
         "commentary_clear",
         "commentary_close",
+        "pre_final_close",
     ]
     text: str | None = None
     window_id: str | None = None
@@ -70,8 +75,10 @@ class MessageTask:
     parts: list[str] = field(default_factory=list)
     tool_use_id: str | None = None
     content_type: str = "text"
+    semantic_kind: str = ""
     thread_id: int | None = None  # Telegram topic thread_id for targeted send
     image_data: list[tuple[str, bytes]] | None = None  # From tool_result images
+    turn_generation: int = 0
 
 
 # Per-user message queues and worker tasks
@@ -89,15 +96,34 @@ _status_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
 # Commentary message tracking: (user_id, thread_id_or_0) -> (message_id, window_id, last_text)
 _commentary_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
 
-# Commentary lane closure: once a final assistant bubble lands in compact mode,
-# commentary is suppressed until the next user turn reopens the lane.
-_commentary_closed: set[tuple[int, int]] = set()
+# Pre-final visible artifact closure: once a final assistant bubble lands in
+# compact mode, no later visible pre-final artifact may surface below it until
+# the next user turn reopens the lane.
+_pre_final_visible_closed: set[tuple[int, int]] = set()
+
+# Technical status closure: once a final assistant bubble lands in compact mode,
+# mutable status/progress artifacts must not reappear below that terminal turn
+# artifact until the next user turn reopens the status lane.
+_technical_status_closed: set[tuple[int, int]] = set()
+
+# Current per-topic turn generation. Incremented whenever a new user turn opens
+# the terminal surface. Queue tasks carry the generation they belong to so that
+# stale closes and stale pre-final/status artifacts cannot leak across turns.
+_turn_generations: dict[tuple[int, int], int] = {}
 
 # Flood control: user_id -> monotonic time when ban expires
 _flood_until: dict[int, float] = {}
 
 # Max seconds to wait for flood control before dropping tasks
 FLOOD_CONTROL_MAX_WAIT = 10
+
+
+def _is_stale_turn_generation(
+    task_generation: int,
+    current_generation: int,
+) -> bool:
+    """Return True when a queued artifact belongs to an older turn."""
+    return task_generation != current_generation
 
 
 def get_message_queue(user_id: int) -> asyncio.Queue[MessageTask] | None:
@@ -137,6 +163,8 @@ def _can_merge_tasks(base: MessageTask, candidate: MessageTask) -> bool:
     if base.window_id != candidate.window_id:
         return False
     if base.thread_id != candidate.thread_id:
+        return False
+    if base.turn_generation != candidate.turn_generation:
         return False
     if candidate.task_type != "content":
         return False
@@ -210,7 +238,9 @@ async def _merge_content_tasks(
             parts=merged_parts,
             tool_use_id=first.tool_use_id,
             content_type=first.content_type,
+            semantic_kind=first.semantic_kind,
             thread_id=first.thread_id,
+            turn_generation=first.turn_generation,
         ),
         merge_count,
     )
@@ -266,11 +296,26 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                     await _do_clear_commentary_message(
                         bot, user_id, task.thread_id or 0
                     )
-                elif task.task_type == "commentary_close":
-                    _mark_commentary_closed(user_id, task.thread_id)
+                elif task.task_type in {"commentary_close", "pre_final_close"}:
+                    current_generation = current_turn_generation(user_id, task.thread_id)
+                    if _is_stale_turn_generation(
+                        task.turn_generation,
+                        current_generation,
+                    ):
+                        logger.debug(
+                            "Ignoring stale terminal close: user=%d thread=%s generation=%d current=%d",
+                            user_id,
+                            task.thread_id,
+                            task.turn_generation,
+                            current_generation,
+                        )
+                        continue
+                    _mark_pre_final_visible_closed(user_id, task.thread_id)
+                    _mark_technical_status_closed(user_id, task.thread_id)
                     await _do_clear_commentary_message(
                         bot, user_id, task.thread_id or 0
                     )
+                    await _do_clear_status_message(bot, user_id, task.thread_id or 0)
             except RetryAfter as e:
                 retry_secs = (
                     e.retry_after
@@ -350,6 +395,8 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
     """Process a content message task."""
     wid = task.window_id or ""
     tid = task.thread_id or 0
+    is_terminal_artifact = task.semantic_kind == ASSISTANT_FINAL_SEMANTIC_KIND
+    current_generation = current_turn_generation(user_id, task.thread_id)
     if not await _is_task_binding_active(user_id, wid, task.thread_id):
         logger.debug(
             "Dropping stale content task: user=%d window=%s thread=%s type=%s",
@@ -361,6 +408,29 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         await _do_clear_status_message(bot, user_id, tid)
         await _do_clear_commentary_message(bot, user_id, tid)
         clear_tool_msg_ids_for_topic(user_id, task.thread_id)
+        return
+    if _is_stale_turn_generation(task.turn_generation, current_generation):
+        logger.debug(
+            "Dropping stale-turn content task: user=%d window=%s thread=%s semantic=%s generation=%d current=%d",
+            user_id,
+            wid,
+            task.thread_id,
+            task.semantic_kind,
+            task.turn_generation,
+            current_generation,
+        )
+        return
+    if (
+        is_pre_final_visible_semantic_kind(task.semantic_kind)
+        and (user_id, tid) in _pre_final_visible_closed
+    ):
+        logger.debug(
+            "Dropping pre-final content after terminal artifact: user=%d window=%s thread=%s semantic=%s",
+            user_id,
+            wid,
+            task.thread_id,
+            task.semantic_kind,
+        )
         return
     chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
 
@@ -382,7 +452,13 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                     link_preview_options=NO_LINK_PREVIEW,
                 )
                 await _send_task_images(bot, chat_id, task)
-                await _check_and_send_status(bot, user_id, wid, task.thread_id)
+                await _check_and_send_status(
+                    bot,
+                    user_id,
+                    wid,
+                    task.thread_id,
+                    expected_turn_generation=task.turn_generation,
+                )
                 return
             except RetryAfter:
                 raise
@@ -397,7 +473,13 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                         link_preview_options=NO_LINK_PREVIEW,
                     )
                     await _send_task_images(bot, chat_id, task)
-                    await _check_and_send_status(bot, user_id, wid, task.thread_id)
+                    await _check_and_send_status(
+                        bot,
+                        user_id,
+                        wid,
+                        task.thread_id,
+                        expected_turn_generation=task.turn_generation,
+                    )
                     return
                 except RetryAfter:
                     raise
@@ -408,7 +490,42 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
     # 2. Send content messages, converting status message to first content part
     first_part = True
     last_msg_id: int | None = None
+    delivered_parts = 0
+    expected_parts = len(task.parts)
     for part in task.parts:
+        current_generation = current_turn_generation(user_id, task.thread_id)
+        if _is_stale_turn_generation(task.turn_generation, current_generation):
+            logger.debug(
+                "Aborting in-flight stale-turn content task: user=%d window=%s thread=%s semantic=%s generation=%d current=%d",
+                user_id,
+                wid,
+                task.thread_id,
+                task.semantic_kind,
+                task.turn_generation,
+                current_generation,
+            )
+            return
+        if not await _is_task_binding_active(user_id, wid, task.thread_id):
+            logger.debug(
+                "Aborting in-flight stale binding content task: user=%d window=%s thread=%s semantic=%s",
+                user_id,
+                wid,
+                task.thread_id,
+                task.semantic_kind,
+            )
+            return
+        if (
+            is_pre_final_visible_semantic_kind(task.semantic_kind)
+            and (user_id, tid) in _pre_final_visible_closed
+        ):
+            logger.debug(
+                "Aborting in-flight pre-final content after terminal artifact: user=%d window=%s thread=%s semantic=%s",
+                user_id,
+                wid,
+                task.thread_id,
+                task.semantic_kind,
+            )
+            return
         sent = None
 
         # For first part, try to convert status message to content (edit instead of delete)
@@ -423,6 +540,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             )
             if converted_msg_id is not None:
                 last_msg_id = converted_msg_id
+                delivered_parts += 1
                 continue
 
         sent = await send_with_fallback(
@@ -434,16 +552,71 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
 
         if sent:
             last_msg_id = sent.message_id
+            delivered_parts += 1
 
     # 3. Record tool_use message ID for later editing
     if last_msg_id and task.tool_use_id and task.content_type == "tool_use":
         _tool_msg_ids[(task.tool_use_id, user_id, tid)] = last_msg_id
 
     # 4. Send images if present (from tool_result with base64 image blocks)
+    current_generation = current_turn_generation(user_id, task.thread_id)
+    if _is_stale_turn_generation(task.turn_generation, current_generation):
+        logger.debug(
+            "Skipping stale-turn content images/status tail: user=%d window=%s thread=%s semantic=%s generation=%d current=%d",
+            user_id,
+            wid,
+            task.thread_id,
+            task.semantic_kind,
+            task.turn_generation,
+            current_generation,
+        )
+        return
+    if not await _is_task_binding_active(user_id, wid, task.thread_id):
+        logger.debug(
+            "Skipping stale binding content images/status tail: user=%d window=%s thread=%s semantic=%s",
+            user_id,
+            wid,
+            task.thread_id,
+            task.semantic_kind,
+        )
+        return
+    if (
+        is_pre_final_visible_semantic_kind(task.semantic_kind)
+        and (user_id, tid) in _pre_final_visible_closed
+    ):
+        logger.debug(
+            "Skipping late pre-final content images/status tail: user=%d window=%s thread=%s semantic=%s",
+            user_id,
+            wid,
+            task.thread_id,
+            task.semantic_kind,
+        )
+        return
     await _send_task_images(bot, chat_id, task)
 
+    final_delivery_complete = (
+        expected_parts == 0 or delivered_parts == expected_parts
+    )
+
+    if is_terminal_artifact and last_msg_id is not None and final_delivery_complete:
+        # Terminal ordering closes only after a final artifact has actually
+        # been delivered in full. Closing earlier can hide commentary/status
+        # without surfacing the complete final answer if Telegram send fails
+        # partway through a multipart delivery.
+        _mark_pre_final_visible_closed(user_id, task.thread_id)
+        _mark_technical_status_closed(user_id, task.thread_id)
+        await _do_clear_commentary_message(bot, user_id, tid)
+        await _do_clear_status_message(bot, user_id, tid)
+        return
+
     # 5. After content, check and send status
-    await _check_and_send_status(bot, user_id, wid, task.thread_id)
+    await _check_and_send_status(
+        bot,
+        user_id,
+        wid,
+        task.thread_id,
+        expected_turn_generation=task.turn_generation,
+    )
 
 
 async def _convert_status_to_content(
@@ -509,6 +682,7 @@ async def _process_status_update_task(
     """Process a status update task."""
     wid = task.window_id or ""
     tid = task.thread_id or 0
+    current_generation = current_turn_generation(user_id, task.thread_id)
     if not await _is_task_binding_active(user_id, wid, task.thread_id):
         logger.debug(
             "Dropping stale status task: user=%d window=%s thread=%s",
@@ -518,6 +692,26 @@ async def _process_status_update_task(
         )
         await _do_clear_status_message(bot, user_id, tid)
         await _do_clear_commentary_message(bot, user_id, tid)
+        return
+    if _is_stale_turn_generation(task.turn_generation, current_generation):
+        logger.debug(
+            "Dropping stale-turn status task: user=%d window=%s thread=%s generation=%d current=%d",
+            user_id,
+            wid,
+            task.thread_id,
+            task.turn_generation,
+            current_generation,
+        )
+        await _do_clear_status_message(bot, user_id, tid)
+        return
+    if (user_id, tid) in _technical_status_closed:
+        logger.debug(
+            "Dropping technical status after terminal artifact: user=%d window=%s thread=%s",
+            user_id,
+            wid,
+            task.thread_id,
+        )
+        await _do_clear_status_message(bot, user_id, tid)
         return
     chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
     skey = (user_id, tid)
@@ -626,6 +820,7 @@ async def _process_commentary_update_task(
     """Keep only the latest visible commentary artifact in a topic."""
     wid = task.window_id or ""
     tid = task.thread_id or 0
+    current_generation = current_turn_generation(user_id, task.thread_id)
     if not await _is_task_binding_active(user_id, wid, task.thread_id):
         logger.debug(
             "Dropping stale commentary task: user=%d window=%s thread=%s",
@@ -635,13 +830,24 @@ async def _process_commentary_update_task(
         )
         await _do_clear_commentary_message(bot, user_id, tid)
         return
+    if _is_stale_turn_generation(task.turn_generation, current_generation):
+        logger.debug(
+            "Dropping stale-turn commentary task: user=%d window=%s thread=%s generation=%d current=%d",
+            user_id,
+            wid,
+            task.thread_id,
+            task.turn_generation,
+            current_generation,
+        )
+        await _do_clear_commentary_message(bot, user_id, tid)
+        return
 
     commentary_text = task.text or ""
     if not commentary_text:
         await _do_clear_commentary_message(bot, user_id, tid)
         return
 
-    if (user_id, tid) in _commentary_closed:
+    if (user_id, tid) in _pre_final_visible_closed:
         logger.debug(
             "Dropping commentary after final answer: user=%d window=%s thread=%s",
             user_id,
@@ -727,8 +933,17 @@ async def _check_and_send_status(
     user_id: int,
     window_id: str,
     thread_id: int | None = None,
+    *,
+    expected_turn_generation: int | None = None,
 ) -> None:
     """Check terminal for status line and send status message if present."""
+    tid = thread_id or 0
+    if (user_id, tid) in _technical_status_closed:
+        return
+    if expected_turn_generation is not None:
+        current_generation = current_turn_generation(user_id, thread_id)
+        if _is_stale_turn_generation(expected_turn_generation, current_generation):
+            return
     # Skip if there are more messages pending in the queue
     queue = _message_queues.get(user_id)
     if queue and not queue.empty():
@@ -741,9 +956,12 @@ async def _check_and_send_status(
     if not pane_text:
         return
 
-    tid = thread_id or 0
     status_line = parse_status_line(pane_text)
     if status_line:
+        if expected_turn_generation is not None:
+            current_generation = current_turn_generation(user_id, thread_id)
+            if _is_stale_turn_generation(expected_turn_generation, current_generation):
+                return
         await _do_send_status_message(bot, user_id, tid, window_id, status_line)
 
 
@@ -754,9 +972,11 @@ async def enqueue_content_message(
     parts: list[str],
     tool_use_id: str | None = None,
     content_type: str = "text",
+    semantic_kind: str = "",
     text: str | None = None,
     thread_id: int | None = None,
     image_data: list[tuple[str, bytes]] | None = None,
+    turn_generation: int = 0,
 ) -> None:
     """Enqueue a content message task."""
     logger.debug(
@@ -774,8 +994,10 @@ async def enqueue_content_message(
         parts=parts,
         tool_use_id=tool_use_id,
         content_type=content_type,
+        semantic_kind=semantic_kind,
         thread_id=thread_id,
         image_data=image_data,
+        turn_generation=turn_generation,
     )
     queue.put_nowait(task)
 
@@ -786,6 +1008,7 @@ async def enqueue_status_update(
     window_id: str,
     status_text: str | None,
     thread_id: int | None = None,
+    turn_generation: int = 0,
 ) -> None:
     """Enqueue status update. Skipped if text unchanged or during flood control."""
     # Don't enqueue during flood control — they'd just be dropped
@@ -794,6 +1017,8 @@ async def enqueue_status_update(
         return
 
     tid = thread_id or 0
+    if status_text and (user_id, tid) in _technical_status_closed:
+        return
 
     # Deduplicate: skip if text matches what's already displayed
     if status_text:
@@ -810,6 +1035,7 @@ async def enqueue_status_update(
             text=status_text,
             window_id=window_id,
             thread_id=thread_id,
+            turn_generation=turn_generation,
         )
     else:
         task = MessageTask(task_type="status_clear", thread_id=thread_id)
@@ -823,10 +1049,11 @@ async def enqueue_commentary_update(
     window_id: str,
     commentary_text: str | None,
     thread_id: int | None = None,
+    turn_generation: int = 0,
 ) -> None:
     """Enqueue latest-only commentary replacement for a topic."""
     tid = thread_id or 0
-    if commentary_text and (user_id, tid) in _commentary_closed:
+    if commentary_text and (user_id, tid) in _pre_final_visible_closed:
         return
 
     queue = get_or_create_queue(bot, user_id)
@@ -837,6 +1064,7 @@ async def enqueue_commentary_update(
             text=commentary_text,
             window_id=window_id,
             thread_id=thread_id,
+            turn_generation=turn_generation,
         )
     else:
         task = MessageTask(task_type="commentary_clear", thread_id=thread_id)
@@ -848,34 +1076,112 @@ async def enqueue_commentary_close(
     bot: Bot,
     user_id: int,
     thread_id: int | None = None,
+    turn_generation: int = 0,
 ) -> None:
     """Close the commentary lane in queue order and clear the visible artifact."""
+    await enqueue_pre_final_close(
+        bot,
+        user_id,
+        thread_id=thread_id,
+        turn_generation=turn_generation,
+    )
+
+
+async def enqueue_pre_final_close(
+    bot: Bot,
+    user_id: int,
+    thread_id: int | None = None,
+    turn_generation: int = 0,
+) -> None:
+    """Close the visible pre-final artifact lane in queue order."""
     queue = get_or_create_queue(bot, user_id)
-    queue.put_nowait(MessageTask(task_type="commentary_close", thread_id=thread_id))
+    queue.put_nowait(
+        MessageTask(
+            task_type="pre_final_close",
+            thread_id=thread_id,
+            turn_generation=turn_generation,
+        )
+    )
+
+
+def _mark_pre_final_visible_closed(
+    user_id: int,
+    thread_id: int | None = None,
+) -> None:
+    """Prevent visible pre-final artifacts from surfacing until the next user turn."""
+    _pre_final_visible_closed.add((user_id, thread_id or 0))
+
+
+def _mark_technical_status_closed(
+    user_id: int,
+    thread_id: int | None = None,
+) -> None:
+    """Prevent technical status artifacts from surfacing until the next user turn."""
+    _technical_status_closed.add((user_id, thread_id or 0))
 
 
 def _mark_commentary_closed(
     user_id: int,
     thread_id: int | None = None,
 ) -> None:
-    """Prevent commentary from surfacing until the next user turn."""
-    _commentary_closed.add((user_id, thread_id or 0))
+    """Backward-compatible alias for terminal surface closure."""
+    _mark_pre_final_visible_closed(user_id, thread_id)
+    _mark_technical_status_closed(user_id, thread_id)
+
+
+def reopen_pre_final_visible_lane(
+    user_id: int,
+    thread_id: int | None = None,
+) -> None:
+    """Allow visible pre-final artifacts to surface again for the next turn."""
+    _pre_final_visible_closed.discard((user_id, thread_id or 0))
+    _technical_status_closed.discard((user_id, thread_id or 0))
 
 
 def reopen_commentary_lane(
     user_id: int,
     thread_id: int | None = None,
 ) -> None:
-    """Allow commentary to surface again for the next turn."""
-    _commentary_closed.discard((user_id, thread_id or 0))
+    """Backward-compatible alias for pre-final visible artifact reopening."""
+    reopen_pre_final_visible_lane(user_id, thread_id)
+
+
+def clear_pre_final_visible_lane_state(
+    user_id: int,
+    thread_id: int | None = None,
+) -> None:
+    """Clear pre-final artifact visibility state for a topic during teardown."""
+    _pre_final_visible_closed.discard((user_id, thread_id or 0))
+    _technical_status_closed.discard((user_id, thread_id or 0))
+    _turn_generations.pop((user_id, thread_id or 0), None)
+
+
+def current_turn_generation(
+    user_id: int,
+    thread_id: int | None = None,
+) -> int:
+    """Return the current turn generation for a topic."""
+    return _turn_generations.get((user_id, thread_id or 0), 0)
+
+
+def open_new_turn_generation(
+    user_id: int,
+    thread_id: int | None = None,
+) -> int:
+    """Advance to the next turn generation and reopen the terminal surface."""
+    key = (user_id, thread_id or 0)
+    generation = _turn_generations.get(key, 0) + 1
+    _turn_generations[key] = generation
+    reopen_pre_final_visible_lane(user_id, thread_id)
+    return generation
 
 
 def clear_commentary_lane_state(
     user_id: int,
     thread_id: int | None = None,
 ) -> None:
-    """Clear commentary visibility state for a topic during teardown."""
-    _commentary_closed.discard((user_id, thread_id or 0))
+    """Backward-compatible alias for pre-final artifact lane cleanup."""
+    clear_pre_final_visible_lane_state(user_id, thread_id)
 
 
 def clear_status_msg_info(user_id: int, thread_id: int | None = None) -> None:
@@ -933,5 +1239,7 @@ async def shutdown_workers() -> None:
     _queue_workers.clear()
     _message_queues.clear()
     _queue_locks.clear()
-    _commentary_closed.clear()
+    _pre_final_visible_closed.clear()
+    _technical_status_closed.clear()
+    _turn_generations.clear()
     logger.info("Message queue workers stopped")

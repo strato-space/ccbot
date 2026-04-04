@@ -27,8 +27,16 @@ The adaptation work uses an explicit runtime ontology to avoid collapsing live
 tmux control, persisted conversation identity, and on-disk replay evidence into
 a single "session" concept.
 
-The maintainer note is:
+Start with the compact ontology index:
+- [`ontology/README.md`](ontology/README.md)
+- [`ontology/runtime.md`](ontology/runtime.md)
+- [`ontology/delivery-surface.md`](ontology/delivery-surface.md)
+- [`ontology/boundaries.md`](ontology/boundaries.md)
+
+Then use the longer maintainer notes:
 - [`doc/runtime-ontology.md`](doc/runtime-ontology.md)
+- [`doc/runtime-event-contract.md`](doc/runtime-event-contract.md)
+- [`doc/telegram-delivery-pipeline.md`](doc/telegram-delivery-pipeline.md)
 - [`doc/state-migration.md`](doc/state-migration.md)
 - [`doc/strato-ops-codex.md`](doc/strato-ops-codex.md)
 - [`doc/multi-runtime-regression-matrix.md`](doc/multi-runtime-regression-matrix.md)
@@ -37,13 +45,6 @@ The maintainer note is:
 The canonical shape is:
 
 `Telegram topic -> binding -> tmux window -> runtime process -> runtime conversation identity -> replay evidence`
-
-Maintainer reference:
-- [`doc/runtime-ontology.md`](doc/runtime-ontology.md)
-- [`doc/state-migration.md`](doc/state-migration.md)
-- [`doc/strato-ops-codex.md`](doc/strato-ops-codex.md)
-- [`doc/multi-runtime-regression-matrix.md`](doc/multi-runtime-regression-matrix.md)
-- [`doc/multi-runtime-rollout.md`](doc/multi-runtime-rollout.md)
 
 ## Strato Ops
 
@@ -67,8 +68,16 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   bubbles, the latest human-facing commentary stays visible as a dedicated
   artifact, and technical reasoning/tool/command/file-change churn stays in
   the mutable status artifact. Once the final assistant answer lands, the
-  commentary lane closes until the next user turn so no late commentary
-  appears below the final answer
+  whole pre-final visible surface closes until the next user turn, and the
+  mutable technical status surface closes with it, so no late commentary, orchestration
+  milestone, or surfaced preview artifact appears below the
+  final answer for the same turn, and no late status artifact appears below the
+  final answer for the same turn. Put bluntly: no pre-final visible artifact
+  or late technical status may leak below the terminal assistant bubble.
+  When command/tool/file previews are surfaced, they follow a Codex-style split:
+  preview body in fenced `sh` / `json`, truncation metadata outside the fence,
+  and no redundant `completed · output 1 line(s)` footer when the preview
+  already conveys the result.
 - **Prompt-safe control lane** — Detect `input ready`, `busy`, and `blocked prompt` terminal states before sending input
 - **Voice messages** — Voice messages are transcribed via OpenAI and forwarded as text
 - **Send messages** — Forward text to Codex via tmux keystrokes
@@ -261,6 +270,9 @@ intentionally narrow:
   content so execution context does not disappear under mutable status churn
 - **Final assistant responses** — The completed assistant answer lands as
   ordinary content
+- **Turn ordering barrier** — Once a newer turn opens, stale pre-final,
+  technical-status, and final artifacts from the older turn fail closed rather
+  than surfacing below the newer turn
 
 Technical execution classes stay out of permanent bubbles by default:
 
