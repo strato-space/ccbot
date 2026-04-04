@@ -13,6 +13,9 @@ runtimes without surrendering the live terminal surface.
   ordinary content bubbles.
 - In `compact`, the latest human-facing commentary should stay visible as a
   dedicated artifact without accumulating a long stack of commentary bubbles.
+- In `compact`, once the final assistant answer is delivered, the commentary
+  lane must close until the next user turn and no late commentary may appear
+  below the final answer.
 - Reasoning, tool lifecycle, command execution, and file-change summaries
   belong in the mutable status artifact unless a debug/verbose path explicitly
   opts into richer delivery.

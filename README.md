@@ -65,7 +65,9 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
 - **Compact Telegram delivery** — In the default production surface, user echo
   and final assistant answers remain ordinary content bubbles, the latest
   human-facing commentary stays visible as a dedicated artifact, and technical
-  reasoning/tool/command/file-change churn stays in the mutable status artifact
+  reasoning/tool/command/file-change churn stays in the mutable status artifact.
+  Once the final assistant answer lands, the commentary lane closes until the
+  next user turn so no late commentary appears below the final answer
 - **Prompt-safe control lane** — Detect `input ready`, `busy`, and `blocked prompt` terminal states before sending input
 - **Voice messages** — Voice messages are transcribed via OpenAI and forwarded as text
 - **Send messages** — Forward text to Codex via tmux keystrokes

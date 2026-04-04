@@ -12,6 +12,9 @@
 - **11:26-11:46** Compact commentary is now latest-only and visible, while
   tool, tool-output, and file-change surfaces gained codex-style code-aware
   formatting instead of raw JSON/arg dumps.
+- **12:00-12:13** Compact delivery no longer allows late commentary to appear
+  below the final assistant answer; the commentary lane now closes in queue
+  order and respects the public turn boundary.
 
 ### FEATURE IMPLEMENTED
 
@@ -22,6 +25,9 @@
   visible execution narrative.
 - **11:26-11:46** Latest-only commentary delivery and code-aware tool/file
   formatting were added to keep Telegram closer to Codex human output.
+- **12:00-12:13** A queue-serialized commentary-close primitive was added so
+  already-queued human narrative can still land before the final answer, while
+  any later commentary is suppressed until the next user turn.
 
 ### CHANGES
 
@@ -43,3 +49,8 @@
   code-aware formatting for tool/file surfaces in
   `src/ccbot/handlers/response_builder.py` and `src/ccbot/codex_rollout.py`,
   and resynchronized the delivery docs/specs.
+- **12:00-12:13** Added a queue-ordered `commentary_close` delivery primitive
+  in `src/ccbot/handlers/message_queue.py`, switched final-answer handling in
+  `src/ccbot/bot.py` from immediate lane closure to queued commentary fencing,
+  tightened teardown in `src/ccbot/handlers/cleanup.py`, and extended delivery
+  contract tests for the no-commentary-after-final invariant.
