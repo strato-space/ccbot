@@ -19,7 +19,14 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 
-from .runtime_types import NormalizedEvent
+from .runtime_types import (
+    COMMAND_EXECUTION_SEMANTIC_KIND,
+    FILE_CHANGE_SEMANTIC_KIND,
+    REASONING_SEMANTIC_KIND,
+    TOOL_RESULT_SEMANTIC_KIND,
+    TOOL_START_SEMANTIC_KIND,
+    NormalizedEvent,
+)
 
 _INTERNAL_USER_ECHO_RE = re.compile(
     r"^\s*<("
@@ -29,12 +36,12 @@ _INTERNAL_USER_ECHO_RE = re.compile(
     re.IGNORECASE,
 )
 _PLACEHOLDER_REASONING = {"[reasoning]", "(thinking)"}
-_STATUS_ONLY_CONTENT_TYPES = {
-    "reasoning",
-    "tool_use",
-    "tool_result",
-    "command_execution",
-    "file_change",
+_STATUS_ONLY_SEMANTIC_KINDS = {
+    REASONING_SEMANTIC_KIND,
+    TOOL_START_SEMANTIC_KIND,
+    TOOL_RESULT_SEMANTIC_KIND,
+    COMMAND_EXECUTION_SEMANTIC_KIND,
+    FILE_CHANGE_SEMANTIC_KIND,
 }
 _COMPACT_STATUS_LIMIT = 280
 
@@ -83,12 +90,13 @@ def apply_telegram_delivery_policy(
     if projected.role == "user" and _is_internal_user_payload(text):
         return _suppress(projected)
 
-    if projected.content_type == "reasoning":
+    if projected.semantic_kind == REASONING_SEMANTIC_KIND:
         if not text or text in _PLACEHOLDER_REASONING:
             return _suppress(projected)
         projected.text = _compact_single_block(text)
         projected.status_message_eligible = True
         projected.is_complete = False
+        projected.include_in_history = False
         return projected
 
     if projected.content_type == "tool_use" and (projected.tool_name or "").lower() == "skill":
@@ -97,7 +105,7 @@ def apply_telegram_delivery_policy(
     if projected.content_type == "tool_result" and (projected.tool_name or "").lower() == "skill":
         return _suppress(projected)
 
-    if projected.content_type in _STATUS_ONLY_CONTENT_TYPES:
+    if projected.semantic_kind in _STATUS_ONLY_SEMANTIC_KINDS:
         projected.text = _compact_single_block(text)
         projected.status_message_eligible = True
         projected.is_complete = False

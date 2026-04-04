@@ -1370,6 +1370,32 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_handle_new_message_compact_mode_routes_thinking_to_status_only(self):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="Checking the workspace layout and comparing outputs.",
+            is_complete=True,
+            content_type="thinking",
+            role="assistant",
+            event_kind="reasoning",
+            runtime_kind="claude",
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
+            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_status.assert_awaited_once()
+        mock_content.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_handle_new_message_compact_mode_routes_command_execution_to_status(self):
         bot = AsyncMock()
         msg = NormalizedEvent(
@@ -1380,6 +1406,33 @@ class TestTelegramDelivery:
             role="assistant",
             event_kind="command_execution",
             runtime_kind="codex",
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
+            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch("ccbot.bot.get_interactive_msg_id", return_value=None),
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_status.assert_awaited_once()
+        mock_content.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_handle_new_message_compact_mode_routes_local_command_to_status(self):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="  ⎿  Output 37 lines",
+            is_complete=True,
+            content_type="local_command",
+            role="assistant",
+            event_kind="command_execution",
+            runtime_kind="claude",
         )
 
         with (

@@ -148,6 +148,57 @@ def test_codex_rollout_command_execution_extracts_bash_lc_script_into_code_block
     assert "completed · output 2 line(s)" in events[0].text
 
 
+def test_codex_rollout_tool_use_exec_command_extracts_shell_payload_into_code_block() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-04T10:05:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": {
+                    "cmd": "/bin/bash\n-lc\njq '.history.prompt[0:3]' /tmp/hard_b.json | sed -n '1,220p'",
+                    "workdir": "/home/tools/server/comfy",
+                },
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].content_type == "tool_use"
+    assert events[0].text.startswith("exec_command\n```sh\n")
+    assert "/bin/bash" not in events[0].text
+    assert "jq '.history.prompt[0:3]' /tmp/hard_b.json | sed -n '1,220p'" in events[0].text
+    assert "/home/tools/server/comfy" in events[0].text
+
+
+def test_codex_rollout_tool_use_write_stdin_summarizes_chars_without_raw_json() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-04T10:06:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "write_stdin",
+                "arguments": {
+                    "session_id": "2041",
+                    "chars": "ok go\n",
+                },
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].content_type == "tool_use"
+    assert events[0].text.startswith("write_stdin(session 2041)\n```text\n")
+    assert '"session_id"' not in events[0].text
+    assert "ok go" in events[0].text
+
+
 def test_codex_rollout_suppresses_duplicate_event_msg_history_delivery() -> None:
     records = [
         {
@@ -299,3 +350,27 @@ def test_codex_rollout_compacts_large_tool_call_and_file_change_payloads() -> No
     assert "modify /tmp/b.txt" in events[1].text
     assert "alpha" not in events[1].text
     assert "beta" not in events[1].text
+
+
+def test_codex_rollout_tool_output_exec_command_uses_compact_output_count() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-04T10:07:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "name": "exec_command",
+                "output": {
+                    "type": "output_text",
+                    "text": "line1\nline2\nline3\n",
+                },
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].content_type == "tool_result"
+    assert events[0].text == "completed · output 3 line(s)"

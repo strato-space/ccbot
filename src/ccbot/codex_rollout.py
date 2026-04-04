@@ -193,6 +193,23 @@ def _command_code_block(command: str, *, max_lines: int = 4, max_chars: int = 14
     return "```sh\n" + "\n".join(clipped) + "\n```"
 
 
+def _tool_text_code_block(
+    text: str,
+    *,
+    language: str = "text",
+    max_lines: int = 4,
+    max_chars: int = 140,
+) -> str:
+    lines = _nonempty_lines(text)
+    if not lines:
+        return ""
+
+    clipped = [_compact_inline(line, max_chars=max_chars) for line in lines[:max_lines]]
+    if len(lines) > max_lines:
+        clipped.append(f"... (+{len(lines) - max_lines} more lines)")
+    return f"```{language}\n" + "\n".join(clipped) + "\n```"
+
+
 def _tool_call_summary(name: str, arguments: Any) -> str:
     lowered = name.lower()
 
@@ -205,6 +222,29 @@ def _tool_call_summary(name: str, arguments: Any) -> str:
         return f"{name}({summary})" if summary else name
 
     if isinstance(arguments, dict):
+        if lowered == "exec_command":
+            cmd = _as_text(arguments.get("cmd")).strip()
+            workdir = _as_text(arguments.get("workdir")).strip()
+            parts = ["exec_command"]
+            if cmd:
+                command_block = _command_code_block(cmd)
+                parts.append(command_block or _compact_multiline(cmd))
+            if workdir:
+                parts.append(_compact_inline(workdir, max_chars=120))
+            return "\n".join(part for part in parts if part)
+        if lowered == "write_stdin":
+            session_id = _as_text(arguments.get("session_id")).strip()
+            chars = _as_text(arguments.get("chars"))
+            if chars.strip():
+                parts = [f"write_stdin(session {session_id or '?'})"]
+                parts.append(
+                    _tool_text_code_block(chars, language="text", max_lines=3)
+                    or _compact_multiline(chars)
+                )
+                return "\n".join(part for part in parts if part)
+            if session_id:
+                return f"write_stdin(session {session_id}, poll)"
+            return "write_stdin(poll)"
         if lowered == "apply_patch":
             patch_text = _as_text(arguments.get("patch") or arguments.get("input")).strip()
             if patch_text:
@@ -240,6 +280,12 @@ def _tool_output_summary(tool_name: str | None, text: str) -> str:
     if head.lower().startswith("success. updated the following files:"):
         file_count = max(0, len(lines) - 1)
         return f"Updated {file_count} file(s)"
+
+    lowered = (tool_name or "").lower()
+    if lowered == "exec_command":
+        return f"completed · output {len(lines)} line(s)"
+    if lowered == "write_stdin":
+        return f"output {len(lines)} line(s)"
 
     label = tool_name or "Tool output"
     return f"{label}: {len(lines)} line(s)"
