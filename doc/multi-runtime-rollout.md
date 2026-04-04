@@ -84,6 +84,16 @@ Primary runbook:
 
 - `doc/strato-ops-codex.md`
 
+Promotion gate:
+
+- `tests/ccbot/test_bot_contracts.py`
+- `tests/ccbot/handlers/test_message_queue.py`
+- `tests/ccbot/test_codex_threads.py`
+- `tests/ccbot/test_runtime_types.py`
+- `tests/ccbot/test_session_monitor.py`
+- `tests/ccbot/test_docs_contracts.py`
+- the Codex and shared rows in `doc/multi-runtime-regression-matrix.md`
+
 ### Ring 1: Claude Code restore canary
 
 Use a dedicated bot instance or host-scoped deployment when restoring Claude
@@ -152,6 +162,20 @@ Forbidden:
 If a lane is not ready, keep it disabled rather than exposing a half-working
 surface on the primary bot.
 
+## Current rollout inventory
+
+| Ring | Status | Host / instance | Service / bot surface | Owner | Change window | Rollback target |
+|---|---|---|---|---|---|---|
+| Ring 0: Codex production baseline | Active | `str` (`/home/tools/server/.production/production.md`, user `iqdoctor`) | `systemd --user ccbot.service`, bot `@ComfyCodexBot` | `@ViLco_O` | Explicit production maintenance window on the primary bot instance | Same host/service with previous known-good Codex launcher and existing `*.v1.bak` state backups |
+| Ring 1: Claude Code restore canary | Reserved, not yet deployed | Separate canary bot instance or host, not the Ring 0 production service | Reserve `ccbot-claude.service` or an equivalent dedicated bot instance | Assign before cutover | Dedicated Claude canary window only | Disable the canary and keep Ring 0 on Codex |
+| Ring 2: fast-agent canary | Reserved, not yet deployed | Separate canary bot instance or host, not the Ring 0 production service | Reserve `ccbot-fast-agent.service` or an equivalent dedicated bot instance | Assign before cutover | Dedicated fast-agent canary window only | Disable the canary and keep Ring 0 on Codex |
+
+Inventory rules:
+
+- do not reuse the Ring 0 production service for Claude Code or fast-agent canaries
+- do not promote a canary without naming the owner and rollback target in this table
+- if the concrete canary host/service changes, update this table in the same change as the rollout decision
+
 ## Operator capability differences
 
 ### Codex
@@ -190,6 +214,13 @@ When promoting a runtime lane:
    - explicit `/unbind` -> `manual_bind_required`
 6. Verify no regression in preserved `voice`, `task`, and `ACP-module` surfaces.
 
+Minimum cutover checklist:
+
+- the target ring in the inventory table is assigned and current
+- the runtime-specific promotion gate has passed
+- help text and `/start` match the degraded or supported `/resume` semantics of that lane
+- the production topic semantics for any existing bot instance are unchanged unless the deploy explicitly changes the configured lane
+
 ## Fallback and rollback
 
 If a canary lane is not production-ready:
@@ -207,6 +238,13 @@ If a deployed lane must roll back:
 3. Reset `CLAUDE_COMMAND` to the previous known-good launcher.
 4. Restart the scoped bot instance.
 5. Re-run the smoke checklist for the restored lane.
+
+Rollback checklist:
+
+- confirm the rollback target named in the inventory table
+- restore only the scoped bot instance; do not reboot the host
+- verify `manual_bind_required` topics stay manually unbound after the rollback
+- verify preserved `voice`, `task`, and `ACP-module` behavior before reopening the lane
 
 ## Release decision
 

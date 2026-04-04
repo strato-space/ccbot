@@ -240,6 +240,15 @@ def _build_resume_degraded_message(runtime_kind: str) -> str:
     return "⚠️ Explicit /resume is not available for the configured runtime lane."
 
 
+def _build_start_resume_note(runtime_kind: str) -> str:
+    if runtime_kind == "codex":
+        return (
+            "In the current Codex lane, explicit `/resume <thread-name|id>` from an "
+            "unbound topic is supported when the persisted identity resolves exactly."
+        )
+    return _build_resume_degraded_message(runtime_kind)
+
+
 def _build_unbound_input_message(user_id: int, thread_id: int | None) -> str:
     """Explain how to re-enter the bind flow for unbound topics."""
     runtime_kind = _default_launch_runtime_kind()
@@ -585,7 +594,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     clear_browse_state(context.user_data)
 
-    capability = session_manager.get_runtime_capability(_default_launch_runtime_kind())
+    runtime_kind = _default_launch_runtime_kind()
+    capability = session_manager.get_runtime_capability(runtime_kind)
 
     if update.message:
         await safe_reply(
@@ -599,6 +609,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "Telegram text enters the equal message layer in queue mode by default. "
             "steer changes routing semantics for explicit runtime controls; raw "
             "tmux terminal control stays separate and is never treated as a queued message.\n"
+            f"{_build_start_resume_note(runtime_kind)}\n"
             "Use /bind when you want to choose a workspace explicitly, and use "
             "/resume when the current runtime lane supports deterministic explicit resume.\n"
             "The menu only advertises the stable bot surface and any supported runtime core lane.",

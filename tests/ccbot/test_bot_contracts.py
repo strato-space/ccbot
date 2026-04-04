@@ -203,7 +203,44 @@ class TestCommandSurface:
         assert "/bind or a supported /resume" in text
         assert "After /unbind or Cancel" in text
         assert "raw tmux terminal control" in text
+        assert "explicit `/resume <thread-name|id>`" in text
         assert "Claude Code Monitor" not in text
+
+    @pytest.mark.asyncio
+    async def test_start_command_describes_claude_degraded_resume_path(self):
+        update = _make_topic_update()
+        context = _make_context()
+
+        with (
+            patch.object(bot_mod.config, "claude_command", "claude"),
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            await bot_mod.start_command(update, context)
+
+        mock_reply.assert_awaited_once()
+        text = mock_reply.await_args.args[1]
+        assert "Claude Code" in text
+        assert "not available from an unbound topic" in text
+        assert "reversible workspace path" in text
+
+    @pytest.mark.asyncio
+    async def test_start_command_describes_fast_agent_degraded_resume_path(self):
+        update = _make_topic_update()
+        context = _make_context()
+
+        with (
+            patch.object(bot_mod.config, "claude_command", "fast-agent"),
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            await bot_mod.start_command(update, context)
+
+        mock_reply.assert_awaited_once()
+        text = mock_reply.await_args.args[1]
+        assert "fast-agent" in text
+        assert "not available from an unbound topic" in text
+        assert "workspace `.fast-agent` root" in text
 
     @pytest.mark.asyncio
     async def test_usage_command_points_codex_users_to_status(self):

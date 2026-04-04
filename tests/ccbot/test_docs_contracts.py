@@ -50,6 +50,15 @@ def test_multi_runtime_rollout_doc_requires_explicit_staged_enablement() -> None
     assert "silently reinterpreting existing production topics under a new runtime lane" in doc
     assert "`GO` for a runtime lane" in doc
     assert "`NO GO`" in doc
+    assert "Current rollout inventory" in doc
+    assert "ccbot.service" in doc
+    assert "@ComfyCodexBot" in doc
+    assert "ccbot-claude.service" in doc
+    assert "ccbot-fast-agent.service" in doc
+    assert "do not reuse the Ring 0 production service" in doc
+    assert "Minimum cutover checklist" in doc
+    assert "Rollback checklist" in doc
+    assert "do not reboot the host" in doc
 
 
 def test_runtime_ontology_note_uses_runtime_neutral_terms() -> None:
