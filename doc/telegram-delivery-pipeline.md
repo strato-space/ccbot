@@ -50,6 +50,8 @@ Ordering guarantees:
 2. the first real content part may convert the status artifact into content
 3. when tool lifecycle is materialized as content, `tool_result` may edit the earlier `tool_use` message in place
 4. final assistant content lands in the topic after the progress/tool lifecycle
+5. once final assistant content is delivered, the commentary lane is closed until
+   the next user turn and no late commentary may appear below the final answer
 
 This preserves the upstream Claude shape:
 
@@ -110,7 +112,9 @@ deliberately narrow:
 In addition to those durable bubbles, `compact` keeps one latest-only visible
 commentary artifact. Each new commentary update replaces the previous one so
 the chat shows the current human-readable execution narrative without
-accumulating a long stack of near-duplicate commentary bubbles.
+accumulating a long stack of near-duplicate commentary bubbles. That commentary
+artifact is explicitly cleared when the final assistant answer is delivered and
+must not reappear below the final answer unless a new user turn has begun.
 
 The following semantic classes are not meant to survive as permanent content
 bubbles in `compact` mode:

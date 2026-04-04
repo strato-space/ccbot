@@ -88,6 +88,10 @@ _status_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
 # Commentary message tracking: (user_id, thread_id_or_0) -> (message_id, window_id, last_text)
 _commentary_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
 
+# Commentary lane closure: once a final assistant bubble lands in compact mode,
+# commentary is suppressed until the next user turn reopens the lane.
+_commentary_closed: set[tuple[int, int]] = set()
+
 # Flood control: user_id -> monotonic time when ban expires
 _flood_until: dict[int, float] = {}
 
@@ -631,6 +635,15 @@ async def _process_commentary_update_task(
         await _do_clear_commentary_message(bot, user_id, tid)
         return
 
+    if (user_id, tid) in _commentary_closed:
+        logger.debug(
+            "Dropping commentary after final answer: user=%d window=%s thread=%s",
+            user_id,
+            wid,
+            task.thread_id,
+        )
+        return
+
     ckey = (user_id, tid)
     current_info = _commentary_msg_info.get(ckey)
     if current_info:
@@ -806,6 +819,10 @@ async def enqueue_commentary_update(
     thread_id: int | None = None,
 ) -> None:
     """Enqueue latest-only commentary replacement for a topic."""
+    tid = thread_id or 0
+    if commentary_text and (user_id, tid) in _commentary_closed:
+        return
+
     queue = get_or_create_queue(bot, user_id)
 
     if commentary_text:
@@ -819,6 +836,30 @@ async def enqueue_commentary_update(
         task = MessageTask(task_type="commentary_clear", thread_id=thread_id)
 
     queue.put_nowait(task)
+
+
+def mark_commentary_closed(
+    user_id: int,
+    thread_id: int | None = None,
+) -> None:
+    """Prevent commentary from surfacing until the next user turn."""
+    _commentary_closed.add((user_id, thread_id or 0))
+
+
+def reopen_commentary_lane(
+    user_id: int,
+    thread_id: int | None = None,
+) -> None:
+    """Allow commentary to surface again for the next turn."""
+    _commentary_closed.discard((user_id, thread_id or 0))
+
+
+def clear_commentary_lane_state(
+    user_id: int,
+    thread_id: int | None = None,
+) -> None:
+    """Clear commentary visibility state for a topic during teardown."""
+    _commentary_closed.discard((user_id, thread_id or 0))
 
 
 def clear_status_msg_info(user_id: int, thread_id: int | None = None) -> None:
@@ -876,4 +917,5 @@ async def shutdown_workers() -> None:
     _queue_workers.clear()
     _message_queues.clear()
     _queue_locks.clear()
+    _commentary_closed.clear()
     logger.info("Message queue workers stopped")

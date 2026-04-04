@@ -170,6 +170,8 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "`tool_use` summaries" in doc
     assert "`tool_result` summaries" in doc
     assert "when tool lifecycle is materialized as content, `tool_result` may edit the earlier `tool_use` message in place" in doc
+    assert "commentary lane is closed until" in doc
+    assert "must not reappear below the final answer" in doc
     assert "durable Telegram content bubbles are" in doc
     assert "deliberately narrow" in doc
     assert "latest-only visible commentary artifact" in doc

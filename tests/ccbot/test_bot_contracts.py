@@ -1267,6 +1267,47 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_handle_new_message_compact_mode_clears_commentary_before_final_answer(self):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="Final answer",
+            is_complete=True,
+            content_type="text",
+            role="assistant",
+            event_kind="message",
+            runtime_kind="codex",
+        )
+
+        call_order: list[str] = []
+
+        async def _record_commentary(*args, **kwargs):
+            call_order.append(f"commentary:{kwargs.get('commentary_text', args[3] if len(args) > 3 else None)}")
+
+        async def _record_content(*args, **kwargs):
+            call_order.append("content")
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
+            patch("ccbot.bot.enqueue_commentary_update", side_effect=_record_commentary) as mock_commentary,
+            patch("ccbot.bot.enqueue_content_message", side_effect=_record_content) as mock_content,
+            patch("ccbot.bot.mark_commentary_closed") as mock_close,
+            patch("ccbot.bot.get_interactive_msg_id", return_value=None),
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_status.assert_not_awaited()
+        mock_close.assert_called_once_with(1, 42)
+        assert mock_commentary.call_count == 1
+        assert mock_content.call_count == 1
+        assert call_order == ["commentary:None", "content"]
+
+    @pytest.mark.asyncio
     async def test_handle_new_message_compact_mode_suppresses_internal_skill_user_echo(self):
         bot = AsyncMock()
         msg = NormalizedEvent(

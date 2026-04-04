@@ -7,6 +7,8 @@ import pytest
 from ccbot.handlers.message_queue import (
     MessageTask,
     _can_merge_tasks,
+    clear_commentary_lane_state,
+    mark_commentary_closed,
     _process_commentary_update_task,
     _process_content_task,
     _process_status_update_task,
@@ -139,3 +141,33 @@ async def test_process_commentary_task_replaces_previous_visible_commentary() ->
 
     assert mock_send.await_count == 2
     bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=101)
+
+
+@pytest.mark.asyncio
+async def test_process_commentary_task_drops_updates_after_final_answer() -> None:
+    task = MessageTask(
+        task_type="commentary_update",
+        window_id="@7",
+        thread_id=42,
+        text="Late commentary after final answer",
+    )
+
+    mark_commentary_closed(1, 42)
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+            ) as mock_send,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+
+            await _process_commentary_update_task(AsyncMock(), 1, task)
+
+        mock_send.assert_not_awaited()
+    finally:
+        clear_commentary_lane_state(1, 42)

@@ -121,6 +121,8 @@ from .handlers.message_queue import (
     enqueue_content_message,
     enqueue_status_update,
     get_message_queue,
+    mark_commentary_closed,
+    reopen_commentary_lane,
     shutdown_workers,
 )
 from .launcher_registration import infer_runtime_kind_from_command
@@ -134,7 +136,11 @@ from .handlers.message_sender import (
 from .markdown_v2 import convert_markdown
 from .handlers.response_builder import build_response_parts, build_status_text
 from .handlers.status_polling import status_poll_loop
-from .runtime_types import runtime_capability_registry
+from .runtime_types import (
+    ASSISTANT_FINAL_SEMANTIC_KIND,
+    USER_ECHO_SEMANTIC_KIND,
+    runtime_capability_registry,
+)
 from .screenshot import text_to_image
 from .state_schema import (
     BINDING_STATE_BIND_FLOW,
@@ -2672,6 +2678,9 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         return
 
     for user_id, wid, thread_id in active_users:
+        if msg.semantic_kind == USER_ECHO_SEMANTIC_KIND:
+            reopen_commentary_lane(user_id, thread_id)
+
         # Handle interactive tools specially - capture terminal and send UI
         if msg.tool_name in INTERACTIVE_TOOL_NAMES and msg.content_type == "tool_use":
             # Mark interactive mode BEFORE sleeping so polling skips this window
@@ -2762,6 +2771,18 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         )
 
         if msg.is_complete:
+            if (
+                config.telegram_delivery_mode == "compact"
+                and msg.semantic_kind == ASSISTANT_FINAL_SEMANTIC_KIND
+            ):
+                mark_commentary_closed(user_id, thread_id)
+                await enqueue_commentary_update(
+                    bot,
+                    user_id,
+                    wid,
+                    None,
+                    thread_id=thread_id,
+                )
             # Enqueue content message task
             # Note: tool_result editing is handled inside _process_content_task
             # to ensure sequential processing with tool_use message sending
