@@ -187,3 +187,47 @@ class TestCheckForUpdatesCodexRollout:
         assert first
         assert {event.event_kind for event in first} >= {"tool_call", "tool_output", "lifecycle"}
         assert second == []
+
+    @pytest.mark.asyncio
+    async def test_check_for_updates_uses_runtime_resolved_active_rollout_sources(
+        self, monitor, tmp_path
+    ):
+        rollout = (
+            Path(__file__).resolve().parents[1]
+            / "fixtures"
+            / "codex"
+            / "rollouts"
+            / "root_tool_call_and_output.jsonl"
+        )
+        copied = tmp_path / "runtime-resolved-thread.jsonl"
+        copied.write_text(rollout.read_text(encoding="utf-8"), encoding="utf-8")
+
+        thread_id = "thread-runtime-resolved"
+        monitor._active_rollout_sources = {
+            thread_id: RolloutSource(
+                thread_id=thread_id,
+                file_path=copied,
+                runtime_kind="codex",
+                cwd="/tmp/project",
+            )
+        }
+        tracked = TrackedSession(
+            session_id=thread_id,
+            file_path=str(copied),
+            last_byte_offset=0,
+        )
+        monitor.state.update_session(tracked)
+
+        async def _scan():
+            raise AssertionError("legacy project scan should not run for active runtime sources")
+
+        monitor.scan_rollout_sources = _scan  # type: ignore[assignment]
+
+        events = await monitor.check_for_updates({thread_id})
+
+        assert events
+        assert {event.event_kind for event in events} >= {
+            "tool_call",
+            "tool_output",
+            "lifecycle",
+        }

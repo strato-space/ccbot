@@ -67,6 +67,8 @@ class SessionMonitor:
         # Track last known binding map for detecting changes
         # Keys may be window_id (@12) or window_name (old format) during transition
         self._last_binding_map: dict[str, str] = {}  # window_key -> thread_id
+        # Active runtime-resolved replay sources for the current binding map.
+        self._active_rollout_sources: dict[str, RolloutSource] = {}
         # In-memory mtime cache for quick file change detection (not persisted)
         self._file_mtimes: dict[str, float] = {}  # thread_id -> last_seen_mtime
 
@@ -267,8 +269,23 @@ class SessionMonitor:
         """
         new_messages = []
 
-        # Scan projects to get available rollout sources
-        rollout_sources = await self.scan_rollout_sources()
+        rollout_sources: list[RolloutSource] = [
+            rollout_source
+            for thread_id, rollout_source in self._active_rollout_sources.items()
+            if thread_id in active_thread_ids
+        ]
+        known_thread_ids = {rollout_source.thread_id for rollout_source in rollout_sources}
+        missing_thread_ids = active_thread_ids - known_thread_ids
+
+        # Legacy fallback: old tests and Claude-only flows may still patch the
+        # project scanner directly. Runtime-aware sources win when available.
+        if missing_thread_ids:
+            for rollout_source in await self.scan_rollout_sources():
+                if rollout_source.thread_id not in missing_thread_ids:
+                    continue
+                rollout_sources.append(rollout_source)
+                known_thread_ids.add(rollout_source.thread_id)
+                missing_thread_ids.discard(rollout_source.thread_id)
 
         # Only process sources that are bound through the current topic/window map
         for rollout_source in rollout_sources:
@@ -402,6 +419,7 @@ class SessionMonitor:
         await session_manager.load_session_map()
         live_window_ids = {window.window_id for window in await tmux_manager.list_windows()}
         window_to_session: dict[str, str] = {}
+        active_rollout_sources: dict[str, RolloutSource] = {}
 
         for binding in session_manager.iter_topic_bindings():
             if binding.window_id not in live_window_ids:
@@ -409,6 +427,15 @@ class SessionMonitor:
             resolved = await session_manager.resolve_thread_for_window(binding.window_id)
             if resolved is not None and resolved.thread_id:
                 window_to_session[binding.window_id] = resolved.thread_id
+                if resolved.file_path:
+                    active_rollout_sources[resolved.thread_id] = RolloutSource(
+                        thread_id=resolved.thread_id,
+                        file_path=Path(resolved.file_path),
+                        runtime_kind=resolved.runtime_kind,
+                        cwd=resolved.cwd,
+                    )
+
+        self._active_rollout_sources = active_rollout_sources
 
         return window_to_session
 

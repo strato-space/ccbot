@@ -337,6 +337,11 @@ async def test_monitor_recovers_codex_binding_from_persisted_registration(
     current_map = await monitor._load_current_session_map()
 
     assert current_map == {"@9": thread_id}
+    assert thread_id in monitor._active_rollout_sources
+    active_source = monitor._active_rollout_sources[thread_id]
+    assert active_source.runtime_kind == "codex"
+    assert active_source.cwd == "/tmp/project-9"
+    assert active_source.file_path.name == f"rollout-{thread_id}.jsonl"
 
 
 def test_state_json_persists_topic_policy_and_binding_state(tmp_path, monkeypatch):

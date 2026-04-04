@@ -139,6 +139,7 @@ class FastAgentSessionCandidate:
             summary=self.summary,
             message_count=self.message_count,
             file_path=str(self.replay_file),
+            runtime_kind="fast-agent",
             cwd=self.cwd,
         )
 

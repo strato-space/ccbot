@@ -150,6 +150,7 @@ class CodexThreadCandidate:
             summary=self.summary,
             message_count=self.message_count,
             file_path=str(self.rollout_file),
+            runtime_kind="codex",
             cwd=self.cwd,
         )
 

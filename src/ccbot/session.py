@@ -833,6 +833,7 @@ class SessionManager:
             summary=summary,
             message_count=message_count,
             file_path=str(file_path),
+            runtime_kind="claude",
             cwd=cwd,
         )
 
