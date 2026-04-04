@@ -199,6 +199,53 @@ def test_codex_rollout_tool_use_write_stdin_summarizes_chars_without_raw_json() 
     assert "ok go" in events[0].text
 
 
+def test_codex_rollout_tool_use_generic_json_arguments_render_as_json_block() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-04T10:06:30.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "browser_click",
+                "arguments": {
+                    "ref": "node-1",
+                    "element": "Submit",
+                    "doubleClick": False,
+                },
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].content_type == "tool_use"
+    assert events[0].text.startswith("browser_click\n```json\n")
+    assert '"ref": "node-1"' in events[0].text
+
+
+def test_codex_rollout_tool_output_generic_json_renders_as_json_block() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-04T10:06:45.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "name": "browser_snapshot",
+                "call_id": "toolu_1",
+                "output": '{"status":"ok","depth":2}',
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].content_type == "tool_result"
+    assert events[0].text.startswith("```json\n")
+    assert '"depth": 2' in events[0].text
+
+
 def test_codex_rollout_suppresses_duplicate_event_msg_history_delivery() -> None:
     records = [
         {

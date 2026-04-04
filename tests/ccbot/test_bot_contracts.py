@@ -1237,7 +1237,7 @@ class TestThreadPickerFlow:
 
 class TestTelegramDelivery:
     @pytest.mark.asyncio
-    async def test_handle_new_message_compact_mode_keeps_complete_commentary_as_content(self):
+    async def test_handle_new_message_compact_mode_routes_commentary_to_latest_visible_artifact(self):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -1253,6 +1253,7 @@ class TestTelegramDelivery:
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
+            patch("ccbot.bot.enqueue_commentary_update", new_callable=AsyncMock) as mock_commentary,
             patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
             patch("ccbot.bot.get_interactive_msg_id", return_value=None),
         ):
@@ -1262,8 +1263,8 @@ class TestTelegramDelivery:
             await bot_mod.handle_new_message(msg, bot)
 
         mock_status.assert_not_awaited()
-        mock_content.assert_awaited_once()
-        assert mock_content.await_args.kwargs["content_type"] == "commentary"
+        mock_commentary.assert_awaited_once()
+        mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_handle_new_message_compact_mode_suppresses_internal_skill_user_echo(self):

@@ -117,6 +117,7 @@ from .handlers.interactive_ui import (
 )
 from .handlers.message_queue import (
     clear_status_msg_info,
+    enqueue_commentary_update,
     enqueue_content_message,
     enqueue_status_update,
     get_message_queue,
@@ -2723,6 +2724,34 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 status_text,
                 thread_id=thread_id,
             )
+            continue
+
+        if (
+            config.telegram_delivery_mode == "compact"
+            and msg.is_complete
+            and msg.content_type == "commentary"
+        ):
+            commentary_text = build_status_text(
+                msg.text,
+                is_complete=True,
+                content_type=msg.content_type,
+                role=msg.role,
+            )
+            await enqueue_commentary_update(
+                bot,
+                user_id,
+                wid,
+                commentary_text,
+                thread_id=thread_id,
+            )
+
+            session = await session_manager.resolve_session_for_window(wid)
+            if session and session.file_path:
+                try:
+                    file_size = Path(session.file_path).stat().st_size
+                    session_manager.update_user_window_offset(user_id, wid, file_size)
+                except OSError:
+                    pass
             continue
 
         parts = build_response_parts(

@@ -210,6 +210,28 @@ def _tool_text_code_block(
     return f"```{language}\n" + "\n".join(clipped) + "\n```"
 
 
+def _tool_json_code_block(
+    value: Any,
+    *,
+    max_lines: int = 10,
+    max_chars: int = 120,
+) -> str:
+    try:
+        if isinstance(value, str):
+            parsed = json.loads(value)
+        else:
+            parsed = value
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ""
+
+    pretty = json.dumps(parsed, ensure_ascii=False, indent=2, sort_keys=True)
+    lines = pretty.splitlines()
+    clipped = [_compact_inline(line, max_chars=max_chars) for line in lines[:max_lines]]
+    if len(lines) > max_lines:
+        clipped.append(f"... (+{len(lines) - max_lines} more lines)")
+    return "```json\n" + "\n".join(clipped) + "\n```"
+
+
 def _tool_call_summary(name: str, arguments: Any) -> str:
     lowered = name.lower()
 
@@ -218,6 +240,9 @@ def _tool_call_summary(name: str, arguments: Any) -> str:
         if lowered == "apply_patch":
             line_count = len(text.splitlines())
             return f"{name}(patch {line_count} lines)"
+        json_block = _tool_json_code_block(text)
+        if json_block:
+            return "\n".join([name, json_block])
         summary = _compact_multiline(text)
         return f"{name}({summary})" if summary else name
 
@@ -249,6 +274,9 @@ def _tool_call_summary(name: str, arguments: Any) -> str:
             patch_text = _as_text(arguments.get("patch") or arguments.get("input")).strip()
             if patch_text:
                 return f"{name}(patch {len(patch_text.splitlines())} lines)"
+        json_block = _tool_json_code_block(arguments)
+        if json_block:
+            return "\n".join([name, json_block])
         for key in _TOOL_SUMMARY_KEYS:
             value = arguments.get(key)
             if isinstance(value, str) and value.strip():
@@ -273,9 +301,6 @@ def _tool_output_summary(tool_name: str | None, text: str) -> str:
     if not lines:
         return "[tool_output]"
 
-    if len(lines) == 1 and len(lines[0]) <= 200:
-        return lines[0]
-
     head = lines[0]
     if head.lower().startswith("success. updated the following files:"):
         file_count = max(0, len(lines) - 1)
@@ -286,6 +311,13 @@ def _tool_output_summary(tool_name: str | None, text: str) -> str:
         return f"completed · output {len(lines)} line(s)"
     if lowered == "write_stdin":
         return f"output {len(lines)} line(s)"
+
+    json_block = _tool_json_code_block(text)
+    if json_block:
+        return json_block
+
+    if len(lines) == 1 and len(lines[0]) <= 200:
+        return lines[0]
 
     label = tool_name or "Tool output"
     return f"{label}: {len(lines)} line(s)"
@@ -442,6 +474,53 @@ def _reasoning_event(
     if not text:
         return _suppress_history_delivery(event)
     return event
+
+
+def _response_message_signature(payload: Any) -> tuple[str, str | None, str] | None:
+    if not isinstance(payload, dict):
+        return None
+    if _as_text(payload.get("type")).strip() != "message":
+        return None
+    role = _as_text(payload.get("role")).strip() or "assistant"
+    phase = _as_text(payload.get("phase")).strip() or None
+    text = _text_from_content(payload.get("content")).strip()
+    if not text:
+        return None
+    return (role, phase, text)
+
+
+def _event_msg_message_signature(payload: Any) -> tuple[str, str | None, str] | None:
+    if not isinstance(payload, dict):
+        return None
+    payload_type = _as_text(payload.get("type")).strip()
+    if payload_type == "user_message":
+        text = _as_text(payload.get("message") or payload.get("text")).strip()
+        if text:
+            return ("user", None, text)
+        return None
+    if payload_type == "agent_message":
+        text = _as_text(payload.get("message") or payload.get("text")).strip()
+        phase = _as_text(payload.get("phase")).strip() or None
+        if text and phase in {"final_answer", "commentary"}:
+            return ("assistant", phase, text)
+    return None
+
+
+def _should_suppress_event_msg_duplicate(
+    entry: dict[str, Any],
+    all_entries: list[dict[str, Any]],
+) -> bool:
+    if _as_text(entry.get("type")).strip() != "event_msg":
+        return False
+    signature = _event_msg_message_signature(entry.get("payload"))
+    if signature is None:
+        return False
+    for candidate in all_entries:
+        if _as_text(candidate.get("type")).strip() != "response_item":
+            continue
+        if _response_message_signature(candidate.get("payload")) == signature:
+            return True
+    return False
 
 
 def _command_execution_event(
@@ -753,8 +832,6 @@ def _normalize_event_msg_payload(
             timestamp=timestamp,
             runtime_kind=runtime_kind,
         )
-        if phase in {"final_answer", "commentary"}:
-            return [_suppress_history_delivery(event)]
         return [event]
 
     if payload_type == "user_message":
@@ -766,7 +843,7 @@ def _normalize_event_msg_payload(
             timestamp=timestamp,
             runtime_kind=runtime_kind,
         )
-        return [_suppress_history_delivery(event)]
+        return [event]
 
     if payload_type in {"turn_started", "turn_completed", "turn_aborted"}:
         return [
@@ -931,9 +1008,10 @@ class CodexRolloutNormalizer:
         *,
         thread_id: str | None = None,
     ) -> list[NormalizedEvent]:
+        entry_list = list(entries)
         current_thread_id = thread_id or ""
         result: list[NormalizedEvent] = []
-        for data in entries:
+        for data in entry_list:
             if not isinstance(data, dict):
                 continue
             payload = data.get("payload")
@@ -941,12 +1019,13 @@ class CodexRolloutNormalizer:
                 current_thread_id = _thread_id_from_payload(payload) or current_thread_id
             if data.get("type") == "session_meta":
                 current_thread_id = _thread_id_from_payload(payload) or current_thread_id
-            result.extend(
-                cls.normalize_record(
-                    data,
-                    thread_id=current_thread_id,
-                )
+            events = cls.normalize_record(
+                data,
+                thread_id=current_thread_id,
             )
+            if _should_suppress_event_msg_duplicate(data, entry_list):
+                events = [_suppress_history_delivery(event) for event in events]
+            result.extend(events)
         return result
 
     @classmethod

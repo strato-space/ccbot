@@ -13,6 +13,9 @@ Key function:
   - build_response_parts: Build paginated response messages
 """
 
+import json
+import re
+
 from ..markdown_v2 import convert_markdown_tables
 from ..telegram_sender import split_message
 from ..transcript_parser import TranscriptParser
@@ -27,6 +30,88 @@ _CONTENT_PREFIXES: dict[str, str] = {
     "tool_result": "↳ Tool Output",
     "file_change": "Δ Files",
 }
+
+_FUNCTION_CALL_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\((.*)\)\s*$", re.DOTALL)
+_FILE_CHANGE_STATUSES = {"applied", "pending", "completed", "failed"}
+
+
+def _clip_code_lines(
+    lines: list[str],
+    *,
+    max_lines: int = 12,
+    max_chars: int = 140,
+) -> list[str]:
+    clipped = [
+        line if len(line) <= max_chars else line[: max_chars - 1].rstrip() + "…"
+        for line in lines[:max_lines]
+    ]
+    if len(lines) > max_lines:
+        clipped.append(f"... (+{len(lines) - max_lines} more lines)")
+    return clipped
+
+
+def _format_json_code_block(
+    value: str | dict | list,
+    *,
+    max_lines: int = 12,
+    max_chars: int = 140,
+) -> str | None:
+    try:
+        if isinstance(value, str):
+            parsed = json.loads(value)
+        else:
+            parsed = value
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+    pretty = json.dumps(parsed, ensure_ascii=False, indent=2, sort_keys=True)
+    lines = pretty.splitlines()
+    return "```json\n" + "\n".join(
+        _clip_code_lines(lines, max_lines=max_lines, max_chars=max_chars)
+    ) + "\n```"
+
+
+def _format_function_call_json(text: str) -> str | None:
+    match = _FUNCTION_CALL_RE.match(text.strip())
+    if not match:
+        return None
+    name, payload = match.groups()
+    block = _format_json_code_block(payload)
+    if not block:
+        return None
+    return f"{name}\n{block}"
+
+
+def _format_file_change_block(text: str) -> str:
+    stripped = text.strip()
+    if not stripped or stripped.startswith("```"):
+        return stripped
+    lines = [line.rstrip() for line in stripped.splitlines() if line.strip()]
+    if len(lines) <= 1:
+        return stripped
+    first = lines[0].strip().lower()
+    if first in _FILE_CHANGE_STATUSES and len(lines) > 1:
+        body = "\n".join(_clip_code_lines(lines[1:], max_lines=12, max_chars=140))
+        return f"{lines[0]}\n```sh\n{body}\n```"
+    body = "\n".join(_clip_code_lines(lines, max_lines=12, max_chars=140))
+    return f"```sh\n{body}\n```"
+
+
+def _format_tool_like_text(text: str, *, content_type: str) -> str:
+    stripped = text.strip()
+    if not stripped or stripped.startswith("```"):
+        return stripped
+    if content_type == "file_change":
+        return _format_file_change_block(stripped)
+    if content_type == "tool_use":
+        function_block = _format_function_call_json(stripped)
+        if function_block:
+            return function_block
+    if content_type in {"tool_use", "tool_result"}:
+        json_block = _format_json_code_block(stripped)
+        if json_block:
+            return json_block
+    return stripped
 
 
 def format_response_text(
@@ -44,6 +129,9 @@ def format_response_text(
         if not for_history and len(text) > 2996:
             text = text[:2996] + "…"
         return f"👤 {text}" if text else "👤"
+
+    if content_type in {"tool_use", "tool_result", "file_change"}:
+        text = _format_tool_like_text(text, content_type=content_type)
 
     if content_type in {"thinking", "reasoning"} and is_complete and not for_history:
         start_tag = TranscriptParser.EXPANDABLE_QUOTE_START

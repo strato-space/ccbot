@@ -159,17 +159,20 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
 
     assert "status artifact" in doc
     assert "The default Telegram surface is `compact`, not `verbose`." in doc
-    assert "commentary stays as ordinary content" in doc
+    assert "latest human-facing commentary remains visible as a dedicated artifact" in doc
     assert "reasoning and thinking summaries are routed through the mutable status" in doc
     assert "artifact" in doc
     assert "including Claude-style `local_command`" in doc
     assert "placeholder reasoning such as `[reasoning]` is suppressed" in doc
     assert "raw tool payloads, giant command stdout dumps, and full file bodies must be summarized before they reach Telegram" in doc
+    assert "fenced `sh` blocks" in doc
+    assert "fenced `json` blocks" in doc
     assert "`tool_use` summaries" in doc
     assert "`tool_result` summaries" in doc
     assert "when tool lifecycle is materialized as content, `tool_result` may edit the earlier `tool_use` message in place" in doc
-    assert "ordinary Telegram content bubbles are" in doc
+    assert "durable Telegram content bubbles are" in doc
     assert "deliberately narrow" in doc
+    assert "latest-only visible commentary artifact" in doc
     assert "Late delivery must fail closed." in doc
     assert "queue" in doc
     assert "steer" in doc
@@ -186,7 +189,8 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
     assert "steer" in doc
     assert "workspace `.fast-agent` root" in doc
     assert "**Compact delivery policy**" in doc
-    assert "user echo, commentary, and final assistant text as durable bubbles" in doc
+    assert "user echo and final assistant text as durable bubbles" in doc
+    assert "latest commentary stays visible as a dedicated artifact" in doc
     assert "Expandable blockquote for debug reasoning" in doc
 
 

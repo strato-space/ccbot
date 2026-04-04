@@ -17,8 +17,8 @@ The default Telegram surface is `compact`, not `verbose`.
 `compact` is the production-facing policy:
 
 - human-facing final answers stay as ordinary content
-- human-facing commentary stays as ordinary content so progress narrative does
-  not disappear under mutable status churn
+- the latest human-facing commentary remains visible as a dedicated artifact so
+  progress narrative does not disappear under mutable status churn
 - reasoning and thinking summaries are routed through the mutable status
   artifact
 - tool lifecycle summaries are routed through the mutable status artifact
@@ -29,14 +29,20 @@ The default Telegram surface is `compact`, not `verbose`.
   ordinary chat content
 - placeholder reasoning such as `[reasoning]` is suppressed
 - raw tool payloads, giant command stdout dumps, and full file bodies must be summarized before they reach Telegram
+- when tool or file summaries are surfaced, they should prefer Codex-style
+  code-aware formatting: shell payloads in fenced `sh` blocks, JSON payloads
+  in fenced `json` blocks, and compact output counts instead of raw dumps
 
 `verbose` is a debug policy for operators. It may expose more raw execution
 surface, but it is not the default product-facing mode.
 
 ## Ordering Rules
 
-The delivery pipeline keeps one mutable progress/status artifact per
-`(user_id, topic)` and one ordered content queue per user.
+The delivery pipeline keeps:
+
+- one mutable progress/status artifact per `(user_id, topic)`
+- one latest-only visible commentary artifact per `(user_id, topic)`
+- one ordered content queue per user
 
 Ordering guarantees:
 
@@ -85,21 +91,26 @@ permanent content bubbles:
 - `command_execution` summaries
 - `file_change` summaries
 
-Compact mode keeps commentary visible as ordinary content, because it is the
-human-readable execution narrative. The mutable status artifact is reserved for
-ephemeral technical execution surface that would otherwise churn too quickly.
+Compact mode keeps commentary visible as a latest-only artifact, because it is
+the human-readable execution narrative. The mutable status artifact is reserved
+for ephemeral technical execution surface that would otherwise churn too
+quickly.
 
 This keeps the chat human-readable while preserving the live CLI and replay
 evidence as the authoritative technical surfaces.
 
 ## Compact Bubble Matrix
 
-In the production-facing `compact` mode, ordinary Telegram content bubbles are
+In the production-facing `compact` mode, durable Telegram content bubbles are
 deliberately narrow:
 
 - user-visible user echo
-- human-facing commentary
 - final assistant text
+
+In addition to those durable bubbles, `compact` keeps one latest-only visible
+commentary artifact. Each new commentary update replaces the previous one so
+the chat shows the current human-readable execution narrative without
+accumulating a long stack of near-duplicate commentary bubbles.
 
 The following semantic classes are not meant to survive as permanent content
 bubbles in `compact` mode:

@@ -56,7 +56,13 @@ MERGE_MAX_LENGTH = 3800  # Leave room for markdown conversion overhead
 class MessageTask:
     """Message task for queue processing."""
 
-    task_type: Literal["content", "status_update", "status_clear"]
+    task_type: Literal[
+        "content",
+        "status_update",
+        "status_clear",
+        "commentary_update",
+        "commentary_clear",
+    ]
     text: str | None = None
     window_id: str | None = None
     # content type fields
@@ -78,6 +84,9 @@ _tool_msg_ids: dict[tuple[str, int, int], int] = {}
 
 # Status message tracking: (user_id, thread_id_or_0) -> (message_id, window_id, last_text)
 _status_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
+
+# Commentary message tracking: (user_id, thread_id_or_0) -> (message_id, window_id, last_text)
+_commentary_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
 
 # Flood control: user_id -> monotonic time when ban expires
 _flood_until: dict[int, float] = {}
@@ -217,7 +226,7 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                 if flood_end > 0:
                     remaining = flood_end - time.monotonic()
                     if remaining > 0:
-                        if task.task_type != "content":
+                        if task.task_type not in {"content", "commentary_update"}:
                             # Status is ephemeral — safe to drop
                             continue
                         # Content is actual Claude output — wait then send
@@ -242,10 +251,16 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                         for _ in range(merge_count):
                             queue.task_done()
                     await _process_content_task(bot, user_id, merged_task)
+                elif task.task_type == "commentary_update":
+                    await _process_commentary_update_task(bot, user_id, task)
                 elif task.task_type == "status_update":
                     await _process_status_update_task(bot, user_id, task)
                 elif task.task_type == "status_clear":
                     await _do_clear_status_message(bot, user_id, task.thread_id or 0)
+                elif task.task_type == "commentary_clear":
+                    await _do_clear_commentary_message(
+                        bot, user_id, task.thread_id or 0
+                    )
             except RetryAfter as e:
                 retry_secs = (
                     e.retry_after
@@ -334,6 +349,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             task.content_type,
         )
         await _do_clear_status_message(bot, user_id, tid)
+        await _do_clear_commentary_message(bot, user_id, tid)
         clear_tool_msg_ids_for_topic(user_id, task.thread_id)
         return
     chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
@@ -491,6 +507,7 @@ async def _process_status_update_task(
             task.thread_id,
         )
         await _do_clear_status_message(bot, user_id, tid)
+        await _do_clear_commentary_message(bot, user_id, tid)
         return
     chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
     skey = (user_id, tid)
@@ -593,6 +610,65 @@ async def _do_send_status_message(
         _status_msg_info[skey] = (sent.message_id, window_id, text)
 
 
+async def _process_commentary_update_task(
+    bot: Bot, user_id: int, task: MessageTask
+) -> None:
+    """Keep only the latest visible commentary artifact in a topic."""
+    wid = task.window_id or ""
+    tid = task.thread_id or 0
+    if not await _is_task_binding_active(user_id, wid, task.thread_id):
+        logger.debug(
+            "Dropping stale commentary task: user=%d window=%s thread=%s",
+            user_id,
+            wid,
+            task.thread_id,
+        )
+        await _do_clear_commentary_message(bot, user_id, tid)
+        return
+
+    commentary_text = task.text or ""
+    if not commentary_text:
+        await _do_clear_commentary_message(bot, user_id, tid)
+        return
+
+    ckey = (user_id, tid)
+    current_info = _commentary_msg_info.get(ckey)
+    if current_info:
+        _, stored_wid, last_text = current_info
+        if stored_wid == wid and last_text == commentary_text:
+            return
+
+    await _do_send_commentary_message(bot, user_id, tid, wid, commentary_text)
+
+
+async def _do_send_commentary_message(
+    bot: Bot,
+    user_id: int,
+    thread_id_or_0: int,
+    window_id: str,
+    text: str,
+) -> None:
+    """Replace the prior commentary bubble with the latest one."""
+    ckey = (user_id, thread_id_or_0)
+    thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
+    chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+    old = _commentary_msg_info.pop(ckey, None)
+    if old:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=old[0])
+        except Exception:
+            pass
+
+    sent = await send_with_fallback(
+        bot,
+        chat_id,
+        text,
+        **_send_kwargs(thread_id),  # type: ignore[arg-type]
+    )
+    if sent:
+        _commentary_msg_info[ckey] = (sent.message_id, window_id, text)
+
+
 async def _do_clear_status_message(
     bot: Bot,
     user_id: int,
@@ -608,6 +684,23 @@ async def _do_clear_status_message(
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
         except Exception as e:
             logger.debug(f"Failed to delete status message {msg_id}: {e}")
+
+
+async def _do_clear_commentary_message(
+    bot: Bot,
+    user_id: int,
+    thread_id_or_0: int = 0,
+) -> None:
+    """Delete the tracked commentary message for a user/topic."""
+    ckey = (user_id, thread_id_or_0)
+    info = _commentary_msg_info.pop(ckey, None)
+    if info:
+        msg_id = info[0]
+        chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except Exception as e:
+            logger.debug(f"Failed to delete commentary message {msg_id}: {e}")
 
 
 async def _check_and_send_status(
@@ -705,6 +798,29 @@ async def enqueue_status_update(
     queue.put_nowait(task)
 
 
+async def enqueue_commentary_update(
+    bot: Bot,
+    user_id: int,
+    window_id: str,
+    commentary_text: str | None,
+    thread_id: int | None = None,
+) -> None:
+    """Enqueue latest-only commentary replacement for a topic."""
+    queue = get_or_create_queue(bot, user_id)
+
+    if commentary_text:
+        task = MessageTask(
+            task_type="commentary_update",
+            text=commentary_text,
+            window_id=window_id,
+            thread_id=thread_id,
+        )
+    else:
+        task = MessageTask(task_type="commentary_clear", thread_id=thread_id)
+
+    queue.put_nowait(task)
+
+
 def clear_status_msg_info(user_id: int, thread_id: int | None = None) -> None:
     """Clear status message tracking for a user (and optionally a specific thread)."""
     skey = (user_id, thread_id or 0)
@@ -721,6 +837,18 @@ async def clear_status_message(
         clear_status_msg_info(user_id, thread_id)
         return
     await _do_clear_status_message(bot, user_id, thread_id or 0)
+
+
+async def clear_commentary_message(
+    bot: Bot | None,
+    user_id: int,
+    thread_id: int | None = None,
+) -> None:
+    """Delete any tracked commentary message for a topic when a bot handle exists."""
+    if bot is None:
+        _commentary_msg_info.pop((user_id, thread_id or 0), None)
+        return
+    await _do_clear_commentary_message(bot, user_id, thread_id or 0)
 
 
 def clear_tool_msg_ids_for_topic(user_id: int, thread_id: int | None = None) -> None:

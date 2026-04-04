@@ -6,7 +6,7 @@ chat mode.
 
 `compact` is the production default:
 - hide internal injected user payloads (`<skill>`, local command XML, etc.)
-- keep commentary as visible human-facing progress content
+- keep only the latest commentary visible as human-facing progress content
 - keep reasoning/tool/command/file-change updates in the mutable status
   artifact instead of as permanent content bubbles
 - suppress placeholder reasoning with no human-readable summary

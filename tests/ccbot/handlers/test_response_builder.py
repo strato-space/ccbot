@@ -96,3 +96,40 @@ class TestBuildResponseParts:
         assert "Reasoning" in formatted
         assert "truncated" not in formatted.lower()
         assert len(formatted) > 800
+
+    def test_tool_use_function_call_json_renders_as_json_block(self):
+        formatted = format_response_text(
+            'write_stdin({"session_id": 2041, "chars": "ok go\\n"})',
+            is_complete=True,
+            content_type="tool_use",
+            role="assistant",
+        )
+
+        assert "Tool" in formatted
+        assert "write_stdin" in formatted
+        assert "```json" in formatted
+        assert '"session_id": 2041' in formatted
+
+    def test_tool_result_json_renders_as_json_block(self):
+        formatted = format_response_text(
+            '{"status":"ok","count":2}',
+            is_complete=True,
+            content_type="tool_result",
+            role="assistant",
+        )
+
+        assert "Tool Output" in formatted
+        assert "```json" in formatted
+        assert '"count": 2' in formatted
+
+    def test_file_change_multiline_renders_as_shell_block(self):
+        formatted = format_response_text(
+            "applied\nmodified src/ccbot/bot.py\nadded tests/ccbot/test_bot_contracts.py",
+            is_complete=True,
+            content_type="file_change",
+            role="assistant",
+        )
+
+        assert "Files" in formatted
+        assert "```sh" in formatted
+        assert "modified src/ccbot/bot.py" in formatted

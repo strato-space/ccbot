@@ -9,8 +9,10 @@ runtimes without surrendering the live terminal surface.
 - Runtime semantics come from replay evidence and runtime-native event
   normalization, not from pane scraping as the primary source of truth.
 - The default Telegram surface is `compact`.
-- In `compact`, only user echo, human-facing commentary, and final assistant
-  text should survive as ordinary content bubbles.
+- In `compact`, only user echo and final assistant text should survive as
+  ordinary content bubbles.
+- In `compact`, the latest human-facing commentary should stay visible as a
+  dedicated artifact without accumulating a long stack of commentary bubbles.
 - Reasoning, tool lifecycle, command execution, and file-change summaries
   belong in the mutable status artifact unless a debug/verbose path explicitly
   opts into richer delivery.

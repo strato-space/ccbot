@@ -81,8 +81,10 @@ At the contract level:
 
 At the default product-facing `compact` Telegram surface:
 
-- `user_echo`, `commentary`, and `assistant_final`
+- `user_echo` and `assistant_final`
   - remain ordinary content bubbles
+- `commentary`
+  - remains visible as a latest-only human-facing commentary artifact
 - `reasoning`, `tool_start`, `tool_result`, `command_execution`, `file_change`
   - are typically projected into the mutable status artifact or suppressed when
     they are placeholder-only / raw-payload-only
