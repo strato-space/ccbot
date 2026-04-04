@@ -163,6 +163,28 @@ def test_monitor_state_mixed_runtime_envelope_is_preserved(tmp_path):
     assert saved["tracked_sessions"]["thread-codex"]["runtime_kind"] == "codex"
 
 
+def test_monitor_state_keeps_legacy_tracked_session_keys(tmp_path):
+    state_file = tmp_path / "monitor_state.json"
+    state = MonitorState(state_file=state_file)
+    state.update_tracked_source(
+        TrackedSession(
+            session_id="thread-codex",
+            file_path="/tmp/codex.jsonl",
+            last_byte_offset=20,
+            runtime_kind="codex",
+        )
+    )
+    state.save()
+
+    saved = json.loads(state_file.read_text())
+    tracked = saved["tracked_sessions"]["thread-codex"]
+
+    assert tracked["session_id"] == "thread-codex"
+    assert tracked["file_path"] == "/tmp/codex.jsonl"
+    assert "thread_id" not in tracked
+    assert "replay_path" not in tracked
+
+
 def test_hook_writes_versioned_session_map_and_backup(tmp_path, monkeypatch):
     legacy_map = {
         "ccbot:proj": {

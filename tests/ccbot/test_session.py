@@ -159,7 +159,13 @@ class TestWindowState:
         state.session_id = "abc"
         assert mgr.get_window_state("@1").session_id == "abc"
 
-    def test_clear_window_session(self, mgr: SessionManager) -> None:
+    def test_clear_window_binding(self, mgr: SessionManager) -> None:
+        state = mgr.get_window_state("@1")
+        state.session_id = "abc"
+        mgr.clear_window_binding("@1")
+        assert mgr.get_window_state("@1").session_id == ""
+
+    def test_clear_window_session_alias(self, mgr: SessionManager) -> None:
         state = mgr.get_window_state("@1")
         state.session_id = "abc"
         mgr.clear_window_session("@1")

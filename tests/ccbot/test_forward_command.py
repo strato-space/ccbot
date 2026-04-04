@@ -138,8 +138,8 @@ class TestForwardCommand:
             )
 
     @pytest.mark.asyncio
-    async def test_clear_clears_session(self):
-        """/clear → send_to_window + clear_window_session."""
+    async def test_clear_clears_persisted_binding(self):
+        """/clear → send_to_window + clear_window_binding."""
         update = _make_update("/clear")
         context = _make_context()
 
@@ -160,7 +160,7 @@ class TestForwardCommand:
             await forward_command_handler(update, context)
 
             mock_sm.send_to_window.assert_called_once_with("@5", "/clear")
-            mock_sm.clear_window_session.assert_called_once_with("@5")
+            mock_sm.clear_window_binding.assert_called_once_with("@5")
 
     @pytest.mark.parametrize(
         "text, expected",
@@ -194,4 +194,4 @@ class TestForwardCommand:
             await forward_command_handler(update, context)
 
             mock_sm.send_to_window.assert_called_once_with("@5", expected)
-            mock_sm.clear_window_session.assert_not_called()
+            mock_sm.clear_window_binding.assert_not_called()

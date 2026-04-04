@@ -1139,11 +1139,11 @@ async def forward_command_handler(
     success, message = await session_manager.send_to_window(wid, cc_slash)
     if success:
         await safe_reply(update.message, f"⚡ [{display}] Sent: {cc_slash}")
-        # If /clear command was sent, clear the session association
-        # so we can detect the new session after first message
+        # If /clear command was sent, clear the persisted identity binding
+        # so we can detect the next runtime-provided identity after first input.
         if cc_slash.strip().lower() == "/clear":
-            logger.info("Clearing session for window %s after /clear", display)
-            session_manager.clear_window_session(wid)
+            logger.info("Clearing persisted binding for window %s after /clear", display)
+            session_manager.clear_window_binding(wid)
 
         # Prompt-producing commands are surfaced by the status poller when the
         # runtime exposes a detectable prompt surface.

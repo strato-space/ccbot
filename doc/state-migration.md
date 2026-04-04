@@ -27,7 +27,12 @@ reversed.
 - `state.json` gets a top-level `schema_version` and `runtime_kind`
 - `session_map.json` is stored as a versioned envelope with `schema_version`,
   `runtime_kind`, and `entries`
-- `monitor_state.json` gets a top-level `schema_version` and `runtime_kind`
+- `monitor_state.json` keeps a versioned top-level envelope with
+  `schema_version`, `runtime_kind`, and `tracked_sessions`
+- `tracked_sessions` entries remain on the compatibility envelope
+  with `session_id` and `file_path`
+- `session_id` and `file_path` stay on disk
+- `thread_id` / `replay_path` are API aliases, not persisted schema keys
 
 ## Guarantees
 

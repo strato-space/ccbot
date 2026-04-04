@@ -754,12 +754,16 @@ class SessionManager:
         self._save_state()
         return state
 
-    def clear_window_session(self, window_id: str) -> None:
-        """Clear the persisted thread association for a window."""
+    def clear_window_binding(self, window_id: str) -> None:
+        """Clear the persisted identity binding for a live window."""
         state = self.get_process_descriptor(window_id)
         state.thread_id = ""
         self._save_state()
-        logger.info("Cleared session for window_id %s", window_id)
+        logger.info("Cleared persisted binding for window_id %s", window_id)
+
+    def clear_window_session(self, window_id: str) -> None:
+        """Backward-compatible alias for clear_window_binding()."""
+        self.clear_window_binding(window_id)
 
     @staticmethod
     def _encode_cwd(cwd: str) -> str:

@@ -47,5 +47,6 @@ ontology cleanup pass. The rule used here is narrow:
 
 No surviving name in this audit was left unclassified. The only name that should
 be considered cleanup debt rather than compatibility is `clear_window_session`,
-and even that is retained intentionally until the next control-path vocabulary
-cleanup task.
+and shared-core call sites should move to clearer persisted-binding wording.
+The legacy alias may remain until a separate alias-cut pass proves it is not
+externally required.

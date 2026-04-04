@@ -35,6 +35,25 @@ class TestTrackedSession:
         assert tracked.session_id == "thread-2"
         assert tracked.file_path == "/tmp/other.jsonl"
 
+    def test_to_dict_keeps_compatibility_envelope_keys(self):
+        tracked = TrackedSession(
+            session_id="thread-1",
+            file_path="/tmp/test.jsonl",
+            last_byte_offset=42,
+            runtime_kind="codex",
+        )
+
+        payload = tracked.to_dict()
+
+        assert payload == {
+            "session_id": "thread-1",
+            "file_path": "/tmp/test.jsonl",
+            "last_byte_offset": 42,
+            "runtime_kind": "codex",
+        }
+        assert "thread_id" not in payload
+        assert "replay_path" not in payload
+
     def test_from_dict_missing_fields_uses_defaults(self):
         session = TrackedSession.from_dict({})
         assert session.session_id == ""

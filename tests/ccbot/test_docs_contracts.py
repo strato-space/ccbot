@@ -205,6 +205,32 @@ def test_consumer_audit_by_kind_doc_is_source_backed() -> None:
     assert "Documentation witnesses" in doc
 
 
+def test_monitor_state_schema_strategy_doc_freezes_compatibility_envelope() -> None:
+    doc = _read("doc/monitor-state-schema-strategy.md")
+
+    assert "compatibility envelope" in doc
+    assert "`monitor_state.json` keeps legacy tracked-session keys" in doc
+    assert "`session_id` and `file_path` remain the persisted transport fields" in doc
+    assert "`schema v2` is not selected in this tranche" in doc
+    assert "T43 is closed as not selected" in doc
+
+
+def test_state_migration_doc_matches_monitor_state_schema_strategy() -> None:
+    doc = _read("doc/state-migration.md")
+
+    assert "`monitor_state.json` keeps a versioned top-level envelope" in doc
+    assert "`tracked_sessions` entries remain on the compatibility envelope" in doc
+    assert "`session_id` and `file_path` stay on disk" in doc
+    assert "`thread_id` / `replay_path` are API aliases, not persisted schema keys" in doc
+
+
+def test_runtime_ontology_doc_assigns_replay_writes_to_runtime_or_emitter() -> None:
+    doc = _read("doc/runtime-ontology.md")
+
+    assert "semantic emitter / supervisor -> persisted replay evidence" in doc
+    assert "runtime conversation identity scopes/indexes the live semantic stream and persisted replay evidence" in doc
+
+
 def test_multi_runtime_regression_matrix_doc_freezes_verification_surface() -> None:
     doc = _read("doc/multi-runtime-regression-matrix.md")
 
