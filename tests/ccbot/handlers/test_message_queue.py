@@ -8,7 +8,7 @@ from ccbot.handlers.message_queue import (
     MessageTask,
     _can_merge_tasks,
     clear_commentary_lane_state,
-    mark_commentary_closed,
+    _mark_commentary_closed,
     _process_commentary_update_task,
     _process_content_task,
     _process_status_update_task,
@@ -152,7 +152,7 @@ async def test_process_commentary_task_drops_updates_after_final_answer() -> Non
         text="Late commentary after final answer",
     )
 
-    mark_commentary_closed(1, 42)
+    _mark_commentary_closed(1, 42)
     try:
         with (
             patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,

@@ -117,11 +117,11 @@ from .handlers.interactive_ui import (
 )
 from .handlers.message_queue import (
     clear_status_msg_info,
+    enqueue_commentary_close,
     enqueue_commentary_update,
     enqueue_content_message,
     enqueue_status_update,
     get_message_queue,
-    mark_commentary_closed,
     reopen_commentary_lane,
     shutdown_workers,
 )
@@ -2775,12 +2775,9 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 config.telegram_delivery_mode == "compact"
                 and msg.semantic_kind == ASSISTANT_FINAL_SEMANTIC_KIND
             ):
-                mark_commentary_closed(user_id, thread_id)
-                await enqueue_commentary_update(
+                await enqueue_commentary_close(
                     bot,
                     user_id,
-                    wid,
-                    None,
                     thread_id=thread_id,
                 )
             # Enqueue content message task

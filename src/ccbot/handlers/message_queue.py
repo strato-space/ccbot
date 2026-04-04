@@ -62,6 +62,7 @@ class MessageTask:
         "status_clear",
         "commentary_update",
         "commentary_clear",
+        "commentary_close",
     ]
     text: str | None = None
     window_id: str | None = None
@@ -262,6 +263,11 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                 elif task.task_type == "status_clear":
                     await _do_clear_status_message(bot, user_id, task.thread_id or 0)
                 elif task.task_type == "commentary_clear":
+                    await _do_clear_commentary_message(
+                        bot, user_id, task.thread_id or 0
+                    )
+                elif task.task_type == "commentary_close":
+                    _mark_commentary_closed(user_id, task.thread_id)
                     await _do_clear_commentary_message(
                         bot, user_id, task.thread_id or 0
                     )
@@ -838,7 +844,17 @@ async def enqueue_commentary_update(
     queue.put_nowait(task)
 
 
-def mark_commentary_closed(
+async def enqueue_commentary_close(
+    bot: Bot,
+    user_id: int,
+    thread_id: int | None = None,
+) -> None:
+    """Close the commentary lane in queue order and clear the visible artifact."""
+    queue = get_or_create_queue(bot, user_id)
+    queue.put_nowait(MessageTask(task_type="commentary_close", thread_id=thread_id))
+
+
+def _mark_commentary_closed(
     user_id: int,
     thread_id: int | None = None,
 ) -> None:
