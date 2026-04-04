@@ -439,6 +439,26 @@ class TestCommandSurface:
         assert "workspace `.fast-agent` root" in mock_reply.await_args.args[1]
 
     @pytest.mark.asyncio
+    async def test_resume_command_reports_claude_degraded_mode(self):
+        update = _make_topic_update()
+        update.message.text = "/resume session-123"
+        context = _make_context()
+
+        with (
+            patch.object(bot_mod.config, "claude_command", "claude"),
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+
+            await bot_mod.resume_command(update, context)
+
+        mock_reply.assert_awaited_once()
+        assert "reversible workspace path" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
     async def test_rename_command_updates_window_topic_and_supported_identity(self):
         update = _make_topic_update()
         update.message.text = "/rename Daily planner"

@@ -31,6 +31,8 @@ The maintainer note is:
 - [`doc/runtime-ontology.md`](doc/runtime-ontology.md)
 - [`doc/state-migration.md`](doc/state-migration.md)
 - [`doc/strato-ops-codex.md`](doc/strato-ops-codex.md)
+- [`doc/multi-runtime-regression-matrix.md`](doc/multi-runtime-regression-matrix.md)
+- [`doc/multi-runtime-rollout.md`](doc/multi-runtime-rollout.md)
 
 The canonical shape is:
 
@@ -40,17 +42,22 @@ Maintainer reference:
 - [`doc/runtime-ontology.md`](doc/runtime-ontology.md)
 - [`doc/state-migration.md`](doc/state-migration.md)
 - [`doc/strato-ops-codex.md`](doc/strato-ops-codex.md)
+- [`doc/multi-runtime-regression-matrix.md`](doc/multi-runtime-regression-matrix.md)
+- [`doc/multi-runtime-rollout.md`](doc/multi-runtime-rollout.md)
 
 ## Strato Ops
 
 For the Strato fork, use the operator runbook in
-[`doc/strato-ops-codex.md`](doc/strato-ops-codex.md). It documents:
+[`doc/strato-ops-codex.md`](doc/strato-ops-codex.md) for the current Codex
+production lane, and [`doc/multi-runtime-rollout.md`](doc/multi-runtime-rollout.md)
+for staged Claude Code restore / fast-agent enablement. Together they document:
 
 - the live `tmux -> runtime process -> replay evidence` operating path
 - the legacy `CLAUDE_COMMAND` env var name that now launches `codex`
 - one-time state migration and reversible rollback via `*.v1.bak`
 - the operator tooling path `/home/tools/codex-tools/codex-session-scout`
 - the release-scope boundary: `voice`, `task`, and `ACP-module` are preserved but not expanded in this release
+- staged enablement rules so partial runtime rollout does not silently change semantics in production topics
 
 ## Features
 

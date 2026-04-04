@@ -12,6 +12,8 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     readme = _read("README.md")
 
     assert "doc/strato-ops-codex.md" in readme
+    assert "doc/multi-runtime-regression-matrix.md" in readme
+    assert "doc/multi-runtime-rollout.md" in readme
     assert "/home/tools/codex-tools/codex-session-scout" in readme
     assert "runtime conversation identity" in readme
     assert "replay evidence" in readme
@@ -19,8 +21,6 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "manual_bind_required" in readme
     assert "queue" in readme
     assert "steer" in readme
-    assert "/resume" in readme
-    assert "manual_bind_required" in readme
     assert "`queue` mode" in readme
     assert "Raw terminal control" in readme
 
@@ -37,6 +37,19 @@ def test_strato_ops_runbook_captures_cutover_and_rollback_contract() -> None:
     assert "voice" in runbook
     assert "raw `/task`" in runbook
     assert "raw `/ACP`" in runbook
+
+
+def test_multi_runtime_rollout_doc_requires_explicit_staged_enablement() -> None:
+    doc = _read("doc/multi-runtime-rollout.md")
+
+    assert "single configured launch lane per bot instance" in doc
+    assert "Ring 0: Codex production baseline" in doc
+    assert "Ring 1: Claude Code restore canary" in doc
+    assert "Ring 2: fast-agent canary" in doc
+    assert "changing `CLAUDE_COMMAND` in place on a shared production bot" in doc
+    assert "silently reinterpreting existing production topics under a new runtime lane" in doc
+    assert "`GO` for a runtime lane" in doc
+    assert "`NO GO`" in doc
 
 
 def test_runtime_ontology_note_uses_runtime_neutral_terms() -> None:
@@ -136,10 +149,23 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
     doc = _read("doc/telegram-bot-features.md")
 
     assert "/resume <token>" in doc
+    assert "/rename <name>" in doc
     assert "manual_bind_required" in doc
     assert "queue" in doc
     assert "steer" in doc
     assert "workspace `.fast-agent` root" in doc
+
+
+def test_multi_runtime_regression_matrix_doc_captures_required_gates() -> None:
+    doc = _read("doc/multi-runtime-regression-matrix.md")
+
+    assert "Per-runtime launch" in doc
+    assert "Per-runtime resume" in doc
+    assert "Claude Code explicit `/resume`" in doc
+    assert "fast-agent explicit `/resume`" in doc
+    assert "`voice`, `task`, `ACP-module`" in doc
+    assert "independent code review" in doc
+    assert "ontology review" in doc
 
 
 def test_claude_runtime_adapter_doc_describes_first_class_adapter() -> None:
@@ -160,12 +186,23 @@ def test_fast_agent_runtime_adapter_doc_describes_title_only_semantics() -> None
     assert "session_id` rename is unsupported" in doc
 
 
-def test_telegram_features_doc_captures_runtime_specific_command_surface() -> None:
-    doc = _read("doc/telegram-bot-features.md")
+def test_multi_runtime_regression_matrix_doc_freezes_verification_surface() -> None:
+    doc = _read("doc/multi-runtime-regression-matrix.md")
 
-    assert "/resume <token>" in doc
-    assert "/rename <name>" in doc
-    assert "manual_bind_required" in doc
-    assert "queue" in doc
-    assert "steer" in doc
-    assert "workspace `.fast-agent` root" in doc
+    assert "Per-runtime launch" in doc
+    assert "Per-runtime resume" in doc
+    assert "Bind / unbind / topic policy" in doc
+    assert "Progress / result delivery" in doc
+    assert "History pollution guards" in doc
+    assert "Rename behavior" in doc
+    assert "Topic rename vs `/rename` precedence" in doc
+    assert "Stale callback invalidation" in doc
+    assert "Late-event / stale-binding guards" in doc
+    assert "Claude parity against upstream" in doc
+    assert "queue / steer semantics" in doc
+    assert "Raw operator control separation" in doc
+    assert "Non-regression: `voice`, `task`, `ACP-module`" in doc
+    assert "Review gates" in doc
+    assert "tests/ccbot/test_claude_parity_contract.py" in doc
+    assert "doc/execution-review-policy.md" in doc
+    assert "/home/tools/ccbot-upstream" in doc
