@@ -2745,7 +2745,7 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         if (
             config.telegram_delivery_mode == "compact"
             and msg.is_complete
-            and msg.content_type == "commentary"
+            and msg.content_type in {"commentary", "orchestration"}
         ):
             commentary_text = build_status_text(
                 msg.text,

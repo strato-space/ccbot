@@ -24,6 +24,14 @@ This note defines the Telegram-facing ontology for turn delivery.
     - command execution progress
     - file-change churn
 
+- **Pending input artifact**
+  - mutable preview of future input already queued behind the current turn
+  - examples:
+    - queued follow-up messages
+    - future queued-message edit hint
+  - this artifact is not part of the current turn's visible output ordering
+    contract and is not itself a user turn opener
+
 - **User turn opener**
   - semantic fact that a new user turn has begun
   - this may be a visible user echo or a hidden internal prompt scaffold that
@@ -60,6 +68,7 @@ Durable bubbles in `compact` mode are intentionally narrow:
 In addition:
 
 - latest commentary stays visible as a dedicated artifact
+- latest pending input preview may stay visible as a separate mutable artifact
 - technical execution classes stay out of permanent bubbles by default
 
 Technical execution classes include:
@@ -83,6 +92,8 @@ Technical execution classes include:
   same turn
 - if an already-started multipart send becomes stale mid-flight, the remaining
   parts must abort rather than leaking below the new boundary
+- pending input preview remains outside this terminal ordering barrier; it
+  describes future queued input rather than current-turn output
 
 ## Preview Contract
 

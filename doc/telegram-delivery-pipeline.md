@@ -56,6 +56,7 @@ The delivery pipeline keeps:
 
 - one mutable progress/status artifact per `(user_id, topic)`
 - one latest-only visible commentary artifact per `(user_id, topic)`
+- one mutable pending-input artifact per `(user_id, topic)`
 - one ordered content queue per user
 - one current turn generation per `(user_id, topic)`
 - one terminal turn artifact: `assistant_final`
@@ -92,6 +93,11 @@ Ordering guarantees:
 14. if an already-started multipart content send becomes stale mid-flight, the
     remaining parts and trailing image/status sends must abort rather than
     surfacing below a newer turn or below the terminal turn artifact
+
+The pending-input artifact is outside that turn-output barrier. It previews
+future queued user input rather than current-turn assistant output, so it may
+remain visible while the current turn is still running without being treated as
+either status churn or pre-final visible content.
 
 This preserves the upstream Claude shape:
 
@@ -137,6 +143,22 @@ Compact mode keeps commentary visible as a latest-only artifact, because it is
 the human-readable execution narrative. The mutable status artifact is reserved
 for ephemeral technical execution surface that would otherwise churn too
 quickly.
+
+Queued follow-up messages are different again. They describe future input that
+has not yet opened its turn, so compact mode may surface them as a separate
+latest-only pending-input artifact modeled after the Codex bottom pane:
+
+- queued follow-up messages
+- optional edit-last-queued-message hint
+
+This artifact is not a durable history bubble, not a user turn opener by
+itself, and not a member of the current turn's pre-final visible artifact
+class.
+
+The preview should preserve queued follow-up text literally. The parser may
+strip Codex UI marker glyphs such as checkbox bullets, but it must not
+normalize away user punctuation like `/`, `#`, `$`, `>` or phrases like
+`Waiting for ...` merely because they resemble other terminal surfaces.
 
 This keeps the chat human-readable while preserving the live CLI and replay
 evidence as the authoritative technical surfaces.
@@ -198,6 +220,12 @@ the chat shows the current human-readable execution narrative without
 accumulating a long stack of near-duplicate commentary bubbles. That commentary
 artifact is explicitly cleared when the final assistant answer is delivered and
 must not reappear below the final answer unless a new user turn has begun.
+
+`compact` may also keep one latest-only pending-input artifact that previews
+queued follow-up messages held behind the current running turn. Unlike
+commentary, that artifact belongs to future input, not current-turn output, so
+it is not closed by the terminal turn artifact unless the queue itself is
+cleared or rebound.
 
 The following semantic classes are not meant to survive as permanent content
 bubbles in `compact` mode:

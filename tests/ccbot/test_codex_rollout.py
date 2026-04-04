@@ -123,6 +123,48 @@ def test_codex_rollout_handles_command_and_file_change_turns() -> None:
     assert events[2].tool_name == "turn_completed"
 
 
+def test_codex_rollout_maps_heads_up_messages_to_warning_events() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-04T14:47:00.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "phase": "commentary",
+                "message": "⚠️Heads up, you have less than 25% of your weekly limit left.",
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].event_kind == "warning"
+    assert events[0].content_type == "warning"
+    assert events[0].role == "system"
+
+
+def test_codex_rollout_keeps_assistant_heads_up_message_as_assistant_text() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-04T14:48:00.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "phase": "assistant_message",
+                "message": "Heads up: final report is ready.",
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].event_kind == "assistant_message"
+    assert events[0].content_type == "text"
+    assert events[0].role == "assistant"
+
+
 def test_codex_rollout_command_execution_extracts_bash_lc_script_into_code_block() -> None:
     records = [
         {

@@ -132,6 +132,7 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | **callback_query.answer()** | ✅ | Instant feedback on all callback button clicks |
 | **editMessageText** | ✅ | Status-to-content conversion in compact mode, plus verbose/fallback `tool_result` editing into `tool_use` messages |
 | **Compact delivery policy** | ✅ | Default production surface keeps user echo, orchestration milestones, and final assistant text as durable bubbles; the latest commentary stays visible as a dedicated artifact while technical execution classes collapse into mutable status |
+| **Queued follow-up preview** | ✅ | Pending queued user messages may surface as a separate mutable artifact modeled after the Codex pending-input preview rather than being mixed into commentary or status |
 | **Pre-final terminal surface barrier** | ✅ | `commentary`, orchestration milestones, any surfaced preview bubble, and the mutable technical status artifact may appear before `assistant_final`, but never below it for the same turn |
 | **Codex-style command/tool previews** | ✅ | When command/tool/file previews are surfaced, they prefer extracted shell payloads, fenced `sh` / `json` blocks, truncation footers outside the code block body, and non-redundant outcome footers |
 | **Codex-style orchestration milestones** | ✅ | Subagent spawn/wait/finished-waiting/completion is rendered as human-facing milestones instead of raw `spawn_agent` / `wait_agent` / `<subagent_notification>` payloads; each `wait_agent` invocation keeps its own waiting/finished lifecycle even when targets overlap |
@@ -227,6 +228,9 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
   - final assistant text
 - Latest commentary remains visible as a dedicated artifact, but it is not a
   durable ordinary content bubble.
+- Queued follow-up messages may remain visible as a separate pending-input
+  artifact. They preview future input and are therefore not part of the
+  current turn's pre-final visible artifact class.
 - Technical execution classes stay out of permanent bubbles by default:
   - reasoning / thinking
   - tool lifecycle

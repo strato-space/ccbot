@@ -33,13 +33,14 @@ _CONTENT_PREFIXES: dict[str, str] = {
 
 _FUNCTION_CALL_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\((.*)\)\s*$", re.DOTALL)
 _FILE_CHANGE_STATUSES = {"applied", "pending", "completed", "failed"}
+_FENCED_BLOCK_RE = re.compile(r"```[A-Za-z0-9_-]*\n[\s\S]*?\n```")
 
 
 def _clip_code_lines(
     lines: list[str],
     *,
-    max_lines: int = 5,
-    max_chars: int = 140,
+    max_lines: int = 10,
+    max_chars: int = 180,
 ) -> tuple[list[str], int]:
     clipped = [
         line if len(line) <= max_chars else line[: max_chars - 1].rstrip() + "…"
@@ -58,8 +59,8 @@ def _preview_footer(total_lines: int, shown_lines: int) -> str:
 def _format_json_code_block(
     value: str | dict | list,
     *,
-    max_lines: int = 12,
-    max_chars: int = 140,
+    max_lines: int = 20,
+    max_chars: int = 180,
 ) -> str | None:
     try:
         if isinstance(value, str):
@@ -123,9 +124,38 @@ def _format_file_change_block(text: str) -> str:
     return "\n".join(result)
 
 
-def _format_tool_like_text(text: str, *, content_type: str) -> str:
+def _format_multiline_code_block(
+    text: str,
+    *,
+    language: str = "text",
+    max_lines: int = 20,
+    max_chars: int = 180,
+    always_wrap: bool = False,
+) -> str:
     stripped = text.strip()
     if not stripped or stripped.startswith("```"):
+        return stripped
+    lines = [line.rstrip() for line in stripped.splitlines() if line.strip()]
+    if len(lines) <= 1 and not always_wrap:
+        return stripped
+    clipped, total_lines = _clip_code_lines(
+        lines,
+        max_lines=max_lines,
+        max_chars=max_chars,
+    )
+    body = "\n".join(clipped)
+    footer = _preview_footer(total_lines, len(clipped))
+    result = [f"```{language}\n{body}\n```"]
+    if footer:
+        result.extend(["", footer])
+    return "\n".join(result)
+
+
+def _format_tool_like_text(text: str, *, content_type: str) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return stripped
+    if stripped.startswith("```") or _FENCED_BLOCK_RE.search(stripped):
         return stripped
     if content_type == "file_change":
         return _format_file_change_block(stripped)
@@ -137,6 +167,23 @@ def _format_tool_like_text(text: str, *, content_type: str) -> str:
         json_block = _format_json_code_block(stripped)
         if json_block:
             return json_block
+        multiline_block = _format_multiline_code_block(
+            stripped,
+            language="text",
+            max_lines=10,
+            max_chars=180,
+            always_wrap=(content_type == "tool_result"),
+        )
+        if multiline_block != stripped:
+            return multiline_block
+        if content_type == "tool_result":
+            return _format_multiline_code_block(
+                stripped,
+                language="text",
+                max_lines=10,
+                max_chars=180,
+                always_wrap=True,
+            )
     return stripped
 
 

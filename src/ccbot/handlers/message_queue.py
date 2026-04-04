@@ -66,6 +66,8 @@ class MessageTask:
         "status_clear",
         "commentary_update",
         "commentary_clear",
+        "pending_input_update",
+        "pending_input_clear",
         "commentary_close",
         "pre_final_close",
     ]
@@ -95,6 +97,18 @@ _status_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
 
 # Commentary message tracking: (user_id, thread_id_or_0) -> (message_id, window_id, last_text)
 _commentary_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
+
+# Pending input preview tracking: (user_id, thread_id_or_0) -> (message_id, window_id, last_text)
+_pending_input_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
+# Last enqueued pending-input state per topic for queue-side dedupe.
+_pending_input_enqueued: dict[tuple[int, int], tuple[str, str | None]] = {}
+
+# Latest visible pre-final artifact kind per topic. This keeps latest-only
+# commentary chronologically correct relative to durable orchestration milestones:
+# commentary may be edited in place only while it is still the latest visible
+# pre-final artifact. Once another visible pre-final artifact lands after it,
+# commentary updates must re-emit at the tail instead of rewriting history above it.
+_latest_pre_final_visible_kind: dict[tuple[int, int], str] = {}
 
 # Pre-final visible artifact closure: once a final assistant bubble lands in
 # compact mode, no later visible pre-final artifact may surface below it until
@@ -263,6 +277,14 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                     if remaining > 0:
                         if task.task_type not in {"content", "commentary_update"}:
                             # Status is ephemeral — safe to drop
+                            if task.task_type in {
+                                "pending_input_update",
+                                "pending_input_clear",
+                            }:
+                                _pending_input_enqueued.pop(
+                                    (user_id, task.thread_id or 0),
+                                    None,
+                                )
                             continue
                         # Content is actual Claude output — wait then send
                         logger.debug(
@@ -288,6 +310,8 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                     await _process_content_task(bot, user_id, merged_task)
                 elif task.task_type == "commentary_update":
                     await _process_commentary_update_task(bot, user_id, task)
+                elif task.task_type == "pending_input_update":
+                    await _process_pending_input_update_task(bot, user_id, task)
                 elif task.task_type == "status_update":
                     await _process_status_update_task(bot, user_id, task)
                 elif task.task_type == "status_clear":
@@ -296,6 +320,8 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                     await _do_clear_commentary_message(
                         bot, user_id, task.thread_id or 0
                     )
+                elif task.task_type == "pending_input_clear":
+                    await _process_pending_input_clear_task(bot, user_id, task)
                 elif task.task_type in {"commentary_close", "pre_final_close"}:
                     current_generation = current_turn_generation(user_id, task.thread_id)
                     if _is_stale_turn_generation(
@@ -407,6 +433,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         )
         await _do_clear_status_message(bot, user_id, tid)
         await _do_clear_commentary_message(bot, user_id, tid)
+        await _do_clear_pending_input_message(bot, user_id, tid)
         clear_tool_msg_ids_for_topic(user_id, task.thread_id)
         return
     if _is_stale_turn_generation(task.turn_generation, current_generation):
@@ -594,6 +621,9 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         return
     await _send_task_images(bot, chat_id, task)
 
+    if delivered_parts > 0 and is_pre_final_visible_semantic_kind(task.semantic_kind):
+        _latest_pre_final_visible_kind[(user_id, tid)] = task.semantic_kind
+
     final_delivery_complete = (
         expected_parts == 0 or delivered_parts == expected_parts
     )
@@ -692,6 +722,7 @@ async def _process_status_update_task(
         )
         await _do_clear_status_message(bot, user_id, tid)
         await _do_clear_commentary_message(bot, user_id, tid)
+        await _do_clear_pending_input_message(bot, user_id, tid)
         return
     if _is_stale_turn_generation(task.turn_generation, current_generation):
         logger.debug(
@@ -859,9 +890,38 @@ async def _process_commentary_update_task(
     ckey = (user_id, tid)
     current_info = _commentary_msg_info.get(ckey)
     if current_info:
-        _, stored_wid, last_text = current_info
+        msg_id, stored_wid, last_text = current_info
         if stored_wid == wid and last_text == commentary_text:
             return
+        latest_kind = _latest_pre_final_visible_kind.get(ckey, "")
+        if stored_wid == wid and latest_kind == "commentary":
+            chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=_ensure_formatted(commentary_text),
+                    parse_mode=PARSE_MODE,
+                    link_preview_options=NO_LINK_PREVIEW,
+                )
+                _commentary_msg_info[ckey] = (msg_id, wid, commentary_text)
+                return
+            except RetryAfter:
+                raise
+            except Exception:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=msg_id,
+                        text=commentary_text,
+                        link_preview_options=NO_LINK_PREVIEW,
+                    )
+                    _commentary_msg_info[ckey] = (msg_id, wid, commentary_text)
+                    return
+                except RetryAfter:
+                    raise
+                except Exception:
+                    _commentary_msg_info.pop(ckey, None)
 
     await _do_send_commentary_message(bot, user_id, tid, wid, commentary_text)
 
@@ -873,7 +933,7 @@ async def _do_send_commentary_message(
     window_id: str,
     text: str,
 ) -> None:
-    """Replace the prior commentary bubble with the latest one."""
+    """Send a new commentary bubble when in-place reuse is unavailable."""
     ckey = (user_id, thread_id_or_0)
     thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
     chat_id = session_manager.resolve_chat_id(user_id, thread_id)
@@ -892,6 +952,121 @@ async def _do_send_commentary_message(
     )
     if sent:
         _commentary_msg_info[ckey] = (sent.message_id, window_id, text)
+        _latest_pre_final_visible_kind[ckey] = "commentary"
+
+
+async def _process_pending_input_update_task(
+    bot: Bot,
+    user_id: int,
+    task: MessageTask,
+) -> None:
+    """Keep a dedicated pending-input preview artifact updated in place.
+
+    Pending-input preview belongs to the topic input queue, not to the current
+    assistant turn generation. It must survive turn transitions while the
+    queue still shows actionable follow-up text.
+    """
+    wid = task.window_id or ""
+    tid = task.thread_id or 0
+    if not await _is_task_binding_active(user_id, wid, task.thread_id):
+        logger.debug(
+            "Dropping stale pending-input task: user=%d window=%s thread=%s",
+            user_id,
+            wid,
+            task.thread_id,
+        )
+        await _do_clear_pending_input_message(bot, user_id, tid)
+        return
+
+    pending_text = task.text or ""
+    if not pending_text:
+        await _do_clear_pending_input_message(bot, user_id, tid)
+        return
+
+    pkey = (user_id, tid)
+    current_info = _pending_input_msg_info.get(pkey)
+    if current_info:
+        msg_id, stored_wid, last_text = current_info
+        if stored_wid == wid and last_text == pending_text:
+            return
+        if stored_wid == wid:
+            chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=_ensure_formatted(pending_text),
+                    parse_mode=PARSE_MODE,
+                    link_preview_options=NO_LINK_PREVIEW,
+                )
+                _pending_input_msg_info[pkey] = (msg_id, wid, pending_text)
+                return
+            except RetryAfter:
+                raise
+            except Exception:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=msg_id,
+                        text=pending_text,
+                        link_preview_options=NO_LINK_PREVIEW,
+                    )
+                    _pending_input_msg_info[pkey] = (msg_id, wid, pending_text)
+                    return
+                except RetryAfter:
+                    raise
+                except Exception:
+                    _pending_input_msg_info.pop(pkey, None)
+
+    await _do_send_pending_input_message(bot, user_id, tid, wid, pending_text)
+
+
+async def _process_pending_input_clear_task(
+    bot: Bot,
+    user_id: int,
+    task: MessageTask,
+) -> None:
+    """Clear pending-input preview only when the clear still belongs to the active topic state."""
+    wid = task.window_id or ""
+    tid = task.thread_id or 0
+    if task.window_id and not await _is_task_binding_active(user_id, wid, task.thread_id):
+        logger.debug(
+            "Dropping stale pending-input clear: user=%d window=%s thread=%s",
+            user_id,
+            wid,
+            task.thread_id,
+        )
+        return
+    await _do_clear_pending_input_message(bot, user_id, tid)
+
+
+async def _do_send_pending_input_message(
+    bot: Bot,
+    user_id: int,
+    thread_id_or_0: int,
+    window_id: str,
+    text: str,
+) -> None:
+    """Send a new pending-input preview artifact."""
+    pkey = (user_id, thread_id_or_0)
+    thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
+    chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+    old = _pending_input_msg_info.pop(pkey, None)
+    if old:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=old[0])
+        except Exception:
+            pass
+
+    sent = await send_with_fallback(
+        bot,
+        chat_id,
+        text,
+        **_send_kwargs(thread_id),  # type: ignore[arg-type]
+    )
+    if sent:
+        _pending_input_msg_info[pkey] = (sent.message_id, window_id, text)
+        _pending_input_enqueued[pkey] = (window_id, text)
 
 
 async def _do_clear_status_message(
@@ -919,6 +1094,8 @@ async def _do_clear_commentary_message(
     """Delete the tracked commentary message for a user/topic."""
     ckey = (user_id, thread_id_or_0)
     info = _commentary_msg_info.pop(ckey, None)
+    if _latest_pre_final_visible_kind.get(ckey) == "commentary":
+        _latest_pre_final_visible_kind.pop(ckey, None)
     if info:
         msg_id = info[0]
         chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
@@ -926,6 +1103,24 @@ async def _do_clear_commentary_message(
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
         except Exception as e:
             logger.debug(f"Failed to delete commentary message {msg_id}: {e}")
+
+
+async def _do_clear_pending_input_message(
+    bot: Bot,
+    user_id: int,
+    thread_id_or_0: int = 0,
+) -> None:
+    """Delete the tracked pending-input preview message for a user/topic."""
+    pkey = (user_id, thread_id_or_0)
+    _pending_input_enqueued.pop(pkey, None)
+    info = _pending_input_msg_info.pop(pkey, None)
+    if info:
+        msg_id = info[0]
+        chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except Exception as e:
+            logger.debug(f"Failed to delete pending-input message {msg_id}: {e}")
 
 
 async def _check_and_send_status(
@@ -1072,6 +1267,54 @@ async def enqueue_commentary_update(
     queue.put_nowait(task)
 
 
+async def enqueue_pending_input_update(
+    bot: Bot,
+    user_id: int,
+    window_id: str,
+    pending_input_text: str | None,
+    thread_id: int | None = None,
+    turn_generation: int = 0,
+) -> None:
+    """Enqueue a dedicated pending-input preview artifact update."""
+    tid = thread_id or 0
+    pkey = (user_id, tid)
+    flood_end = _flood_until.get(user_id, 0)
+    if flood_end > time.monotonic():
+        # Non-content updates are dropped during flood control; do not pin dedupe
+        # state here or we may suppress the first post-flood refresh.
+        _pending_input_enqueued.pop(pkey, None)
+        return
+    dedupe_key = (window_id, pending_input_text)
+    if _pending_input_enqueued.get(pkey) == dedupe_key:
+        return
+    if pending_input_text:
+        info = _pending_input_msg_info.get(pkey)
+        if info and info[1] == window_id and info[2] == pending_input_text:
+            _pending_input_enqueued[pkey] = dedupe_key
+            return
+
+    queue = get_or_create_queue(bot, user_id)
+    _pending_input_enqueued[pkey] = dedupe_key
+
+    if pending_input_text:
+        task = MessageTask(
+            task_type="pending_input_update",
+            text=pending_input_text,
+            window_id=window_id,
+            thread_id=thread_id,
+            turn_generation=turn_generation,
+        )
+    else:
+        task = MessageTask(
+            task_type="pending_input_clear",
+            window_id=window_id,
+            thread_id=thread_id,
+            turn_generation=turn_generation,
+        )
+
+    queue.put_nowait(task)
+
+
 async def enqueue_commentary_close(
     bot: Bot,
     user_id: int,
@@ -1136,6 +1379,7 @@ def reopen_pre_final_visible_lane(
     """Allow visible pre-final artifacts to surface again for the next turn."""
     _pre_final_visible_closed.discard((user_id, thread_id or 0))
     _technical_status_closed.discard((user_id, thread_id or 0))
+    _latest_pre_final_visible_kind.pop((user_id, thread_id or 0), None)
 
 
 def reopen_commentary_lane(
@@ -1151,9 +1395,12 @@ def clear_pre_final_visible_lane_state(
     thread_id: int | None = None,
 ) -> None:
     """Clear pre-final artifact visibility state for a topic during teardown."""
-    _pre_final_visible_closed.discard((user_id, thread_id or 0))
-    _technical_status_closed.discard((user_id, thread_id or 0))
-    _turn_generations.pop((user_id, thread_id or 0), None)
+    key = (user_id, thread_id or 0)
+    _pre_final_visible_closed.discard(key)
+    _technical_status_closed.discard(key)
+    _turn_generations.pop(key, None)
+    _latest_pre_final_visible_kind.pop(key, None)
+    _pending_input_enqueued.pop(key, None)
 
 
 def current_turn_generation(
@@ -1214,6 +1461,20 @@ async def clear_commentary_message(
     await _do_clear_commentary_message(bot, user_id, thread_id or 0)
 
 
+async def clear_pending_input_message(
+    bot: Bot | None,
+    user_id: int,
+    thread_id: int | None = None,
+) -> None:
+    """Delete any tracked pending-input preview for a topic when a bot handle exists."""
+    if bot is None:
+        pkey = (user_id, thread_id or 0)
+        _pending_input_msg_info.pop(pkey, None)
+        _pending_input_enqueued.pop(pkey, None)
+        return
+    await _do_clear_pending_input_message(bot, user_id, thread_id or 0)
+
+
 def clear_tool_msg_ids_for_topic(user_id: int, thread_id: int | None = None) -> None:
     """Clear tool message ID tracking for a specific topic.
 
@@ -1239,6 +1500,12 @@ async def shutdown_workers() -> None:
     _queue_workers.clear()
     _message_queues.clear()
     _queue_locks.clear()
+    _status_msg_info.clear()
+    _commentary_msg_info.clear()
+    _pending_input_msg_info.clear()
+    _pending_input_enqueued.clear()
+    _latest_pre_final_visible_kind.clear()
+    _tool_msg_ids.clear()
     _pre_final_visible_closed.clear()
     _technical_status_closed.clear()
     _turn_generations.clear()

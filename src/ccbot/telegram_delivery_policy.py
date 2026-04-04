@@ -6,9 +6,11 @@ chat mode.
 
 `compact` is the production default:
 - hide internal injected user payloads (`<skill>`, local command XML, etc.)
-- keep only the latest commentary visible as human-facing progress content
+- keep only the latest human-facing narrative visible; `commentary` and
+  orchestration milestones collapse into one mutable surface
 - keep reasoning/tool/command/file-change updates in the mutable status
   artifact instead of as permanent content bubbles
+- keep warning artifacts as Telegram-visible system notices
 - suppress placeholder reasoning with no human-readable summary
 
 `verbose` leaves the existing runtime-visible behavior intact for debugging.
@@ -21,10 +23,13 @@ from dataclasses import replace
 
 from .runtime_types import (
     COMMAND_EXECUTION_SEMANTIC_KIND,
+    COMMENTARY_SEMANTIC_KIND,
     FILE_CHANGE_SEMANTIC_KIND,
+    ORCHESTRATION_SEMANTIC_KIND,
     REASONING_SEMANTIC_KIND,
     TOOL_RESULT_SEMANTIC_KIND,
     TOOL_START_SEMANTIC_KIND,
+    WARNING_SEMANTIC_KIND,
     NormalizedEvent,
 )
 
@@ -61,11 +66,7 @@ def is_non_turn_user_notification(text: str) -> bool:
     stripped = text.strip()
     if stripped.startswith("<turn_aborted>"):
         return True
-    if _INTERNAL_USER_ECHO_RE.match(stripped):
-        tag = _INTERNAL_USER_ECHO_RE.match(stripped)
-        if tag:
-            return tag.group(1).lower() not in {"skill"}
-    return False
+    return _INTERNAL_USER_ECHO_RE.match(stripped) is not None
 
 
 def _clip_inline(text: str, *, max_chars: int) -> str:
@@ -180,6 +181,24 @@ def apply_telegram_delivery_policy(
 
     if projected.role == "user" and is_internal_user_payload(text):
         return _suppress(projected)
+
+    if projected.semantic_kind == WARNING_SEMANTIC_KIND:
+        projected.include_in_history = True
+        projected.dispatch_to_telegram = True
+        projected.status_message_eligible = False
+        projected.is_complete = True
+        return projected
+
+    if projected.semantic_kind in {
+        COMMENTARY_SEMANTIC_KIND,
+        ORCHESTRATION_SEMANTIC_KIND,
+    }:
+        projected.text = _compact_single_block(text)
+        projected.include_in_history = False
+        projected.dispatch_to_telegram = True
+        projected.status_message_eligible = False
+        projected.is_complete = True
+        return projected
 
     if projected.semantic_kind == REASONING_SEMANTIC_KIND:
         if not text or text in _PLACEHOLDER_REASONING:

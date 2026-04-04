@@ -33,6 +33,13 @@ Start with the compact ontology index:
 - [`ontology/delivery-surface.md`](ontology/delivery-surface.md)
 - [`ontology/boundaries.md`](ontology/boundaries.md)
 
+Execution plans and companion specs live in:
+- [`specs/README.md`](specs/README.md)
+- [`specs/ccbot-codex-adaptation-plan.md`](specs/ccbot-codex-adaptation-plan.md)
+- [`specs/ccbot-codex-adaptation-plan-2.md`](specs/ccbot-codex-adaptation-plan-2.md)
+- [`specs/ccbot-codex-adaptation-plan-4.md`](specs/ccbot-codex-adaptation-plan-4.md)
+- [`specs/ccbot-fast-agent-jsonl-spec.md`](specs/ccbot-fast-agent-jsonl-spec.md)
+
 Then use the longer maintainer notes:
 - [`doc/runtime-ontology.md`](doc/runtime-ontology.md)
 - [`doc/runtime-event-contract.md`](doc/runtime-event-contract.md)
@@ -78,6 +85,14 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   preview body in fenced `sh` / `json`, truncation metadata outside the fence,
   and no redundant `completed · output 1 line(s)` footer when the preview
   already conveys the result.
+- **Queued follow-up preview** — When Codex is still running and later messages
+  are queued behind the active turn, the bot may surface them as a separate
+  mutable pending-input artifact (after-next-tool, end-of-turn, and queued
+  follow-up sections) rather than mixing them into commentary or current-turn
+  status.
+- **Heads-up warnings stay visible without breaking turn closure** — Operator
+  warning notices remain visible in Telegram while assistant-final semantics
+  and post-final artifact closure remain intact.
 - **Prompt-safe control lane** — Detect `input ready`, `busy`, and `blocked prompt` terminal states before sending input
 - **Voice messages** — Voice messages are transcribed via OpenAI and forwarded as text
 - **Send messages** — Forward text to Codex via tmux keystrokes
@@ -231,6 +246,9 @@ Routing note:
 - Telegram text and voice inputs enter the equal message layer in `queue` mode by default.
 - `steer` is a routing semantic for runtime-aware control flows; it is not the same thing as raw terminal takeover.
 - Raw terminal control in tmux remains a separate operator layer and is never modeled as an ordinary queued message.
+- Pending-input previews preserve queued message text literally (except explicit
+  Codex checkbox marker glyph stripping), so command-like user text does not
+  get normalized away.
 
 **Killing a session:**
 

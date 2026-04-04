@@ -66,6 +66,15 @@ Two higher-order ontological classes matter at delivery time:
   - mutable progress/status surface for ephemeral execution detail
   - may appear while the turn is running, but must not reappear below the
     terminal turn artifact for the same turn
+- `pending input artifact`
+  - mutable preview surface for queued future input that is waiting behind the
+    current turn
+  - examples include queued follow-up messages and the edit-last-queued-message
+    hint
+  - must preserve queued message text literally, except for stripping explicit
+    Codex UI checkbox markers
+  - this artifact is not part of the current turn's output ordering contract
+    and is not itself a user turn opener
 - `user turn opener`
   - semantic fact that a new user turn has begun, regardless of whether the
     corresponding payload is visible in Telegram
@@ -158,6 +167,11 @@ At the default product-facing `compact` Telegram surface:
     completed subagent summaries
 - `commentary`
   - remains visible as a latest-only human-facing commentary artifact
+- queued follow-up preview
+  - may remain visible as a separate mutable pending-input artifact modeled
+    after the Codex bottom-pane pending-input preview
+  - it is neither a durable history bubble nor a current-turn visible
+    pre-final artifact
 - `reasoning`, `tool_start`, `tool_result`, `command_execution`, `file_change`
   - are typically projected into the mutable status artifact or suppressed when
     they are placeholder-only / raw-payload-only

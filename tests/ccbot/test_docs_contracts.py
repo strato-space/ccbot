@@ -15,6 +15,8 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "ontology/runtime.md" in readme
     assert "ontology/delivery-surface.md" in readme
     assert "ontology/boundaries.md" in readme
+    assert "specs/README.md" in readme
+    assert "specs/ccbot-codex-adaptation-plan-4.md" in readme
     assert "doc/strato-ops-codex.md" in readme
     assert "doc/runtime-event-contract.md" in readme
     assert "doc/telegram-delivery-pipeline.md" in readme
@@ -34,6 +36,7 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "Commentary" in readme
     assert "Final assistant responses" in readme
     assert "Technical execution classes stay out of permanent bubbles by default" in readme
+    assert "Queued follow-up preview" in readme
     assert "whole pre-final visible surface closes until the next user turn" in readme
     assert "mutable technical status surface" in readme
     assert "no pre-final visible artifact" in readme
@@ -109,6 +112,7 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "terminal turn artifact" in delivery
     assert "pre-final visible artifact" in delivery
     assert "technical status artifact" in delivery
+    assert "Pending input artifact" in delivery
     assert "ACP-protocol" in boundaries
     assert "ACP-module" in boundaries
     assert "Replay evidence is written by" in boundaries
@@ -192,6 +196,7 @@ def test_runtime_event_contract_doc_names_semantic_and_delivery_layers() -> None
     assert "terminal turn artifact" in doc
     assert "pre-final visible artifact" in doc
     assert "technical status artifact" in doc
+    assert "pending input artifact" in doc
     assert "user turn opener" in doc
     assert "turn generation" in doc
     assert "must be suppressed or dropped if they would otherwise appear below" in doc
@@ -210,6 +215,7 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "status artifact" in doc
     assert "The default Telegram surface is `compact`, not `verbose`." in doc
     assert "latest human-facing commentary remains visible as a dedicated artifact" in doc
+    assert "pending-input artifact" in doc
     assert "human-facing orchestration milestones stay as ordinary content" in doc
     assert "reasoning and thinking summaries are routed through the mutable status" in doc
     assert "artifact" in doc
@@ -235,6 +241,7 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "durable Telegram content bubbles are" in doc
     assert "deliberately narrow" in doc
     assert "latest-only visible commentary artifact" in doc
+    assert "latest-only pending-input artifact" in doc
     assert "spawned/waiting/completed subagent summaries" in doc
     assert "Late delivery must fail closed." in doc
     assert "queue" in doc
@@ -252,6 +259,7 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
     assert "steer" in doc
     assert "workspace `.fast-agent` root" in doc
     assert "**Compact delivery policy**" in doc
+    assert "Queued follow-up preview" in doc
     assert "user echo, orchestration milestones, and final assistant text as durable bubbles" in doc
     assert "latest commentary stays visible as a dedicated artifact" in doc
     assert "**Pre-final terminal surface barrier**" in doc

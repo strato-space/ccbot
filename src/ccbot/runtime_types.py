@@ -20,6 +20,7 @@ LIFECYCLE_SEMANTIC_KIND = "lifecycle"
 USER_ECHO_SEMANTIC_KIND = "user_echo"
 COMMENTARY_SEMANTIC_KIND = "commentary"
 ORCHESTRATION_SEMANTIC_KIND = "orchestration"
+WARNING_SEMANTIC_KIND = "warning"
 REASONING_SEMANTIC_KIND = "reasoning"
 TOOL_START_SEMANTIC_KIND = "tool_start"
 TOOL_PROGRESS_SEMANTIC_KIND = "tool_progress"
@@ -44,6 +45,8 @@ def infer_semantic_kind(
         return LIFECYCLE_SEMANTIC_KIND
     if role == "user":
         return USER_ECHO_SEMANTIC_KIND
+    if content_type == "warning" or event_kind == "warning":
+        return WARNING_SEMANTIC_KIND
     if content_type == "orchestration" or event_kind == "orchestration":
         return ORCHESTRATION_SEMANTIC_KIND
     if content_type == "commentary" or event_kind == "commentary":
@@ -86,6 +89,7 @@ def is_pre_final_visible_semantic_kind(semantic_kind: str) -> bool:
     """Return True for visible assistant-side artifacts that must precede final."""
     return semantic_kind not in {
         USER_ECHO_SEMANTIC_KIND,
+        WARNING_SEMANTIC_KIND,
         ASSISTANT_FINAL_SEMANTIC_KIND,
         LIFECYCLE_SEMANTIC_KIND,
     }

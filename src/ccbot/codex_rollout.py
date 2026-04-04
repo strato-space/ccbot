@@ -165,6 +165,7 @@ _SUBAGENT_NOTIFICATION_RE = re.compile(
     r"^\s*<subagent_notification>\s*(\{.*\})\s*</subagent_notification>\s*$",
     re.DOTALL,
 )
+_HEADS_UP_WARNING_RE = re.compile(r"^\s*(?:⚠️?\s*)?heads up\b", re.IGNORECASE)
 _PENDING_EVENT_FLUSH_WINDOW_SECONDS = 0.5
 _USER_MESSAGE_DUPLICATE_WINDOW_SECONDS = 0.5
 
@@ -275,7 +276,12 @@ def _preview_footer(total_lines: int, shown_lines: int) -> str:
     return f"preview {shown_lines}/{total_lines} lines"
 
 
-def _command_code_block(command: str, *, max_lines: int = 5, max_chars: int = 140) -> str:
+def _command_code_block(
+    command: str,
+    *,
+    max_lines: int = 10,
+    max_chars: int = 180,
+) -> str:
     payload = _extract_shell_payload(command)
     lines = _nonempty_lines(payload)
     if not lines:
@@ -303,8 +309,8 @@ def _tool_text_code_block(
     text: str,
     *,
     language: str = "text",
-    max_lines: int = 5,
-    max_chars: int = 140,
+    max_lines: int = 10,
+    max_chars: int = 180,
 ) -> str:
     lines = _nonempty_lines(text)
     if not lines:
@@ -319,8 +325,8 @@ def _tool_text_code_block(
 def _tool_json_code_block(
     value: Any,
     *,
-    max_lines: int = 10,
-    max_chars: int = 120,
+    max_lines: int = 20,
+    max_chars: int = 160,
 ) -> str:
     try:
         if isinstance(value, str):
@@ -369,7 +375,7 @@ def _tool_call_summary(name: str, arguments: Any) -> str:
             if chars.strip():
                 parts = [f"write_stdin(session {session_id or '?'})"]
                 parts.append(
-                    _tool_text_code_block(chars, language="text", max_lines=3)
+                    _tool_text_code_block(chars, language="text", max_lines=6)
                     or _compact_multiline(chars)
                 )
                 return "\n".join(part for part in parts if part)
@@ -414,19 +420,19 @@ def _tool_output_summary(tool_name: str | None, text: str) -> str:
 
     lowered = (tool_name or "").lower()
     if lowered == "exec_command":
-        preview = _tool_json_code_block(text, max_lines=5) or _tool_text_code_block(
+        preview = _tool_json_code_block(text, max_lines=10) or _tool_text_code_block(
             text,
             language="sh",
-            max_lines=5,
+            max_lines=10,
         )
         if preview:
             return preview
         return f"output {len(lines)} line(s)"
     if lowered == "write_stdin":
-        preview = _tool_json_code_block(text, max_lines=5) or _tool_text_code_block(
+        preview = _tool_json_code_block(text, max_lines=10) or _tool_text_code_block(
             text,
             language="text",
-            max_lines=5,
+            max_lines=10,
         )
         if preview:
             return preview
@@ -436,10 +442,7 @@ def _tool_output_summary(tool_name: str | None, text: str) -> str:
     if json_block:
         return json_block
 
-    if len(lines) == 1 and len(lines[0]) <= 200:
-        return lines[0]
-
-    preview = _tool_text_code_block(text, language="text", max_lines=5)
+    preview = _tool_text_code_block(text, language="text", max_lines=10)
     if preview:
         return preview
 
@@ -921,10 +924,10 @@ def _command_execution_summary(
             parts.append(_compact_multiline(command))
     lines = _nonempty_lines(output)
     if lines:
-        preview = _tool_json_code_block(output, max_lines=5) or _tool_text_code_block(
+        preview = _tool_json_code_block(output, max_lines=10) or _tool_text_code_block(
             output,
             language="sh",
-            max_lines=5,
+            max_lines=10,
         )
         if preview:
             parts.append(preview)
@@ -941,6 +944,38 @@ def _command_execution_summary(
     elif cwd and len(parts) < 3:
         parts.append(_compact_inline(cwd, max_chars=120))
     return "\n".join(part for part in parts if part) or "[command_execution]"
+
+
+def _is_warning_text(text: str, *, phase: str) -> bool:
+    """Detect operator-facing warnings without stealing assistant-final semantics.
+
+    Codex can emit "Heads up..." as commentary/status guidance. We treat it as
+    a warning only inside commentary phase; assistant message/final phases must
+    keep normal turn semantics.
+    """
+    if phase not in _COMMENTARY_PHASES:
+        return False
+    return bool(_HEADS_UP_WARNING_RE.match(text.strip()))
+
+
+def _warning_event(
+    *,
+    thread_id: str,
+    text: str,
+    timestamp: str | None,
+    runtime_kind: str = "codex",
+) -> NormalizedEvent:
+    warning_text = text.strip() or "[warning]"
+    return NormalizedEvent(
+        thread_id=thread_id,
+        text=warning_text,
+        is_complete=True,
+        content_type="warning",
+        role="system",
+        timestamp=timestamp,
+        runtime_kind=runtime_kind,
+        event_kind="warning",
+    )
 
 
 def _thread_id_from_payload(payload: Any) -> str:
@@ -1025,6 +1060,13 @@ def _message_event(
         return _lifecycle_event(
             thread_id=thread_id,
             event_name="message",
+            timestamp=timestamp,
+            runtime_kind=runtime_kind,
+        )
+    if _is_warning_text(text, phase=phase):
+        return _warning_event(
+            thread_id=thread_id,
+            text=text,
             timestamp=timestamp,
             runtime_kind=runtime_kind,
         )
@@ -1149,6 +1191,12 @@ def _command_execution_event(
         or payload.get("output")
         or payload.get("stdout")
         or payload.get("stderr")
+        or payload.get("output_text")
+        or payload.get("output_preview")
+        or payload.get("preview")
+        or payload.get("command_output")
+        or payload.get("result")
+        or payload.get("response")
     )
     status = _as_text(payload.get("status")).strip()
     text = _command_execution_summary(
@@ -1451,6 +1499,19 @@ def _normalize_event_msg_payload(
             runtime_kind=runtime_kind,
         )
         return [event]
+
+    if payload_type in {"warning", "heads_up"}:
+        warning_text = _as_text(
+            payload.get("message") or payload.get("text") or payload.get("warning")
+        ).strip()
+        return [
+            _warning_event(
+                thread_id=thread_id,
+                text=warning_text,
+                timestamp=timestamp,
+                runtime_kind=runtime_kind,
+            )
+        ]
 
     if payload_type in {"turn_started", "turn_completed", "turn_aborted"}:
         return [

@@ -15,6 +15,7 @@ from .interactive_ui import clear_interactive_msg
 from .message_queue import (
     clear_commentary_lane_state,
     clear_commentary_message,
+    clear_pending_input_message,
     clear_status_message,
     clear_tool_msg_ids_for_topic,
 )
@@ -42,6 +43,7 @@ async def clear_topic_state(
     # Clear any live status artifact before dropping the tracking entry.
     await clear_status_message(bot, user_id, thread_id)
     await clear_commentary_message(bot, user_id, thread_id)
+    await clear_pending_input_message(bot, user_id, thread_id)
     clear_commentary_lane_state(user_id, thread_id)
 
     # Clear tool message ID tracking

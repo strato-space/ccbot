@@ -1268,6 +1268,36 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_handle_new_message_compact_mode_routes_orchestration_to_latest_visible_artifact_in_commentary_lane(self):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="• Waiting for Mill [explorer]",
+            is_complete=True,
+            content_type="orchestration",
+            role="assistant",
+            event_kind="orchestration",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
+            patch("ccbot.bot.enqueue_commentary_update", new_callable=AsyncMock) as mock_commentary,
+            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch("ccbot.bot.get_interactive_msg_id", return_value=None),
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_status.assert_not_awaited()
+        mock_commentary.assert_awaited_once()
+        mock_content.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_handle_new_message_compact_mode_does_not_preclose_surface_before_final_answer(self):
         bot = AsyncMock()
         msg = NormalizedEvent(
@@ -1327,7 +1357,7 @@ class TestTelegramDelivery:
 
             await bot_mod.handle_new_message(msg, bot)
 
-        mock_open_turn.assert_called_once_with(1, 42)
+        mock_open_turn.assert_not_called()
         mock_status.assert_not_awaited()
         mock_content.assert_not_awaited()
 
@@ -1592,7 +1622,7 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_compact_mode_keeps_orchestration_as_content(self):
+    async def test_handle_new_message_compact_mode_routes_orchestration_to_latest_visible_artifact(self):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -1618,8 +1648,8 @@ class TestTelegramDelivery:
             await bot_mod.handle_new_message(msg, bot)
 
         mock_status.assert_not_awaited()
-        mock_commentary.assert_not_awaited()
-        mock_content.assert_awaited_once()
+        mock_commentary.assert_awaited_once()
+        mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_handle_new_message_routes_incomplete_progress_to_status(self):

@@ -24,7 +24,7 @@ from telegram import Bot
 from telegram.error import BadRequest
 
 from ..session import session_manager
-from ..terminal_parser import classify_input_surface
+from ..terminal_parser import classify_input_surface, extract_pending_input_preview
 from ..tmux_manager import tmux_manager
 from .interactive_ui import (
     clear_interactive_msg,
@@ -34,6 +34,7 @@ from .interactive_ui import (
 from .cleanup import clear_topic_state
 from .message_queue import (
     current_turn_generation,
+    enqueue_pending_input_update,
     enqueue_status_update,
     get_message_queue,
 )
@@ -45,6 +46,36 @@ STATUS_POLL_INTERVAL = 1.0  # seconds - faster response (rate limiting at send l
 
 # Topic existence probe interval
 TOPIC_CHECK_INTERVAL = 60.0  # seconds
+
+
+def _clip_pending_input_line(text: str, *, max_chars: int = 96) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
+
+
+def _build_pending_input_text(pane_text: str) -> str | None:
+    preview = extract_pending_input_preview(pane_text)
+    if preview.is_empty:
+        return None
+
+    sections: list[tuple[str, tuple[str, ...]]] = [
+        ("Messages to be submitted after next tool call", preview.pending_steers),
+        ("Messages to be submitted at end of turn", preview.rejected_steers),
+        ("Queued follow-up messages", preview.queued_messages),
+    ]
+    parts = ["⏭ Pending input"]
+    for title, messages in sections:
+        if not messages:
+            continue
+        shown = list(messages[:3])
+        parts.extend(["", title])
+        parts.extend(f"↳ {_clip_pending_input_line(message)}" for message in shown)
+        if len(messages) > len(shown):
+            parts.append(f"preview {len(shown)}/{len(messages)} messages")
+    if preview.edit_hint:
+        parts.extend(["", preview.edit_hint])
+    return "\n".join(parts)
 
 
 async def update_status_message(
@@ -63,8 +94,8 @@ async def update_status_message(
     Also detects permission prompt UIs (not triggered via JSONL) and enters
     interactive mode when found.
     """
-    w = await tmux_manager.find_window_by_id(window_id)
     turn_generation = current_turn_generation(user_id, thread_id)
+    w = await tmux_manager.find_window_by_id(window_id)
     if not w:
         # Window gone, enqueue clear (unless skipping status)
         if not skip_status:
@@ -83,6 +114,14 @@ async def update_status_message(
         # Transient capture failure - keep existing status message
         return
     surface = classify_input_surface(pane_text)
+    pending_input_text = _build_pending_input_text(pane_text)
+    await enqueue_pending_input_update(
+        bot,
+        user_id,
+        window_id,
+        pending_input_text,
+        thread_id=thread_id,
+    )
 
     interactive_window = get_interactive_window(user_id, thread_id)
     should_check_new_ui = True

@@ -39,6 +39,24 @@ class InputSurface:
 
 
 @dataclass(frozen=True)
+class PendingInputPreview:
+    """Best-effort extraction of Codex pending input preview surface."""
+
+    pending_steers: tuple[str, ...] = ()
+    rejected_steers: tuple[str, ...] = ()
+    queued_messages: tuple[str, ...] = ()
+    edit_hint: str = ""
+
+    @property
+    def is_empty(self) -> bool:
+        return not (
+            self.pending_steers
+            or self.rejected_steers
+            or self.queued_messages
+        )
+
+
+@dataclass(frozen=True)
 class UIPattern:
     """A text-marker pair that delimits an interactive UI region.
 
@@ -179,6 +197,17 @@ REMOTE_ACTION_PROMPTS = frozenset(
 # ── Post-processing ──────────────────────────────────────────────────────
 
 _RE_LONG_DASH = re.compile(r"^─{5,}$")
+_QUEUED_FOLLOW_UP_HEADER_RE = re.compile(r"^\s*Queued follow-up messages\s*$")
+_PENDING_STEERS_HEADER_RE = re.compile(
+    r"^\s*Messages to be submitted after next tool call\s*$"
+)
+_REJECTED_STEERS_HEADER_RE = re.compile(
+    r"^\s*Messages to be submitted at end of turn\s*$"
+)
+_EDIT_LAST_QUEUED_RE = re.compile(r"edit last queued message", re.IGNORECASE)
+_PENDING_ITEM_PREFIX_RE = re.compile(
+    r"^\s*(?:[☐☑☒□◻◽▫▪▢▣↳→➜➤•◦]\s*)+",
+)
 
 
 def _shorten_separators(text: str) -> str:
@@ -358,6 +387,90 @@ def strip_pane_chrome(lines: list[str]) -> list[str]:
         if len(stripped) >= 20 and all(c == "─" for c in stripped):
             return lines[:i]
     return lines
+
+
+def extract_pending_input_preview(pane_text: str) -> PendingInputPreview:
+    """Extract queued follow-up messages from the visible terminal surface."""
+    if not pane_text:
+        return PendingInputPreview()
+
+    lines = strip_pane_chrome(pane_text.splitlines())
+    header_indices: list[int] = []
+    for index, line in enumerate(lines):
+        if (
+            _QUEUED_FOLLOW_UP_HEADER_RE.match(line)
+            or _PENDING_STEERS_HEADER_RE.match(line)
+            or _REJECTED_STEERS_HEADER_RE.match(line)
+        ):
+            header_indices.append(index)
+    if not header_indices:
+        return PendingInputPreview()
+
+    # Prefer the newest contiguous pending-input block near the bottom.
+    header_index = header_indices[-1]
+    for previous in reversed(header_indices[:-1]):
+        bridge_ok = True
+        for raw_line in lines[previous + 1 : header_index]:
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            if _EDIT_LAST_QUEUED_RE.search(stripped):
+                continue
+            if _PENDING_ITEM_PREFIX_RE.match(stripped):
+                continue
+            bridge_ok = False
+            break
+        if not bridge_ok:
+            break
+        header_index = previous
+
+    pending_steers: list[str] = []
+    rejected_steers: list[str] = []
+    queued_messages: list[str] = []
+    edit_hint = ""
+    header_line = lines[header_index].strip()
+    if _PENDING_STEERS_HEADER_RE.match(header_line):
+        current_section = "pending_steers"
+    elif _REJECTED_STEERS_HEADER_RE.match(header_line):
+        current_section = "rejected_steers"
+    else:
+        current_section = "queued_messages"
+    for raw_line in lines[header_index + 1 :]:
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        if _EDIT_LAST_QUEUED_RE.search(stripped):
+            edit_hint = stripped
+            continue
+        if _PENDING_STEERS_HEADER_RE.match(stripped):
+            current_section = "pending_steers"
+            continue
+        if _REJECTED_STEERS_HEADER_RE.match(stripped):
+            current_section = "rejected_steers"
+            continue
+        if _QUEUED_FOLLOW_UP_HEADER_RE.match(stripped):
+            current_section = "queued_messages"
+            continue
+        if not current_section:
+            continue
+
+        message = _PENDING_ITEM_PREFIX_RE.sub("", stripped).strip()
+        if not message:
+            continue
+        if current_section == "pending_steers":
+            pending_steers.append(message)
+            continue
+        if current_section == "rejected_steers":
+            rejected_steers.append(message)
+            continue
+        queued_messages.append(message)
+
+    return PendingInputPreview(
+        pending_steers=tuple(pending_steers),
+        rejected_steers=tuple(rejected_steers),
+        queued_messages=tuple(queued_messages),
+        edit_hint=edit_hint,
+    )
 
 
 def extract_bash_output(pane_text: str, command: str) -> str | None:

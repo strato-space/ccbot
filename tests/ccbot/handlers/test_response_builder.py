@@ -135,6 +135,55 @@ class TestBuildResponseParts:
         assert "```json" in formatted
         assert "\n```\n\npreview " in formatted
 
+    def test_tool_result_multiline_text_renders_as_text_block(self):
+        formatted = format_response_text(
+            "line 1\nline 2\nline 3",
+            is_complete=True,
+            content_type="tool_result",
+            role="assistant",
+        )
+
+        assert "Tool Output" in formatted
+        assert "```text" in formatted
+        assert "line 1" in formatted
+        assert "line 3" in formatted
+
+    def test_tool_result_single_line_text_renders_as_text_block(self):
+        formatted = format_response_text(
+            "Tool output: 7 line(s)",
+            is_complete=True,
+            content_type="tool_result",
+            role="assistant",
+        )
+
+        assert "Tool Output" in formatted
+        assert "```text" in formatted
+        assert "Tool output: 7 line(s)" in formatted
+
+    def test_tool_use_preserves_existing_fenced_preview_without_double_wrap(self):
+        formatted = format_response_text(
+            "exec_command\n```sh\nbd show server-k7k\n```\n\npreview 1/4 lines",
+            is_complete=True,
+            content_type="tool_use",
+            role="assistant",
+        )
+
+        assert formatted.count("```sh") == 1
+        assert "```text" not in formatted
+        assert "\n```\n\npreview 1/4 lines" in formatted
+
+    def test_tool_result_inline_backticks_do_not_disable_text_block_formatting(self):
+        formatted = format_response_text(
+            "Tool output mentions ```token``` inline",
+            is_complete=True,
+            content_type="tool_result",
+            role="assistant",
+        )
+
+        assert "Tool Output" in formatted
+        assert "```text" in formatted
+        assert "```token``` inline" in formatted
+
     def test_file_change_multiline_renders_as_shell_block(self):
         formatted = format_response_text(
             "applied\nmodified src/ccbot/bot.py\nadded tests/ccbot/test_bot_contracts.py",

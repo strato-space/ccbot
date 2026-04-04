@@ -286,7 +286,8 @@ class TestCodexHistory:
         assert messages[0]["content_type"] == "commentary"
         assert messages[0]["event_kind"] == "commentary"
         assert messages[1]["content_type"] == "tool_result"
-        assert messages[1]["text"] == "done"
+        assert "```text" in messages[1]["text"]
+        assert "done" in messages[1]["text"]
 
 
 class TestRuntimeInputDriverIntegration:

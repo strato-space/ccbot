@@ -15,6 +15,15 @@
 - **12:00-12:13** Compact delivery no longer allows late commentary to appear
   below the final assistant answer; the commentary lane now closes in queue
   order and respects the public turn boundary.
+- **22:20-22:40** Crash-recovery review found and removed a turn-order risk
+  where `Heads up` text could be misclassified as warning/finally-visible
+  status, potentially weakening final-turn closure guarantees.
+- **22:20-22:40** Status polling no longer silently drops active-turn status
+  updates due to generation mismatch, and pending-input preview no longer
+  sticks stale after flood-control drops.
+- **22:20-22:40** Pending-input parsing now prefers the newest visible queue
+  block, preventing stale scrollback lines from being surfaced as live queued
+  user input.
 
 ### FEATURE IMPLEMENTED
 
@@ -38,6 +47,12 @@
 - **17:25-17:30** Overlapping `wait_agent` lifecycles no longer collapse into
   one visible wait, and legitimate user prompts that quote repository
   instructions are no longer hidden by broad payload heuristics.
+- **22:20-22:40** Added a dedicated pending-input artifact lane with safer
+  queue dedupe behavior under flood-control and explicit parser coverage for
+  multi-section pending-input previews.
+- **22:20-22:40** Added warning normalization guardrails so `Heads up`
+  detection applies to commentary warnings without stealing assistant-final
+  semantics.
 
 ### CHANGES
 
@@ -82,3 +97,21 @@
   `src/ccbot/telegram_delivery_policy.py`, and added regressions for
   overlapping waits plus visible quoted-instructions user prompts in
   `tests/ccbot/test_codex_rollout.py` and `tests/ccbot/test_bot_contracts.py`.
+- **22:20-22:40** Hardened warning normalization in
+  `src/ccbot/codex_rollout.py` so `Heads up` warning mapping is commentary-only;
+  added regression in `tests/ccbot/test_codex_rollout.py` for assistant-phase
+  `Heads up` text.
+- **22:20-22:40** Restored generation-scoped status polling in
+  `src/ccbot/handlers/status_polling.py` and added assertions in
+  `tests/ccbot/handlers/test_status_polling.py`.
+- **22:20-22:40** Improved newest-block pending-input extraction in
+  `src/ccbot/terminal_parser.py`, added multi-header parser regressions in
+  `tests/ccbot/test_terminal_parser.py`, and kept pending-input surface
+  rendering covered in `tests/ccbot/test_pending_input_status_polling.py`.
+- **22:20-22:40** Fixed flood-window dedupe stickiness for pending-input tasks
+  in `src/ccbot/handlers/message_queue.py` and added flood-drop regression in
+  `tests/ccbot/handlers/test_message_queue.py`.
+- **22:20-22:40** Tightened tool-output formatting in
+  `src/ccbot/handlers/response_builder.py` so incidental inline backticks do
+  not disable fenced preview formatting; added regression in
+  `tests/ccbot/handlers/test_response_builder.py`.

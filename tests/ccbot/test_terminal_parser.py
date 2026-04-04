@@ -7,6 +7,7 @@ import pytest
 
 from ccbot.terminal_parser import (
     classify_input_surface,
+    extract_pending_input_preview,
     extract_bash_output,
     extract_interactive_content,
     is_interactive_ui,
@@ -309,6 +310,114 @@ class TestClassifyInputSurface:
 
         assert surface.kind == "unknown"
         assert surface.has_visible_prompt is False
+
+
+class TestExtractPendingInputPreview:
+    def test_extracts_queued_follow_up_messages(self):
+        pane = (
+            "some output\n"
+            "Queued follow-up messages\n"
+            "◻ update docs\n"
+            "◻ continue infra\n"
+            "shift+← edit last queued message\n"
+            "──────────────────────────────\n"
+            "❯\n"
+        )
+
+        preview = extract_pending_input_preview(pane)
+
+        assert preview.queued_messages == ("update docs", "continue infra")
+        assert preview.edit_hint == "shift+← edit last queued message"
+
+    def test_returns_empty_when_no_pending_input_preview_exists(self):
+        preview = extract_pending_input_preview("Working (2m 03s • esc to interrupt)")
+
+        assert preview.is_empty is True
+
+    def test_preserves_literal_message_text_inside_pending_section(self):
+        pane = (
+            "Queued follow-up messages\n"
+            "> quote this\n"
+            "Waiting for deploy confirmation\n"
+            "/review\n"
+            "# heading\n"
+            "$ echo hi\n"
+            "shift+← edit last queued message\n"
+            "──────────────────────────────\n"
+            "❯\n"
+        )
+
+        preview = extract_pending_input_preview(pane)
+
+        assert preview.queued_messages == (
+            "> quote this",
+            "Waiting for deploy confirmation",
+            "/review",
+            "# heading",
+            "$ echo hi",
+        )
+
+    def test_strips_only_known_codex_checkbox_markers(self):
+        pane = (
+            "Queued follow-up messages\n"
+            "☐ update docs\n"
+            "↳ continue infra\n"
+            "• run smoke\n"
+            "shift+← edit last queued message\n"
+            "──────────────────────────────\n"
+            "❯\n"
+        )
+
+        preview = extract_pending_input_preview(pane)
+
+        assert preview.queued_messages == (
+            "update docs",
+            "continue infra",
+            "run smoke",
+        )
+
+    def test_extracts_codex_pending_and_rejected_steers_sections(self):
+        pane = (
+            "Messages to be submitted after next tool call\n"
+            "• continue infra\n"
+            "• git commit push\n"
+            "Messages to be submitted at end of turn\n"
+            "• send executive summary\n"
+            "Queued follow-up messages\n"
+            "◻ review rollout\n"
+            "shift+← edit last queued message\n"
+            "──────────────────────────────\n"
+            "❯\n"
+        )
+
+        preview = extract_pending_input_preview(pane)
+
+        assert preview.pending_steers == (
+            "continue infra",
+            "git commit push",
+        )
+        assert preview.rejected_steers == ("send executive summary",)
+        assert preview.queued_messages == ("review rollout",)
+        assert preview.edit_hint == "shift+← edit last queued message"
+
+    def test_prefers_last_pending_header_block_when_multiple_are_visible(self):
+        pane = (
+            "Queued follow-up messages\n"
+            "◻ stale old item\n"
+            "some unrelated transcript text\n"
+            "Messages to be submitted after next tool call\n"
+            "• continue infra\n"
+            "Queued follow-up messages\n"
+            "◻ fresh item\n"
+            "shift+← edit last queued message\n"
+            "──────────────────────────────\n"
+            "❯\n"
+        )
+
+        preview = extract_pending_input_preview(pane)
+
+        assert preview.pending_steers == ("continue infra",)
+        assert preview.queued_messages == ("fresh item",)
 
 
 # ── strip_pane_chrome ───────────────────────────────────────────────────

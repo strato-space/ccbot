@@ -1,5 +1,6 @@
 """Focused tests for message queue merge invariants and stale-delivery guards."""
 
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -8,9 +9,14 @@ from ccbot.handlers.message_queue import (
     MessageTask,
     _check_and_send_status,
     _can_merge_tasks,
+    _flood_until,
     _is_stale_turn_generation,
+    _pending_input_enqueued,
+    _process_pending_input_clear_task,
     clear_commentary_lane_state,
     current_turn_generation,
+    enqueue_pending_input_update,
+    shutdown_workers,
     _mark_commentary_closed,
     open_new_turn_generation,
     _process_commentary_update_task,
@@ -123,8 +129,6 @@ async def test_process_commentary_task_replaces_previous_visible_commentary() ->
     bot = AsyncMock()
     sent_first = AsyncMock()
     sent_first.message_id = 101
-    sent_second = AsyncMock()
-    sent_second.message_id = 102
 
     with (
         patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
@@ -132,7 +136,7 @@ async def test_process_commentary_task_replaces_previous_visible_commentary() ->
         patch(
             "ccbot.handlers.message_queue.send_with_fallback",
             new_callable=AsyncMock,
-            side_effect=[sent_first, sent_second],
+            side_effect=[sent_first],
         ) as mock_send,
     ):
         mock_tmux.find_window_by_id = AsyncMock(return_value=object())
@@ -143,8 +147,102 @@ async def test_process_commentary_task_replaces_previous_visible_commentary() ->
         await _process_commentary_update_task(bot, 1, first)
         await _process_commentary_update_task(bot, 1, second)
 
-    assert mock_send.await_count == 2
-    bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=101)
+    assert mock_send.await_count == 1
+    bot.delete_message.assert_not_awaited()
+    bot.edit_message_text.assert_awaited_once()
+    kwargs = bot.edit_message_text.await_args.kwargs
+    assert kwargs["chat_id"] == 100
+    assert kwargs["message_id"] == 101
+    assert "Wave A2 started" in kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_process_pending_input_task_reuses_visible_preview_in_place() -> None:
+    first = MessageTask(
+        task_type="pending_input_update",
+        window_id="@7",
+        thread_id=42,
+        text="⏭ Queued follow-up messages\n↳ update docs",
+    )
+    second = MessageTask(
+        task_type="pending_input_update",
+        window_id="@7",
+        thread_id=42,
+        text="⏭ Queued follow-up messages\n↳ update docs\n↳ continue infra",
+    )
+
+    bot = AsyncMock()
+    sent_first = AsyncMock()
+    sent_first.message_id = 201
+
+    with (
+        patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.message_queue.send_with_fallback",
+            new_callable=AsyncMock,
+            side_effect=[sent_first],
+        ) as mock_send,
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+        mock_sm.get_window_for_thread.return_value = "@7"
+        mock_sm.get_topic_binding_state.return_value = "bound"
+        mock_sm.resolve_chat_id.return_value = 100
+
+        from ccbot.handlers.message_queue import _process_pending_input_update_task
+
+        await _process_pending_input_update_task(bot, 1, first)
+        await _process_pending_input_update_task(bot, 1, second)
+
+    assert mock_send.await_count == 1
+    bot.delete_message.assert_not_awaited()
+    bot.edit_message_text.assert_awaited_once()
+    kwargs = bot.edit_message_text.await_args.kwargs
+    assert kwargs["chat_id"] == 100
+    assert kwargs["message_id"] == 201
+    assert "continue infra" in kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_pending_input_clear_is_not_generation_scoped() -> None:
+    task = MessageTask(
+        task_type="pending_input_clear",
+        window_id="@7",
+        thread_id=42,
+        turn_generation=1,
+    )
+
+    with (
+        patch(
+            "ccbot.handlers.message_queue._is_task_binding_active",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "ccbot.handlers.message_queue._do_clear_pending_input_message",
+            new_callable=AsyncMock,
+        ) as mock_clear,
+    ):
+        await _process_pending_input_clear_task(AsyncMock(), 1, task)
+
+    mock_clear.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_flood_drop_of_pending_input_clears_dedupe_state() -> None:
+    _flood_until[1] = time.monotonic() + 5.0
+    try:
+        await enqueue_pending_input_update(
+            AsyncMock(),
+            user_id=1,
+            window_id="@7",
+            pending_input_text="⏭ Pending input\nQueued follow-up messages\n↳ continue infra",
+            thread_id=42,
+        )
+        assert (1, 42) not in _pending_input_enqueued
+    finally:
+        _flood_until.pop(1, None)
+        await shutdown_workers()
 
 
 @pytest.mark.asyncio
@@ -173,6 +271,83 @@ async def test_process_commentary_task_drops_updates_after_final_answer() -> Non
             await _process_commentary_update_task(AsyncMock(), 1, task)
 
         mock_send.assert_not_awaited()
+    finally:
+        clear_commentary_lane_state(1, 42)
+
+
+@pytest.mark.asyncio
+async def test_commentary_after_orchestration_re_emits_at_tail_instead_of_editing_old_bubble() -> None:
+    commentary = MessageTask(
+        task_type="commentary_update",
+        window_id="@7",
+        thread_id=42,
+        text="Wave A1 started",
+        turn_generation=1,
+    )
+    orchestration = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["• Waiting for Mill [explorer]"],
+        content_type="orchestration",
+        semantic_kind="orchestration",
+        turn_generation=1,
+    )
+    commentary_update = MessageTask(
+        task_type="commentary_update",
+        window_id="@7",
+        thread_id=42,
+        text="Wave A1 updated after waiting",
+        turn_generation=1,
+    )
+
+    commentary_msg = AsyncMock()
+    commentary_msg.message_id = 301
+    orchestration_msg = AsyncMock()
+    orchestration_msg.message_id = 302
+    commentary_tail_msg = AsyncMock()
+    commentary_tail_msg.message_id = 303
+
+    bot = AsyncMock()
+
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.current_turn_generation",
+                return_value=1,
+            ),
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                side_effect=[commentary_msg, orchestration_msg, commentary_tail_msg],
+            ) as mock_send,
+            patch(
+                "ccbot.handlers.message_queue._check_and_send_status",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "ccbot.handlers.message_queue._send_task_images",
+                new_callable=AsyncMock,
+            ),
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+
+            await _process_commentary_update_task(bot, 1, commentary)
+            await _process_content_task(bot, 1, orchestration)
+            await _process_commentary_update_task(bot, 1, commentary_update)
+
+        assert mock_send.await_count == 3
+        bot.edit_message_text.assert_not_awaited()
+        assert bot.delete_message.await_count >= 1
+        deleted_ids = {
+            call.kwargs["message_id"] for call in bot.delete_message.await_args_list
+        }
+        assert 301 in deleted_ids
     finally:
         clear_commentary_lane_state(1, 42)
 
