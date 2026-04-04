@@ -27,6 +27,9 @@ Established claims:
 - The remaining tails are cleanup and migration work, not current correctness blockers.
 - A dedicated `ontology/` folder now exists in the repo as the compact
   source-of-truth entrypoint for core nouns and delivery boundaries.
+- The hidden-opener vs lifecycle-reopen edge case (`server-wmf`) is closed:
+  `turn_started` now reopens a turn only as a lane-closed fallback, preserving
+  the non-turn contract for hidden internal user payloads.
 
 Concrete implemented alignment already landed in:
 
@@ -34,6 +37,20 @@ Concrete implemented alignment already landed in:
 - [runtime_types.py](/home/tools/ccbot/src/ccbot/runtime_types.py)
 - [session_monitor.py](/home/tools/ccbot/src/ccbot/session_monitor.py)
 - [session.py](/home/tools/ccbot/src/ccbot/session.py)
+
+### Post-Plan Delta (2026-04-04)
+
+- Implemented lifecycle fallback in `handle_new_message`:
+  - reopen generation on lifecycle `turn_started` only when the pre-final /
+    technical-status lanes are still closed
+  - do not reopen when lanes are already open
+- Added regression coverage:
+  - `test_handle_new_message_reopens_turn_on_lifecycle_turn_started_when_lane_closed`
+  - `test_handle_new_message_does_not_reopen_turn_on_lifecycle_turn_started_when_lane_open`
+- Validation and rollout completed:
+  - `uv run --extra dev pytest tests/ccbot -q`
+  - `uv run --extra dev ruff check src tests`
+  - deployed on `str` with `ccbot.service` active
 
 ## Definitions
 

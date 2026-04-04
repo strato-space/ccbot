@@ -167,6 +167,9 @@ The reopen side of the contract is semantic, not merely visual:
 
 - any real `user turn opener` reopens the terminal surface for the next turn
 - a hidden internal prompt scaffold may still be a real user turn opener
+- if that hidden opener was suppressed for Telegram visibility and the lanes
+  remain closed, lifecycle `turn_started` is allowed to reopen turn generation
+  as an idempotent fallback
 - hidden notifications such as `<subagent_notification>` or
   `<turn_aborted>` are not user turn openers and must not reopen the surface
 - hidden internal technical payloads such as `<bash-stdout>`,
@@ -178,6 +181,12 @@ The reopen side of the contract is semantic, not merely visual:
 - once a newer turn opens, stale pre-final, technical-status, and stale final
   artifacts from the older turn must fail closed instead of surfacing below
   the newer turn
+
+This fallback is intentionally narrow:
+
+- it is keyed to lifecycle event `turn_started`
+- it must not create a visible duplicate user-opener bubble
+- it must not advance generation again if the lanes are already open
 
 ## Canonical Codex Message Preference
 

@@ -81,6 +81,9 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   final answer for the same turn, and no late status artifact appears below the
   final answer for the same turn. Put bluntly: no pre-final visible artifact
   or late technical status may leak below the terminal assistant bubble.
+  If a new turn starts via hidden opener scaffolding, lifecycle `turn_started`
+  can reopen the delivery lanes idempotently without creating a duplicate
+  visible user-opener bubble.
   When command/tool/file previews are surfaced, they follow a Codex-style split:
   preview body in fenced `sh` / `json`, truncation metadata outside the fence,
   and no redundant `completed · output 1 line(s)` footer when the preview

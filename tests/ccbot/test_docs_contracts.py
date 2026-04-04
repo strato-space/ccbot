@@ -41,6 +41,7 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "mutable technical status surface" in readme
     assert "no pre-final visible artifact" in readme
     assert "late technical status" in readme
+    assert "lifecycle `turn_started`" in readme
     assert "Verbose/debug paths may expose more raw execution surface" in readme
 
 
@@ -113,6 +114,7 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "pre-final visible artifact" in delivery
     assert "technical status artifact" in delivery
     assert "Pending input artifact" in delivery
+    assert "lifecycle `turn_started` may reopen the lanes idempotently" in delivery
     assert "ACP-protocol" in boundaries
     assert "ACP-module" in boundaries
     assert "Replay evidence is written by" in boundaries
@@ -237,6 +239,7 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "mutable technical status" in doc
     assert "turn generation" in doc
     assert "hidden internal prompt scaffold" in doc
+    assert "lifecycle `turn_started` is allowed to reopen turn generation" in doc
     assert "orchestration milestone, or surfaced preview bubble" in doc
     assert "durable Telegram content bubbles are" in doc
     assert "deliberately narrow" in doc

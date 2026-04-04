@@ -36,6 +36,9 @@ This note defines the Telegram-facing ontology for turn delivery.
   - semantic fact that a new user turn has begun
   - this may be a visible user echo or a hidden internal prompt scaffold that
     still starts a real runtime turn
+  - if the opener is hidden and the turn boundary would otherwise be missed by
+    delivery, lifecycle `turn_started` may reopen the lanes idempotently, but
+    only while the lanes are still closed
 
 - **Turn generation**
   - per-topic ordering generation used to prevent stale close tasks and stale
@@ -90,6 +93,9 @@ Technical execution classes include:
   same turn
 - no late technical status artifact may appear below the final answer for the
   same turn
+- lifecycle markers are not visible content by default, but `turn_started`
+  may act as a lane-reopen fallback when hidden opener scaffolding already
+  started a real turn and the pre-final/status lanes remained closed
 - if an already-started multipart send becomes stale mid-flight, the remaining
   parts must abort rather than leaking below the new boundary
 - pending input preview remains outside this terminal ordering barrier; it
