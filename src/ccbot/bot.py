@@ -35,6 +35,7 @@ Key functions: create_bot(), handle_new_message().
 import asyncio
 import io
 import logging
+import shlex
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -132,6 +133,7 @@ from .handlers.message_sender import (
 from .markdown_v2 import convert_markdown
 from .handlers.response_builder import build_response_parts, build_status_text
 from .handlers.status_polling import status_poll_loop
+from .runtime_types import runtime_capability_registry
 from .screenshot import text_to_image
 from .state_schema import (
     BINDING_STATE_BIND_FLOW,
@@ -358,6 +360,58 @@ def _get_window_runtime_kind(window_id: str) -> str | None:
     if isinstance(runtime_kind, str) and runtime_kind:
         return runtime_kind
     return None
+
+
+def _infer_known_runtime_kind_from_pane_command(command: str) -> str | None:
+    """Infer a runtime from an active pane command without default fallback."""
+    normalized = (command or "").strip()
+    if not normalized:
+        return None
+    try:
+        tokens = shlex.split(normalized)
+    except ValueError:
+        tokens = normalized.split()
+    if not tokens:
+        return None
+
+    executable = Path(tokens[0]).name.casefold()
+    for runtime_kind, capability in runtime_capability_registry.items():
+        aliases = {
+            capability.launch_command_name.casefold(),
+            *(alias.casefold() for alias in capability.command_aliases),
+        }
+        if executable in aliases:
+            return runtime_kind
+    return None
+
+
+def _get_registered_window_runtime_kind(window_id: str) -> str | None:
+    """Return a trusted persisted runtime kind for an already-registered window."""
+    window_states = getattr(session_manager, "window_states", None)
+    if not isinstance(window_states, dict):
+        return _get_window_runtime_kind(window_id)
+
+    state = window_states.get(window_id)
+    if state is None:
+        return None
+
+    # Ignore placeholder descriptors that only contain the legacy default runtime.
+    if not getattr(state, "cwd", "") and not getattr(state, "thread_id", ""):
+        return None
+
+    runtime_kind = getattr(state, "runtime_kind", None)
+    if isinstance(runtime_kind, str) and runtime_kind:
+        return runtime_kind
+    return None
+
+
+def _resolve_existing_window_runtime_kind(window_id: str, pane_command: str) -> str:
+    """Resolve the runtime kind for a live tmux window selected via /bind."""
+    return (
+        _infer_known_runtime_kind_from_pane_command(pane_command)
+        or _get_registered_window_runtime_kind(window_id)
+        or _default_launch_runtime_kind()
+    )
 
 
 def build_bot_commands() -> list[BotCommand]:
@@ -2237,21 +2291,27 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
 
         display = w.window_name
-        clear_window_picker_state(context.user_data)
-        session_manager.bind_thread(
-            user.id, thread_id, selected_wid, window_name=display
-        )
-
-        # Rename the topic to match the window name
-        resolved_chat = session_manager.resolve_chat_id(user.id, thread_id)
-        try:
-            await context.bot.edit_forum_topic(
-                chat_id=resolved_chat,
-                message_thread_id=thread_id,
-                name=display,
+        if not w.cwd:
+            await query.answer(
+                f"Window '{display}' has no detectable workspace path",
+                show_alert=True,
             )
-        except Exception as e:
-            logger.debug(f"Failed to rename topic: {e}")
+            return
+
+        clear_window_picker_state(context.user_data)
+        runtime_kind = _resolve_existing_window_runtime_kind(
+            selected_wid,
+            w.pane_current_command,
+        )
+        await _register_bound_window(
+            context,
+            user,
+            thread_id,
+            window_id=selected_wid,
+            window_name=display,
+            selected_path=w.cwd,
+            runtime_kind=runtime_kind,
+        )
 
         await safe_edit(
             query,
@@ -2259,6 +2319,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
 
         # Forward pending text if any
+        resolved_chat = session_manager.resolve_chat_id(user.id, thread_id)
         pending_text = (
             context.user_data.get("_pending_thread_text") if context.user_data else None
         )

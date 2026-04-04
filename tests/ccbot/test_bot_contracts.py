@@ -683,6 +683,109 @@ class TestCommandSurface:
         )
         mock_sm.require_manual_bind.assert_called_once_with(1, 42)
 
+    @pytest.mark.asyncio
+    async def test_window_picker_bind_registers_existing_window_before_binding(self):
+        update = MagicMock()
+        update.effective_user = MagicMock(id=1)
+        update.effective_chat = MagicMock(type="supergroup", id=100)
+        update.callback_query = MagicMock()
+        update.callback_query.data = append_bind_flow_token(
+            f"{bot_mod.CB_WIN_BIND}0",
+            version=2,
+            nonce="nonce123",
+        )
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.message = MagicMock(
+            message_thread_id=42,
+            chat=update.effective_chat,
+        )
+        context = _make_context()
+        context.user_data = {
+            "_pending_thread_id": 42,
+            bot_mod.STATE_KEY: bot_mod.STATE_SELECTING_WINDOW,
+            bot_mod.UNBOUND_WINDOWS_KEY: ["@7"],
+        }
+        window = SimpleNamespace(
+            window_id="@7",
+            window_name="node",
+            cwd="/tmp/project",
+            pane_current_command="node",
+        )
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot._register_bound_window", new_callable=AsyncMock) as mock_register,
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock),
+            patch.object(bot_mod.config, "claude_command", "codex --no-alt-screen"),
+        ):
+            mock_sm.validate_topic_bind_flow_callback.return_value = True
+            mock_tmux.find_window_by_id = AsyncMock(return_value=window)
+
+            await bot_mod.callback_handler(update, context)
+
+        mock_register.assert_awaited_once_with(
+            context,
+            update.effective_user,
+            42,
+            window_id="@7",
+            window_name="node",
+            selected_path="/tmp/project",
+            runtime_kind="codex",
+        )
+        mock_sm.bind_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_window_picker_bind_existing_window_without_cwd_fails_closed(self):
+        update = MagicMock()
+        update.effective_user = MagicMock(id=1)
+        update.effective_chat = MagicMock(type="supergroup", id=100)
+        update.callback_query = MagicMock()
+        update.callback_query.data = append_bind_flow_token(
+            f"{bot_mod.CB_WIN_BIND}0",
+            version=2,
+            nonce="nonce123",
+        )
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.message = MagicMock(
+            message_thread_id=42,
+            chat=update.effective_chat,
+        )
+        context = _make_context()
+        context.user_data = {
+            "_pending_thread_id": 42,
+            bot_mod.STATE_KEY: bot_mod.STATE_SELECTING_WINDOW,
+            bot_mod.UNBOUND_WINDOWS_KEY: ["@7"],
+        }
+        window = SimpleNamespace(
+            window_id="@7",
+            window_name="node",
+            cwd="",
+            pane_current_command="node",
+        )
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot._register_bound_window", new_callable=AsyncMock) as mock_register,
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock),
+        ):
+            mock_sm.validate_topic_bind_flow_callback.return_value = True
+            mock_tmux.find_window_by_id = AsyncMock(return_value=window)
+
+            await bot_mod.callback_handler(update, context)
+
+        mock_register.assert_not_awaited()
+        mock_sm.bind_thread.assert_not_called()
+        update.callback_query.answer.assert_awaited_once_with(
+            "Window 'node' has no detectable workspace path",
+            show_alert=True,
+        )
+
 
 class TestTopicCleanup:
     @pytest.mark.asyncio
