@@ -15,6 +15,8 @@ preserving the semantic distinctions needed by the bot layer.
 from __future__ import annotations
 
 import json
+import os
+import shlex
 from typing import Any, Iterable
 
 from .runtime_types import NormalizedEvent
@@ -152,6 +154,45 @@ def _compact_multiline(text: str, *, max_chars: int = 160) -> str:
     return f"{head} (+{len(lines) - 1} more lines)"
 
 
+_SHELL_NAMES = {"sh", "bash", "zsh", "fish"}
+
+
+def _extract_shell_payload(command: str) -> str:
+    stripped = command.strip()
+    if not stripped:
+        return ""
+
+    lines = _nonempty_lines(stripped)
+    if len(lines) >= 3:
+        shell_name = os.path.basename(lines[0])
+        if shell_name in _SHELL_NAMES and lines[1] == "-lc":
+            return "\n".join(lines[2:]).strip()
+
+    try:
+        parts = shlex.split(stripped)
+    except ValueError:
+        return stripped
+
+    if len(parts) >= 3:
+        shell_name = os.path.basename(parts[0])
+        if shell_name in _SHELL_NAMES and parts[1] == "-lc":
+            return parts[2].strip()
+
+    return stripped
+
+
+def _command_code_block(command: str, *, max_lines: int = 4, max_chars: int = 140) -> str:
+    payload = _extract_shell_payload(command)
+    lines = _nonempty_lines(payload)
+    if not lines:
+        return ""
+
+    clipped = [_compact_inline(line, max_chars=max_chars) for line in lines[:max_lines]]
+    if len(lines) > max_lines:
+        clipped.append(f"... (+{len(lines) - max_lines} more lines)")
+    return "```sh\n" + "\n".join(clipped) + "\n```"
+
+
 def _tool_call_summary(name: str, arguments: Any) -> str:
     lowered = name.lower()
 
@@ -213,15 +254,22 @@ def _command_execution_summary(
 ) -> str:
     parts: list[str] = []
     if command:
-        parts.append(_compact_multiline(command))
+        command_block = _command_code_block(command)
+        if command_block:
+            parts.append(command_block)
+        else:
+            parts.append(_compact_multiline(command))
     if status:
         parts.append(status)
     elif output:
         parts.append("completed")
     lines = _nonempty_lines(output)
     if lines:
-        parts.append(f"output {len(lines)} line(s)")
-    if cwd and len(parts) < 3:
+        if parts and parts[-1] in {"completed", "failed", "declined", "in_progress"}:
+            parts[-1] = f"{parts[-1]} · output {len(lines)} line(s)"
+        else:
+            parts.append(f"output {len(lines)} line(s)")
+    elif cwd and len(parts) < 3:
         parts.append(_compact_inline(cwd, max_chars=120))
     return "\n".join(part for part in parts if part) or "[command_execution]"
 

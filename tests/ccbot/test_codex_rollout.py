@@ -114,12 +114,38 @@ def test_codex_rollout_handles_command_and_file_change_turns() -> None:
         "lifecycle",
     ]
     assert events[0].content_type == "command_execution"
+    assert "```sh" in events[0].text
     assert "codex run --help" in events[0].text
-    assert "output 1 line(s)" in events[0].text
+    assert "completed · output 1 line(s)" in events[0].text
     assert "ok" not in events[0].text
     assert events[1].content_type == "file_change"
     assert "src/ccbot/session_monitor.py" in events[1].text
     assert events[2].tool_name == "turn_completed"
+
+
+def test_codex_rollout_command_execution_extracts_bash_lc_script_into_code_block() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-04T10:00:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "command_execution",
+                "command": "/bin/bash\n-lc\njq '.history[] | keys' /tmp/hard_b.json | sed -n '1,200p'",
+                "cwd": "/home/tools/server/comfy",
+                "status": "completed",
+                "aggregated_output": "line1\nline2\n",
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].content_type == "command_execution"
+    assert "```sh" in events[0].text
+    assert "/bin/bash" not in events[0].text
+    assert "jq '.history[] | keys' /tmp/hard_b.json | sed -n '1,200p'" in events[0].text
+    assert "completed · output 2 line(s)" in events[0].text
 
 
 def test_codex_rollout_suppresses_duplicate_event_msg_history_delivery() -> None:
