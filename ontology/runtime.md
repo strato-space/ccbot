@@ -12,8 +12,11 @@ This note defines the core runtime nouns for `ccbot`.
     instead requires explicit bind
 
 - **Binding**
-  - persisted association from a Telegram topic to a live tmux window, together
+  - persisted association from a Telegram topic to a delivery source, together
     with runtime metadata needed for safe routing and delivery
+  - binding scope is explicit:
+    - `tmux` for a live terminal container
+    - `external` for a persisted runtime thread without live tmux attachment
 
 - **tmux window**
   - the live terminal container managed by the bot
@@ -55,11 +58,21 @@ This note defines the core runtime nouns for `ccbot`.
   - semantic handling mode for a submitted message
   - current required modes: `queue`, `steer`
 
+- **Input injection plane**
+  - capability to inject text/keys into a live runtime process
+  - available only when the topic is bound to a live tmux scope
+  - external-thread binding may stay read-only when no live injection plane is
+    attached
+
 ## Canonical Model
 
 `Telegram topic --governed by topic control policy--> may or may not enter a binding flow`
 
-`binding -> tmux window -> runtime process`
+`binding -> delivery source`
+
+`binding_scope=tmux -> tmux window -> runtime process`
+
+`binding_scope=external -> runtime conversation identity -> persisted replay evidence`
 
 `runtime process -> binds to runtime conversation identity`
 
@@ -95,7 +108,7 @@ Raw operator control is different:
 
 ## Operational Invariants
 
-- a topic may bind to at most one live tmux window at a time
+- a topic may bind to at most one delivery source at a time
 - a tmux window may host at most one active runtime process at a time
 - a live process may be associated with at most one primary runtime
   conversation identity at a time
@@ -104,3 +117,7 @@ Raw operator control is different:
   not restore the previous live process
 - history is reconstructed from normalized replay evidence, not from the live
   process buffer
+- external-thread bind may deliver replay events without exposing a live input
+  injection plane
+- if no live input injection plane exists, Telegram text/keys must fail closed
+  as read-only rather than pretending to send into tmux

@@ -5,6 +5,7 @@
 The current Codex adaptation only advertises the supported Telegram core lane:
 
 - topic -> live tmux window binding
+- topic -> external Codex persisted-thread bind (read-only replay mode)
 - directory / thread picker
 - text / voice / photo forwarding
 - history and screenshot inspection
@@ -171,7 +172,7 @@ These commands are registered in the Telegram bot menu as the stable topic-contr
 
 | Command | Bot Menu Description | Function |
 |---------|---------------------|----------|
-| `/bind` | Start or resume the topic bind flow | Explicitly choose a live window or workspace for this topic |
+| `/bind` | Start or resume the topic bind flow | Explicitly choose a live window/workspace, or use `/bind <thread-name|id>` in Codex lane to attach external read-only replay |
 | `/unbind` | Detach this topic from its live window | Leaves the tmux window running but moves the topic to `manual_bind_required` |
 | `/resume <token>` | Bind this topic to a persisted runtime thread | Works only when the configured launch lane supports deterministic explicit resume from an unbound topic |
 | `/rename <name>` | Rename the current tmux window and topic | Sync the live tmux label, forum topic title, and supported runtime title metadata |
@@ -228,6 +229,8 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
   - final assistant text
 - Latest commentary remains visible as a dedicated artifact, but it is not a
   durable ordinary content bubble.
+- Warning artifacts remain durable and visible; repeated identical warning text
+  in one topic deduplicates into one bubble with a `×N` counter when `N > 2`.
 - Queued follow-up messages may remain visible as a separate pending-input
   artifact. They preview future input and are therefore not part of the
   current turn's pre-final visible artifact class.
@@ -249,6 +252,12 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
 - After explicit `/unbind` or picker cancel, the topic moves to `manual_bind_required`.
 - In `manual_bind_required`, plain messages do not re-trigger bind implicitly.
 - Only explicit `/bind` or explicit `/resume` may re-enter a bind-capable flow.
+- In Codex lane, `/bind <thread-name|id>` may attach an external persisted
+  thread without tmux. This binding is replay-delivery first and marked
+  read-only.
+- In external read-only bind mode, Telegram input must fail closed with a
+  read-only warning and a hint to reattach writable live control via `/bind`
+  or `/resume`.
 
 ### queue vs steer
 

@@ -25,9 +25,14 @@ but this folder is the canonical ontology entrypoint.
 
 `Telegram topic -> binding -> tmux window -> runtime process -> runtime conversation identity -> replay evidence`
 
+External replay-only variant:
+
+`Telegram topic -> binding(binding_scope=external) -> runtime conversation identity -> replay evidence`
+
 More precisely:
 
-- `binding -> tmux window -> runtime process`
+- `binding_scope=tmux -> tmux window -> runtime process`
+- `binding_scope=external -> runtime conversation identity -> replay evidence`
 - `runtime process -> semantic emitter / supervisor`
 - `semantic emitter / supervisor -> live semantic stream`
 - `semantic emitter / supervisor -> persisted replay evidence`

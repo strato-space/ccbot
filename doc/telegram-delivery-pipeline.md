@@ -26,6 +26,7 @@ The default Telegram surface is `compact`, not `verbose`.
 
 - human-facing final answers stay as ordinary content
 - human-facing orchestration milestones stay as ordinary content
+- warning artifacts stay visible as durable system notices
 - the latest human-facing commentary remains visible as a dedicated artifact so
   progress narrative does not disappear under mutable status churn
 - reasoning and thinking summaries are routed through the mutable status
@@ -38,6 +39,8 @@ The default Telegram surface is `compact`, not `verbose`.
   ordinary chat content
 - placeholder reasoning such as `[reasoning]` is suppressed
 - raw tool payloads, giant command stdout dumps, and full file bodies must be summarized before they reach Telegram
+- repeated identical warnings in one topic deduplicate into one latest warning
+  bubble, with a visible repeat counter only when `N > 2`
 - when tool or file summaries are surfaced, they should prefer Codex-style
   code-aware formatting: shell payloads in fenced `sh` blocks, JSON payloads
   in fenced `json` blocks, with truncation footers outside the fenced block
@@ -64,6 +67,7 @@ The delivery pipeline keeps:
   - commentary
   - orchestration milestones
   - any future human-facing preview bubble that the product chooses to surface
+- one latest-warning artifact with warning-dedup state per `(user_id, topic)`
 
 Ordering guarantees:
 
@@ -84,13 +88,16 @@ Ordering guarantees:
 9. no late status artifact may appear below the final answer for the same turn
 10. no late commentary, orchestration milestone, or surfaced preview bubble may
    appear below the final answer for the same turn
-11. a new user turn advances the topic turn generation before the new turn's
+11. warning artifacts are not members of the current-turn pre-final surface and
+    are not dropped by terminal closure; warning dedup state is keyed by topic
+    and latest warning text
+12. a new user turn advances the topic turn generation before the new turn's
     artifacts are enqueued
-12. stale close tasks from an older generation must fail closed instead of
+13. stale close tasks from an older generation must fail closed instead of
     reclosing the newer turn's visible or status surface
-13. this ordering contract applies to the whole `pre-final visible artifact`
+14. this ordering contract applies to the whole `pre-final visible artifact`
     class, not only to commentary
-14. if an already-started multipart content send becomes stale mid-flight, the
+15. if an already-started multipart content send becomes stale mid-flight, the
     remaining parts and trailing image/status sends must abort rather than
     surfacing below a newer turn or below the terminal turn artifact
 
@@ -221,6 +228,7 @@ deliberately narrow:
 
 - user-visible user echo
 - orchestration milestones such as spawned/waiting/completed subagent summaries
+- warning artifacts (latest-warning dedup with `×N` counter for `N > 2`)
 - final assistant text
 
 In addition to those durable bubbles, `compact` keeps one latest-only visible
@@ -257,6 +265,13 @@ multi-agent history rows:
 Each `wait_agent` invocation owns its own waiting/finished milestone pair. If
 two overlapping waits target the same agent set, both lifecycles must remain
 visible instead of collapsing into one shared dedupe key.
+
+Warning artifacts are intentionally separate from both technical status churn
+and pre-final turn artifacts:
+
+- warnings are durable system notices
+- they are deduplicated against the latest warning text in the same topic
+- a different warning text creates a new warning bubble and resets the counter
 
 Those classes must either:
 
@@ -312,6 +327,13 @@ Routing mode affects semantics:
 Raw terminal control is not part of this equal message layer.
 Direct human `tmux` input remains a separate operator intervention surface and
 is not modeled as an ordinary queued semantic message.
+
+External-thread bind follows the same split:
+
+- replay/event delivery may remain active without tmux
+- input injection requires a live tmux binding
+- if no live injection plane exists, Telegram input must fail closed with an
+  explicit read-only warning and reattach hint
 
 ## Why This Is Not ACP-First
 

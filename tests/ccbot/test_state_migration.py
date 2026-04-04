@@ -344,6 +344,74 @@ async def test_monitor_recovers_codex_binding_from_persisted_registration(
     assert active_source.file_path.name == f"rollout-{thread_id}.jsonl"
 
 
+@pytest.mark.asyncio
+async def test_monitor_includes_external_codex_binding_without_tmux_window(
+    tmp_path,
+    monkeypatch,
+):
+    codex_home = tmp_path / ".codex"
+    sessions_root = codex_home / "sessions" / "2026" / "04" / "02"
+    sessions_root.mkdir(parents=True)
+    thread_id = "019d4e76-7fae-7a90-bc40-2290ee269660"
+    (codex_home / "session_index.jsonl").write_text(
+        json.dumps(
+            {
+                "id": thread_id,
+                "thread_name": "External thread",
+                "updated_at": "2026-04-02T14:00:00Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rollout = sessions_root / f"rollout-{thread_id}.jsonl"
+    rollout.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-02T14:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": thread_id, "cwd": "/tmp/project-9"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(session_module.config, "state_file", tmp_path / "state.json")
+    monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+    manager = SessionManager(
+        codex_thread_catalog=CodexThreadCatalog(codex_home=codex_home)
+    )
+    manager.bind_external_thread(
+        100,
+        7,
+        runtime_kind="codex",
+        source_thread_id=thread_id,
+        summary="External thread",
+        cwd="/tmp/project-9",
+        file_path=str(rollout),
+        read_only=True,
+    )
+    monkeypatch.setattr(session_module, "session_manager", manager)
+
+    monitor = SessionMonitor(
+        projects_path=tmp_path / "projects",
+        state_file=tmp_path / "monitor_state.json",
+    )
+    monkeypatch.setattr(
+        "ccbot.session_monitor.tmux_manager.list_windows",
+        AsyncMock(return_value=[]),
+    )
+
+    current_map = await monitor._load_current_session_map()
+
+    assert current_map == {"external:codex:019d4e76-7fae-7a90-bc40-2290ee269660": thread_id}
+    assert thread_id in monitor._active_rollout_sources
+    source = monitor._active_rollout_sources[thread_id]
+    assert source.runtime_kind == "codex"
+    assert source.file_path == rollout
+
+
 def test_state_json_persists_topic_policy_and_binding_state(tmp_path, monkeypatch):
     state_file = tmp_path / "state.json"
     monkeypatch.setattr(session_module.config, "state_file", state_file)

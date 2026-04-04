@@ -76,6 +76,27 @@ class TestThreadBindings:
         binding = next(mgr.iter_topic_bindings())
         assert binding.runtime_kind == "codex"
 
+    def test_bind_external_thread_exposes_external_topic_binding(self, mgr: SessionManager) -> None:
+        binding_window_id = mgr.bind_external_thread(
+            100,
+            1,
+            runtime_kind="codex",
+            source_thread_id="thread-1",
+            summary="Thread One",
+            cwd="/tmp/project",
+            file_path="/tmp/rollout-thread-1.jsonl",
+            read_only=True,
+        )
+
+        assert binding_window_id == "external:codex:thread-1"
+        binding = mgr.get_topic_binding(100, 1)
+        assert binding is not None
+        assert binding.binding_scope == "external"
+        assert binding.source_thread_id == "thread-1"
+        assert binding.read_only is True
+        assert binding.runtime_kind == "codex"
+        assert binding.window_name == "Thread One"
+
 
 class TestGroupChatId:
     """Tests for group chat_id routing (supergroup forum topic support).
@@ -289,6 +310,62 @@ class TestCodexHistory:
         assert "```text" in messages[1]["text"]
         assert "done" in messages[1]["text"]
 
+    @pytest.mark.asyncio
+    async def test_resolve_thread_for_external_codex_binding(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        codex_home = tmp_path / ".codex"
+        sessions_root = codex_home / "sessions" / "2026" / "04" / "02"
+        sessions_root.mkdir(parents=True)
+        thread_id = "019d4e76-7fae-7a90-bc40-2290ee269660"
+        (codex_home / "session_index.jsonl").write_text(
+            json.dumps(
+                {
+                    "id": thread_id,
+                    "thread_name": "External thread",
+                    "updated_at": "2026-04-02T14:00:00Z",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        rollout = sessions_root / f"rollout-{thread_id}.jsonl"
+        rollout.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-04-02T14:00:00Z",
+                    "type": "session_meta",
+                    "payload": {"id": thread_id, "cwd": "/tmp/project-9"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+        monkeypatch.setattr(SessionManager, "_save_state", lambda self: None)
+        manager = SessionManager(
+            codex_thread_catalog=CodexThreadCatalog(codex_home=codex_home)
+        )
+        binding_window_id = manager.bind_external_thread(
+            100,
+            7,
+            runtime_kind="codex",
+            source_thread_id=thread_id,
+            summary="External thread",
+            cwd="/tmp/project-9",
+            file_path=str(rollout),
+            read_only=True,
+        )
+
+        locator = await manager.resolve_thread_for_window(binding_window_id)
+
+        assert locator is not None
+        assert locator.thread_id == thread_id
+        assert locator.runtime_kind == "codex"
+        assert locator.cwd == "/tmp/project-9"
+        assert locator.file_path.endswith(f"rollout-{thread_id}.jsonl")
+
 
 class TestRuntimeInputDriverIntegration:
     @pytest.mark.asyncio
@@ -382,6 +459,12 @@ class TestRuntimeInputDriverIntegration:
         assert message == "Input blocked by a visible prompt in the terminal"
         mock_driver.send_text.assert_not_called()
         mock_driver.send_raw_slash_command.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_to_window_fails_closed_for_external_binding(self, mgr: SessionManager):
+        success, message = await mgr.send_to_window("external:codex:thread-1", "ping")
+        assert success is False
+        assert "read-only mode" in message
 
     @pytest.mark.asyncio
     async def test_send_special_key_uses_runtime_input_driver(self, mgr: SessionManager):

@@ -307,6 +307,55 @@ class TestCommandSurface:
         mock_reply.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_bind_command_with_codex_token_binds_external_read_only(self):
+        update = _make_topic_update()
+        update.message.text = "/bind thread-1"
+        context = _make_context()
+
+        with (
+            patch.object(bot_mod.config, "claude_command", "codex"),
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch(
+                "ccbot.bot._resolve_resume_command_target",
+                new_callable=AsyncMock,
+                return_value=(
+                    bot_mod._ResumeCommandTarget(
+                        runtime_kind="codex",
+                        thread_id="thread-1",
+                        summary="Thread One",
+                        cwd="/tmp/project",
+                        file_path="/tmp/rollout-thread-1.jsonl",
+                    ),
+                    None,
+                ),
+            ),
+            patch("ccbot.bot.clear_topic_state", new_callable=AsyncMock) as mock_clear,
+            patch("ccbot.bot._sync_topic_title", new_callable=AsyncMock, return_value=True),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+
+            await bot_mod.bind_command(update, context)
+
+        mock_clear.assert_awaited_once_with(1, 42, context.bot, context.user_data)
+        mock_sm.allow_implicit_bind.assert_called_once_with(1, 42)
+        mock_sm.bind_external_thread.assert_called_once_with(
+            1,
+            42,
+            runtime_kind="codex",
+            source_thread_id="thread-1",
+            summary="Thread One",
+            cwd="/tmp/project",
+            file_path="/tmp/rollout-thread-1.jsonl",
+            read_only=True,
+        )
+        mock_sm.start_topic_bind_flow.assert_not_called()
+        mock_reply.assert_awaited_once()
+        assert "read-only" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
     async def test_text_handler_manual_policy_blocks_implicit_bind(self):
         update = _make_topic_update()
         update.message.text = "hello"
@@ -351,6 +400,42 @@ class TestCommandSurface:
 
         mock_tmux.list_windows.assert_not_called()
         mock_reply.assert_awaited_once_with(update.message, bot_mod.BIND_FLOW_ACTIVE_MESSAGE)
+
+    @pytest.mark.asyncio
+    async def test_text_handler_external_binding_returns_read_only_warning(self):
+        update = _make_topic_update()
+        update.message.text = "ping"
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = "external:codex:thread-1"
+            mock_sm.is_external_binding_window_id.return_value = True
+            mock_sm.send_to_window = AsyncMock(
+                return_value=(
+                    False,
+                    "Topic is bound to an external persisted thread in read-only mode. Attach a live tmux window via /bind or /resume to inject input.",
+                )
+            )
+            mock_sm.get_external_topic_binding.return_value = {
+                "runtime_kind": "codex",
+                "source_thread_id": "thread-1",
+                "read_only": True,
+            }
+
+            await bot_mod.text_handler(update, context)
+
+        mock_sm.send_to_window.assert_awaited_once_with(
+            "external:codex:thread-1", "ping"
+        )
+        mock_tmux.find_window_by_id.assert_not_called()
+        mock_reply.assert_awaited_once()
+        assert "read-only" in mock_reply.await_args.args[1]
 
     @pytest.mark.asyncio
     async def test_unbind_command_on_bound_topic_sets_manual_bind_required(self):
@@ -1404,6 +1489,36 @@ class TestTelegramDelivery:
         msg = NormalizedEvent(
             thread_id="thread-1",
             text=text,
+            is_complete=True,
+            content_type="text",
+            role="user",
+            event_kind="user_message",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.current_turn_generation", return_value=0),
+            patch("ccbot.bot.open_new_turn_generation", return_value=1) as mock_open_turn,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
+            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_open_turn.assert_called_once_with(1, 42)
+        mock_status.assert_not_awaited()
+        mock_content.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_new_message_compact_mode_keeps_plain_user_echo_visible(self):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="ping",
             is_complete=True,
             content_type="text",
             role="user",

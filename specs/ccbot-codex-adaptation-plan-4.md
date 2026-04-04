@@ -1239,6 +1239,157 @@ By the end of this tranche:
   - parser/polling/queue tests cover queued follow-up extraction and edit-in-place reuse
   - docs/spec contracts name the pending-input artifact explicitly
 
+### T68: Warning Artifact Dedup With Mutable Repeat Counter
+
+- **description**: `warning` is a durable system artifact and must not flood a
+  topic when the same warning repeats. Repeated warnings equal to the latest
+  warning in the same topic must reuse one bubble and expose an explicit
+  repeat counter once the repetition cardinality is strictly greater than 2.
+- **status**: completed
+- **depends_on**: []
+- **log**:
+  - ontology normalized: warning is not a turn opener and not a technical
+    status artifact; it is a durable system notice with latest-warning dedup
+    semantics
+  - message queue now routes `semantic_kind=warning` through dedicated
+    warning processing with same-text dedup per topic
+  - warning bubble now reuses the existing message for identical text and
+    renders `×N` only when repetition cardinality is strictly greater than 2
+  - warning state is cleared on worker shutdown to avoid stale carry-over
+- **files edited**:
+  - [message_queue.py](/home/tools/ccbot/src/ccbot/handlers/message_queue.py)
+  - [test_message_queue.py](/home/tools/ccbot/tests/ccbot/handlers/test_message_queue.py)
+  - [delivery-surface.md](/home/tools/ccbot/ontology/delivery-surface.md)
+  - [runtime-event-contract.md](/home/tools/ccbot/doc/runtime-event-contract.md)
+  - [telegram-delivery-pipeline.md](/home/tools/ccbot/doc/telegram-delivery-pipeline.md)
+- **acceptance criteria**:
+  - identical warning repeated in the same topic does not emit a new bubble
+  - when repeat count becomes `N > 2`, the warning bubble shows a visible
+    bottom counter
+  - a different warning text creates a new warning bubble and resets counter
+- **validation**:
+  - queue tests cover same-warning dedup and counter threshold behavior
+  - `uv run --extra dev pytest -q tests/ccbot/handlers/test_message_queue.py`
+
+### T69: External Codex Bind Without tmux
+
+- **description**: Topic bind must support an explicit `external-thread`
+  attachment for Codex persisted threads (`thread id` or exact `thread name`)
+  even when there is no tmux window for that thread (for example, Codex VS Code
+  plugin sessions). This bind is event-stream first and must feed Telegram
+  delivery through the same runtime event contract.
+- **status**: completed
+- **depends_on**: [T68]
+- **log**:
+  - ontology normalized: bind target is not always a live terminal container;
+    external thread bind is a first-class binding kind
+  - topic binding model now supports `binding_scope=external` with persisted
+    metadata (`runtime_kind`, `source_thread_id`, `file_path`, `read_only`)
+  - `/bind <thread-name|id>` in Codex lane can now bind a topic directly to an
+    external persisted thread without creating/reusing tmux
+  - session monitor now includes external bindings in active replay-source
+    resolution even when there is no live tmux window
+- **files edited**:
+  - [runtime.md](/home/tools/ccbot/ontology/runtime.md)
+  - [session.py](/home/tools/ccbot/src/ccbot/session.py)
+  - [session_monitor.py](/home/tools/ccbot/src/ccbot/session_monitor.py)
+  - [bot.py](/home/tools/ccbot/src/ccbot/bot.py)
+  - [test_session.py](/home/tools/ccbot/tests/ccbot/test_session.py)
+  - [test_state_migration.py](/home/tools/ccbot/tests/ccbot/test_state_migration.py)
+  - [test_bot_contracts.py](/home/tools/ccbot/tests/ccbot/test_bot_contracts.py)
+- **acceptance criteria**:
+  - a topic can bind to a Codex persisted thread without creating/reusing tmux
+    window
+  - monitor/session routing resolves that binding to replay evidence and
+    delivers events to Telegram
+  - binding participates in stale-binding cleanup and persisted state reload
+- **validation**:
+  - session + monitor + bot contract tests cover external bind attach/delivery
+  - `uv run --extra dev pytest -q tests/ccbot/test_session.py tests/ccbot/test_state_migration.py tests/ccbot/test_bot_contracts.py`
+
+### T70: Read-Only Injection Guard For External Bind
+
+- **description**: External bind does not imply command-injection capability.
+  Telegram input to an external-bound topic must fail closed with explicit
+  read-only warning when no live input plane is available.
+- **status**: completed
+- **depends_on**: [T69]
+- **log**:
+  - ontology normalized: event delivery capability and input injection
+    capability are different modalities and must not be conflated
+  - external-bound topics now fail closed on input injection attempts
+    (`send_to_window`, `send_special_key_to_window`, `send_input_to_window`)
+  - Telegram text sent into external bind mode returns explicit read-only
+    warning with reattach hint instead of probing tmux
+- **files edited**:
+  - [bot.py](/home/tools/ccbot/src/ccbot/bot.py)
+  - [session.py](/home/tools/ccbot/src/ccbot/session.py)
+  - [telegram-bot-features.md](/home/tools/ccbot/doc/telegram-bot-features.md)
+  - [runtime-ontology.md](/home/tools/ccbot/doc/runtime-ontology.md)
+  - [test_bot_contracts.py](/home/tools/ccbot/tests/ccbot/test_bot_contracts.py)
+- **acceptance criteria**:
+  - Telegram text in external bind mode does not attempt tmux send
+  - user receives explicit read-only warning with next action hint
+- **validation**:
+  - bot contract tests cover read-only warning path
+  - `uv run --extra dev pytest -q tests/ccbot/test_bot_contracts.py tests/ccbot/test_session.py`
+
+### T71: Restore User-Echo Surface Contract
+
+- **description**: `user_echo` must remain visible as `👤 ...` in compact mode
+  for ordinary user turns. Internal scaffolds stay suppressible, but ordinary
+  user echo must not regress silently.
+- **status**: completed
+- **depends_on**: [T69]
+- **log**:
+  - ontology normalized: user echo is a turn-opener semantic fact and a
+    user-facing artifact unless explicitly classified as internal scaffold
+  - compact-mode regression coverage now pins visible plain user echo delivery
+    and prevents silent suppression regressions
+  - hidden internal scaffold suppression remains intact while ordinary `👤 ...`
+    user echoes stay visible
+- **files edited**:
+  - [bot.py](/home/tools/ccbot/src/ccbot/bot.py)
+  - [test_bot_contracts.py](/home/tools/ccbot/tests/ccbot/test_bot_contracts.py)
+- **acceptance criteria**:
+  - visible user text keeps `👤` echo bubble in compact mode
+  - hidden internal payload suppression still works
+- **validation**:
+  - compact-mode bot tests pin visible-vs-hidden user echo
+  - `uv run --extra dev pytest -q tests/ccbot/test_bot_contracts.py`
+
+### T72: Docs/Ontology/Spec Cohesion For New Binding And Warning Semantics
+
+- **description**: Consolidate ontology and operator docs after T68-T71 so
+  runtime nouns, delivery semantics, and bot UX match implementation.
+- **status**: completed
+- **depends_on**: [T68, T69, T70, T71]
+- **log**:
+  - planner tranche declared before implementation to keep ontology and code
+    synchronized
+  - ontology/docs now explicitly separate `tmux` bind from `external` bind
+    and document read-only guard when injection plane is unavailable
+  - delivery docs now formalize warning artifact dedup with mutable repeat
+    counter semantics (`N > 2`)
+  - doc contract tests now pin the new binding and warning terminology
+- **files edited**:
+  - [README.md](/home/tools/ccbot/README.md)
+  - [runtime.md](/home/tools/ccbot/ontology/runtime.md)
+  - [delivery-surface.md](/home/tools/ccbot/ontology/delivery-surface.md)
+  - [README.md](/home/tools/ccbot/ontology/README.md)
+  - [runtime-ontology.md](/home/tools/ccbot/doc/runtime-ontology.md)
+  - [runtime-event-contract.md](/home/tools/ccbot/doc/runtime-event-contract.md)
+  - [telegram-delivery-pipeline.md](/home/tools/ccbot/doc/telegram-delivery-pipeline.md)
+  - [telegram-bot-features.md](/home/tools/ccbot/doc/telegram-bot-features.md)
+  - [test_docs_contracts.py](/home/tools/ccbot/tests/ccbot/test_docs_contracts.py)
+- **acceptance criteria**:
+  - docs explicitly separate tmux-live bind vs external-thread bind
+  - docs explicitly state read-only guard when injection plane is unavailable
+  - docs capture warning dedup + mutable counter semantics
+- **validation**:
+  - docs contract tests pin the new terminology and guarantees
+  - `uv run --extra dev pytest -q tests/ccbot/test_docs_contracts.py`
+
 ## Success Criteria
 
 - Current Codex behavior remains green.

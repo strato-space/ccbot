@@ -199,6 +199,7 @@ class _ResumeCommandTarget:
     thread_id: str
     summary: str
     cwd: str
+    file_path: str = ""
 
 
 def _default_launch_runtime_kind() -> str:
@@ -316,6 +317,7 @@ async def _resolve_resume_command_target(
                     thread_id=candidate.thread_id,
                     summary=candidate.summary,
                     cwd=candidate.cwd,
+                    file_path=str(getattr(candidate, "rollout_file", "") or ""),
                 ),
                 None,
             )
@@ -644,6 +646,57 @@ async def bind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"ℹ️ This topic is already bound to '{display}'. "
             "Use /unbind first if you want to bind a different window.",
         )
+        return
+
+    raw_text = (update.message.text or "").strip()
+    parts = raw_text.split(maxsplit=1)
+    if len(parts) > 1 and parts[1].strip():
+        runtime_kind = _default_launch_runtime_kind()
+        if runtime_kind != "codex":
+            await safe_reply(update.message, _build_resume_degraded_message(runtime_kind))
+            return
+
+        token = " ".join(parts[1].split())
+        target, error_message = await _resolve_resume_command_target(runtime_kind, token)
+        if target is None:
+            await safe_reply(
+                update.message,
+                error_message
+                or "❌ No Codex thread matched the token for external bind.",
+            )
+            return
+
+        await clear_topic_state(user.id, thread_id, context.bot, context.user_data)
+        _clear_same_thread_picker_state(context.user_data, thread_id)
+        session_manager.allow_implicit_bind(user.id, thread_id)
+        session_manager.bind_external_thread(
+            user.id,
+            thread_id,
+            runtime_kind=target.runtime_kind,
+            source_thread_id=target.thread_id,
+            summary=target.summary,
+            cwd=target.cwd,
+            file_path=target.file_path,
+            read_only=True,
+        )
+        topic_synced = await _sync_topic_title(
+            context.bot,
+            user.id,
+            thread_id,
+            target.summary or target.thread_id,
+        )
+
+        response_lines = [
+            "✅ Bound this topic to persisted Codex replay.",
+            f"• thread: `{target.thread_id}`",
+            "• mode: read-only (no live tmux injection plane attached)",
+            "Use `/unbind` then `/resume <thread-name|id>` (or `/bind`) to attach writable control.",
+        ]
+        if not topic_synced:
+            response_lines.append(
+                "⚠️ Topic title sync failed; binding is still active."
+            )
+        await safe_reply(update.message, "\n".join(response_lines))
         return
 
     await _start_bind_flow(update, context, user, thread_id, explicit=True)
@@ -1671,6 +1724,22 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             explicit=False,
             pending_text=text,
         )
+        return
+
+    if session_manager.is_external_binding_window_id(wid) is True:
+        success, message = await session_manager.send_to_window(wid, text)
+        if success:
+            return
+        external = session_manager.get_external_topic_binding(user.id, thread_id) or {}
+        source_thread_id = str(external.get("source_thread_id") or "").strip()
+        runtime_kind = str(external.get("runtime_kind") or "codex").strip() or "codex"
+        hint_lines = [f"⚠️ {message}"]
+        if source_thread_id:
+            hint_lines.append(f"• bound {runtime_kind} thread: `{source_thread_id}`")
+        hint_lines.append(
+            "Use `/unbind` then `/resume <thread-name|id>` (or `/bind`) to switch to writable live control."
+        )
+        await safe_reply(update.message, "\n".join(hint_lines))
         return
 
     # Bound topic — forward to bound window

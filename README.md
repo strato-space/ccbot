@@ -53,6 +53,10 @@ The canonical shape is:
 
 `Telegram topic -> binding -> tmux window -> runtime process -> runtime conversation identity -> replay evidence`
 
+External replay-only shape is also supported:
+
+`Telegram topic -> binding(binding_scope=external) -> runtime conversation identity -> replay evidence`
+
 ## Strato Ops
 
 For the Strato fork, use the operator runbook in
@@ -69,7 +73,7 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
 
 ## Features
 
-- **Topic-based control** — Each Telegram topic binds to one tmux window at a time, while the live process in that window may start or resume a persisted conversation identity
+- **Topic-based control** — Each Telegram topic binds to one delivery source at a time: either a live tmux window, or an external persisted Codex thread in read-only replay mode
 - **Compact Telegram delivery** — In the default production surface, user echo,
   orchestration milestones, and final assistant answers remain ordinary content
   bubbles, the latest human-facing commentary stays visible as a dedicated
@@ -95,7 +99,8 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   status.
 - **Heads-up warnings stay visible without breaking turn closure** — Operator
   warning notices remain visible in Telegram while assistant-final semantics
-  and post-final artifact closure remain intact.
+  and post-final artifact closure remain intact. Repeated identical warning
+  text reuses one warning bubble and adds a repeat counter only when `N > 2`.
 - **Prompt-safe control lane** — Detect `input ready`, `busy`, and `blocked prompt` terminal states before sending input
 - **Voice messages** — Voice messages are transcribed via OpenAI and forwarded as text
 - **Send messages** — Forward text to Codex via tmux keystrokes
@@ -198,7 +203,7 @@ uv run ccbot
 | `/history`    | Message history for this topic |
 | `/screenshot` | Capture terminal screenshot |
 | `/esc`        | Send Escape to interrupt the active runtime |
-| `/bind`       | Start an explicit bind flow for this topic |
+| `/bind`       | Start an explicit bind flow for this topic (`/bind <thread-name|id>` in Codex lane attaches external read-only replay) |
 | `/unbind`     | Detach this topic from its live window |
 | `/resume`     | Bind this topic to a persisted runtime thread when the configured lane supports deterministic explicit resume |
 | `/rename`     | Rename the current tmux window and sync the topic title |
@@ -218,9 +223,14 @@ Other raw `/command` inputs are still forwarded best-effort to the active tmux-h
 
 ### Topic Workflow
 
-**1 Topic = 1 live tmux binding at a time.** The bot runs in Telegram Forum (topics) mode.
+**1 Topic = 1 binding at a time.** The bot runs in Telegram Forum (topics) mode.
 
-Each topic controls one tmux window at a time. The process inside that window may start a fresh conversation or resume an existing persisted identity. The concrete runtime lane depends on `CLAUDE_COMMAND`.
+Each topic controls one delivery source at a time:
+
+- live tmux window (writable control lane)
+- external persisted Codex thread (read-only replay lane)
+
+The concrete runtime lane depends on `CLAUDE_COMMAND`.
 
 **Creating a new session:**
 
@@ -236,6 +246,8 @@ Each topic controls one tmux window at a time. The process inside that window ma
 - After an explicit `/unbind` or a picker cancel, the topic enters `manual_bind_required`.
 - In `manual_bind_required`, plain messages do not restart binding implicitly.
 - Use `/bind` to choose a live window or workspace again.
+- In Codex lane, `/bind <thread-name|id>` can attach external persisted replay
+  without tmux. This path is read-only.
 - Use `/resume <thread-name|id>` only when the configured runtime lane supports deterministic explicit resume from an unbound topic.
   - Codex: supported by exact persisted thread id or exact thread name.
   - Claude Code: degraded from an unbound topic because transcript ids do not prove the workspace path.
@@ -243,7 +255,12 @@ Each topic controls one tmux window at a time. The process inside that window ma
 
 **Sending messages:**
 
-Once a topic is bound to a window, plain text and voice messages are forwarded to the active tmux-hosted runtime. Voice is transcribed first, then routed like plain text.
+Once a topic is bound to a live tmux window, plain text and voice messages are
+forwarded to the active runtime. Voice is transcribed first, then routed like
+plain text.
+
+If the topic is bound to an external persisted thread without live tmux, input
+injection fails closed with an explicit read-only warning and a reattach hint.
 
 Routing note:
 - Telegram text and voice inputs enter the equal message layer in `queue` mode by default.

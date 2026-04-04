@@ -559,12 +559,17 @@ class SessionMonitor:
         from .session import session_manager
 
         await session_manager.load_session_map()
-        live_window_ids = {window.window_id for window in await tmux_manager.list_windows()}
+        live_window_ids = {
+            window.window_id for window in await tmux_manager.list_windows()
+        }
         window_to_session: dict[str, str] = {}
         active_rollout_sources: dict[str, RolloutSource] = {}
 
         for binding in session_manager.iter_topic_bindings():
-            if binding.window_id not in live_window_ids:
+            if (
+                binding.binding_scope == "tmux"
+                and binding.window_id not in live_window_ids
+            ):
                 continue
             resolved = await session_manager.resolve_thread_for_window(binding.window_id)
             if resolved is not None and resolved.thread_id:

@@ -39,9 +39,11 @@ transport used by machine consumers.
   - This is normative routing state, not a live runtime object.
 
 - **Binding**
-  - The bot's persisted association from a Telegram topic to a live tmux
-    window, together with the runtime metadata needed to route input and
-    notifications safely.
+  - The bot's persisted association from a Telegram topic to a delivery source,
+    together with runtime metadata needed for safe routing.
+  - Binding scope is explicit:
+    - `tmux`: live terminal container with writable input plane
+    - `external`: persisted runtime thread without live tmux attachment
 
 - **tmux window**
   - The live terminal container managed by the bot.
@@ -50,6 +52,12 @@ transport used by machine consumers.
 - **Runtime process**
   - The live interactive CLI process running inside the tmux window.
   - Examples: `claude`, `codex`, `fast-agent`.
+
+- **Input injection plane**
+  - Capability to inject text/keys into a live runtime process.
+  - Available only when the binding scope is `tmux`.
+  - In `external` binding scope, replay delivery may remain available while
+    input injection is read-only/disabled.
 
 - **Runtime conversation identity**
   - The persisted conversation object that can later be resumed.
@@ -139,7 +147,11 @@ The model must distinguish these relations:
 
 `Telegram topic --governed by topic control policy--> may or may not enter a binding flow`
 
-`binding -> tmux window -> runtime process`
+`binding -> delivery source`
+
+`binding_scope=tmux -> tmux window -> runtime process`
+
+`binding_scope=external -> runtime conversation identity -> persisted replay evidence`
 
 `runtime process -> binds to runtime conversation identity`
 
@@ -251,7 +263,7 @@ More precise statements:
 
 ## Operational invariants
 
-- A topic may bind to at most one live tmux window at a time.
+- A topic may bind to at most one delivery source at a time.
 - A tmux window may host at most one active runtime process at a time.
 - A live process may be associated with at most one primary runtime conversation
   identity at a time.
@@ -259,6 +271,10 @@ More precise statements:
   over time.
 - Resume attaches a new or reused live process to an existing identity; it does
   not restore the previous live process.
+- External bind may attach directly to persisted replay evidence for a runtime
+  thread without creating/reusing a tmux window.
+- If no live input injection plane exists, message injection must fail closed
+  as read-only rather than pretending to send into tmux.
 - History is reconstructed from normalized replay evidence, not from the live
   process buffer.
 

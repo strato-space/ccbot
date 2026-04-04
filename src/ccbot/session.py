@@ -48,6 +48,7 @@ from .state_schema import (
     BINDING_STATE_BIND_FLOW,
     BINDING_STATE_BOUND,
     BINDING_STATE_NONE,
+    EXTERNAL_TOPIC_BINDINGS_KEY,
     TOPIC_BIND_FLOW_NONCES_KEY,
     TOPIC_BIND_FLOW_VERSIONS_KEY,
     TOPIC_BINDING_STATES_KEY,
@@ -75,6 +76,13 @@ BLOCKED_PROMPT_SEND_MESSAGE = "Input blocked by a visible prompt in the terminal
 WindowState = LiveProcessDescriptor
 ClaudeSession = ThreadLocator
 
+EXTERNAL_BINDING_PREFIX = "external"
+EXTERNAL_BINDING_WINDOW_PREFIX = f"{EXTERNAL_BINDING_PREFIX}:"
+EXTERNAL_BINDING_READ_ONLY_MESSAGE = (
+    "Topic is bound to an external persisted thread in read-only mode. "
+    "Attach a live tmux window via /bind or /resume to inject input."
+)
+
 
 @dataclass
 class SessionManager:
@@ -86,6 +94,7 @@ class SessionManager:
     window_states: window_id -> LiveProcessDescriptor
     user_window_offsets: user_id -> {window_id -> byte_offset}
     thread_bindings: user_id -> {thread_id -> window_id}
+    external_topic_bindings: user_id -> {thread_id -> external-thread metadata}
     window_display_names: window_id -> window_name (for display)
     group_chat_ids: "user_id:thread_id" -> group chat_id (for supergroup routing)
     """
@@ -93,6 +102,9 @@ class SessionManager:
     window_states: dict[str, LiveProcessDescriptor] = field(default_factory=dict)
     user_window_offsets: dict[int, dict[str, int]] = field(default_factory=dict)
     thread_bindings: dict[int, dict[int, str]] = field(default_factory=dict)
+    external_topic_bindings: dict[int, dict[int, dict[str, Any]]] = field(
+        default_factory=dict
+    )
     topic_policies: dict[int, dict[int, str]] = field(default_factory=dict)
     topic_binding_states: dict[int, dict[int, str]] = field(default_factory=dict)
     topic_bind_flow_versions: dict[int, dict[int, int]] = field(default_factory=dict)
@@ -134,6 +146,10 @@ class SessionManager:
                 str(uid): {str(tid): wid for tid, wid in bindings.items()}
                 for uid, bindings in self.thread_bindings.items()
             },
+            EXTERNAL_TOPIC_BINDINGS_KEY: {
+                str(uid): {str(tid): dict(meta) for tid, meta in bindings.items()}
+                for uid, bindings in self.external_topic_bindings.items()
+            },
             "topic_policies": {
                 str(uid): {str(tid): policy for tid, policy in policies.items()}
                 for uid, policies in self.topic_policies.items()
@@ -156,9 +172,38 @@ class SessionManager:
         atomic_write_json(config.state_file, state)
         logger.debug("State saved to %s", config.state_file)
 
-    def _is_window_id(self, key: str) -> bool:
+    @staticmethod
+    def _is_window_id(key: str) -> bool:
         """Check if a key looks like a tmux window ID (e.g. '@0', '@12')."""
         return key.startswith("@") and len(key) > 1 and key[1:].isdigit()
+
+    @staticmethod
+    def make_external_binding_window_id(runtime_kind: str, source_thread_id: str) -> str:
+        """Build a synthetic window key for external non-tmux binds."""
+        safe_runtime = (runtime_kind or "codex").strip() or "codex"
+        safe_thread = source_thread_id.strip()
+        return f"{EXTERNAL_BINDING_WINDOW_PREFIX}{safe_runtime}:{safe_thread}"
+
+    @staticmethod
+    def parse_external_binding_window_id(window_id: str) -> tuple[str, str] | None:
+        """Parse a synthetic external binding key into runtime/thread ids."""
+        if not window_id.startswith(EXTERNAL_BINDING_WINDOW_PREFIX):
+            return None
+        payload = window_id[len(EXTERNAL_BINDING_WINDOW_PREFIX) :]
+        runtime, sep, thread_id = payload.partition(":")
+        if not sep or not runtime.strip() or not thread_id.strip():
+            return None
+        return runtime.strip(), thread_id.strip()
+
+    @classmethod
+    def is_external_binding_window_id(cls, window_id: str) -> bool:
+        """Return True when a binding key targets external non-tmux replay."""
+        return cls.parse_external_binding_window_id(window_id) is not None
+
+    @classmethod
+    def _is_binding_id(cls, key: str) -> bool:
+        """Return True for supported persisted topic binding ids."""
+        return cls._is_window_id(key) or cls.is_external_binding_window_id(key)
 
     def _load_state(self) -> None:
         """Load state synchronously during initialization.
@@ -185,6 +230,17 @@ class SessionManager:
                 self.thread_bindings = {
                     int(uid): {int(tid): wid for tid, wid in bindings.items()}
                     for uid, bindings in state.get("thread_bindings", {}).items()
+                }
+                self.external_topic_bindings = {
+                    int(uid): {
+                        int(tid): dict(meta)
+                        for tid, meta in bindings.items()
+                        if isinstance(meta, dict)
+                    }
+                    for uid, bindings in state.get(
+                        EXTERNAL_TOPIC_BINDINGS_KEY, {}
+                    ).items()
+                    if isinstance(bindings, dict)
                 }
                 self.topic_policies = {
                     int(uid): {
@@ -224,13 +280,13 @@ class SessionManager:
                 # Detect old format: keys that don't look like window IDs
                 needs_migration = False
                 for k in self.window_states:
-                    if not self._is_window_id(k):
+                    if not self._is_binding_id(k):
                         needs_migration = True
                         break
                 if not needs_migration:
                     for bindings in self.thread_bindings.values():
                         for wid in bindings.values():
-                            if not self._is_window_id(wid):
+                            if not self._is_binding_id(wid):
                                 needs_migration = True
                                 break
                         if needs_migration:
@@ -248,6 +304,7 @@ class SessionManager:
                 self.window_states = {}
                 self.user_window_offsets = {}
                 self.thread_bindings = {}
+                self.external_topic_bindings = {}
                 self.topic_policies = {}
                 self.topic_binding_states = {}
                 self.topic_bind_flow_versions = {}
@@ -267,6 +324,9 @@ class SessionManager:
                     migrate_legacy = True
                 if TOPIC_BIND_FLOW_NONCES_KEY not in state:
                     self.topic_bind_flow_nonces = {}
+                    migrate_legacy = True
+                if EXTERNAL_TOPIC_BINDINGS_KEY not in state:
+                    self.external_topic_bindings = {}
                     migrate_legacy = True
                 if self.topic_policies:
                     for uid, policies in self.topic_policies.items():
@@ -382,6 +442,8 @@ class SessionManager:
                             "Dropping stale window_state: %s (name=%s)", key, display
                         )
                         changed = True
+            elif self.is_external_binding_window_id(key):
+                new_window_states[key] = ws
             else:
                 # Old format: key is window_name
                 new_id = live_by_name.get(key)
@@ -431,6 +493,42 @@ class SessionManager:
                             )
                             dropped_bindings.append((uid, tid))
                             changed = True
+                elif self.is_external_binding_window_id(val):
+                    new_bindings[tid] = val
+                    parsed = self.parse_external_binding_window_id(val)
+                    runtime_kind = (
+                        (parsed[0] if parsed is not None else config.default_runtime_kind)
+                        or config.default_runtime_kind
+                    )
+                    source_thread_id = parsed[1] if parsed is not None else ""
+                    external = self.external_topic_bindings.setdefault(uid, {})
+                    meta = external.get(tid)
+                    if not isinstance(meta, dict):
+                        external[tid] = {
+                            "runtime_kind": runtime_kind,
+                            "source_thread_id": source_thread_id,
+                            "summary": "",
+                            "cwd": "",
+                            "file_path": "",
+                            "read_only": True,
+                        }
+                        changed = True
+                    else:
+                        if not str(meta.get("runtime_kind") or "").strip():
+                            meta["runtime_kind"] = runtime_kind
+                            changed = True
+                        if (
+                            not str(meta.get("source_thread_id") or "").strip()
+                            and source_thread_id
+                        ):
+                            meta["source_thread_id"] = source_thread_id
+                            changed = True
+                        if "read_only" not in meta:
+                            meta["read_only"] = True
+                            changed = True
+                    self.topic_binding_states.setdefault(uid, {})[tid] = (
+                        BINDING_STATE_BOUND
+                    )
                 else:
                     # Old format: val is window_name
                     new_id = live_by_name.get(val)
@@ -461,6 +559,19 @@ class SessionManager:
         for uid, tid in dropped_bindings:
             self.topic_binding_states.setdefault(uid, {})[tid] = BINDING_STATE_NONE
 
+        for uid, external in list(self.external_topic_bindings.items()):
+            bindings = self.thread_bindings.get(uid, {})
+            for tid in list(external.keys()):
+                current_binding = bindings.get(tid)
+                if current_binding is None or not self.is_external_binding_window_id(
+                    current_binding
+                ):
+                    del external[tid]
+                    changed = True
+            if not external:
+                del self.external_topic_bindings[uid]
+                changed = True
+
         # Ensure every live binding has an explicit policy/state record.
         for uid, bindings in self.thread_bindings.items():
             policy_map = self.topic_policies.setdefault(uid, {})
@@ -484,6 +595,8 @@ class SessionManager:
                             changed = True
                         else:
                             changed = True
+                elif self.is_external_binding_window_id(key):
+                    new_offsets[key] = offset
                 else:
                     new_id = live_by_name.get(key)
                     if new_id:
@@ -919,6 +1032,9 @@ class SessionManager:
         Uses the explicit launcher registration first, then exact cwd-based
         resolution. Ambiguity is fail-closed.
         """
+        if self.is_external_binding_window_id(window_id):
+            return await self._resolve_external_thread_for_window(window_id)
+
         state = self.get_process_descriptor(window_id)
         resolution = await self.resolve_thread_candidate(window_id)
         if resolution is None:
@@ -944,6 +1060,96 @@ class SessionManager:
                 state.cwd,
             )
         return None
+
+    def _find_external_binding_record_by_window(
+        self,
+        window_id: str,
+    ) -> tuple[int, int, dict[str, Any]] | None:
+        """Return (user_id, thread_id, metadata) for an external binding id."""
+        for user_id, bindings in self.thread_bindings.items():
+            for thread_id, bound_window_id in bindings.items():
+                if bound_window_id != window_id:
+                    continue
+                metadata = self.get_external_topic_binding(user_id, thread_id) or {}
+                return user_id, thread_id, dict(metadata)
+        return None
+
+    async def _resolve_external_thread_for_window(
+        self,
+        window_id: str,
+    ) -> ThreadLocator | None:
+        """Resolve a non-tmux external binding to a persisted thread locator."""
+        parsed = self.parse_external_binding_window_id(window_id)
+        if parsed is None:
+            return None
+
+        parsed_runtime_kind, parsed_thread_id = parsed
+        record = self._find_external_binding_record_by_window(window_id)
+        metadata = record[2] if record is not None else {}
+        runtime_kind = (
+            str(metadata.get("runtime_kind") or parsed_runtime_kind).strip()
+            or config.default_runtime_kind
+        )
+        source_thread_id = (
+            str(metadata.get("source_thread_id") or parsed_thread_id).strip()
+            or parsed_thread_id
+        )
+        summary = str(metadata.get("summary") or source_thread_id).strip() or source_thread_id
+        cwd = str(metadata.get("cwd") or "").strip()
+        file_path = str(metadata.get("file_path") or "").strip()
+        message_count = 0
+
+        if runtime_kind == "codex" and self.codex_thread_catalog is not None:
+            self.codex_thread_catalog.refresh()
+            candidate = await asyncio.to_thread(
+                self.codex_thread_catalog.get_candidate_fast,
+                source_thread_id,
+            )
+            if candidate is None:
+                resolution = await asyncio.to_thread(
+                    self.codex_thread_catalog.resolve_resume_target,
+                    source_thread_id,
+                )
+                if resolution.status == "selected" and resolution.selected is not None:
+                    candidate = resolution.selected
+            if candidate is not None:
+                summary = candidate.summary
+                cwd = candidate.cwd
+                file_path = str(candidate.rollout_file)
+                message_count = candidate.message_count
+
+        if not file_path:
+            return None
+
+        if record is not None:
+            user_id, thread_id, _ = record
+            external = self.external_topic_bindings.setdefault(user_id, {})
+            current = external.setdefault(thread_id, {})
+            changed = False
+            for key, value in (
+                ("runtime_kind", runtime_kind),
+                ("source_thread_id", source_thread_id),
+                ("summary", summary),
+                ("cwd", cwd),
+                ("file_path", file_path),
+            ):
+                if str(current.get(key) or "") != value:
+                    current[key] = value
+                    changed = True
+            if "read_only" not in current:
+                current["read_only"] = True
+                changed = True
+            if changed:
+                self._save_state()
+
+        return ThreadLocator(
+            thread_id=source_thread_id,
+            summary=summary,
+            message_count=message_count,
+            file_path=file_path,
+            runtime_kind=runtime_kind,
+            cwd=cwd,
+        )
 
     async def resolve_thread_candidate(
         self, window_id: str
@@ -1100,6 +1306,11 @@ class SessionManager:
         if user_id not in self.thread_bindings:
             self.thread_bindings[user_id] = {}
         self.thread_bindings[user_id][thread_id] = window_id
+        external = self.external_topic_bindings.get(user_id)
+        if external and thread_id in external:
+            del external[thread_id]
+            if not external:
+                self.external_topic_bindings.pop(user_id, None)
         self.set_topic_binding_state(user_id, thread_id, BINDING_STATE_BOUND)
         self._rotate_topic_bind_flow_credentials(user_id, thread_id)
         if window_name:
@@ -1114,6 +1325,51 @@ class SessionManager:
             user_id,
         )
 
+    def bind_external_thread(
+        self,
+        user_id: int,
+        thread_id: int,
+        *,
+        runtime_kind: str,
+        source_thread_id: str,
+        summary: str = "",
+        cwd: str = "",
+        file_path: str = "",
+        read_only: bool = True,
+    ) -> str:
+        """Bind a topic to an external persisted thread without tmux."""
+        binding_window_id = self.make_external_binding_window_id(
+            runtime_kind,
+            source_thread_id,
+        )
+        if user_id not in self.thread_bindings:
+            self.thread_bindings[user_id] = {}
+        self.thread_bindings[user_id][thread_id] = binding_window_id
+        if user_id not in self.external_topic_bindings:
+            self.external_topic_bindings[user_id] = {}
+        self.external_topic_bindings[user_id][thread_id] = {
+            "runtime_kind": runtime_kind,
+            "source_thread_id": source_thread_id,
+            "summary": summary,
+            "cwd": cwd,
+            "file_path": file_path,
+            "read_only": bool(read_only),
+        }
+        if summary:
+            self.window_display_names[binding_window_id] = summary
+        self.set_topic_binding_state(user_id, thread_id, BINDING_STATE_BOUND)
+        self._rotate_topic_bind_flow_credentials(user_id, thread_id)
+        self._save_state()
+        logger.info(
+            "Bound thread %d -> external %s thread=%s (read_only=%s) for user %d",
+            thread_id,
+            runtime_kind,
+            source_thread_id,
+            read_only,
+            user_id,
+        )
+        return binding_window_id
+
     def unbind_thread(self, user_id: int, thread_id: int) -> str | None:
         """Remove a thread binding. Returns the previously bound window_id, or None."""
         self._rotate_topic_bind_flow_credentials(user_id, thread_id)
@@ -1125,6 +1381,11 @@ class SessionManager:
         window_id = bindings.pop(thread_id)
         if not bindings:
             del self.thread_bindings[user_id]
+        external = self.external_topic_bindings.get(user_id)
+        if external and thread_id in external:
+            del external[thread_id]
+            if not external:
+                self.external_topic_bindings.pop(user_id, None)
         self.set_topic_binding_state(user_id, thread_id, BINDING_STATE_NONE)
         self._save_state()
         logger.info(
@@ -1141,6 +1402,20 @@ class SessionManager:
         if not bindings:
             return None
         return bindings.get(thread_id)
+
+    def get_external_topic_binding(
+        self,
+        user_id: int,
+        thread_id: int,
+    ) -> dict[str, Any] | None:
+        """Return external bind metadata for a topic, if present."""
+        bindings = self.external_topic_bindings.get(user_id)
+        if not bindings:
+            return None
+        binding = bindings.get(thread_id)
+        if not isinstance(binding, dict):
+            return None
+        return binding
 
     def get_topic_policy(self, user_id: int, thread_id: int) -> str:
         """Return the persisted topic policy for a user/topic pair."""
@@ -1231,6 +1506,23 @@ class SessionManager:
         window_id = self.get_window_for_thread(user_id, thread_id)
         if not window_id:
             return None
+        if self.is_external_binding_window_id(window_id):
+            external = self.get_external_topic_binding(user_id, thread_id) or {}
+            runtime_kind = (
+                str(external.get("runtime_kind") or config.default_runtime_kind).strip()
+                or config.default_runtime_kind
+            )
+            source_thread_id = str(external.get("source_thread_id") or "").strip()
+            return TopicBinding(
+                user_id=user_id,
+                thread_id=thread_id,
+                window_id=window_id,
+                window_name=self.get_display_name(window_id),
+                runtime_kind=runtime_kind,
+                binding_scope="external",
+                source_thread_id=source_thread_id,
+                read_only=bool(external.get("read_only", True)),
+            )
         return TopicBinding(
             user_id=user_id,
             thread_id=thread_id,
@@ -1243,6 +1535,27 @@ class SessionManager:
         """Iterate persisted topic bindings as structured runtime-neutral objects."""
         for user_id, bindings in self.thread_bindings.items():
             for thread_id, window_id in bindings.items():
+                if self.is_external_binding_window_id(window_id):
+                    external = self.get_external_topic_binding(user_id, thread_id) or {}
+                    runtime_kind = (
+                        str(
+                            external.get("runtime_kind")
+                            or config.default_runtime_kind
+                        ).strip()
+                        or config.default_runtime_kind
+                    )
+                    source_thread_id = str(external.get("source_thread_id") or "").strip()
+                    yield TopicBinding(
+                        user_id=user_id,
+                        thread_id=thread_id,
+                        window_id=window_id,
+                        window_name=self.get_display_name(window_id),
+                        runtime_kind=runtime_kind,
+                        binding_scope="external",
+                        source_thread_id=source_thread_id,
+                        read_only=bool(external.get("read_only", True)),
+                    )
+                    continue
                 yield TopicBinding(
                     user_id=user_id,
                     thread_id=thread_id,
@@ -1283,6 +1596,8 @@ class SessionManager:
 
     async def send_to_window(self, window_id: str, text: str) -> tuple[bool, str]:
         """Send text to a tmux window by ID."""
+        if self.is_external_binding_window_id(window_id):
+            return False, EXTERNAL_BINDING_READ_ONLY_MESSAGE
         display = self.get_display_name(window_id)
         logger.debug(
             "send_to_window: window_id=%s (%s), text_len=%d",
@@ -1330,6 +1645,8 @@ class SessionManager:
         self, window_id: str, key: str
     ) -> tuple[bool, str]:
         """Send a control key through the runtime input driver."""
+        if self.is_external_binding_window_id(window_id):
+            return False, EXTERNAL_BINDING_READ_ONLY_MESSAGE
         window = await tmux_manager.find_window_by_id(window_id)
         if not window:
             return False, "Window not found (may have been closed)"
@@ -1355,6 +1672,8 @@ class SessionManager:
         self, window_id: str, action: InputAction
     ) -> tuple[bool, str]:
         """Send a runtime-neutral input action to the live window."""
+        if self.is_external_binding_window_id(window_id):
+            return False, EXTERNAL_BINDING_READ_ONLY_MESSAGE
         window = await tmux_manager.find_window_by_id(window_id)
         if not window:
             return False, "Window not found (may have been closed)"

@@ -97,13 +97,16 @@ def is_pre_final_visible_semantic_kind(semantic_kind: str) -> bool:
 
 @dataclass(frozen=True)
 class TopicBinding:
-    """Persisted association from a Telegram topic to a tmux window."""
+    """Persisted association from a Telegram topic to a delivery source."""
 
     user_id: int
     thread_id: int
     window_id: str
     window_name: str = ""
     runtime_kind: str = "claude"
+    binding_scope: str = "tmux"
+    source_thread_id: str = ""
+    read_only: bool = False
 
 
 @dataclass

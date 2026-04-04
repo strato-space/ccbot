@@ -31,6 +31,7 @@ from ..markdown_v2 import convert_markdown
 from ..session import session_manager
 from ..runtime_types import (
     ASSISTANT_FINAL_SEMANTIC_KIND,
+    WARNING_SEMANTIC_KIND,
     is_pre_final_visible_semantic_kind,
 )
 from ..state_schema import BINDING_STATE_BOUND
@@ -102,6 +103,8 @@ _commentary_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
 _pending_input_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
 # Last enqueued pending-input state per topic for queue-side dedupe.
 _pending_input_enqueued: dict[tuple[int, int], tuple[str, str | None]] = {}
+# Warning tracking: (user_id, thread_id_or_0) -> (message_id, window_id, warning_text, repeat_count)
+_warning_msg_info: dict[tuple[int, int], tuple[int, str, str, int]] = {}
 
 # Latest visible pre-final artifact kind per topic. This keeps latest-only
 # commentary chronologically correct relative to durable orchestration milestones:
@@ -404,6 +407,17 @@ async def _is_task_binding_active(
     thread_id: int | None,
 ) -> bool:
     """Check whether a queued task still targets the current live binding."""
+    if session_manager.is_external_binding_window_id(window_id) is True:
+        if thread_id is None:
+            return True
+        current_window_id = session_manager.get_window_for_thread(user_id, thread_id)
+        if current_window_id != window_id:
+            return False
+        return (
+            session_manager.get_topic_binding_state(user_id, thread_id)
+            == BINDING_STATE_BOUND
+        )
+
     if await tmux_manager.find_window_by_id(window_id) is None:
         return False
     if thread_id is None:
@@ -457,6 +471,15 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             wid,
             task.thread_id,
             task.semantic_kind,
+        )
+        return
+    if task.semantic_kind == WARNING_SEMANTIC_KIND:
+        await _process_warning_content_task(
+            bot,
+            user_id,
+            task,
+            window_id=wid,
+            thread_id_or_0=tid,
         )
         return
     chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
@@ -704,6 +727,75 @@ async def _convert_status_to_content(
             logger.debug(f"Failed to convert status to content: {e}")
             # Message might be deleted or too old, caller will send new message
             return None
+
+
+def _render_warning_text(base_text: str, repeat_count: int) -> str:
+    """Render warning text with optional repeat counter footer."""
+    if repeat_count > 2:
+        return f"{base_text}\n\n×{repeat_count}"
+    return base_text
+
+
+async def _process_warning_content_task(
+    bot: Bot,
+    user_id: int,
+    task: MessageTask,
+    *,
+    window_id: str,
+    thread_id_or_0: int,
+) -> None:
+    """Deduplicate repeated warning bubbles and add a counter for N>2."""
+    text = (task.text or "\n\n".join(task.parts)).strip()
+    if not text:
+        return
+
+    thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
+    chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+    wkey = (user_id, thread_id_or_0)
+    current = _warning_msg_info.get(wkey)
+
+    if current is not None:
+        msg_id, stored_wid, last_text, repeat_count = current
+        if stored_wid == window_id and last_text == text:
+            new_count = repeat_count + 1
+            _warning_msg_info[wkey] = (msg_id, stored_wid, last_text, new_count)
+            if new_count <= 2:
+                return
+
+            rendered = _render_warning_text(text, new_count)
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=_ensure_formatted(rendered),
+                    parse_mode=PARSE_MODE,
+                    link_preview_options=NO_LINK_PREVIEW,
+                )
+                return
+            except RetryAfter:
+                raise
+            except Exception:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=msg_id,
+                        text=rendered,
+                        link_preview_options=NO_LINK_PREVIEW,
+                    )
+                    return
+                except RetryAfter:
+                    raise
+                except Exception:
+                    _warning_msg_info.pop(wkey, None)
+
+    sent = await send_with_fallback(
+        bot,
+        chat_id,
+        text,
+        **_send_kwargs(thread_id),  # type: ignore[arg-type]
+    )
+    if sent:
+        _warning_msg_info[wkey] = (sent.message_id, window_id, text, 1)
 
 
 async def _process_status_update_task(
@@ -1513,6 +1605,7 @@ async def shutdown_workers() -> None:
     _commentary_msg_info.clear()
     _pending_input_msg_info.clear()
     _pending_input_enqueued.clear()
+    _warning_msg_info.clear()
     _latest_pre_final_visible_kind.clear()
     _tool_msg_ids.clear()
     _pre_final_visible_closed.clear()

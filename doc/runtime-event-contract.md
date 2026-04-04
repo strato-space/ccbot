@@ -41,6 +41,7 @@ Required semantic kinds:
 
 - `user_echo`
 - `orchestration`
+- `warning`
 - `commentary`
 - `reasoning`
 - `tool_start`
@@ -123,6 +124,8 @@ At the contract level:
   - eligible to drive status/progress handling
 - `user_echo`, `orchestration`, `commentary`, `assistant_final`
   - user-facing content candidates
+- `warning`
+  - user-facing system notice candidate with latest-warning dedup semantics
 - `tool_result`, `command_execution`, `file_change`
   - history-worthy semantic facts even when the product surface chooses to
     collapse them into compact status delivery
@@ -167,6 +170,11 @@ At the default product-facing `compact` Telegram surface:
     completed subagent summaries
 - `commentary`
   - remains visible as a latest-only human-facing commentary artifact
+- `warning`
+  - remains visible as a durable system notice
+  - repeated identical warning text in the same topic reuses one bubble and
+    adds a repeat counter only when repetition cardinality is strictly greater
+    than 2
 - queued follow-up preview
   - may remain visible as a separate mutable pending-input artifact modeled
     after the Codex bottom-pane pending-input preview
@@ -214,6 +222,13 @@ It does not collapse:
 
 - equal message channels
 - raw terminal operator control
+- replay delivery capability
+- input injection capability
 
 `queue` and `steer` are routing semantics for submitted messages, not semantic
 output kinds.
+
+External-thread bind is first-class for replay delivery, but it is not equal to
+live tmux control. If a topic is bound to external replay without a live tmux
+injection plane, Telegram input must fail closed with an explicit read-only
+warning and a next-step hint to reattach writable control.

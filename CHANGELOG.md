@@ -1,5 +1,62 @@
 # Changelog
 
+## 2026-04-05
+
+### PROBLEM SOLVED
+
+- **00:35-01:56** Repeated warning notices could flood Telegram topics and
+  obscure operator signal. Warning delivery now deduplicates identical warning
+  text in-place and keeps one visible warning artifact per topic.
+- **00:35-01:56** Topics bound to external Codex threads had no explicit
+  modality boundary between replay delivery and input injection. External bind
+  is now first-class and input injection fails closed as read-only when no live
+  tmux plane is attached.
+- **00:35-01:56** Documentation/ontology drift around external bind semantics
+  and warning behavior increased operational ambiguity. Ontology, delivery
+  docs, README, and doc contracts are now synchronized to the implemented model.
+
+### FEATURE IMPLEMENTED
+
+- **00:35-01:56** Added warning artifact dedup with mutable repeat counter:
+  the counter is rendered only when repetition cardinality is strictly greater
+  than 2 (`×N` for `N > 2`).
+- **00:35-01:56** Added external Codex bind without tmux via `/bind <thread-name|id>`
+  in Codex lane, with persisted external binding metadata and replay-source
+  resolution in monitor flow.
+- **00:35-01:56** Added explicit read-only guardrails for external bindings
+  across text/key/input actions and user-facing reattach hints.
+- **00:35-01:56** Finalized ontology/spec tranche T68-T72 as completed and
+  pinned new guarantees in doc contract tests.
+
+### CHANGES
+
+- **00:35-01:56** Implemented warning dedup flow in
+  `src/ccbot/handlers/message_queue.py` (new warning routing, repeat tracking,
+  in-place edits, and shutdown cleanup) with regressions in
+  `tests/ccbot/handlers/test_message_queue.py`.
+- **00:35-01:56** Extended binding model with external scope in
+  `src/ccbot/session.py`, `src/ccbot/runtime_types.py`,
+  `src/ccbot/state_schema.py`, and `src/ccbot/session_monitor.py`; added
+  coverage in `tests/ccbot/test_session.py` and
+  `tests/ccbot/test_state_migration.py`.
+- **00:35-01:56** Added external bind and read-only delivery behavior in
+  `src/ccbot/bot.py` with contract coverage in
+  `tests/ccbot/test_bot_contracts.py`.
+- **00:35-01:56** Updated ontology/docs:
+  `ontology/runtime.md`, `ontology/delivery-surface.md`,
+  `ontology/README.md`, `doc/runtime-ontology.md`,
+  `doc/runtime-event-contract.md`, `doc/telegram-delivery-pipeline.md`,
+  `doc/telegram-bot-features.md`, `README.md`.
+- **00:35-01:56** Updated spec status/log for T68-T72 in
+  `specs/ccbot-codex-adaptation-plan-4.md` and expanded
+  `tests/ccbot/test_docs_contracts.py` to pin external-bind and warning
+  semantics.
+- **01:40-01:50** Validation: `uv run --extra dev pytest -q
+  tests/ccbot/test_docs_contracts.py tests/ccbot/handlers/test_message_queue.py
+  tests/ccbot/test_session.py tests/ccbot/test_state_migration.py
+  tests/ccbot/test_bot_contracts.py` (`175 passed`), and
+  `uv run --extra dev ruff check src tests` (`All checks passed`).
+
 ## 2026-04-04
 
 ### PROBLEM SOLVED

@@ -25,7 +25,10 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "/home/tools/codex-tools/codex-session-scout" in readme
     assert "runtime conversation identity" in readme
     assert "replay evidence" in readme
+    assert "binding(binding_scope=external)" in readme
+    assert "external persisted Codex thread in read-only replay mode" in readme
     assert "/resume <thread-name|id>" in readme
+    assert "/bind <thread-name|id>" in readme
     assert "manual_bind_required" in readme
     assert "queue" in readme
     assert "steer" in readme
@@ -92,6 +95,9 @@ def test_runtime_ontology_note_uses_runtime_neutral_terms() -> None:
     assert "semantic emitter / supervisor" in ontology
     assert "live semantic stream" in ontology
     assert "persisted replay evidence" in ontology
+    assert "binding_scope=external" in ontology
+    assert "Input injection plane" in ontology
+    assert "read-only rather than pretending to send into tmux" in ontology
     assert "queue" in ontology
     assert "steer" in ontology
     assert "literal ACP-protocol-over-stdio" in ontology
@@ -107,13 +113,17 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "ontology/runtime.md" in index
     assert "ontology/delivery-surface.md" in index
     assert "ontology/boundaries.md" in index
+    assert "External replay-only variant" in index
     assert "semantic emitter / supervisor" in runtime
     assert "runtime conversation identity" in runtime
     assert "persisted replay evidence" in runtime
+    assert "binding_scope=external" in runtime
     assert "terminal turn artifact" in delivery
     assert "pre-final visible artifact" in delivery
     assert "technical status artifact" in delivery
     assert "Pending input artifact" in delivery
+    assert "Warning artifact" in delivery
+    assert "repeat counter only when `N > 2`" in delivery
     assert "lifecycle `turn_started` may reopen the lanes idempotently" in delivery
     assert "ACP-protocol" in boundaries
     assert "ACP-module" in boundaries
@@ -199,6 +209,8 @@ def test_runtime_event_contract_doc_names_semantic_and_delivery_layers() -> None
     assert "pre-final visible artifact" in doc
     assert "technical status artifact" in doc
     assert "pending input artifact" in doc
+    assert "warning" in doc
+    assert "latest-warning dedup semantics" in doc
     assert "user turn opener" in doc
     assert "turn generation" in doc
     assert "must be suppressed or dropped if they would otherwise appear below" in doc
@@ -207,6 +219,9 @@ def test_runtime_event_contract_doc_names_semantic_and_delivery_layers() -> None
     assert "later idle poll" in doc
     assert "event_msg.user_message" in doc
     assert "reopening the turn a second time" in doc
+    assert "replay delivery capability" in doc
+    assert "input injection capability" in doc
+    assert "explicit read-only" in doc
 
 
 def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> None:
@@ -219,6 +234,8 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "latest human-facing commentary remains visible as a dedicated artifact" in doc
     assert "pending-input artifact" in doc
     assert "human-facing orchestration milestones stay as ordinary content" in doc
+    assert "warning artifacts stay visible as durable system notices" in doc
+    assert "repeat counter only when `N > 2`" in doc
     assert "reasoning and thinking summaries are routed through the mutable status" in doc
     assert "artifact" in doc
     assert "including Claude-style `local_command`" in doc
@@ -246,6 +263,8 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "latest-only visible commentary artifact" in doc
     assert "latest-only pending-input artifact" in doc
     assert "spawned/waiting/completed subagent summaries" in doc
+    assert "External-thread bind follows the same split" in doc
+    assert "read-only warning and reattach hint" in doc
     assert "Late delivery must fail closed." in doc
     assert "queue" in doc
     assert "steer" in doc
@@ -255,6 +274,7 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
 def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> None:
     doc = _read("doc/telegram-bot-features.md")
 
+    assert "/bind <thread-name|id>" in doc
     assert "/resume <token>" in doc
     assert "/rename <name>" in doc
     assert "manual_bind_required" in doc
@@ -265,10 +285,14 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
     assert "Queued follow-up preview" in doc
     assert "user echo, orchestration milestones, and final assistant text as durable bubbles" in doc
     assert "latest commentary stays visible as a dedicated artifact" in doc
+    assert "Warning artifacts remain durable and visible" in doc
+    assert "`×N` counter when `N > 2`" in doc
     assert "**Pre-final terminal surface barrier**" in doc
     assert "Codex-style command/tool previews" in doc
     assert "whole pre-final visible surface is" in doc
     assert "mutable technical status artifact are both closed" in doc
+    assert "In external read-only bind mode" in doc
+    assert "read-only warning and a hint to reattach writable live control" in doc
     assert "Draft answer artifact" in doc
     assert "Expandable blockquote for debug reasoning" in doc
 

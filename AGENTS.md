@@ -28,6 +28,12 @@ runtimes without surrendering the live terminal surface.
   instruction-looking heuristics alone.
 - Heads-up warnings are Telegram-visible system notices, but they must not
   steal assistant-final turn semantics.
+- Warning delivery is latest-warning dedup by topic: identical warning text
+  reuses one bubble and adds a visible `×N` counter only when `N > 2`.
+- Topic binding scope may be `tmux` or `external`; external bindings are
+  replay-delivery first and may be read-only for input injection.
+- If no live tmux input plane is attached, Telegram input must fail closed
+  with an explicit read-only warning and a reattach hint.
 - Reasoning, tool lifecycle, command execution, and file-change summaries
   belong in the mutable status artifact unless a debug/verbose path explicitly
   opts into richer delivery.

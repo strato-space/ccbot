@@ -32,6 +32,13 @@ This note defines the Telegram-facing ontology for turn delivery.
   - this artifact is not part of the current turn's visible output ordering
     contract and is not itself a user turn opener
 
+- **Warning artifact**
+  - durable system notice
+  - not a user turn opener
+  - not a technical status artifact
+  - repeated warning text in the same topic deduplicates into one latest
+    warning bubble, with a visible repeat counter only when `N > 2`
+
 - **User turn opener**
   - semantic fact that a new user turn has begun
   - this may be a visible user echo or a hidden internal prompt scaffold that
@@ -66,6 +73,7 @@ Durable bubbles in `compact` mode are intentionally narrow:
 
 - user echo
 - orchestration milestones
+- warning artifacts
 - final assistant text
 
 In addition:
@@ -73,6 +81,8 @@ In addition:
 - latest commentary stays visible as a dedicated artifact
 - latest pending input preview may stay visible as a separate mutable artifact
 - technical execution classes stay out of permanent bubbles by default
+- warning artifacts use latest-warning dedup semantics rather than technical
+  status churn semantics
 
 Technical execution classes include:
 
@@ -93,6 +103,9 @@ Technical execution classes include:
   same turn
 - no late technical status artifact may appear below the final answer for the
   same turn
+- warning artifacts are outside the current-turn pre-final/status closure
+  barrier and may remain visible across turns
+- warning dedup is keyed by topic and latest warning text, not by turn
 - lifecycle markers are not visible content by default, but `turn_started`
   may act as a lane-reopen fallback when hidden opener scaffolding already
   started a real turn and the pre-final/status lanes remained closed
