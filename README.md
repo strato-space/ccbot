@@ -62,7 +62,10 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
 ## Features
 
 - **Topic-based control** — Each Telegram topic binds to one tmux window at a time, while the live process in that window may start or resume a persisted conversation identity
-- **Real-time notifications** — Get Telegram messages for assistant responses, thinking content, tool use/result, and local command output
+- **Compact Telegram delivery** — In the default production surface, user echo,
+  human-facing commentary, and final assistant answers remain ordinary content
+  bubbles while technical reasoning/tool/command/file-change churn stays in the
+  mutable status artifact
 - **Prompt-safe control lane** — Detect `input ready`, `busy`, and `blocked prompt` terminal states before sending input
 - **Voice messages** — Voice messages are transcribed via OpenAI and forwarded as text
 - **Send messages** — Forward text to Codex via tmux keystrokes
@@ -241,12 +244,29 @@ I'll look into the login bug...
 
 ### Notifications
 
-The monitor polls replay evidence every 2 seconds and sends notifications for:
+The monitor polls replay evidence every 2 seconds and projects it onto the
+Telegram delivery surface.
 
-- **Assistant responses** — Codex text replies
-- **Thinking content** — Shown as expandable blockquotes
-- **Tool use/result** — Summarized with stats (e.g. "Read 42 lines", "Found 5 matches")
-- **Local command output** — stdout from commands like `git status`, prefixed with `❯ command_name`
+In the default production-facing `compact` mode, the visible bubble surface is
+intentionally narrow:
+
+- **User echo** — The submitted Telegram message is echoed back into the topic
+- **Commentary** — Human-facing progress narrative remains visible as ordinary
+  content so execution context does not disappear under mutable status churn
+- **Final assistant responses** — The completed assistant answer lands as
+  ordinary content
+
+Technical execution classes stay out of permanent bubbles by default:
+
+- **Reasoning / thinking** — Routed through the mutable status artifact or
+  suppressed when they are placeholder-only
+- **Tool lifecycle** — Summarized into the mutable status artifact
+- **Command execution / local command** — Summarized into the mutable status
+  artifact with compact command text rather than raw shell dumps
+- **File-change summaries** — Routed through the mutable status artifact
+
+Verbose/debug paths may expose more raw execution surface, but that is not the
+default product contract.
 
 Notifications are delivered to the topic bound to the window.
 

@@ -130,7 +130,8 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | **send_chat_action("typing")** | ✅ | Shown while processing user messages and during long operations |
 | **InlineKeyboardMarkup** | ✅ | Used extensively: thread picker, history pagination, directory browser, prompt snapshots, screenshot refresh |
 | **callback_query.answer()** | ✅ | Instant feedback on all callback button clicks |
-| **editMessageText** | ✅ | Status-to-content conversion, tool_result editing into tool_use messages |
+| **editMessageText** | ✅ | Status-to-content conversion in compact mode, plus verbose/fallback `tool_result` editing into `tool_use` messages |
+| **Compact delivery policy** | ✅ | Default production surface keeps only user echo, commentary, and final assistant text as durable bubbles; technical execution classes collapse into mutable status |
 | **editMessageMedia** | ✅ | Screenshot refresh replaces image in-place |
 | **deleteMessage** | ✅ | Status message cleanup, interactive UI cleanup |
 | **BotCommand + set_my_commands** | ✅ | Bot menu is limited to the supported Codex core lane plus a small passthrough subset |
@@ -146,7 +147,7 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | # | Feature | Impact | Effort | Notes |
 |---|---------|--------|--------|-------|
 | 1 | **sendMessageDraft (streaming)** | High | Medium | Stream Codex responses progressively instead of waiting for complete messages. Bot API 9.3+ required. Would significantly improve perceived responsiveness |
-| 2 | **Expandable blockquote for thinking** | Medium | Low | Wrap Codex thinking/reasoning in `<blockquote expandable>` for cleaner layout. Replaces spoiler approach — better UX since content is visible on tap without losing context |
+| 2 | **Expandable blockquote for debug reasoning** | Medium | Low | Use `<blockquote expandable>` only in verbose/debug lanes where reasoning is intentionally exposed; the default compact surface should stay quiet |
 | 3 | **reply_parameters with quote** | Medium | Low | Quote the specific user message when replying, providing clear message association |
 | 4 | **copy_text button** | Medium | Low | Add "Copy" button to code block messages for one-tap clipboard copy |
 | 5 | **link_preview_options** | Low | Low | Disable or minimize link previews in Codex responses to reduce visual noise |

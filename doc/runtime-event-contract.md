@@ -58,6 +58,13 @@ The semantic kinds collapse into three delivery classes:
 
 ## Current policy
 
+Two levels must remain distinct:
+
+- semantic eligibility in the runtime-neutral contract
+- product projection onto the Telegram delivery surface
+
+At the contract level:
+
 - `lifecycle`
   - not dispatched to Telegram content handling
   - not included in `/history`
@@ -66,8 +73,19 @@ The semantic kinds collapse into three delivery classes:
   - not included in `/history`
 - `commentary`, `reasoning`, `tool_start`, `tool_progress`
   - eligible to drive status/progress handling
-- `user_echo`, `assistant_final`, `tool_result`, `command_execution`, `file_change`
-  - treated as history-worthy content
+- `user_echo`, `commentary`, `assistant_final`
+  - user-facing content candidates
+- `tool_result`, `command_execution`, `file_change`
+  - history-worthy semantic facts even when the product surface chooses to
+    collapse them into compact status delivery
+
+At the default product-facing `compact` Telegram surface:
+
+- `user_echo`, `commentary`, and `assistant_final`
+  - remain ordinary content bubbles
+- `reasoning`, `tool_start`, `tool_result`, `command_execution`, `file_change`
+  - are typically projected into the mutable status artifact or suppressed when
+    they are placeholder-only / raw-payload-only
 
 This preserves current Codex and Claude behavior while giving `fast-agent`
 room to emit explicit `tool_progress` later without changing the queue layer

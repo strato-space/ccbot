@@ -23,6 +23,12 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "steer" in readme
     assert "`queue` mode" in readme
     assert "Raw terminal control" in readme
+    assert "Compact Telegram delivery" in readme
+    assert "User echo" in readme
+    assert "Commentary" in readme
+    assert "Final assistant responses" in readme
+    assert "Technical execution classes stay out of permanent bubbles by default" in readme
+    assert "Verbose/debug paths may expose more raw execution surface" in readme
 
 
 def test_strato_ops_runbook_captures_cutover_and_rollback_contract() -> None:
@@ -141,6 +147,11 @@ def test_runtime_event_contract_doc_names_semantic_and_delivery_layers() -> None
     assert "delivery_class" in doc
     assert "status_message_eligible" in doc
     assert "ACP-protocol" in doc
+    assert "semantic eligibility in the runtime-neutral contract" in doc
+    assert "product projection onto the Telegram delivery surface" in doc
+    assert "history-worthy semantic facts" in doc
+    assert "product surface chooses to" in doc
+    assert "collapse them into compact status delivery" in doc
 
 
 def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> None:
@@ -174,6 +185,9 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
     assert "queue" in doc
     assert "steer" in doc
     assert "workspace `.fast-agent` root" in doc
+    assert "**Compact delivery policy**" in doc
+    assert "user echo, commentary, and final assistant text as durable bubbles" in doc
+    assert "Expandable blockquote for debug reasoning" in doc
 
 
 def test_multi_runtime_regression_matrix_doc_captures_required_gates() -> None:
