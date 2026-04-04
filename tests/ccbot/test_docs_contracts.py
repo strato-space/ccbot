@@ -195,6 +195,16 @@ def test_fast_agent_runtime_adapter_doc_describes_title_only_semantics() -> None
     assert "session_id` rename is unsupported" in doc
 
 
+def test_consumer_audit_by_kind_doc_is_source_backed() -> None:
+    doc = _read("doc/consumer-audit-by-kind.md")
+
+    assert "T41 Consumer Audit By Kind" in doc
+    assert "src/ccbot/monitor_state.py:27-71, 88-183" in doc
+    assert "src/ccbot/hook.py:238-299" in doc
+    assert "src/ccbot/session.py:310-338, 500-715" in doc
+    assert "Documentation witnesses" in doc
+
+
 def test_multi_runtime_regression_matrix_doc_freezes_verification_surface() -> None:
     doc = _read("doc/multi-runtime-regression-matrix.md")
 
