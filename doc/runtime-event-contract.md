@@ -125,6 +125,9 @@ At the contract level:
     they begin a real runtime turn
   - hidden internal technical payloads and hidden notifications are not user
     turn openers merely because they are suppressed from Telegram
+  - hidden-vs-visible classification must depend on explicit payload shape,
+    not on broad text heuristics that could match a legitimate pasted user
+    message
 - `commentary`, `orchestration`, and any surfaced preview bubble
   - are pre-final visible artifacts
   - they may be delivered before `assistant_final`
@@ -177,8 +180,10 @@ For Codex rollout specifically:
     duplicate of that same opener inside the duplicate window, it is dropped
     rather than reopening the turn a second time
 - `wait_agent` is also different:
-  - `Waiting for ...` means the wait cycle is active
-  - `Finished waiting ...` means the wait tool returned
+  - each `wait_agent` invocation owns its own waiting/finished lifecycle, even
+    when overlapping waits target the same agent set
+  - `Waiting for ...` means that specific wait cycle is active
+  - `Finished waiting ...` means that specific wait tool returned
   - any per-agent completion/failure statuses and timeout summaries are
     distinct follow-on orchestration facts, not substitutes for the finished
     waiting milestone

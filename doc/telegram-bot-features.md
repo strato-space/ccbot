@@ -134,7 +134,7 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | **Compact delivery policy** | ✅ | Default production surface keeps user echo, orchestration milestones, and final assistant text as durable bubbles; the latest commentary stays visible as a dedicated artifact while technical execution classes collapse into mutable status |
 | **Pre-final terminal surface barrier** | ✅ | `commentary`, orchestration milestones, any surfaced preview bubble, and the mutable technical status artifact may appear before `assistant_final`, but never below it for the same turn |
 | **Codex-style command/tool previews** | ✅ | When command/tool/file previews are surfaced, they prefer extracted shell payloads, fenced `sh` / `json` blocks, truncation footers outside the code block body, and non-redundant outcome footers |
-| **Codex-style orchestration milestones** | ✅ | Subagent spawn/wait/finished-waiting/completion is rendered as human-facing milestones instead of raw `spawn_agent` / `wait_agent` / `<subagent_notification>` payloads |
+| **Codex-style orchestration milestones** | ✅ | Subagent spawn/wait/finished-waiting/completion is rendered as human-facing milestones instead of raw `spawn_agent` / `wait_agent` / `<subagent_notification>` payloads; each `wait_agent` invocation keeps its own waiting/finished lifecycle even when targets overlap |
 | **editMessageMedia** | ✅ | Screenshot refresh replaces image in-place |
 | **deleteMessage** | ✅ | Status message cleanup, interactive UI cleanup |
 | **BotCommand + set_my_commands** | ✅ | Bot menu is limited to the supported Codex core lane plus a small passthrough subset |

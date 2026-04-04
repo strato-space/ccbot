@@ -692,6 +692,61 @@ def test_codex_rollout_stateful_wait_dedupe_is_scoped_to_wait_cycle() -> None:
     ]
 
 
+def test_codex_rollout_overlapping_wait_calls_keep_distinct_wait_lifecycles() -> None:
+    state = CodexRolloutState()
+    records = [
+        {
+            "timestamp": "2026-04-04T12:01:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "wait_agent",
+                "call_id": "call_wait_1",
+                "arguments": json.dumps({"targets": ["agent-1"], "timeout_ms": 30000}),
+            },
+        },
+        {
+            "timestamp": "2026-04-04T12:01:00.100Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "wait_agent",
+                "call_id": "call_wait_2",
+                "arguments": json.dumps({"targets": ["agent-1"], "timeout_ms": 30000}),
+            },
+        },
+        {
+            "timestamp": "2026-04-04T12:01:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_wait_1",
+                "output": json.dumps({"status": {"agent-1": {"completed": "done"}}}),
+            },
+        },
+        {
+            "timestamp": "2026-04-04T12:01:02.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_wait_2",
+                "output": json.dumps({"status": {"agent-1": {"completed": "done"}}}),
+            },
+        },
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1", state=state)
+
+    assert [event.text for event in events if event.dispatch_to_telegram] == [
+        "• Waiting for agent-1",
+        "• Waiting for agent-1",
+        "• Finished waiting for agent-1",
+        "• agent-1 completed\n  └ done",
+        "• Finished waiting for agent-1",
+        "• agent-1 completed\n  └ done",
+    ]
+
+
 def test_codex_rollout_stateful_cross_poll_message_dedupe() -> None:
     state = CodexRolloutState()
 

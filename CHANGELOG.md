@@ -35,6 +35,9 @@
   surface closure now waits for full multipart final delivery, and hidden
   internal payloads no longer reopen turns unless they are real hidden turn
   openers.
+- **17:25-17:30** Overlapping `wait_agent` lifecycles no longer collapse into
+  one visible wait, and legitimate user prompts that quote repository
+  instructions are no longer hidden by broad payload heuristics.
 
 ### CHANGES
 
@@ -74,3 +77,8 @@
   `tests/ccbot/handlers/test_message_queue.py`,
   `tests/ccbot/test_bot_contracts.py`, and
   `tests/ccbot/test_codex_rollout.py`.
+- **17:25-17:30** Scoped `wait_agent` lifecycle tracking to the invocation in
+  `src/ccbot/codex_rollout.py`, removed broad instruction-text suppression from
+  `src/ccbot/telegram_delivery_policy.py`, and added regressions for
+  overlapping waits plus visible quoted-instructions user prompts in
+  `tests/ccbot/test_codex_rollout.py` and `tests/ccbot/test_bot_contracts.py`.

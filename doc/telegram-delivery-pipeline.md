@@ -150,6 +150,9 @@ The reopen side of the contract is semantic, not merely visual:
 - hidden internal technical payloads such as `<bash-stdout>`,
   `<bash-stderr>`, `<local-command-caveat>`, and `<system-reminder>` are also
   not user turn openers and must not reopen the surface
+- a message is not hidden merely because it resembles instructions text; hidden
+  payload classification must rely on explicit tagged/internal shapes so a
+  user can still paste repository guidance or XML-like snippets visibly
 - once a newer turn opens, stale pre-final, technical-status, and stale final
   artifacts from the older turn must fail closed instead of surfacing below
   the newer turn
@@ -213,6 +216,10 @@ multi-agent history rows:
 - waiting for agent(s)
 - finished waiting for agent(s)
 - completed / failed / shutdown agent summaries
+
+Each `wait_agent` invocation owns its own waiting/finished milestone pair. If
+two overlapping waits target the same agent set, both lifecycles must remain
+visible instead of collapsing into one shared dedupe key.
 
 Those classes must either:
 

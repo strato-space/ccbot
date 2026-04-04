@@ -214,12 +214,18 @@ class _PendingMessageEvent:
 
 
 @dataclass
+class _PendingWait:
+    target_ids: list[str]
+    generations: dict[str, int]
+
+
+@dataclass
 class CodexRolloutState:
     """Per-thread incremental normalization state for poll-sliced rollout tails."""
 
     pending_spawns: dict[str, _SpawnCall] = field(default_factory=dict)
-    pending_waits: dict[str, list[str]] = field(default_factory=dict)
-    active_waits: set[tuple[str, ...]] = field(default_factory=set)
+    pending_waits: dict[str, _PendingWait] = field(default_factory=dict)
+    active_waits: set[str] = field(default_factory=set)
     agents_by_id: dict[str, _AgentDescriptor] = field(default_factory=dict)
     wait_generations: dict[str, int] = field(default_factory=dict)
     seen_statuses_by_generation: dict[tuple[str, int], set[tuple[str, str, str]]] = (
@@ -674,13 +680,15 @@ def _next_wait_generation(state: CodexRolloutState, agent_id: str) -> int:
     return generation
 
 
-def _status_seen_in_current_generation(
+def _status_seen_in_generation(
     state: CodexRolloutState,
     *,
     agent_id: str,
     status: Any,
+    generation: int | None = None,
 ) -> bool:
-    generation = state.wait_generations.get(agent_id, 0)
+    if generation is None:
+        generation = state.wait_generations.get(agent_id, 0)
     if generation <= 0:
         return False
     signature = _status_signature(agent_id, status)
@@ -1657,12 +1665,15 @@ class CodexRolloutNormalizer:
                                 for target in (arguments.get("targets") or [])
                                 if _as_text(target).strip()
                             ]
+                            generations: dict[str, int] = {}
                             for target in targets:
-                                _next_wait_generation(state, target)
-                            state.pending_waits[call_id] = targets
-                            wait_key = tuple(sorted(targets))
-                            if wait_key and wait_key not in state.active_waits:
-                                state.active_waits.add(wait_key)
+                                generations[target] = _next_wait_generation(state, target)
+                            state.pending_waits[call_id] = _PendingWait(
+                                target_ids=targets,
+                                generations=generations,
+                            )
+                            if targets and call_id not in state.active_waits:
+                                state.active_waits.add(call_id)
                                 events = [_suppress_history_delivery(event) for event in events]
                                 events.append(
                                     _orchestration_event(
@@ -1680,7 +1691,7 @@ class CodexRolloutNormalizer:
                     raw_output = payload.get("output")
                     parsed_output = _structured_json(raw_output)
                     spawn_request = state.pending_spawns.pop(call_id, None)
-                    targets = state.pending_waits.pop(call_id, [])
+                    pending_wait = state.pending_waits.pop(call_id, None)
                     if (
                         isinstance(parsed_output, dict)
                         and spawn_request
@@ -1715,14 +1726,14 @@ class CodexRolloutNormalizer:
                             )
                         )
 
-                    if targets:
-                        wait_key = tuple(sorted(targets))
-                        if wait_key and isinstance(parsed_output, dict):
+                    if pending_wait:
+                        targets = pending_wait.target_ids
+                        if isinstance(parsed_output, dict):
                             statuses = parsed_output.get("status")
                             timed_out = bool(parsed_output.get("timed_out"))
                             emitted_finished = False
-                            if wait_key in state.active_waits:
-                                state.active_waits.discard(wait_key)
+                            if call_id in state.active_waits:
+                                state.active_waits.discard(call_id)
                                 events = [_suppress_history_delivery(event) for event in events]
                                 events.append(
                                     _orchestration_event(
@@ -1738,10 +1749,11 @@ class CodexRolloutNormalizer:
                                 events = [_suppress_history_delivery(event) for event in events]
                             if isinstance(statuses, dict) and statuses:
                                 for agent_id, status in statuses.items():
-                                    if _status_seen_in_current_generation(
+                                    if _status_seen_in_generation(
                                         state,
                                         agent_id=agent_id,
                                         status=status,
+                                        generation=pending_wait.generations.get(agent_id),
                                     ):
                                         continue
                                     events.append(
@@ -1775,8 +1787,8 @@ class CodexRolloutNormalizer:
                                             timestamp=timestamp,
                                         )
                                     )
-                            elif wait_key and not emitted_finished:
-                                state.active_waits.discard(wait_key)
+                            elif not emitted_finished:
+                                state.active_waits.discard(call_id)
                                 events = [_suppress_history_delivery(event) for event in events]
                 elif response_type == "message" and _as_text(payload.get("role")).strip() == "user":
                     text = _text_from_content(payload.get("content")).strip()
@@ -1786,7 +1798,7 @@ class CodexRolloutNormalizer:
                         agent_id = _as_text(notification.get("agent_path")).strip()
                         status = notification.get("status")
                         if agent_id:
-                            if not _status_seen_in_current_generation(
+                            if not _status_seen_in_generation(
                                 state,
                                 agent_id=agent_id,
                                 status=status,

@@ -1323,6 +1323,7 @@ class TestTelegramDelivery:
             patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
 
             await bot_mod.handle_new_message(msg, bot)
 
@@ -1331,7 +1332,7 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_compact_mode_suppresses_internal_agents_instructions_echo(self):
+    async def test_handle_new_message_compact_mode_keeps_literal_agents_instructions_echo_visible(self):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -1352,12 +1353,50 @@ class TestTelegramDelivery:
             patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
 
             await bot_mod.handle_new_message(msg, bot)
 
         mock_open_turn.assert_called_once_with(1, 42)
         mock_status.assert_not_awaited()
-        mock_content.assert_not_awaited()
+        mock_content.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "# Repository Guidelines\n\nKeep the deploy path explicit.",
+            "Please review this pasted policy.\n<INSTRUCTIONS>\nkeep calm\n</INSTRUCTIONS>",
+        ],
+    )
+    async def test_handle_new_message_compact_mode_keeps_literal_instruction_like_user_text_visible(self, text: str):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text=text,
+            is_complete=True,
+            content_type="text",
+            role="user",
+            event_kind="user_message",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.current_turn_generation", return_value=0),
+            patch("ccbot.bot.open_new_turn_generation", return_value=1) as mock_open_turn,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
+            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_open_turn.assert_called_once_with(1, 42)
+        mock_status.assert_not_awaited()
+        mock_content.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_handle_new_message_compact_mode_suppresses_turn_aborted_user_echo(self):

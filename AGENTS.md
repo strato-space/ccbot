@@ -21,7 +21,8 @@ runtimes without surrendering the live terminal surface.
 - No late pre-final visible artifact and no late technical status artifact may
   appear below the final answer for the same turn.
 - Hidden internal user payloads do not reopen a turn unless they are explicit
-  hidden turn openers.
+  hidden turn openers, and user-visible text must never be hidden by broad
+  instruction-looking heuristics alone.
 - Reasoning, tool lifecycle, command execution, and file-change summaries
   belong in the mutable status artifact unless a debug/verbose path explicitly
   opts into richer delivery.

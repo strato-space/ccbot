@@ -53,12 +53,6 @@ def is_internal_user_payload(text: str) -> bool:
         return True
     if stripped.startswith("<turn_aborted>"):
         return True
-    if stripped.startswith("# AGENTS.md instructions for "):
-        return True
-    if stripped.startswith("# Repository Guidelines"):
-        return True
-    if "\n<INSTRUCTIONS>\n" in stripped:
-        return True
     return False
 
 
@@ -67,12 +61,6 @@ def is_non_turn_user_notification(text: str) -> bool:
     stripped = text.strip()
     if stripped.startswith("<turn_aborted>"):
         return True
-    if stripped.startswith("# AGENTS.md instructions for "):
-        return False
-    if stripped.startswith("# Repository Guidelines"):
-        return False
-    if "\n<INSTRUCTIONS>\n" in stripped:
-        return False
     if _INTERNAL_USER_ECHO_RE.match(stripped):
         tag = _INTERNAL_USER_ECHO_RE.match(stripped)
         if tag:
