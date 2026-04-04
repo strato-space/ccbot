@@ -122,6 +122,7 @@ from .handlers.message_queue import (
     enqueue_content_message,
     enqueue_status_update,
     get_message_queue,
+    is_pre_final_visible_lane_closed,
     open_new_turn_generation,
     shutdown_workers,
 )
@@ -137,6 +138,7 @@ from .markdown_v2 import convert_markdown
 from .handlers.response_builder import build_response_parts, build_status_text
 from .handlers.status_polling import status_poll_loop
 from .runtime_types import (
+    LIFECYCLE_SEMANTIC_KIND,
     USER_ECHO_SEMANTIC_KIND,
     runtime_capability_registry,
 )
@@ -2660,6 +2662,9 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         msg.semantic_kind == USER_ECHO_SEMANTIC_KIND
         and not is_non_turn_user_notification(msg.text)
     )
+    is_turn_started_lifecycle = (
+        msg.semantic_kind == LIFECYCLE_SEMANTIC_KIND and msg.text.strip() == "turn_started"
+    )
 
     status = "complete" if msg.is_complete else "streaming"
     logger.info(
@@ -2677,6 +2682,10 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
     for user_id, wid, thread_id in active_users:
         turn_generation = current_turn_generation(user_id, thread_id)
         if opens_new_turn:
+            turn_generation = open_new_turn_generation(user_id, thread_id)
+        elif is_turn_started_lifecycle and is_pre_final_visible_lane_closed(
+            user_id, thread_id
+        ):
             turn_generation = open_new_turn_generation(user_id, thread_id)
 
         if not msg.dispatch_to_telegram:

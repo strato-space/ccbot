@@ -1737,6 +1737,68 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_handle_new_message_reopens_turn_on_lifecycle_turn_started_when_lane_closed(self):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="turn_started",
+            is_complete=True,
+            content_type="lifecycle",
+            role="assistant",
+            event_kind="lifecycle",
+            runtime_kind="codex",
+            dispatch_to_telegram=False,
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.current_turn_generation", return_value=4),
+            patch("ccbot.bot.is_pre_final_visible_lane_closed", return_value=True),
+            patch("ccbot.bot.open_new_turn_generation", return_value=5) as mock_open_turn,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
+            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_open_turn.assert_called_once_with(1, 42)
+        mock_status.assert_not_awaited()
+        mock_content.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_handle_new_message_does_not_reopen_turn_on_lifecycle_turn_started_when_lane_open(self):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="turn_started",
+            is_complete=True,
+            content_type="lifecycle",
+            role="assistant",
+            event_kind="lifecycle",
+            runtime_kind="codex",
+            dispatch_to_telegram=False,
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.current_turn_generation", return_value=4),
+            patch("ccbot.bot.is_pre_final_visible_lane_closed", return_value=False),
+            patch("ccbot.bot.open_new_turn_generation", return_value=5) as mock_open_turn,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
+            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_open_turn.assert_not_called()
+        mock_status.assert_not_awaited()
+        mock_content.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_handle_new_message_reopens_pre_final_lane_for_hidden_user_echo(self):
         bot = AsyncMock()
         msg = NormalizedEvent(

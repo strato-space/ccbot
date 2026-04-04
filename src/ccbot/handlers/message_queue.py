@@ -1403,6 +1403,15 @@ def clear_pre_final_visible_lane_state(
     _pending_input_enqueued.pop(key, None)
 
 
+def is_pre_final_visible_lane_closed(
+    user_id: int,
+    thread_id: int | None = None,
+) -> bool:
+    """Return True when pre-final/status lanes are closed for this topic."""
+    key = (user_id, thread_id or 0)
+    return key in _pre_final_visible_closed or key in _technical_status_closed
+
+
 def current_turn_generation(
     user_id: int,
     thread_id: int | None = None,
