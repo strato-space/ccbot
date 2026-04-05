@@ -135,6 +135,14 @@ _flood_until: dict[int, float] = {}
 FLOOD_CONTROL_MAX_WAIT = 10
 
 
+def _clear_warning_tracking_for_topic(
+    user_id: int,
+    thread_id_or_0: int,
+) -> None:
+    """Clear warning dedupe state for a topic."""
+    _warning_msg_info.pop((user_id, thread_id_or_0), None)
+
+
 def _is_stale_turn_generation(
     task_generation: int,
     current_generation: int,
@@ -448,6 +456,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         await _do_clear_status_message(bot, user_id, tid)
         await _do_clear_commentary_message(bot, user_id, tid)
         await _do_clear_pending_input_message(bot, user_id, tid)
+        _clear_warning_tracking_for_topic(user_id, tid)
         clear_tool_msg_ids_for_topic(user_id, task.thread_id)
         return
     if _is_stale_turn_generation(task.turn_generation, current_generation):
@@ -815,6 +824,7 @@ async def _process_status_update_task(
         await _do_clear_status_message(bot, user_id, tid)
         await _do_clear_commentary_message(bot, user_id, tid)
         await _do_clear_pending_input_message(bot, user_id, tid)
+        _clear_warning_tracking_for_topic(user_id, tid)
         return
     if _is_stale_turn_generation(task.turn_generation, current_generation):
         logger.debug(
@@ -1159,6 +1169,10 @@ async def _do_send_pending_input_message(
     if sent:
         _pending_input_msg_info[pkey] = (sent.message_id, window_id, text)
         _pending_input_enqueued[pkey] = (window_id, text)
+        return
+    # If delivery fails, clear dedupe pin so the next poll can retry the same
+    # payload instead of getting suppressed by stale enqueue state.
+    _pending_input_enqueued.pop(pkey, None)
 
 
 async def _do_clear_status_message(

@@ -40,6 +40,10 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "Final assistant responses" in readme
     assert "Technical execution classes stay out of permanent bubbles by default" in readme
     assert "Queued follow-up preview" in readme
+    assert "visibility-first" in readme
+    assert "Ordinary user echo remains visible" in readme
+    assert "queue is empty" in readme
+    assert "the binding goes stale, or an explicit clear path runs" in readme
     assert "whole pre-final visible surface closes until the next user turn" in readme
     assert "mutable technical status surface" in readme
     assert "no pre-final visible artifact" in readme
@@ -124,6 +128,9 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "Pending input artifact" in delivery
     assert "Warning artifact" in delivery
     assert "repeat counter only when `N > 2`" in delivery
+    assert "visibility-first mutable" in delivery
+    assert "must drop rather than reopen the lane" in delivery
+    assert "queue-empty, binding-stale, or explicit clear" in delivery
     assert "lifecycle `turn_started` may reopen the lanes idempotently" in delivery
     assert "ACP-protocol" in boundaries
     assert "ACP-module" in boundaries
@@ -212,6 +219,7 @@ def test_runtime_event_contract_doc_names_semantic_and_delivery_layers() -> None
     assert "warning" in doc
     assert "latest-warning dedup semantics" in doc
     assert "user turn opener" in doc
+    assert "ordinary user-visible user echo remains eligible for compact Telegram" in doc
     assert "turn generation" in doc
     assert "must be suppressed or dropped if they would otherwise appear below" in doc
     assert "canonical `response_item.message` wins over duplicate lightweight `event_msg`" in doc
@@ -222,6 +230,8 @@ def test_runtime_event_contract_doc_names_semantic_and_delivery_layers() -> None
     assert "replay delivery capability" in doc
     assert "input injection capability" in doc
     assert "explicit read-only" in doc
+    assert "queue-owned lifecycle changes" in doc
+    assert "visibility-first mutable updates" in doc
 
 
 def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> None:
@@ -236,6 +246,7 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "human-facing orchestration milestones stay as ordinary content" in doc
     assert "warning artifacts stay visible as durable system notices" in doc
     assert "repeat counter only when `N > 2`" in doc
+    assert "ordinary user echo remains visible in compact mode" in doc
     assert "reasoning and thinking summaries are routed through the mutable status" in doc
     assert "artifact" in doc
     assert "including Claude-style `local_command`" in doc
@@ -245,6 +256,7 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "fenced `json` blocks" in doc
     assert "truncation footers outside the fenced block" in doc
     assert "outcome metadata rendered as a separate footer" in doc
+    assert "visibility-first mutable updates" in doc
     assert "`tool_use` summaries" in doc
     assert "`tool_result` summaries" in doc
     assert "when tool lifecycle is materialized as content, `tool_result` may edit the earlier `tool_use` message in place" in doc
@@ -262,6 +274,9 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "deliberately narrow" in doc
     assert "latest-only visible commentary artifact" in doc
     assert "latest-only pending-input artifact" in doc
+    assert "queue-owned lifecycle changes" in doc
+    assert "drop it instead of reopening the closed pre-final lane" in doc
+    assert "must not add a second preview footer" in doc
     assert "spawned/waiting/completed subagent summaries" in doc
     assert "External-thread bind follows the same split" in doc
     assert "read-only warning and reattach hint" in doc
@@ -284,7 +299,9 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
     assert "**Compact delivery policy**" in doc
     assert "Queued follow-up preview" in doc
     assert "user echo, orchestration milestones, and final assistant text as durable bubbles" in doc
+    assert "visibility wins when silence would make runtime state ambiguous" in doc
     assert "latest commentary stays visible as a dedicated artifact" in doc
+    assert "Ordinary user echo stays visible in compact mode" in doc
     assert "Warning artifacts remain durable and visible" in doc
     assert "`×N` counter when `N > 2`" in doc
     assert "**Pre-final terminal surface barrier**" in doc

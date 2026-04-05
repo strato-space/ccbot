@@ -2825,6 +2825,14 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
             and msg.is_complete
             and msg.content_type in {"commentary", "orchestration"}
         ):
+            if is_pre_final_visible_lane_closed(user_id, thread_id):
+                logger.debug(
+                    "Skipping post-final pre-final visible artifact: user=%d thread=%s content_type=%s",
+                    user_id,
+                    thread_id,
+                    msg.content_type,
+                )
+                continue
             commentary_text = build_status_text(
                 msg.text,
                 is_complete=True,

@@ -208,6 +208,17 @@ _EDIT_LAST_QUEUED_RE = re.compile(r"edit last queued message", re.IGNORECASE)
 _PENDING_ITEM_PREFIX_RE = re.compile(
     r"^\s*(?:[☐☑☒□◻◽▫▪▢▣↳→➜➤•◦]\s*)+",
 )
+_PENDING_TERMINAL_PROMPT_RE = re.compile(r"^\s*(?:❯|>)\s*$")
+_PENDING_STATUS_LINE_RE = re.compile(r"^\s*[·✻✽✶✳✢]\s+")
+
+
+def _pending_header_kind(line: str) -> str:
+    stripped = line.strip()
+    if _PENDING_STEERS_HEADER_RE.match(stripped):
+        return "pending_steers"
+    if _REJECTED_STEERS_HEADER_RE.match(stripped):
+        return "rejected_steers"
+    return "queued_messages"
 
 
 def _shorten_separators(text: str) -> str:
@@ -395,20 +406,27 @@ def extract_pending_input_preview(pane_text: str) -> PendingInputPreview:
         return PendingInputPreview()
 
     lines = strip_pane_chrome(pane_text.splitlines())
-    header_indices: list[int] = []
+    header_points: list[tuple[int, str]] = []
     for index, line in enumerate(lines):
-        if (
-            _QUEUED_FOLLOW_UP_HEADER_RE.match(line)
-            or _PENDING_STEERS_HEADER_RE.match(line)
-            or _REJECTED_STEERS_HEADER_RE.match(line)
-        ):
-            header_indices.append(index)
-    if not header_indices:
+        if _QUEUED_FOLLOW_UP_HEADER_RE.match(line):
+            header_points.append((index, "queued_messages"))
+            continue
+        if _PENDING_STEERS_HEADER_RE.match(line):
+            header_points.append((index, "pending_steers"))
+            continue
+        if _REJECTED_STEERS_HEADER_RE.match(line):
+            header_points.append((index, "rejected_steers"))
+    if not header_points:
         return PendingInputPreview()
 
     # Prefer the newest contiguous pending-input block near the bottom.
-    header_index = header_indices[-1]
-    for previous in reversed(header_indices[:-1]):
+    header_index, header_kind = header_points[-1]
+    for previous, previous_kind in reversed(header_points[:-1]):
+        # Do not merge two blocks starting with the same section header.
+        # This avoids cross-poll duplicate folding where the newest block
+        # repeats the same queue section near the bottom.
+        if previous_kind == header_kind:
+            break
         bridge_ok = True
         for raw_line in lines[previous + 1 : header_index]:
             stripped = raw_line.strip()
@@ -423,22 +441,25 @@ def extract_pending_input_preview(pane_text: str) -> PendingInputPreview:
         if not bridge_ok:
             break
         header_index = previous
+        header_kind = previous_kind
 
     pending_steers: list[str] = []
     rejected_steers: list[str] = []
     queued_messages: list[str] = []
     edit_hint = ""
-    header_line = lines[header_index].strip()
-    if _PENDING_STEERS_HEADER_RE.match(header_line):
-        current_section = "pending_steers"
-    elif _REJECTED_STEERS_HEADER_RE.match(header_line):
-        current_section = "rejected_steers"
-    else:
-        current_section = "queued_messages"
+    current_section = _pending_header_kind(lines[header_index])
     for raw_line in lines[header_index + 1 :]:
         stripped = raw_line.strip()
         if not stripped:
             continue
+        if _PENDING_TERMINAL_PROMPT_RE.match(stripped):
+            break
+        if len(stripped) >= 20 and all(c == "─" for c in stripped):
+            break
+        if _PENDING_STATUS_LINE_RE.match(stripped):
+            break
+        if stripped.startswith("[") and "Context:" in stripped:
+            break
         if _EDIT_LAST_QUEUED_RE.search(stripped):
             edit_hint = stripped
             continue

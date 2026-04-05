@@ -132,8 +132,8 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | **InlineKeyboardMarkup** | ✅ | Used extensively: thread picker, history pagination, directory browser, prompt snapshots, screenshot refresh |
 | **callback_query.answer()** | ✅ | Instant feedback on all callback button clicks |
 | **editMessageText** | ✅ | Status-to-content conversion in compact mode, plus verbose/fallback `tool_result` editing into `tool_use` messages |
-| **Compact delivery policy** | ✅ | Default production surface keeps user echo, orchestration milestones, and final assistant text as durable bubbles; the latest commentary stays visible as a dedicated artifact while technical execution classes collapse into mutable status |
-| **Queued follow-up preview** | ✅ | Pending queued user messages may surface as a separate mutable artifact modeled after the Codex pending-input preview rather than being mixed into commentary or status |
+| **Compact delivery policy** | ✅ | Default production surface keeps ordinary user echo, orchestration milestones, and final assistant text as durable bubbles; the latest commentary stays visible as a dedicated artifact while technical execution classes collapse into mutable status, and visibility wins when silence would make runtime state ambiguous |
+| **Queued follow-up preview** | ✅ | Pending queued user messages may surface as a separate mutable artifact modeled after the Codex pending-input preview rather than being mixed into commentary or status; it closes on queue-empty, binding-stale, or explicit clear rather than on assistant-final alone |
 | **Pre-final terminal surface barrier** | ✅ | `commentary`, orchestration milestones, any surfaced preview bubble, and the mutable technical status artifact may appear before `assistant_final`, but never below it for the same turn |
 | **Codex-style command/tool previews** | ✅ | When command/tool/file previews are surfaced, they prefer extracted shell payloads, fenced `sh` / `json` blocks, truncation footers outside the code block body, and non-redundant outcome footers |
 | **Codex-style orchestration milestones** | ✅ | Subagent spawn/wait/finished-waiting/completion is rendered as human-facing milestones instead of raw `spawn_agent` / `wait_agent` / `<subagent_notification>` payloads; each `wait_agent` invocation keeps its own waiting/finished lifecycle even when targets overlap |
@@ -229,6 +229,8 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
   - final assistant text
 - Latest commentary remains visible as a dedicated artifact, but it is not a
   durable ordinary content bubble.
+- Ordinary user echo stays visible in compact mode; hidden internal payloads
+  stay suppressed only when they match explicit tagged/internal shapes.
 - Warning artifacts remain durable and visible; repeated identical warning text
   in one topic deduplicates into one bubble with a `×N` counter when `N > 2`.
 - Queued follow-up messages may remain visible as a separate pending-input
@@ -273,6 +275,8 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
 - Once the terminal assistant bubble lands, no later member of that class may
   appear below it for the same turn.
 - The same turn boundary also closes the mutable technical status artifact.
+- Post-final commentary or orchestration milestones are dropped once the
+  pre-final lane is closed; they do not reopen that lane retroactively.
 - If a visible multipart send has already started when the boundary closes, the
   remaining parts fail closed rather than leaking below the final answer.
 

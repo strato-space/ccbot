@@ -133,6 +133,8 @@ At the contract level:
   - is the terminal turn artifact
 - `user_echo`
   - may act as the user turn opener
+  - ordinary user-visible user echo remains eligible for compact Telegram
+    delivery even when other user-role events are suppressed
   - hidden internal prompt scaffolds may also act as user turn openers when
     they begin a real runtime turn
   - hidden internal technical payloads and hidden notifications are not user
@@ -180,9 +182,14 @@ At the default product-facing `compact` Telegram surface:
     after the Codex bottom-pane pending-input preview
   - it is neither a durable history bubble nor a current-turn visible
     pre-final artifact
+  - it closes on queue-owned lifecycle changes such as queue-empty,
+    binding-stale, or explicit clear rather than on terminal assistant closure
 - `reasoning`, `tool_start`, `tool_result`, `command_execution`, `file_change`
   - are typically projected into the mutable status artifact or suppressed when
     they are placeholder-only / raw-payload-only
+
+When compactness conflicts with semantic clarity, the product projection prefers
+visibility-first mutable updates over ambiguous suppression.
 
 For Codex rollout specifically:
 

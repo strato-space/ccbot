@@ -13,6 +13,7 @@ from ccbot.handlers.message_queue import (
     _is_task_binding_active,
     _is_stale_turn_generation,
     _pending_input_enqueued,
+    _pending_input_msg_info,
     _process_pending_input_clear_task,
     _warning_msg_info,
     clear_commentary_lane_state,
@@ -291,6 +292,107 @@ async def test_process_warning_task_new_text_opens_new_warning_bubble() -> None:
 
 
 @pytest.mark.asyncio
+async def test_process_warning_task_fallbacks_to_plain_edit_after_markdown_failure() -> None:
+    first = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["Heads up: quota is low"],
+        content_type="warning",
+        semantic_kind=WARNING_SEMANTIC_KIND,
+        text="Heads up: quota is low",
+    )
+    second = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["Heads up: quota is low"],
+        content_type="warning",
+        semantic_kind=WARNING_SEMANTIC_KIND,
+        text="Heads up: quota is low",
+    )
+    third = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["Heads up: quota is low"],
+        content_type="warning",
+        semantic_kind=WARNING_SEMANTIC_KIND,
+        text="Heads up: quota is low",
+    )
+
+    bot = AsyncMock()
+    sent_first = AsyncMock()
+    sent_first.message_id = 701
+
+    _warning_msg_info.clear()
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                side_effect=[sent_first],
+            ) as mock_send,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+
+            bot.edit_message_text.side_effect = [
+                Exception("markdown parse failed"),
+                None,
+            ]
+
+            await _process_content_task(bot, 1, first)
+            await _process_content_task(bot, 1, second)
+            await _process_content_task(bot, 1, third)
+
+        assert mock_send.await_count == 1
+        assert bot.edit_message_text.await_count == 2
+        first_call = bot.edit_message_text.await_args_list[0].kwargs
+        second_call = bot.edit_message_text.await_args_list[1].kwargs
+        assert first_call["parse_mode"] == "MarkdownV2"
+        assert "parse_mode" not in second_call
+    finally:
+        _warning_msg_info.clear()
+
+
+@pytest.mark.asyncio
+async def test_stale_binding_content_task_clears_warning_tracking() -> None:
+    task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["final answer"],
+        content_type="text",
+    )
+    _warning_msg_info[(1, 42)] = (999, "@7", "Heads up: quota is low", 4)
+
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+            ) as mock_send,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = None
+            mock_sm.get_topic_binding_state.return_value = "none"
+
+            await _process_content_task(AsyncMock(), 1, task)
+
+        mock_send.assert_not_awaited()
+        assert (1, 42) not in _warning_msg_info
+    finally:
+        _warning_msg_info.clear()
+
+
+@pytest.mark.asyncio
 async def test_process_pending_input_task_reuses_visible_preview_in_place() -> None:
     first = MessageTask(
         task_type="pending_input_update",
@@ -335,6 +437,85 @@ async def test_process_pending_input_task_reuses_visible_preview_in_place() -> N
     assert kwargs["chat_id"] == 100
     assert kwargs["message_id"] == 201
     assert "continue infra" in kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_process_pending_input_task_fallbacks_to_plain_edit_after_markdown_failure() -> None:
+    first = MessageTask(
+        task_type="pending_input_update",
+        window_id="@7",
+        thread_id=42,
+        text="⏭ Queued follow-up messages\n↳ update docs",
+    )
+    second = MessageTask(
+        task_type="pending_input_update",
+        window_id="@7",
+        thread_id=42,
+        text="⏭ Queued follow-up messages\n↳ update docs\n↳ continue infra",
+    )
+
+    bot = AsyncMock()
+    sent_first = AsyncMock()
+    sent_first.message_id = 401
+
+    _pending_input_msg_info.clear()
+    _pending_input_enqueued.clear()
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                side_effect=[sent_first],
+            ) as mock_send,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+            bot.edit_message_text.side_effect = [Exception("markdown failed"), None]
+
+            from ccbot.handlers.message_queue import _process_pending_input_update_task
+
+            await _process_pending_input_update_task(bot, 1, first)
+            await _process_pending_input_update_task(bot, 1, second)
+
+        assert mock_send.await_count == 1
+        assert bot.edit_message_text.await_count == 2
+        first_call = bot.edit_message_text.await_args_list[0].kwargs
+        second_call = bot.edit_message_text.await_args_list[1].kwargs
+        assert first_call["parse_mode"] == "MarkdownV2"
+        assert "parse_mode" not in second_call
+    finally:
+        _pending_input_msg_info.clear()
+        _pending_input_enqueued.clear()
+
+
+@pytest.mark.asyncio
+async def test_pending_input_send_failure_clears_dedupe_pin_for_retry() -> None:
+    _pending_input_msg_info.clear()
+    _pending_input_enqueued.clear()
+    try:
+        with patch(
+            "ccbot.handlers.message_queue.send_with_fallback",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            from ccbot.handlers.message_queue import _do_send_pending_input_message
+
+            await _do_send_pending_input_message(
+                AsyncMock(),
+                user_id=1,
+                thread_id_or_0=42,
+                window_id="@7",
+                text="⏭ Pending input\n↳ continue infra",
+            )
+
+        assert (1, 42) not in _pending_input_enqueued
+    finally:
+        _pending_input_msg_info.clear()
+        _pending_input_enqueued.clear()
 
 
 @pytest.mark.asyncio

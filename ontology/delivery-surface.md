@@ -83,6 +83,8 @@ In addition:
 - technical execution classes stay out of permanent bubbles by default
 - warning artifacts use latest-warning dedup semantics rather than technical
   status churn semantics
+- when compactness and semantic clarity conflict, visibility-first mutable
+  updates are preferred over ambiguous suppression
 
 Technical execution classes include:
 
@@ -106,6 +108,8 @@ Technical execution classes include:
 - warning artifacts are outside the current-turn pre-final/status closure
   barrier and may remain visible across turns
 - warning dedup is keyed by topic and latest warning text, not by turn
+- once the pre-final visible lane is closed, later commentary/orchestration
+  facts for that same generation must drop rather than reopen the lane
 - lifecycle markers are not visible content by default, but `turn_started`
   may act as a lane-reopen fallback when hidden opener scaffolding already
   started a real turn and the pre-final/status lanes remained closed
@@ -113,6 +117,9 @@ Technical execution classes include:
   parts must abort rather than leaking below the new boundary
 - pending input preview remains outside this terminal ordering barrier; it
   describes future queued input rather than current-turn output
+- pending input preview closes on queue-owned lifecycle transitions such as
+  queue-empty, binding-stale, or explicit clear, not on terminal assistant
+  closure alone
 
 ## Preview Contract
 

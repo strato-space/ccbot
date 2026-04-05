@@ -29,6 +29,7 @@ from .runtime_types import (
     REASONING_SEMANTIC_KIND,
     TOOL_RESULT_SEMANTIC_KIND,
     TOOL_START_SEMANTIC_KIND,
+    USER_ECHO_SEMANTIC_KIND,
     WARNING_SEMANTIC_KIND,
     NormalizedEvent,
 )
@@ -181,6 +182,15 @@ def apply_telegram_delivery_policy(
 
     if projected.role == "user" and is_internal_user_payload(text):
         return _suppress(projected)
+
+    if projected.semantic_kind == USER_ECHO_SEMANTIC_KIND:
+        # Ordinary user echo stays visible in compact mode even if upstream
+        # normalizers set dispatch_to_telegram=False on user events.
+        projected.include_in_history = True
+        projected.dispatch_to_telegram = True
+        projected.status_message_eligible = False
+        projected.is_complete = True
+        return projected
 
     if projected.semantic_kind == WARNING_SEMANTIC_KIND:
         projected.include_in_history = True

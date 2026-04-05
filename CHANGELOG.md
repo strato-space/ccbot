@@ -14,6 +14,12 @@
 - **00:35-01:56** Documentation/ontology drift around external bind semantics
   and warning behavior increased operational ambiguity. Ontology, delivery
   docs, README, and doc contracts are now synchronized to the implemented model.
+- **11:05-11:41** Compact delivery still had semantic drift across queue,
+  policy, parser, and preview layers: ordinary user echo could be hidden,
+  post-final commentary/orchestration could reappear after closure, pending
+  input could over-merge older poll slices or get stuck after send failure, and
+  preview bubbles could retain redundant output-footers. The Telegram surface
+  now behaves as a clearer semantic ledger without adding new bubble classes.
 
 ### FEATURE IMPLEMENTED
 
@@ -27,6 +33,14 @@
   across text/key/input actions and user-facing reattach hints.
 - **00:35-01:56** Finalized ontology/spec tranche T68-T72 as completed and
   pinned new guarantees in doc contract tests.
+- **11:05-11:41** Implemented the Telegram delivery integration wave across the
+  existing five delivery surfaces: warning dedup/counter hardening, visible
+  ordinary user echo in compact mode, post-final orchestration/commentary
+  non-reopen, queue-owned pending-input preview hardening, and preview/footer
+  convergence without duplicate fenced output decoration.
+- **11:05-11:41** Added an execution-ready wave plan artifact in
+  `specs/telegram-delivery-integration-wave-plan.md` so the delivery contract,
+  rollout gate, and verification scope are recorded alongside the codebase.
 
 ### CHANGES
 
@@ -56,6 +70,46 @@
   tests/ccbot/test_session.py tests/ccbot/test_state_migration.py
   tests/ccbot/test_bot_contracts.py` (`175 passed`), and
   `uv run --extra dev ruff check src tests` (`All checks passed`).
+- **11:05-11:41** Hardened queue lifecycle behavior in
+  `src/ccbot/handlers/message_queue.py`: stale-binding cleanup now clears
+  warning dedupe state, pending-input send failures clear stale dedupe pins for
+  retry, and regressions were added in
+  `tests/ccbot/handlers/test_message_queue.py` for markdown fallback paths,
+  stale binding cleanup, and retry-safe pending-input resend behavior.
+- **11:05-11:41** Tightened compact policy and bot routing in
+  `src/ccbot/telegram_delivery_policy.py` and `src/ccbot/bot.py` so ordinary
+  user echo always remains Telegram-visible while hidden internal payloads stay
+  suppressed, and complete commentary/orchestration events are dropped once the
+  pre-final lane is closed. Added coverage in
+  `tests/ccbot/test_bot_contracts.py`.
+- **11:05-11:41** Converged preview/footer formatting in
+  `src/ccbot/handlers/response_builder.py` and
+  `src/ccbot/codex_rollout.py`: existing fenced previews are preserved without
+  double-wrap, valid `preview X/Y lines` footers stay outside the fence, and
+  redundant trailing `output N line(s)` noise is stripped. Added regressions in
+  `tests/ccbot/handlers/test_response_builder.py` and
+  `tests/ccbot/test_codex_rollout.py`.
+- **11:05-11:41** Hardened pending-input parsing/rendering in
+  `src/ccbot/terminal_parser.py` and `src/ccbot/handlers/status_polling.py`
+  with stricter stop conditions for prompt/status noise, non-merging repeated
+  same-header blocks across older poll slices, and clipped edit-hint rendering.
+  Added coverage in `tests/ccbot/test_terminal_parser.py` and
+  `tests/ccbot/test_pending_input_status_polling.py`.
+- **11:05-11:41** Synced documentation and ontology with the implemented
+  delivery contract in `AGENTS.md`, `README.md`,
+  `doc/runtime-event-contract.md`, `doc/telegram-bot-features.md`,
+  `doc/telegram-delivery-pipeline.md`, `ontology/delivery-surface.md`, and
+  expanded `tests/ccbot/test_docs_contracts.py` to pin the new wording.
+- **11:05-11:41** Validation: `uv run --extra dev pytest -q
+  tests/ccbot/handlers/test_message_queue.py
+  tests/ccbot/test_pending_input_status_polling.py
+  tests/ccbot/test_terminal_parser.py
+  tests/ccbot/test_bot_contracts.py
+  tests/ccbot/test_codex_rollout.py
+  tests/ccbot/handlers/test_response_builder.py
+  tests/ccbot/test_docs_contracts.py` (`248 passed`), and
+  `uv run --extra dev ruff check src tests README.md doc ontology`
+  (`All checks passed`).
 
 ## 2026-04-04
 

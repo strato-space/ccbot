@@ -419,6 +419,33 @@ class TestExtractPendingInputPreview:
         assert preview.pending_steers == ("continue infra",)
         assert preview.queued_messages == ("fresh item",)
 
+    def test_does_not_merge_repeated_same_header_blocks_from_older_slice(self):
+        pane = (
+            "Queued follow-up messages\n"
+            "◻ update docs\n"
+            "Queued follow-up messages\n"
+            "◻ update docs\n"
+            "shift+← edit last queued message\n"
+            "──────────────────────────────\n"
+            "❯\n"
+        )
+
+        preview = extract_pending_input_preview(pane)
+
+        assert preview.queued_messages == ("update docs",)
+
+    def test_stops_pending_parse_on_status_or_prompt_noise(self):
+        pane = (
+            "Queued follow-up messages\n"
+            "◻ update docs\n"
+            "✻ Working on task\n"
+            "❯\n"
+        )
+
+        preview = extract_pending_input_preview(pane)
+
+        assert preview.queued_messages == ("update docs",)
+
 
 # ── strip_pane_chrome ───────────────────────────────────────────────────
 

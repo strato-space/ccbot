@@ -55,6 +55,37 @@ def test_build_pending_input_text_includes_all_pending_sections() -> None:
     assert "↳ update docs" in text
 
 
+def test_build_pending_input_text_returns_none_for_edit_hint_without_messages() -> None:
+    pane = (
+        "Queued follow-up messages\n"
+        "shift+← edit last queued message\n"
+        "──────────────────────────────\n"
+        "❯\n"
+    )
+
+    assert _build_pending_input_text(pane) is None
+
+
+def test_build_pending_input_text_clips_long_edit_hint() -> None:
+    pane = (
+        "Queued follow-up messages\n"
+        "◻ update docs\n"
+        "shift+← edit last queued message "
+        + ("x" * 220)
+        + "\n"
+        "──────────────────────────────\n"
+        "❯\n"
+    )
+
+    text = _build_pending_input_text(pane)
+
+    assert text is not None
+    assert "edit last queued message" in text
+    hint_line = text.splitlines()[-1]
+    assert hint_line.endswith("…")
+    assert len(hint_line) <= 120
+
+
 @pytest.mark.asyncio
 async def test_update_status_message_enqueues_pending_input_preview() -> None:
     pane = (

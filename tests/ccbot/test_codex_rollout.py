@@ -468,6 +468,50 @@ def test_codex_rollout_tool_output_exec_command_uses_preview_block() -> None:
     assert "line3" in events[0].text
 
 
+def test_codex_rollout_tool_output_preserves_existing_fenced_preview_without_double_wrap() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-04T10:07:30.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "name": "exec_command",
+                "output": "```sh\nline1\nline2\n```\n\npreview 2/4 lines",
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].content_type == "tool_result"
+    assert events[0].text.count("```sh") == 1
+    assert events[0].text.endswith("preview 2/4 lines")
+
+
+def test_codex_rollout_tool_output_strips_redundant_output_footer_when_preview_exists() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-04T10:07:31.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "name": "exec_command",
+                "output": "```sh\nline1\nline2\n```\n\npreview 2/4 lines\noutput 4 line(s)",
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].content_type == "tool_result"
+    assert "preview 2/4 lines" in events[0].text
+    assert "output 4 line(s)" not in events[0].text
+
+
 def test_codex_rollout_synthesizes_spawn_and_wait_orchestration_events() -> None:
     records = [
         {

@@ -54,6 +54,12 @@ def _clip_pending_input_line(text: str, *, max_chars: int = 96) -> str:
     return text[: max_chars - 1].rstrip() + "…"
 
 
+def _clip_pending_input_hint(text: str, *, max_chars: int = 120) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
+
+
 def _build_pending_input_text(pane_text: str) -> str | None:
     preview = extract_pending_input_preview(pane_text)
     if preview.is_empty:
@@ -74,7 +80,7 @@ def _build_pending_input_text(pane_text: str) -> str | None:
         if len(messages) > len(shown):
             parts.append(f"preview {len(shown)}/{len(messages)} messages")
     if preview.edit_hint:
-        parts.extend(["", preview.edit_hint])
+        parts.extend(["", _clip_pending_input_hint(preview.edit_hint)])
     return "\n".join(parts)
 
 

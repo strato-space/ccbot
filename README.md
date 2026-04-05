@@ -85,9 +85,14 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   final answer for the same turn, and no late status artifact appears below the
   final answer for the same turn. Put bluntly: no pre-final visible artifact
   or late technical status may leak below the terminal assistant bubble.
+  When compactness and semantic clarity conflict, the delivery surface prefers
+  visibility-first edit-in-place updates over ambiguous silence.
   If a new turn starts via hidden opener scaffolding, lifecycle `turn_started`
   can reopen the delivery lanes idempotently without creating a duplicate
   visible user-opener bubble.
+  Ordinary user echo remains visible; only explicit internal payload shapes
+  such as `<subagent_notification>` or tagged command scaffolds stay hidden and
+  non-turn-opening.
   When command/tool/file previews are surfaced, they follow a Codex-style split:
   preview body in fenced `sh` / `json`, truncation metadata outside the fence,
   and no redundant `completed · output 1 line(s)` footer when the preview
@@ -96,7 +101,9 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   are queued behind the active turn, the bot may surface them as a separate
   mutable pending-input artifact (after-next-tool, end-of-turn, and queued
   follow-up sections) rather than mixing them into commentary or current-turn
-  status.
+  status. That artifact belongs to future input, so the terminal assistant
+  answer does not clear it by itself; it closes only when the queue is empty,
+  the binding goes stale, or an explicit clear path runs.
 - **Heads-up warnings stay visible without breaking turn closure** — Operator
   warning notices remain visible in Telegram while assistant-final semantics
   and post-final artifact closure remain intact. Repeated identical warning

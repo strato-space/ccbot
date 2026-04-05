@@ -1565,6 +1565,7 @@ class TestTelegramDelivery:
             patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
 
             await bot_mod.handle_new_message(msg, bot)
 
@@ -1592,6 +1593,7 @@ class TestTelegramDelivery:
             patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
 
             await bot_mod.handle_new_message(msg, bot)
 
@@ -1618,6 +1620,7 @@ class TestTelegramDelivery:
             patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
 
             await bot_mod.handle_new_message(msg, bot)
 
@@ -1914,11 +1917,11 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_reopens_pre_final_lane_for_hidden_user_echo(self):
+    async def test_handle_new_message_reopens_pre_final_lane_for_ordinary_user_echo(self):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
-            text="hidden user turn boundary",
+            text="please continue with the next step",
             is_complete=True,
             content_type="text",
             role="user",
@@ -1934,13 +1937,47 @@ class TestTelegramDelivery:
             patch("ccbot.bot.open_new_turn_generation", return_value=1) as mock_open_turn,
             patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
             patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch("ccbot.bot.get_interactive_msg_id", return_value=None),
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
 
             await bot_mod.handle_new_message(msg, bot)
 
         mock_open_turn.assert_called_once_with(1, 42)
         mock_status.assert_not_awaited()
+        mock_content.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_new_message_drops_post_final_commentary_when_lane_closed(self):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="still waiting for worker result",
+            is_complete=True,
+            content_type="commentary",
+            role="assistant",
+            event_kind="commentary",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.current_turn_generation", return_value=5),
+            patch("ccbot.bot.is_pre_final_visible_lane_closed", return_value=True),
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
+            patch("ccbot.bot.enqueue_commentary_update", new_callable=AsyncMock) as mock_commentary,
+            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch("ccbot.bot.get_interactive_msg_id", return_value=None),
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_status.assert_not_awaited()
+        mock_commentary.assert_not_awaited()
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -2090,3 +2127,23 @@ class TestTelegramDelivery:
         assert projected.status_message_eligible is True
         assert len(projected.text) <= 280
         assert projected.text.count("```") in {0, 2}
+
+    def test_compact_policy_forces_dispatch_for_ordinary_user_echo(self):
+        event = NormalizedEvent(
+            thread_id="thread-1",
+            text="show latest status",
+            is_complete=False,
+            content_type="text",
+            role="user",
+            event_kind="user_message",
+            dispatch_to_telegram=False,
+            include_in_history=False,
+            status_message_eligible=True,
+        )
+
+        projected = apply_telegram_delivery_policy(event, mode="compact")
+
+        assert projected.dispatch_to_telegram is True
+        assert projected.include_in_history is True
+        assert projected.status_message_eligible is False
+        assert projected.is_complete is True

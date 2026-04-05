@@ -34,6 +34,11 @@ _CONTENT_PREFIXES: dict[str, str] = {
 _FUNCTION_CALL_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\((.*)\)\s*$", re.DOTALL)
 _FILE_CHANGE_STATUSES = {"applied", "pending", "completed", "failed"}
 _FENCED_BLOCK_RE = re.compile(r"```[A-Za-z0-9_-]*\n[\s\S]*?\n```")
+_PREVIEW_FOOTER_RE = re.compile(r"^preview\s+\d+/\d+\s+lines$", re.IGNORECASE)
+_REDUNDANT_OUTPUT_FOOTER_RE = re.compile(
+    r"^(?:[a-z ]*·\s*)?output\s+\d+\s+line\(s\)$",
+    re.IGNORECASE,
+)
 
 
 def _clip_code_lines(
@@ -156,6 +161,15 @@ def _format_tool_like_text(text: str, *, content_type: str) -> str:
     if not stripped:
         return stripped
     if stripped.startswith("```") or _FENCED_BLOCK_RE.search(stripped):
+        lines = stripped.splitlines()
+        if any(_PREVIEW_FOOTER_RE.match(line.strip()) for line in lines):
+            while lines and not lines[-1].strip():
+                lines.pop()
+            while lines and _REDUNDANT_OUTPUT_FOOTER_RE.match(lines[-1].strip()):
+                lines.pop()
+                while lines and not lines[-1].strip():
+                    lines.pop()
+            return "\n".join(lines).strip()
         return stripped
     if content_type == "file_change":
         return _format_file_change_block(stripped)

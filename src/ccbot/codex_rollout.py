@@ -56,6 +56,12 @@ _TOOL_SUMMARY_KEYS = (
     "issue",
     "project",
 )
+_FENCED_BLOCK_RE = re.compile(r"```[A-Za-z0-9_-]*\n[\s\S]*?\n```")
+_PREVIEW_FOOTER_RE = re.compile(r"^preview\s+\d+/\d+\s+lines$", re.IGNORECASE)
+_REDUNDANT_OUTPUT_FOOTER_RE = re.compile(
+    r"^(?:[a-z ]*·\s*)?output\s+\d+\s+line\(s\)$",
+    re.IGNORECASE,
+)
 
 
 def _as_text(value: Any) -> str:
@@ -276,6 +282,23 @@ def _preview_footer(total_lines: int, shown_lines: int) -> str:
     return f"preview {shown_lines}/{total_lines} lines"
 
 
+def _preserve_existing_fenced_preview(text: str) -> str:
+    stripped = text.strip()
+    if not stripped or not _FENCED_BLOCK_RE.search(stripped):
+        return ""
+
+    lines = stripped.splitlines()
+    if any(_PREVIEW_FOOTER_RE.match(line.strip()) for line in lines):
+        while lines and not lines[-1].strip():
+            lines.pop()
+        while lines and _REDUNDANT_OUTPUT_FOOTER_RE.match(lines[-1].strip()):
+            lines.pop()
+            while lines and not lines[-1].strip():
+                lines.pop()
+        return "\n".join(lines).strip()
+    return stripped
+
+
 def _command_code_block(
     command: str,
     *,
@@ -312,6 +335,10 @@ def _tool_text_code_block(
     max_lines: int = 10,
     max_chars: int = 180,
 ) -> str:
+    preserved = _preserve_existing_fenced_preview(text)
+    if preserved:
+        return preserved
+
     lines = _nonempty_lines(text)
     if not lines:
         return ""
@@ -408,6 +435,10 @@ def _tool_output_summary(tool_name: str | None, text: str) -> str:
     text = text.strip()
     if not text:
         return "[tool_output]"
+
+    preserved = _preserve_existing_fenced_preview(text)
+    if preserved:
+        return preserved
 
     lines = _nonempty_lines(text)
     if not lines:

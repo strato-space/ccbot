@@ -30,10 +30,17 @@ runtimes without surrendering the live terminal surface.
   steal assistant-final turn semantics.
 - Warning delivery is latest-warning dedup by topic: identical warning text
   reuses one bubble and adds a visible `×N` counter only when `N > 2`.
+- If compactness conflicts with semantic clarity, prefer visibility-first
+  mutable updates over ambiguous suppression.
+- Ordinary user echo remains visible in `compact`; only explicit internal
+  payload shapes stay hidden and non-turn-opening.
 - Topic binding scope may be `tmux` or `external`; external bindings are
   replay-delivery first and may be read-only for input injection.
 - If no live tmux input plane is attached, Telegram input must fail closed
   with an explicit read-only warning and a reattach hint.
+- Pending-input preview belongs to the queue-owned future-input lane and closes
+  on `queue-empty`, `binding-stale`, or explicit clear rather than on
+  assistant-final alone.
 - Reasoning, tool lifecycle, command execution, and file-change summaries
   belong in the mutable status artifact unless a debug/verbose path explicitly
   opts into richer delivery.
@@ -57,3 +64,13 @@ runtimes without surrendering the live terminal surface.
   - a live deploy smoke check against the bot service
 - If polling enqueues status artifacts, keep turn-generation scoping aligned
   with queue stale-drop guards.
+
+## Recent Updates
+
+- 2026-04-05: Tightened compact delivery so ordinary user echo always remains
+  visible, late commentary/orchestration cannot reopen a closed pre-final lane,
+  and pending-input preview keeps queue-owned closure semantics across polling
+  and retry paths.
+- 2026-04-05: Hardened warning fallback/retry behavior, removed redundant
+  preview output footers when a valid preview footer already exists, and synced
+  README/docs/ontology contract text with the implemented Telegram surface.

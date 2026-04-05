@@ -37,6 +37,8 @@ The default Telegram surface is `compact`, not `verbose`.
 - file-change summaries are routed through the mutable status artifact
 - internal injected user payloads such as `<skill>...</skill>` never appear as
   ordinary chat content
+- ordinary user echo remains visible in compact mode unless it matches an
+  explicit internal payload shape
 - placeholder reasoning such as `[reasoning]` is suppressed
 - raw tool payloads, giant command stdout dumps, and full file bodies must be summarized before they reach Telegram
 - repeated identical warnings in one topic deduplicate into one latest warning
@@ -49,6 +51,8 @@ The default Telegram surface is `compact`, not `verbose`.
 - when a surfaced technical preview already conveys the outcome clearly, the
   visible bubble should not add a redundant footer like
   `completed · output 1 line(s)` just for symmetry
+- when compactness conflicts with semantic clarity, the delivery surface
+  prefers visibility-first mutable updates over ambiguous suppression
 
 `verbose` is a debug policy for operators. It may expose more raw execution
 surface, but it is not the default product-facing mode.
@@ -162,6 +166,10 @@ This artifact is not a durable history bubble, not a user turn opener by
 itself, and not a member of the current turn's pre-final visible artifact
 class.
 
+It is closed by queue-owned lifecycle changes (`queue-empty`, stale binding, or
+explicit clear), not merely because the current assistant turn has produced its
+terminal answer.
+
 The preview should preserve queued follow-up text literally. The parser may
 strip Codex UI marker glyphs such as checkbox bullets, but it must not
 normalize away user punctuation like `/`, `#`, `$`, `>` or phrases like
@@ -237,12 +245,21 @@ the chat shows the current human-readable execution narrative without
 accumulating a long stack of near-duplicate commentary bubbles. That commentary
 artifact is explicitly cleared when the final assistant answer is delivered and
 must not reappear below the final answer unless a new user turn has begun.
+If a complete commentary or orchestration event arrives after that closure
+point, the bot must drop it instead of reopening the closed pre-final lane.
 
 `compact` may also keep one latest-only pending-input artifact that previews
 queued follow-up messages held behind the current running turn. Unlike
 commentary, that artifact belongs to future input, not current-turn output, so
 it is not closed by the terminal turn artifact unless the queue itself is
 cleared or rebound.
+
+Formatting ownership is intentionally split:
+
+- preview builders/rollout formatters emit fenced blocks and preview footers
+- compact-policy clipping may shorten those previews for budget reasons
+- compact policy must not add a second preview footer or wrap an already-fenced
+  preview again
 
 The following semantic classes are not meant to survive as permanent content
 bubbles in `compact` mode:

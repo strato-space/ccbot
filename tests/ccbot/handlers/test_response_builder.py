@@ -172,6 +172,18 @@ class TestBuildResponseParts:
         assert "```text" not in formatted
         assert "\n```\n\npreview 1/4 lines" in formatted
 
+    def test_tool_use_strips_redundant_output_line_footer_when_preview_exists(self):
+        formatted = format_response_text(
+            "exec_command\n```sh\nbd show server-k7k\n```\n\npreview 1/4 lines\noutput 4 line(s)",
+            is_complete=True,
+            content_type="tool_use",
+            role="assistant",
+        )
+
+        assert formatted.count("```sh") == 1
+        assert "\n```\n\npreview 1/4 lines" in formatted
+        assert "output 4 line(s)" not in formatted
+
     def test_tool_result_inline_backticks_do_not_disable_text_block_formatting(self):
         formatted = format_response_text(
             "Tool output mentions ```token``` inline",
