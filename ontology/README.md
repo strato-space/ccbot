@@ -40,6 +40,11 @@ More precisely:
 - `live semantic stream and/or persisted replay evidence -> normalized events`
 - `normalized events -> Telegram delivery and history views`
 
+For chats without forum topics, the product may expose a separate shared
+main-chat control mode:
+
+`chat without forum topics -> no-topics main-chat mode (thread_id is None) -> binding -> tmux window -> runtime process -> runtime conversation identity -> replay evidence`
+
 ## Why this folder exists
 
 The project cannot afford to collapse these distinct kinds of thing into one

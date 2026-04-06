@@ -30,6 +30,10 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "/resume <thread-name|id>" in readme
     assert "/bind <thread-name|id>" in readme
     assert "manual_bind_required" in readme
+    assert "chat -> live tmux window" in readme
+    assert "no-topics group main chat" in readme
+    assert "ordinary non-addressed text stays silent" in readme
+    assert "shared group topics" in readme
     assert "queue" in readme
     assert "steer" in readme
     assert "`queue` mode" in readme
@@ -304,6 +308,9 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
     assert "Ordinary user echo stays visible in compact mode" in doc
     assert "Warning artifacts remain durable and visible" in doc
     assert "`×N` counter when `N > 2`" in doc
+    assert "no-topics group chat" in doc or "no-topics group" in doc
+    assert "ordinary non-addressed message in an unbound topic must stay silent" in doc
+    assert "bot-addressed `@mention` remain valid explicit entry paths" in doc
     assert "**Pre-final terminal surface barrier**" in doc
     assert "Codex-style command/tool previews" in doc
     assert "whole pre-final visible surface is" in doc

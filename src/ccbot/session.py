@@ -83,6 +83,20 @@ EXTERNAL_BINDING_READ_ONLY_MESSAGE = (
     "Attach a live tmux window via /bind or /resume to inject input."
 )
 
+SURFACE_BINDINGS_KEY = "surface_bindings"
+EXTERNAL_SURFACE_BINDINGS_KEY = "external_surface_bindings"
+SURFACE_POLICIES_KEY = "surface_policies"
+SURFACE_BINDING_STATES_KEY = "surface_binding_states"
+SURFACE_BIND_FLOW_VERSIONS_KEY = "surface_bind_flow_versions"
+SURFACE_BIND_FLOW_NONCES_KEY = "surface_bind_flow_nonces"
+SURFACE_PENDING_SLOTS_KEY = "surface_pending_slots"
+TOPIC_SURFACE_PREFIX = "t:"
+CHAT_SURFACE_PREFIX = "c:"
+PENDING_SLOT_STATUS_PENDING = "pending"
+PENDING_SLOT_STATUS_CONSUMED = "consumed"
+SURFACE_PENDING_STATUS_PENDING = PENDING_SLOT_STATUS_PENDING
+SURFACE_PENDING_STATUS_CONSUMED = PENDING_SLOT_STATUS_CONSUMED
+
 
 @dataclass
 class SessionManager:
@@ -93,14 +107,30 @@ class SessionManager:
 
     window_states: window_id -> LiveProcessDescriptor
     user_window_offsets: user_id -> {window_id -> byte_offset}
-    thread_bindings: user_id -> {thread_id -> window_id}
-    external_topic_bindings: user_id -> {thread_id -> external-thread metadata}
+    surface_bindings: user_id -> {surface_key -> window_id}
+    external_surface_bindings: user_id -> {surface_key -> external-thread metadata}
+    surface_policies: user_id -> {surface_key -> topic policy}
+    surface_binding_states: user_id -> {surface_key -> binding state}
+    surface_bind_flow_versions/nonces: user_id -> {surface_key -> bind-flow credentials}
+    surface_pending_slots: user_id -> {surface_key -> pending input metadata}
+    thread_bindings/external_topic_bindings/topic_*: compatibility-only topic mirrors
     window_display_names: window_id -> window_name (for display)
     group_chat_ids: "user_id:thread_id" -> group chat_id (for supergroup routing)
     """
 
     window_states: dict[str, LiveProcessDescriptor] = field(default_factory=dict)
     user_window_offsets: dict[int, dict[str, int]] = field(default_factory=dict)
+    surface_bindings: dict[int, dict[str, str]] = field(default_factory=dict)
+    external_surface_bindings: dict[int, dict[str, dict[str, Any]]] = field(
+        default_factory=dict
+    )
+    surface_policies: dict[int, dict[str, str]] = field(default_factory=dict)
+    surface_binding_states: dict[int, dict[str, str]] = field(default_factory=dict)
+    surface_bind_flow_versions: dict[int, dict[str, int]] = field(default_factory=dict)
+    surface_bind_flow_nonces: dict[int, dict[str, str]] = field(default_factory=dict)
+    surface_pending_slots: dict[int, dict[str, dict[str, Any]]] = field(
+        default_factory=dict
+    )
     thread_bindings: dict[int, dict[int, str]] = field(default_factory=dict)
     external_topic_bindings: dict[int, dict[int, dict[str, Any]]] = field(
         default_factory=dict
@@ -133,6 +163,7 @@ class SessionManager:
         self._load_state()
 
     def _save_state(self) -> None:
+        self._sync_legacy_topic_views_from_surface()
         state: dict[str, Any] = {
             "schema_version": config.state_schema_version,
             "runtime_kind": infer_runtime_kind(
@@ -141,6 +172,45 @@ class SessionManager:
             "window_states": {k: v.to_dict() for k, v in self.window_states.items()},
             "user_window_offsets": {
                 str(uid): offsets for uid, offsets in self.user_window_offsets.items()
+            },
+            SURFACE_BINDINGS_KEY: {
+                str(uid): {surface_key: wid for surface_key, wid in bindings.items()}
+                for uid, bindings in self.surface_bindings.items()
+            },
+            EXTERNAL_SURFACE_BINDINGS_KEY: {
+                str(uid): {
+                    surface_key: dict(meta)
+                    for surface_key, meta in bindings.items()
+                    if isinstance(meta, dict)
+                }
+                for uid, bindings in self.external_surface_bindings.items()
+            },
+            SURFACE_POLICIES_KEY: {
+                str(uid): {surface_key: policy for surface_key, policy in policies.items()}
+                for uid, policies in self.surface_policies.items()
+            },
+            SURFACE_BINDING_STATES_KEY: {
+                str(uid): {surface_key: binding_state for surface_key, binding_state in states.items()}
+                for uid, states in self.surface_binding_states.items()
+            },
+            SURFACE_BIND_FLOW_VERSIONS_KEY: {
+                str(uid): {surface_key: version for surface_key, version in versions.items()}
+                for uid, versions in self.surface_bind_flow_versions.items()
+            },
+            SURFACE_BIND_FLOW_NONCES_KEY: {
+                str(uid): {surface_key: nonce for surface_key, nonce in nonces.items()}
+                for uid, nonces in self.surface_bind_flow_nonces.items()
+            },
+            SURFACE_PENDING_SLOTS_KEY: {
+                str(uid): {
+                    surface_key: normalized_pending
+                    for surface_key, pending in pending_slots.items()
+                    if (
+                        normalized_pending := self._normalize_pending_slot_record(pending)
+                    )
+                    is not None
+                }
+                for uid, pending_slots in self.surface_pending_slots.items()
             },
             "thread_bindings": {
                 str(uid): {str(tid): wid for tid, wid in bindings.items()}
@@ -204,6 +274,299 @@ class SessionManager:
     def _is_binding_id(cls, key: str) -> bool:
         """Return True for supported persisted topic binding ids."""
         return cls._is_window_id(key) or cls.is_external_binding_window_id(key)
+
+    @staticmethod
+    def make_surface_key(
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Build the canonical persisted key for a control surface."""
+        if thread_id is not None and chat_id is not None:
+            raise ValueError("surface key requires exactly one of thread_id or chat_id")
+        if thread_id is not None:
+            return f"{TOPIC_SURFACE_PREFIX}{int(thread_id)}"
+        if chat_id is not None:
+            return f"{CHAT_SURFACE_PREFIX}{int(chat_id)}"
+        raise ValueError("surface key requires thread_id or chat_id")
+
+    @staticmethod
+    def _parse_surface_key(surface_key: str) -> tuple[str, int] | None:
+        """Parse a persisted surface key into (kind, numeric id)."""
+        if surface_key.startswith(TOPIC_SURFACE_PREFIX):
+            payload = surface_key[len(TOPIC_SURFACE_PREFIX) :]
+            kind = "topic"
+        elif surface_key.startswith(CHAT_SURFACE_PREFIX):
+            payload = surface_key[len(CHAT_SURFACE_PREFIX) :]
+            kind = "chat"
+        else:
+            return None
+        try:
+            return kind, int(payload)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _topic_thread_id_from_surface_key(cls, surface_key: str) -> int | None:
+        parsed = cls._parse_surface_key(surface_key)
+        if parsed is None or parsed[0] != "topic":
+            return None
+        return parsed[1]
+
+    def _resolve_surface_key(
+        self,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Resolve either a direct surface key or thread/chat coordinates."""
+        if surface_key is not None:
+            parsed = self._parse_surface_key(surface_key)
+            if parsed is None:
+                raise ValueError(f"invalid surface key: {surface_key!r}")
+            return self.make_surface_key(
+                thread_id=parsed[1] if parsed[0] == "topic" else None,
+                chat_id=parsed[1] if parsed[0] == "chat" else None,
+            )
+        return self.make_surface_key(thread_id=thread_id, chat_id=chat_id)
+
+    @classmethod
+    def _normalize_surface_map(cls, raw: Any) -> dict[int, dict[str, Any]]:
+        """Normalize nested user_id -> surface_key payloads from JSON state."""
+        normalized: dict[int, dict[str, Any]] = {}
+        if not isinstance(raw, dict):
+            return normalized
+        for uid, payload in raw.items():
+            try:
+                user_id = int(uid)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            normalized_payload: dict[str, Any] = {}
+            for key, value in payload.items():
+                normalized_key = cls._normalize_surface_key(key)
+                if normalized_key is None:
+                    continue
+                normalized_payload[normalized_key] = value
+            if normalized_payload:
+                normalized[user_id] = normalized_payload
+        return normalized
+
+    @staticmethod
+    def _prune_empty_surface_entry(store: dict[int, dict[str, Any]], user_id: int) -> None:
+        if user_id in store and not store[user_id]:
+            store.pop(user_id, None)
+
+    @classmethod
+    def _normalize_surface_key(cls, surface_key: Any) -> str | None:
+        raw_key = str(surface_key or "").strip()
+        parsed = cls._parse_surface_key(raw_key)
+        if parsed is None:
+            return None
+        kind, numeric_id = parsed
+        if kind == "topic":
+            return cls.make_surface_key(thread_id=numeric_id)
+        return cls.make_surface_key(chat_id=numeric_id)
+
+    @staticmethod
+    def _normalize_pending_slot_record(record: Any) -> dict[str, Any] | None:
+        if not isinstance(record, dict):
+            return None
+        text = str(record.get("text") or "")
+        if not text:
+            return None
+        try:
+            revision = max(int(record.get("revision") or 0), 1)
+        except (TypeError, ValueError):
+            revision = 1
+        consumed_by_activation_id = str(record.get("consumed_by_activation_id") or "")
+        status = str(record.get("status") or PENDING_SLOT_STATUS_PENDING)
+        if status != PENDING_SLOT_STATUS_CONSUMED:
+            status = PENDING_SLOT_STATUS_PENDING
+            consumed_by_activation_id = ""
+        return {
+            "text": text,
+            "revision": revision,
+            "status": status,
+            "consumed_by_activation_id": consumed_by_activation_id,
+        }
+
+    @classmethod
+    def _normalize_surface_pending_slots(
+        cls,
+        raw: Any,
+    ) -> dict[int, dict[str, dict[str, Any]]]:
+        normalized: dict[int, dict[str, dict[str, Any]]] = {}
+        for user_id, payload in cls._normalize_surface_map(raw).items():
+            normalized_payload: dict[str, dict[str, Any]] = {}
+            for surface_key, record in payload.items():
+                normalized_record = cls._normalize_pending_slot_record(record)
+                if normalized_record is None:
+                    continue
+                normalized_payload[surface_key] = normalized_record
+            if normalized_payload:
+                normalized[user_id] = normalized_payload
+        return normalized
+
+    def _sync_legacy_topic_views_from_surface(self) -> bool:
+        """Rebuild legacy topic-keyed mirrors from canonical surface state."""
+        thread_bindings: dict[int, dict[int, str]] = {}
+        external_topic_bindings: dict[int, dict[int, dict[str, Any]]] = {}
+        topic_policies: dict[int, dict[int, str]] = {}
+        topic_binding_states: dict[int, dict[int, str]] = {}
+        topic_bind_flow_versions: dict[int, dict[int, int]] = {}
+        topic_bind_flow_nonces: dict[int, dict[int, str]] = {}
+
+        for user_id, bindings in self.surface_bindings.items():
+            for surface_key, window_id in bindings.items():
+                thread_id = self._topic_thread_id_from_surface_key(surface_key)
+                if thread_id is None:
+                    continue
+                thread_bindings.setdefault(user_id, {})[thread_id] = window_id
+
+        for user_id, bindings in self.external_surface_bindings.items():
+            for surface_key, metadata in bindings.items():
+                thread_id = self._topic_thread_id_from_surface_key(surface_key)
+                if thread_id is None or not isinstance(metadata, dict):
+                    continue
+                external_topic_bindings.setdefault(user_id, {})[thread_id] = dict(metadata)
+
+        for user_id, policies in self.surface_policies.items():
+            for surface_key, policy in policies.items():
+                thread_id = self._topic_thread_id_from_surface_key(surface_key)
+                if thread_id is None:
+                    continue
+                topic_policies.setdefault(user_id, {})[thread_id] = normalize_topic_policy(policy)
+
+        for user_id, states in self.surface_binding_states.items():
+            for surface_key, binding_state in states.items():
+                thread_id = self._topic_thread_id_from_surface_key(surface_key)
+                if thread_id is None:
+                    continue
+                topic_binding_states.setdefault(user_id, {})[thread_id] = normalize_binding_state(binding_state)
+
+        for user_id, versions in self.surface_bind_flow_versions.items():
+            for surface_key, version in versions.items():
+                thread_id = self._topic_thread_id_from_surface_key(surface_key)
+                if thread_id is None:
+                    continue
+                topic_bind_flow_versions.setdefault(user_id, {})[thread_id] = normalize_bind_flow_version(version)
+
+        for user_id, nonces in self.surface_bind_flow_nonces.items():
+            for surface_key, nonce in nonces.items():
+                thread_id = self._topic_thread_id_from_surface_key(surface_key)
+                if thread_id is None:
+                    continue
+                topic_bind_flow_nonces.setdefault(user_id, {})[thread_id] = normalize_bind_flow_nonce(nonce)
+
+        changed = (
+            self.thread_bindings != thread_bindings
+            or self.external_topic_bindings != external_topic_bindings
+            or self.topic_policies != topic_policies
+            or self.topic_binding_states != topic_binding_states
+            or self.topic_bind_flow_versions != topic_bind_flow_versions
+            or self.topic_bind_flow_nonces != topic_bind_flow_nonces
+        )
+
+        self.thread_bindings = thread_bindings
+        self.external_topic_bindings = external_topic_bindings
+        self.topic_policies = topic_policies
+        self.topic_binding_states = topic_binding_states
+        self.topic_bind_flow_versions = topic_bind_flow_versions
+        self.topic_bind_flow_nonces = topic_bind_flow_nonces
+        return changed
+
+    def _merge_legacy_topic_state_into_surface(self, *, overwrite: bool = False) -> bool:
+        """Merge legacy topic-keyed state into canonical surface maps."""
+        changed = False
+
+        for user_id, bindings in self.thread_bindings.items():
+            target = self.surface_bindings.setdefault(user_id, {})
+            for thread_id, window_id in bindings.items():
+                surface_key = self.make_surface_key(thread_id=thread_id)
+                if overwrite or surface_key not in target:
+                    if target.get(surface_key) != window_id:
+                        target[surface_key] = window_id
+                        changed = True
+
+        for user_id, bindings in self.external_topic_bindings.items():
+            target = self.external_surface_bindings.setdefault(user_id, {})
+            for thread_id, metadata in bindings.items():
+                surface_key = self.make_surface_key(thread_id=thread_id)
+                normalized_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+                if overwrite or surface_key not in target:
+                    if target.get(surface_key) != normalized_metadata:
+                        target[surface_key] = normalized_metadata
+                        changed = True
+
+        for user_id, policies in self.topic_policies.items():
+            target = self.surface_policies.setdefault(user_id, {})
+            for thread_id, policy in policies.items():
+                surface_key = self.make_surface_key(thread_id=thread_id)
+                normalized = normalize_topic_policy(policy)
+                if overwrite or surface_key not in target:
+                    if target.get(surface_key) != normalized:
+                        target[surface_key] = normalized
+                        changed = True
+
+        for user_id, states in self.topic_binding_states.items():
+            target = self.surface_binding_states.setdefault(user_id, {})
+            for thread_id, binding_state in states.items():
+                surface_key = self.make_surface_key(thread_id=thread_id)
+                normalized = normalize_binding_state(binding_state)
+                if overwrite or surface_key not in target:
+                    if target.get(surface_key) != normalized:
+                        target[surface_key] = normalized
+                        changed = True
+
+        for user_id, versions in self.topic_bind_flow_versions.items():
+            target = self.surface_bind_flow_versions.setdefault(user_id, {})
+            for thread_id, version in versions.items():
+                surface_key = self.make_surface_key(thread_id=thread_id)
+                normalized = normalize_bind_flow_version(version)
+                if overwrite or surface_key not in target:
+                    if target.get(surface_key) != normalized:
+                        target[surface_key] = normalized
+                        changed = True
+
+        for user_id, nonces in self.topic_bind_flow_nonces.items():
+            target = self.surface_bind_flow_nonces.setdefault(user_id, {})
+            for thread_id, nonce in nonces.items():
+                surface_key = self.make_surface_key(thread_id=thread_id)
+                normalized = normalize_bind_flow_nonce(nonce)
+                if overwrite or surface_key not in target:
+                    if target.get(surface_key) != normalized:
+                        target[surface_key] = normalized
+                        changed = True
+
+        for user_id, bindings in self.surface_bindings.items():
+            policy_map = self.surface_policies.setdefault(user_id, {})
+            state_map = self.surface_binding_states.setdefault(user_id, {})
+            for surface_key in bindings:
+                if surface_key not in policy_map:
+                    policy_map[surface_key] = TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
+                    changed = True
+                if surface_key not in state_map:
+                    state_map[surface_key] = BINDING_STATE_BOUND
+                    changed = True
+
+        for user_id, states in self.surface_binding_states.items():
+            version_map = self.surface_bind_flow_versions.setdefault(user_id, {})
+            nonce_map = self.surface_bind_flow_nonces.setdefault(user_id, {})
+            for surface_key, binding_state in states.items():
+                if normalize_binding_state(binding_state) != BINDING_STATE_BIND_FLOW:
+                    continue
+                version = normalize_bind_flow_version(version_map.get(surface_key))
+                nonce = normalize_bind_flow_nonce(nonce_map.get(surface_key))
+                if version <= 0 or not nonce:
+                    version_map[surface_key] = version + 1
+                    nonce_map[surface_key] = secrets.token_urlsafe(16)
+                    changed = True
+
+        if self._sync_legacy_topic_views_from_surface():
+            changed = True
+        return changed
 
     def _load_state(self) -> None:
         """Load state synchronously during initialization.
@@ -272,6 +635,64 @@ class SessionManager:
                     }
                     for uid, nonces in state.get(TOPIC_BIND_FLOW_NONCES_KEY, {}).items()
                 }
+                self.surface_bindings = {
+                    user_id: {
+                        surface_key: str(window_id)
+                        for surface_key, window_id in bindings.items()
+                    }
+                    for user_id, bindings in self._normalize_surface_map(
+                        state.get(SURFACE_BINDINGS_KEY, {})
+                    ).items()
+                }
+                self.external_surface_bindings = {
+                    user_id: {
+                        surface_key: dict(metadata)
+                        for surface_key, metadata in bindings.items()
+                        if isinstance(metadata, dict)
+                    }
+                    for user_id, bindings in self._normalize_surface_map(
+                        state.get(EXTERNAL_SURFACE_BINDINGS_KEY, {})
+                    ).items()
+                }
+                self.surface_policies = {
+                    user_id: {
+                        surface_key: normalize_topic_policy(policy)
+                        for surface_key, policy in policies.items()
+                    }
+                    for user_id, policies in self._normalize_surface_map(
+                        state.get(SURFACE_POLICIES_KEY, {})
+                    ).items()
+                }
+                self.surface_binding_states = {
+                    user_id: {
+                        surface_key: normalize_binding_state(binding_state)
+                        for surface_key, binding_state in states.items()
+                    }
+                    for user_id, states in self._normalize_surface_map(
+                        state.get(SURFACE_BINDING_STATES_KEY, {})
+                    ).items()
+                }
+                self.surface_bind_flow_versions = {
+                    user_id: {
+                        surface_key: normalize_bind_flow_version(version)
+                        for surface_key, version in versions.items()
+                    }
+                    for user_id, versions in self._normalize_surface_map(
+                        state.get(SURFACE_BIND_FLOW_VERSIONS_KEY, {})
+                    ).items()
+                }
+                self.surface_bind_flow_nonces = {
+                    user_id: {
+                        surface_key: normalize_bind_flow_nonce(nonce)
+                        for surface_key, nonce in nonces.items()
+                    }
+                    for user_id, nonces in self._normalize_surface_map(
+                        state.get(SURFACE_BIND_FLOW_NONCES_KEY, {})
+                    ).items()
+                }
+                self.surface_pending_slots = self._normalize_surface_pending_slots(
+                    state.get(SURFACE_PENDING_SLOTS_KEY, {})
+                )
                 self.window_display_names = state.get("window_display_names", {})
                 self.group_chat_ids = {
                     k: int(v) for k, v in state.get("group_chat_ids", {}).items()
@@ -285,6 +706,14 @@ class SessionManager:
                         break
                 if not needs_migration:
                     for bindings in self.thread_bindings.values():
+                        for wid in bindings.values():
+                            if not self._is_binding_id(wid):
+                                needs_migration = True
+                                break
+                        if needs_migration:
+                            break
+                if not needs_migration:
+                    for bindings in self.surface_bindings.values():
                         for wid in bindings.values():
                             if not self._is_binding_id(wid):
                                 needs_migration = True
@@ -309,6 +738,13 @@ class SessionManager:
                 self.topic_binding_states = {}
                 self.topic_bind_flow_versions = {}
                 self.topic_bind_flow_nonces = {}
+                self.surface_bindings = {}
+                self.external_surface_bindings = {}
+                self.surface_policies = {}
+                self.surface_binding_states = {}
+                self.surface_bind_flow_versions = {}
+                self.surface_bind_flow_nonces = {}
+                self.surface_pending_slots = {}
                 self.window_display_names = {}
                 self.group_chat_ids = {}
                 migrate_legacy = False
@@ -328,6 +764,28 @@ class SessionManager:
                 if EXTERNAL_TOPIC_BINDINGS_KEY not in state:
                     self.external_topic_bindings = {}
                     migrate_legacy = True
+                if SURFACE_BINDINGS_KEY not in state:
+                    self.surface_bindings = {}
+                    migrate_legacy = True
+                if EXTERNAL_SURFACE_BINDINGS_KEY not in state:
+                    self.external_surface_bindings = {}
+                    migrate_legacy = True
+                if SURFACE_POLICIES_KEY not in state:
+                    self.surface_policies = {}
+                    migrate_legacy = True
+                if SURFACE_BINDING_STATES_KEY not in state:
+                    self.surface_binding_states = {}
+                    migrate_legacy = True
+                if SURFACE_BIND_FLOW_VERSIONS_KEY not in state:
+                    self.surface_bind_flow_versions = {}
+                    migrate_legacy = True
+                if SURFACE_BIND_FLOW_NONCES_KEY not in state:
+                    self.surface_bind_flow_nonces = {}
+                    migrate_legacy = True
+                if SURFACE_PENDING_SLOTS_KEY not in state:
+                    self.surface_pending_slots = {}
+                    migrate_legacy = True
+
                 if self.topic_policies:
                     for uid, policies in self.topic_policies.items():
                         for tid, policy in list(policies.items()):
@@ -344,26 +802,12 @@ class SessionManager:
                     for uid, nonces in self.topic_bind_flow_nonces.items():
                         for tid, nonce in list(nonces.items()):
                             nonces[tid] = normalize_bind_flow_nonce(nonce)
-                for uid, bindings in self.thread_bindings.items():
-                    policy_map = self.topic_policies.setdefault(uid, {})
-                    state_map = self.topic_binding_states.setdefault(uid, {})
-                    for tid in bindings:
-                        policy_map.setdefault(
-                            tid, TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
-                        )
-                        state_map[tid] = BINDING_STATE_BOUND
-                for uid, states in self.topic_binding_states.items():
-                    version_map = self.topic_bind_flow_versions.setdefault(uid, {})
-                    nonce_map = self.topic_bind_flow_nonces.setdefault(uid, {})
-                    for tid, binding_state in states.items():
-                        if binding_state != BINDING_STATE_BIND_FLOW:
-                            continue
-                        version = normalize_bind_flow_version(version_map.get(tid))
-                        nonce = normalize_bind_flow_nonce(nonce_map.get(tid))
-                        if version <= 0 or not nonce:
-                            version_map[tid] = version + 1
-                            nonce_map[tid] = secrets.token_urlsafe(16)
-                            migrate_legacy = True
+
+                migrated = self._merge_legacy_topic_state_into_surface(overwrite=False)
+                if migrated:
+                    migrate_legacy = True
+                self._sync_legacy_topic_views_from_surface()
+
                 if migrate_legacy:
                     self._save_state()
 
@@ -607,6 +1051,7 @@ class SessionManager:
             self.user_window_offsets[uid] = new_offsets
 
         if changed:
+            self._merge_legacy_topic_state_into_surface(overwrite=True)
             self._save_state()
             logger.info("Startup re-resolution complete")
 
@@ -711,18 +1156,19 @@ class SessionManager:
         """Resolve the correct chat_id for sending messages.
 
         Returns the stored group chat_id when a thread_id is present and a
-        mapping exists, otherwise falls back to user_id (for private chats).
+        mapping exists. When thread_id is None, this also checks the chat-wide
+        no-topics slot (`user_id:0`) before falling back to user_id.
 
         Every outbound Telegram API call (send_message, edit_message_text,
         delete_message, send_chat_action, edit_forum_topic, etc.) MUST use
         this method instead of raw user_id. Using user_id directly breaks
         supergroup forum topic routing.
         """
-        if thread_id is not None:
-            key = f"{user_id}:{thread_id}"
-            group_id = self.group_chat_ids.get(key)
-            if group_id is not None:
-                return group_id
+        lookup_thread_id = thread_id if thread_id is not None else 0
+        key = f"{user_id}:{lookup_thread_id}"
+        group_id = self.group_chat_ids.get(key)
+        if group_id is not None:
+            return group_id
         return user_id
 
     async def wait_for_session_map_entry(
@@ -1064,14 +1510,17 @@ class SessionManager:
     def _find_external_binding_record_by_window(
         self,
         window_id: str,
-    ) -> tuple[int, int, dict[str, Any]] | None:
-        """Return (user_id, thread_id, metadata) for an external binding id."""
-        for user_id, bindings in self.thread_bindings.items():
-            for thread_id, bound_window_id in bindings.items():
+    ) -> tuple[int, str, dict[str, Any]] | None:
+        """Return (user_id, surface_key, metadata) for an external binding id."""
+        for user_id, bindings in self.surface_bindings.items():
+            for surface_key, bound_window_id in bindings.items():
                 if bound_window_id != window_id:
                     continue
-                metadata = self.get_external_topic_binding(user_id, thread_id) or {}
-                return user_id, thread_id, dict(metadata)
+                metadata = self.get_external_surface_binding(
+                    user_id,
+                    surface_key=surface_key,
+                ) or {}
+                return user_id, surface_key, dict(metadata)
         return None
 
     async def _resolve_external_thread_for_window(
@@ -1122,9 +1571,9 @@ class SessionManager:
             return None
 
         if record is not None:
-            user_id, thread_id, _ = record
-            external = self.external_topic_bindings.setdefault(user_id, {})
-            current = external.setdefault(thread_id, {})
+            user_id, surface_key, _ = record
+            external = self.external_surface_bindings.setdefault(user_id, {})
+            current = external.setdefault(surface_key, {})
             changed = False
             for key, value in (
                 ("runtime_kind", runtime_kind),
@@ -1239,40 +1688,604 @@ class SessionManager:
 
     # --- Thread binding management ---
 
+    def _rotate_surface_bind_flow_credentials(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> tuple[int, str]:
+        """Issue fresh bind-flow credentials and persist them for a surface."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        version_map = self.surface_bind_flow_versions.setdefault(user_id, {})
+        nonce_map = self.surface_bind_flow_nonces.setdefault(user_id, {})
+        version = normalize_bind_flow_version(version_map.get(resolved_surface_key)) + 1
+        nonce = secrets.token_urlsafe(16)
+        version_map[resolved_surface_key] = version
+        nonce_map[resolved_surface_key] = nonce
+        return version, nonce
+
+    def get_surface_bind_flow_version(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> int:
+        """Return the current bind-flow version for a surface."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        versions = self.surface_bind_flow_versions.get(user_id)
+        if not versions:
+            return 0
+        return normalize_bind_flow_version(versions.get(resolved_surface_key))
+
+    def get_surface_bind_flow_nonce(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Return the current bind-flow nonce for a surface."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        nonces = self.surface_bind_flow_nonces.get(user_id)
+        if not nonces:
+            return ""
+        return normalize_bind_flow_nonce(nonces.get(resolved_surface_key))
+
+    def get_surface_bind_flow_credentials(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> tuple[int, str]:
+        """Return the current bind-flow version and nonce for a surface."""
+        return (
+            self.get_surface_bind_flow_version(
+                user_id,
+                surface_key=surface_key,
+                thread_id=thread_id,
+                chat_id=chat_id,
+            ),
+            self.get_surface_bind_flow_nonce(
+                user_id,
+                surface_key=surface_key,
+                thread_id=thread_id,
+                chat_id=chat_id,
+            ),
+        )
+
+    def validate_surface_bind_flow_callback(
+        self,
+        user_id: int,
+        version: int,
+        nonce: str,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> bool:
+        """Check whether a callback matches the current bind-flow credentials."""
+        current_version, current_nonce = self.get_surface_bind_flow_credentials(
+            user_id,
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        return (
+            version > 0
+            and bool(nonce)
+            and current_version == version
+            and current_nonce == nonce
+        )
+
+    def get_window_for_surface(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str | None:
+        """Look up the window_id bound to a control surface."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        bindings = self.surface_bindings.get(user_id)
+        if not bindings:
+            return None
+        return bindings.get(resolved_surface_key)
+
+    def resolve_window_for_surface(
+        self,
+        user_id: int,
+        surface_key: str | None = None,
+        *,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str | None:
+        """Resolve the tmux window_id for a control surface."""
+        return self.get_window_for_surface(
+            user_id,
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+
+    def get_external_surface_binding(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Return external bind metadata for a control surface, if present."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        bindings = self.external_surface_bindings.get(user_id)
+        if not bindings:
+            return None
+        binding = bindings.get(resolved_surface_key)
+        if not isinstance(binding, dict):
+            return None
+        return dict(binding)
+
+    def bind_surface(
+        self,
+        user_id: int,
+        window_id: str,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+        window_name: str = "",
+    ) -> None:
+        """Bind a control surface to a live tmux window."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        bindings = self.surface_bindings.setdefault(user_id, {})
+        bindings[resolved_surface_key] = window_id
+        external = self.external_surface_bindings.get(user_id)
+        if external and resolved_surface_key in external:
+            del external[resolved_surface_key]
+            self._prune_empty_surface_entry(self.external_surface_bindings, user_id)
+        states = self.surface_binding_states.setdefault(user_id, {})
+        states[resolved_surface_key] = BINDING_STATE_BOUND
+        policies = self.surface_policies.setdefault(user_id, {})
+        policies.setdefault(resolved_surface_key, TOPIC_POLICY_IMPLICIT_BIND_ALLOWED)
+        self._rotate_surface_bind_flow_credentials(user_id, surface_key=resolved_surface_key)
+        if window_name:
+            self.window_display_names[window_id] = window_name
+        self._sync_legacy_topic_views_from_surface()
+        self._save_state()
+        display = window_name or self.get_display_name(window_id)
+        logger.info(
+            "Bound surface %s -> window_id %s (%s) for user %d",
+            resolved_surface_key,
+            window_id,
+            display,
+            user_id,
+        )
+
+    def bind_external_surface(
+        self,
+        user_id: int,
+        *,
+        runtime_kind: str,
+        source_thread_id: str,
+        summary: str = "",
+        cwd: str = "",
+        file_path: str = "",
+        read_only: bool = True,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Bind a control surface to an external persisted thread without tmux."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        binding_window_id = self.make_external_binding_window_id(
+            runtime_kind,
+            source_thread_id,
+        )
+        self.surface_bindings.setdefault(user_id, {})[resolved_surface_key] = binding_window_id
+        self.external_surface_bindings.setdefault(user_id, {})[resolved_surface_key] = {
+            "runtime_kind": runtime_kind,
+            "source_thread_id": source_thread_id,
+            "summary": summary,
+            "cwd": cwd,
+            "file_path": file_path,
+            "read_only": bool(read_only),
+        }
+        if summary:
+            self.window_display_names[binding_window_id] = summary
+        self.surface_binding_states.setdefault(user_id, {})[resolved_surface_key] = (
+            BINDING_STATE_BOUND
+        )
+        self.surface_policies.setdefault(user_id, {}).setdefault(
+            resolved_surface_key,
+            TOPIC_POLICY_IMPLICIT_BIND_ALLOWED,
+        )
+        self._rotate_surface_bind_flow_credentials(user_id, surface_key=resolved_surface_key)
+        self._sync_legacy_topic_views_from_surface()
+        self._save_state()
+        logger.info(
+            "Bound surface %s -> external %s thread=%s (read_only=%s) for user %d",
+            resolved_surface_key,
+            runtime_kind,
+            source_thread_id,
+            read_only,
+            user_id,
+        )
+        return binding_window_id
+
+    def unbind_surface(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str | None:
+        """Remove a control-surface binding and return the previous window_id."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        self._rotate_surface_bind_flow_credentials(user_id, surface_key=resolved_surface_key)
+        bindings = self.surface_bindings.get(user_id)
+        if not bindings or resolved_surface_key not in bindings:
+            self.surface_binding_states.setdefault(user_id, {})[resolved_surface_key] = (
+                BINDING_STATE_NONE
+            )
+            self._sync_legacy_topic_views_from_surface()
+            self._save_state()
+            return None
+        window_id = bindings.pop(resolved_surface_key)
+        self._prune_empty_surface_entry(self.surface_bindings, user_id)
+        external = self.external_surface_bindings.get(user_id)
+        if external and resolved_surface_key in external:
+            del external[resolved_surface_key]
+            self._prune_empty_surface_entry(self.external_surface_bindings, user_id)
+        self.surface_binding_states.setdefault(user_id, {})[resolved_surface_key] = (
+            BINDING_STATE_NONE
+        )
+        self._sync_legacy_topic_views_from_surface()
+        self._save_state()
+        logger.info(
+            "Unbound surface %s (was %s) for user %d",
+            resolved_surface_key,
+            window_id,
+            user_id,
+        )
+        return window_id
+
+    def get_surface_policy(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Return the persisted policy for a control surface."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        policies = self.surface_policies.get(user_id)
+        if not policies:
+            return TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
+        return normalize_topic_policy(policies.get(resolved_surface_key))
+
+    def set_surface_policy(
+        self,
+        user_id: int,
+        policy: str,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> None:
+        """Persist the control-surface policy without changing the binding."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        normalized = normalize_topic_policy(policy)
+        policies = self.surface_policies.setdefault(user_id, {})
+        if policies.get(resolved_surface_key) == normalized:
+            return
+        policies[resolved_surface_key] = normalized
+        self._sync_legacy_topic_views_from_surface()
+        self._save_state()
+        logger.info(
+            "Set surface policy for user %d surface %s -> %s",
+            user_id,
+            resolved_surface_key,
+            normalized,
+        )
+
+    def get_surface_binding_state(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Return the persisted binding state for a control surface."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        states = self.surface_binding_states.get(user_id)
+        if states and resolved_surface_key in states:
+            return normalize_binding_state(states[resolved_surface_key])
+        return (
+            BINDING_STATE_BOUND
+            if self.get_window_for_surface(user_id, surface_key=resolved_surface_key)
+            else BINDING_STATE_NONE
+        )
+
+    def set_surface_binding_state(
+        self,
+        user_id: int,
+        binding_state: str,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> None:
+        """Persist the binding state without changing the control-surface policy."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        normalized = normalize_binding_state(binding_state)
+        states = self.surface_binding_states.setdefault(user_id, {})
+        if states.get(resolved_surface_key) == normalized:
+            return
+        states[resolved_surface_key] = normalized
+        self._sync_legacy_topic_views_from_surface()
+        self._save_state()
+        logger.info(
+            "Set surface binding state for user %d surface %s -> %s",
+            user_id,
+            resolved_surface_key,
+            normalized,
+        )
+
+    def start_surface_bind_flow(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> None:
+        """Mark a control surface as being in an active bind flow."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        self.surface_binding_states.setdefault(user_id, {})[resolved_surface_key] = (
+            BINDING_STATE_BIND_FLOW
+        )
+        self._rotate_surface_bind_flow_credentials(user_id, surface_key=resolved_surface_key)
+        self._sync_legacy_topic_views_from_surface()
+        self._save_state()
+
+    def require_manual_bind_for_surface(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> None:
+        """Force a control surface into manual-bind mode without changing its binding."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        self.surface_policies.setdefault(user_id, {})[resolved_surface_key] = (
+            TOPIC_POLICY_MANUAL_BIND_REQUIRED
+        )
+        self.surface_binding_states.setdefault(user_id, {})[resolved_surface_key] = (
+            BINDING_STATE_NONE
+        )
+        self._rotate_surface_bind_flow_credentials(user_id, surface_key=resolved_surface_key)
+        self._sync_legacy_topic_views_from_surface()
+        self._save_state()
+
+    def allow_implicit_bind_for_surface(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> None:
+        """Allow implicit binding again for a control surface."""
+        self.set_surface_policy(
+            user_id,
+            TOPIC_POLICY_IMPLICIT_BIND_ALLOWED,
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+
+    def peek_surface_pending_slot(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the current pending-slot payload for a surface without consuming it."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        pending_slots = self.surface_pending_slots.get(user_id)
+        if not pending_slots:
+            return None
+        pending = self._normalize_pending_slot_record(
+            pending_slots.get(resolved_surface_key)
+        )
+        if pending is None:
+            return None
+        return dict(pending)
+
+    def set_surface_pending_slot(
+        self,
+        user_id: int,
+        text: str,
+        *,
+        revision: int | None = None,
+        status: str = PENDING_SLOT_STATUS_PENDING,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Persist or overwrite the latest pending-slot payload for a surface."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        current = self.peek_surface_pending_slot(
+            user_id,
+            surface_key=resolved_surface_key,
+        ) or {}
+        next_revision = revision
+        if next_revision is None:
+            next_revision = normalize_bind_flow_version(current.get("revision")) + 1
+        record = self._normalize_pending_slot_record(
+            {
+                "text": text,
+                "revision": next_revision,
+                "status": status or PENDING_SLOT_STATUS_PENDING,
+                "consumed_by_activation_id": "",
+            }
+        )
+        assert record is not None
+        self.surface_pending_slots.setdefault(user_id, {})[resolved_surface_key] = record
+        self._save_state()
+        return dict(record)
+
+    def clear_surface_pending_slot(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Remove any pending-slot payload associated with a surface."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        pending_slots = self.surface_pending_slots.get(user_id)
+        if not pending_slots:
+            return None
+        pending = self._normalize_pending_slot_record(pending_slots.pop(resolved_surface_key))
+        self._prune_empty_surface_entry(self.surface_pending_slots, user_id)
+        self._save_state()
+        return dict(pending) if pending is not None else None
+
+    def consume_surface_pending_slot(
+        self,
+        user_id: int,
+        activation_id: str,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Consume a pending-slot payload exactly once for a writable activation."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        pending_slots = self.surface_pending_slots.get(user_id)
+        if not pending_slots:
+            return None
+        pending = self._normalize_pending_slot_record(
+            pending_slots.get(resolved_surface_key)
+        )
+        if pending is None:
+            return None
+        if pending.get("status") == PENDING_SLOT_STATUS_CONSUMED:
+            return None
+        consumed = dict(pending)
+        consumed["status"] = PENDING_SLOT_STATUS_CONSUMED
+        consumed["consumed_by_activation_id"] = activation_id
+        pending_slots[resolved_surface_key] = consumed
+        self._save_state()
+        return dict(consumed)
+
     def _rotate_topic_bind_flow_credentials(
         self, user_id: int, thread_id: int
     ) -> tuple[int, str]:
-        """Issue fresh bind-flow credentials and persist them."""
-        version_map = self.topic_bind_flow_versions.setdefault(user_id, {})
-        nonce_map = self.topic_bind_flow_nonces.setdefault(user_id, {})
-        version = normalize_bind_flow_version(version_map.get(thread_id)) + 1
-        nonce = secrets.token_urlsafe(16)
-        version_map[thread_id] = version
-        nonce_map[thread_id] = nonce
-        return version, nonce
+        """Issue fresh bind-flow credentials for a legacy topic wrapper."""
+        return self._rotate_surface_bind_flow_credentials(user_id, thread_id=thread_id)
 
     def get_topic_bind_flow_version(self, user_id: int, thread_id: int) -> int:
-        """Return the current bind-flow version for a topic."""
-        versions = self.topic_bind_flow_versions.get(user_id)
-        if not versions:
-            return 0
-        return normalize_bind_flow_version(versions.get(thread_id))
+        """Return the current bind-flow version for a legacy topic wrapper."""
+        return self.get_surface_bind_flow_version(user_id, thread_id=thread_id)
 
     def get_topic_bind_flow_nonce(self, user_id: int, thread_id: int) -> str:
-        """Return the current bind-flow nonce for a topic."""
-        nonces = self.topic_bind_flow_nonces.get(user_id)
-        if not nonces:
-            return ""
-        return normalize_bind_flow_nonce(nonces.get(thread_id))
+        """Return the current bind-flow nonce for a legacy topic wrapper."""
+        return self.get_surface_bind_flow_nonce(user_id, thread_id=thread_id)
 
     def get_topic_bind_flow_credentials(
         self, user_id: int, thread_id: int
     ) -> tuple[int, str]:
-        """Return the current bind-flow version and nonce for a topic."""
-        return (
-            self.get_topic_bind_flow_version(user_id, thread_id),
-            self.get_topic_bind_flow_nonce(user_id, thread_id),
-        )
+        """Return the current bind-flow version and nonce for a legacy topic wrapper."""
+        return self.get_surface_bind_flow_credentials(user_id, thread_id=thread_id)
 
     def validate_topic_bind_flow_callback(
         self,
@@ -1282,47 +2295,22 @@ class SessionManager:
         nonce: str,
     ) -> bool:
         """Check whether a callback matches the current bind-flow credentials."""
-        current_version, current_nonce = self.get_topic_bind_flow_credentials(
-            user_id, thread_id
-        )
-        return (
-            version > 0
-            and bool(nonce)
-            and current_version == version
-            and current_nonce == nonce
+        return self.validate_surface_bind_flow_callback(
+            user_id,
+            version,
+            nonce,
+            thread_id=thread_id,
         )
 
     def bind_thread(
         self, user_id: int, thread_id: int, window_id: str, window_name: str = ""
     ) -> None:
-        """Bind a Telegram topic thread to a tmux window.
-
-        Args:
-            user_id: Telegram user ID
-            thread_id: Telegram topic thread ID
-            window_id: Tmux window ID (e.g. '@0')
-            window_name: Display name for the window (optional)
-        """
-        if user_id not in self.thread_bindings:
-            self.thread_bindings[user_id] = {}
-        self.thread_bindings[user_id][thread_id] = window_id
-        external = self.external_topic_bindings.get(user_id)
-        if external and thread_id in external:
-            del external[thread_id]
-            if not external:
-                self.external_topic_bindings.pop(user_id, None)
-        self.set_topic_binding_state(user_id, thread_id, BINDING_STATE_BOUND)
-        self._rotate_topic_bind_flow_credentials(user_id, thread_id)
-        if window_name:
-            self.window_display_names[window_id] = window_name
-        self._save_state()
-        display = window_name or self.get_display_name(window_id)
-        logger.info(
-            "Bound thread %d -> window_id %s (%s) for user %d",
-            thread_id,
-            window_id,
-            display,
+        """Legacy topic wrapper around bind_surface()."""
+        self.bind_surface(
             user_id,
+            window_id,
+            thread_id=thread_id,
+            window_name=window_name,
         )
 
     def bind_external_thread(
@@ -1337,71 +2325,25 @@ class SessionManager:
         file_path: str = "",
         read_only: bool = True,
     ) -> str:
-        """Bind a topic to an external persisted thread without tmux."""
-        binding_window_id = self.make_external_binding_window_id(
-            runtime_kind,
-            source_thread_id,
-        )
-        if user_id not in self.thread_bindings:
-            self.thread_bindings[user_id] = {}
-        self.thread_bindings[user_id][thread_id] = binding_window_id
-        if user_id not in self.external_topic_bindings:
-            self.external_topic_bindings[user_id] = {}
-        self.external_topic_bindings[user_id][thread_id] = {
-            "runtime_kind": runtime_kind,
-            "source_thread_id": source_thread_id,
-            "summary": summary,
-            "cwd": cwd,
-            "file_path": file_path,
-            "read_only": bool(read_only),
-        }
-        if summary:
-            self.window_display_names[binding_window_id] = summary
-        self.set_topic_binding_state(user_id, thread_id, BINDING_STATE_BOUND)
-        self._rotate_topic_bind_flow_credentials(user_id, thread_id)
-        self._save_state()
-        logger.info(
-            "Bound thread %d -> external %s thread=%s (read_only=%s) for user %d",
-            thread_id,
-            runtime_kind,
-            source_thread_id,
-            read_only,
+        """Legacy topic wrapper around bind_external_surface()."""
+        return self.bind_external_surface(
             user_id,
+            runtime_kind=runtime_kind,
+            source_thread_id=source_thread_id,
+            summary=summary,
+            cwd=cwd,
+            file_path=file_path,
+            read_only=read_only,
+            thread_id=thread_id,
         )
-        return binding_window_id
 
     def unbind_thread(self, user_id: int, thread_id: int) -> str | None:
-        """Remove a thread binding. Returns the previously bound window_id, or None."""
-        self._rotate_topic_bind_flow_credentials(user_id, thread_id)
-        bindings = self.thread_bindings.get(user_id)
-        if not bindings or thread_id not in bindings:
-            self.set_topic_binding_state(user_id, thread_id, BINDING_STATE_NONE)
-            self._save_state()
-            return None
-        window_id = bindings.pop(thread_id)
-        if not bindings:
-            del self.thread_bindings[user_id]
-        external = self.external_topic_bindings.get(user_id)
-        if external and thread_id in external:
-            del external[thread_id]
-            if not external:
-                self.external_topic_bindings.pop(user_id, None)
-        self.set_topic_binding_state(user_id, thread_id, BINDING_STATE_NONE)
-        self._save_state()
-        logger.info(
-            "Unbound thread %d (was %s) for user %d",
-            thread_id,
-            window_id,
-            user_id,
-        )
-        return window_id
+        """Legacy topic wrapper around unbind_surface()."""
+        return self.unbind_surface(user_id, thread_id=thread_id)
 
     def get_window_for_thread(self, user_id: int, thread_id: int) -> str | None:
-        """Look up the window_id bound to a thread."""
-        bindings = self.thread_bindings.get(user_id)
-        if not bindings:
-            return None
-        return bindings.get(thread_id)
+        """Look up the window_id bound to a topic thread."""
+        return self.get_window_for_surface(user_id, thread_id=thread_id)
 
     def get_external_topic_binding(
         self,
@@ -1409,94 +2351,53 @@ class SessionManager:
         thread_id: int,
     ) -> dict[str, Any] | None:
         """Return external bind metadata for a topic, if present."""
-        bindings = self.external_topic_bindings.get(user_id)
-        if not bindings:
-            return None
-        binding = bindings.get(thread_id)
-        if not isinstance(binding, dict):
-            return None
-        return binding
+        return self.get_external_surface_binding(user_id, thread_id=thread_id)
 
     def get_topic_policy(self, user_id: int, thread_id: int) -> str:
-        """Return the persisted topic policy for a user/topic pair."""
-        policies = self.topic_policies.get(user_id)
-        if not policies:
-            return TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
-        return normalize_topic_policy(policies.get(thread_id))
+        """Return the persisted topic policy for a legacy topic wrapper."""
+        return self.get_surface_policy(user_id, thread_id=thread_id)
 
     def set_topic_policy(self, user_id: int, thread_id: int, policy: str) -> None:
         """Persist the topic policy without changing the binding itself."""
-        normalized = normalize_topic_policy(policy)
-        if user_id not in self.topic_policies:
-            self.topic_policies[user_id] = {}
-        if self.topic_policies[user_id].get(thread_id) == normalized:
-            return
-        self.topic_policies[user_id][thread_id] = normalized
-        self._save_state()
-        logger.info(
-            "Set topic policy for user %d thread %d -> %s",
-            user_id,
-            thread_id,
-            normalized,
-        )
+        self.set_surface_policy(user_id, policy, thread_id=thread_id)
 
     def get_topic_binding_state(self, user_id: int, thread_id: int) -> str:
-        """Return the persisted binding state for a user/topic pair."""
-        states = self.topic_binding_states.get(user_id)
-        if states and thread_id in states:
-            return normalize_binding_state(states[thread_id])
-        return (
-            BINDING_STATE_BOUND
-            if self.get_window_for_thread(user_id, thread_id)
-            else BINDING_STATE_NONE
-        )
+        """Return the persisted binding state for a legacy topic wrapper."""
+        return self.get_surface_binding_state(user_id, thread_id=thread_id)
 
     def set_topic_binding_state(
         self, user_id: int, thread_id: int, binding_state: str
     ) -> None:
         """Persist the binding state without changing the topic policy."""
-        normalized = normalize_binding_state(binding_state)
-        if user_id not in self.topic_binding_states:
-            self.topic_binding_states[user_id] = {}
-        if self.topic_binding_states[user_id].get(thread_id) == normalized:
-            return
-        self.topic_binding_states[user_id][thread_id] = normalized
-        self._save_state()
-        logger.info(
-            "Set topic binding state for user %d thread %d -> %s",
-            user_id,
-            thread_id,
-            normalized,
-        )
+        self.set_surface_binding_state(user_id, binding_state, thread_id=thread_id)
 
     def start_topic_bind_flow(self, user_id: int, thread_id: int) -> None:
         """Mark a topic as being in an active bind flow."""
-        self.set_topic_binding_state(user_id, thread_id, BINDING_STATE_BIND_FLOW)
-        self._rotate_topic_bind_flow_credentials(user_id, thread_id)
-        self._save_state()
+        self.start_surface_bind_flow(user_id, thread_id=thread_id)
 
     def require_manual_bind(self, user_id: int, thread_id: int) -> None:
         """Force a topic into manual-bind mode without changing its binding."""
-        self.set_topic_policy(user_id, thread_id, TOPIC_POLICY_MANUAL_BIND_REQUIRED)
-        self.set_topic_binding_state(user_id, thread_id, BINDING_STATE_NONE)
-        self._rotate_topic_bind_flow_credentials(user_id, thread_id)
-        self._save_state()
+        self.require_manual_bind_for_surface(user_id, thread_id=thread_id)
 
     def allow_implicit_bind(self, user_id: int, thread_id: int) -> None:
         """Allow implicit binding again for a topic."""
-        self.set_topic_policy(user_id, thread_id, TOPIC_POLICY_IMPLICIT_BIND_ALLOWED)
+        self.allow_implicit_bind_for_surface(user_id, thread_id=thread_id)
 
     def resolve_window_for_thread(
         self,
         user_id: int,
         thread_id: int | None,
+        *,
+        chat_id: int | None = None,
     ) -> str | None:
         """Resolve the tmux window_id for a user's thread.
 
         Returns None if thread_id is None or the thread is not bound.
         """
         if thread_id is None:
-            return None
+            if chat_id is None:
+                return None
+            return self.get_window_for_surface(user_id, chat_id=chat_id)
         return self.get_window_for_thread(user_id, thread_id)
 
     def get_topic_binding(
@@ -1533,10 +2434,14 @@ class SessionManager:
 
     def iter_topic_bindings(self) -> Iterator[TopicBinding]:
         """Iterate persisted topic bindings as structured runtime-neutral objects."""
-        for user_id, bindings in self.thread_bindings.items():
-            for thread_id, window_id in bindings.items():
+        for user_id, bindings in self.surface_bindings.items():
+            for surface_key, window_id in bindings.items():
+                thread_id = self._topic_thread_id_from_surface_key(surface_key)
                 if self.is_external_binding_window_id(window_id):
-                    external = self.get_external_topic_binding(user_id, thread_id) or {}
+                    external = self.get_external_surface_binding(
+                        user_id,
+                        surface_key=surface_key,
+                    ) or {}
                     runtime_kind = (
                         str(
                             external.get("runtime_kind")
@@ -1564,7 +2469,7 @@ class SessionManager:
                     runtime_kind=self.get_process_descriptor(window_id).runtime_kind,
                 )
 
-    def iter_thread_bindings(self) -> Iterator[tuple[int, int, str]]:
+    def iter_thread_bindings(self) -> Iterator[tuple[int, int | None, str]]:
         """Backward-compatible tuple view over iter_topic_bindings()."""
         for binding in self.iter_topic_bindings():
             yield binding.user_id, binding.thread_id, binding.window_id

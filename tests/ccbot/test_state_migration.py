@@ -16,6 +16,7 @@ from ccbot.monitor_state import MonitorState, TrackedSession
 from ccbot.session import SessionManager
 from ccbot.session_monitor import SessionMonitor
 from ccbot.state_schema import (
+    BINDING_STATE_BIND_FLOW,
     BINDING_STATE_BOUND,
     BINDING_STATE_NONE,
     TOPIC_POLICY_IMPLICIT_BIND_ALLOWED,
@@ -464,3 +465,130 @@ def test_legacy_bind_flow_state_migrates_nonce_and_version(tmp_path, monkeypatch
     saved = json.loads(state_file.read_text(encoding="utf-8"))
     assert saved["topic_bind_flow_versions"]["100"]["42"] >= 1
     assert saved["topic_bind_flow_nonces"]["100"]["42"]
+
+
+def test_surface_state_is_persisted_as_canonical_maps(tmp_path, monkeypatch):
+    state_file = tmp_path / "state.json"
+    monkeypatch.setattr(session_module.config, "state_file", state_file)
+    monkeypatch.setattr(session_module.SessionManager, "_load_state", lambda self: None)
+
+    manager = SessionManager()
+    manager.require_manual_bind(100, 42)
+    manager.bind_thread(100, 43, "@7", window_name="proj")
+    manager.bind_surface(100, "@8", chat_id=-100200300, window_name="main")
+    manager.set_surface_pending_slot(100, "queued text", chat_id=-100200300)
+
+    saved = json.loads(state_file.read_text())
+    assert saved["surface_policies"]["100"]["t:42"] == TOPIC_POLICY_MANUAL_BIND_REQUIRED
+    assert saved["surface_bindings"]["100"]["t:43"] == "@7"
+    assert saved["surface_bindings"]["100"]["c:-100200300"] == "@8"
+    assert saved["surface_binding_states"]["100"]["t:43"] == BINDING_STATE_BOUND
+    assert saved["surface_pending_slots"]["100"]["c:-100200300"]["text"] == "queued text"
+    assert saved["thread_bindings"]["100"]["43"] == "@7"
+
+
+def test_surface_key_migration_from_legacy_topic_maps(tmp_path, monkeypatch):
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "thread_bindings": {"100": {"42": "@7"}},
+                "external_topic_bindings": {
+                    "100": {
+                        "42": {
+                            "runtime_kind": "codex",
+                            "source_thread_id": "thread-42",
+                            "summary": "Recovered",
+                            "cwd": "/tmp/project",
+                            "file_path": "/tmp/rollout.jsonl",
+                            "read_only": True,
+                        }
+                    }
+                },
+                "topic_policies": {"100": {"42": TOPIC_POLICY_MANUAL_BIND_REQUIRED}},
+                "topic_binding_states": {"100": {"42": BINDING_STATE_BOUND}},
+                "topic_bind_flow_versions": {"100": {"42": 3}},
+                "topic_bind_flow_nonces": {"100": {"42": "nonce-42"}},
+                "window_states": {},
+                "user_window_offsets": {},
+                "window_display_names": {},
+                "group_chat_ids": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(session_module.config, "state_file", state_file)
+
+    manager = SessionManager()
+
+    assert manager.surface_bindings[100]["t:42"] == "@7"
+    assert manager.get_surface_policy(100, thread_id=42) == TOPIC_POLICY_MANUAL_BIND_REQUIRED
+    assert manager.get_surface_binding_state(100, thread_id=42) == BINDING_STATE_BOUND
+    assert manager.get_surface_bind_flow_credentials(100, thread_id=42) == (3, "nonce-42")
+    assert manager.get_external_surface_binding(100, thread_id=42)["source_thread_id"] == "thread-42"
+
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved["surface_bindings"]["100"]["t:42"] == "@7"
+    assert saved["surface_policies"]["100"]["t:42"] == TOPIC_POLICY_MANUAL_BIND_REQUIRED
+
+
+def test_surface_key_migration_roundtrip_after_restart_preserves_behavior(tmp_path, monkeypatch):
+    state_file = tmp_path / "state.json"
+    original_load_state = SessionManager._load_state
+    monkeypatch.setattr(session_module.config, "state_file", state_file)
+    monkeypatch.setattr(session_module.SessionManager, "_load_state", lambda self: None)
+
+    manager = SessionManager()
+    manager.bind_thread(100, 42, "@7", window_name="proj")
+    manager.require_manual_bind_for_surface(100, chat_id=-100200300)
+    manager.start_surface_bind_flow(100, chat_id=-100200300)
+    manager.set_surface_pending_slot(100, "queued text", chat_id=-100200300)
+
+    monkeypatch.setattr(session_module.SessionManager, "_load_state", original_load_state)
+    reloaded = SessionManager()
+
+    assert reloaded.get_window_for_thread(100, 42) == "@7"
+    assert reloaded.get_window_for_surface(100, chat_id=-100200300) is None
+    assert reloaded.get_surface_binding_state(100, chat_id=-100200300) == BINDING_STATE_BIND_FLOW
+    assert reloaded.get_surface_policy(100, chat_id=-100200300) == TOPIC_POLICY_MANUAL_BIND_REQUIRED
+    assert reloaded.peek_surface_pending_slot(100, chat_id=-100200300)["text"] == "queued text"
+
+
+def test_surface_key_conflict_resolution_prefers_surface_maps_over_legacy(tmp_path, monkeypatch):
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "surface_bindings": {"100": {"t:42": "@surface"}},
+                "surface_policies": {"100": {"t:42": TOPIC_POLICY_MANUAL_BIND_REQUIRED}},
+                "surface_binding_states": {"100": {"t:42": BINDING_STATE_BIND_FLOW}},
+                "surface_bind_flow_versions": {"100": {"t:42": 9}},
+                "surface_bind_flow_nonces": {"100": {"t:42": "surface-nonce"}},
+                "thread_bindings": {"100": {"42": "@legacy"}},
+                "topic_policies": {"100": {"42": TOPIC_POLICY_IMPLICIT_BIND_ALLOWED}},
+                "topic_binding_states": {"100": {"42": BINDING_STATE_BOUND}},
+                "topic_bind_flow_versions": {"100": {"42": 1}},
+                "topic_bind_flow_nonces": {"100": {"42": "legacy-nonce"}},
+                "window_states": {},
+                "user_window_offsets": {},
+                "window_display_names": {},
+                "group_chat_ids": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(session_module.config, "state_file", state_file)
+
+    manager = SessionManager()
+
+    assert manager.get_window_for_thread(100, 42) == "@surface"
+    assert manager.get_topic_policy(100, 42) == TOPIC_POLICY_MANUAL_BIND_REQUIRED
+    assert manager.get_topic_binding_state(100, 42) == BINDING_STATE_BIND_FLOW
+    assert manager.get_topic_bind_flow_credentials(100, 42) == (9, "surface-nonce")
+
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved["thread_bindings"]["100"]["42"] == "@surface"
+    assert saved["topic_policies"]["100"]["42"] == TOPIC_POLICY_MANUAL_BIND_REQUIRED
+    assert saved["topic_binding_states"]["100"]["42"] == BINDING_STATE_BIND_FLOW
+
+

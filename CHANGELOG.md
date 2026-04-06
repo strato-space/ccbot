@@ -1,5 +1,70 @@
 # Changelog
 
+## 2026-04-06
+
+### PROBLEM SOLVED
+
+- **07:37-11:49** Shared group topics and groups without forum topics could
+  still drift into implicit bind/autosend behavior from ordinary unaddressed
+  text, which made the control surface noisy and unsafe in multi-user chats.
+  The bind gate now stays silent on ordinary unaddressed text in shared group
+  surfaces and only re-enters through explicit `@bot`, `/bind`, or `/resume`
+  flows.
+- **07:37-11:49** No-topics main-chat mode did not have a canonical persisted
+  surface identity, so stale cleanup and resume/bind behavior could drift away
+  from the real chat-wide control surface. Runtime state now persists canonical
+  `c:<chat_id>` surface keys and stale polling cleanup unbinds the no-topics
+  main chat by `chat_id`.
+- **07:37-11:49** Addressed text captured before activation could resend
+  ambiguously across retries or read-only external binds, increasing the risk
+  of duplicate operator input. Pending addressed text is now a single
+  latest-wins slot that is consumed exactly once after writable activation and
+  never autosends for read-only external binds.
+
+### FEATURE IMPLEMENTED
+
+- **07:37-11:49** Added the hybrid group-chat bind gate rollout: named topics
+  remain the canonical ontology surface, while one explicit no-topics main-chat
+  mode can coexist for supported groups without collapsing `chat == topic`.
+- **07:37-11:49** Added canonical surface-state persistence and migration for
+  topic surfaces (`t:<thread_id>`) and no-topics main-chat surfaces
+  (`c:<chat_id>`), including surface-scoped pending slots, policy/state maps,
+  and compatibility handling for legacy topic-keyed state.
+- **07:37-11:49** Added explicit-entry behavior for shared group surfaces so
+  bot-addressed mentions, `/bind`, and `/resume` remain valid openers while
+  writable activation auto-forwards pending addressed text exactly once.
+
+### CHANGES
+
+- **07:37-11:49** Reworked bind gating, control-surface classification,
+  addressed-event parsing, and pending-slot consumption in `src/ccbot/bot.py`
+  so shared group topics and no-topics main-chat mode stay silent on ordinary
+  unbound text, preserve explicit entry paths, and avoid duplicate autosends.
+- **07:37-11:49** Introduced canonical surface-key persistence/migration in
+  `src/ccbot/session.py` and `src/ccbot/runtime_types.py`, then updated stale
+  no-topics cleanup in `src/ccbot/handlers/status_polling.py` so main-chat
+  bindings are cleared by `chat_id`.
+- **07:37-11:49** Synced the documented contract in `README.md`,
+  `doc/telegram-bot-features.md`, `doc/topic-control-state-machine.md`,
+  `doc/runtime-ontology.md`, `ontology/README.md`, `ontology/boundaries.md`,
+  and `ontology/runtime.md` with the new topic-vs-chat ontology and bind-gate
+  behavior.
+- **07:37-11:49** Added/updated regressions in
+  `tests/ccbot/test_bot_contracts.py`, `tests/ccbot/test_docs_contracts.py`,
+  `tests/ccbot/test_session.py`, `tests/ccbot/test_state_migration.py`, and
+  `tests/ccbot/handlers/test_status_polling.py` for shared-group silence,
+  no-topics main-chat flow, surface migration, pending-slot idempotency, and
+  stale cleanup.
+- **11:49** Validation: `uv run --extra dev pytest
+  tests/ccbot/test_session.py tests/ccbot/test_state_migration.py
+  tests/ccbot/test_bot_contracts.py tests/ccbot/test_docs_contracts.py
+  tests/ccbot/handlers/test_status_polling.py -q` (`181 passed`) and
+  `uv run --extra dev ruff check src/ccbot/bot.py src/ccbot/session.py
+  src/ccbot/runtime_types.py src/ccbot/handlers/status_polling.py
+  tests/ccbot/test_bot_contracts.py tests/ccbot/test_docs_contracts.py
+  tests/ccbot/test_session.py tests/ccbot/test_state_migration.py
+  tests/ccbot/handlers/test_status_polling.py` (`All checks passed`).
+
 ## 2026-04-05
 
 ### PROBLEM SOLVED

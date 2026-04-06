@@ -6,6 +6,13 @@ This note defines the core runtime nouns for `ccbot`.
 
 - **Telegram topic**
   - the user-facing control lane in Telegram
+  - may be realized as:
+    - a forum topic in a topic-enabled chat
+
+- **Topic transport identifier**
+  - Telegram transport token such as `message_thread_id`
+  - identifies a topic at the API/storage boundary
+  - is not identical to the topic itself
 
 - **Topic control policy**
   - persisted rule that governs whether a topic may trigger implicit bind or
@@ -88,6 +95,10 @@ This note defines the core runtime nouns for `ccbot`.
 
 `normalized events -> Telegram notifications / history views`
 
+Separate no-topics mode:
+
+`chat without forum topics -> no-topics main-chat mode (thread_id is None) -> binding -> ...`
+
 ## Message Plane vs Operator Layer
 
 Equal message channels:
@@ -109,6 +120,8 @@ Raw operator control is different:
 ## Operational Invariants
 
 - a topic may bind to at most one delivery source at a time
+- a chat without forum topics may expose one shared no-topics main-chat mode
+  for the control plane
 - a tmux window may host at most one active runtime process at a time
 - a live process may be associated with at most one primary runtime
   conversation identity at a time

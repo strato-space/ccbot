@@ -100,7 +100,7 @@ class TopicBinding:
     """Persisted association from a Telegram topic to a delivery source."""
 
     user_id: int
-    thread_id: int
+    thread_id: int | None
     window_id: str
     window_name: str = ""
     runtime_kind: str = "claude"

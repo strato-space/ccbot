@@ -183,10 +183,10 @@ async def status_poll_loop(bot: Bot) -> None:
             now = time.monotonic()
             if now - last_topic_check >= TOPIC_CHECK_INTERVAL:
                 last_topic_check = now
-                for user_id, thread_id, wid in list(
-                    session_manager.iter_thread_bindings()
-                ):
+                for user_id, thread_id, wid in list(session_manager.iter_thread_bindings()):
                     try:
+                        if thread_id is None:
+                            continue
                         await bot.unpin_all_forum_topic_messages(
                             chat_id=session_manager.resolve_chat_id(user_id, thread_id),
                             message_thread_id=thread_id,
@@ -224,10 +224,22 @@ async def status_poll_loop(bot: Bot) -> None:
                     # Clean up stale bindings (window no longer exists)
                     w = await tmux_manager.find_window_by_id(wid)
                     if not w:
-                        session_manager.unbind_thread(user_id, thread_id)
+                        if thread_id is None:
+                            chat_id = session_manager.resolve_chat_id(user_id, None)
+                            if chat_id != user_id:
+                                session_manager.unbind_surface(user_id, chat_id=chat_id)
+                            else:
+                                logger.warning(
+                                    "Unable to resolve chat id for stale main-chat binding "
+                                    "(user=%d, window_id=%s)",
+                                    user_id,
+                                    wid,
+                                )
+                        else:
+                            session_manager.unbind_thread(user_id, thread_id)
                         await clear_topic_state(user_id, thread_id, bot)
                         logger.info(
-                            "Cleaned up stale binding: user=%d thread=%d window_id=%s",
+                            "Cleaned up stale binding: user=%d thread=%s window_id=%s",
                             user_id,
                             thread_id,
                             wid,

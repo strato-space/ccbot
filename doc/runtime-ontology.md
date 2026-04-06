@@ -31,7 +31,14 @@ transport used by machine consumers.
 
 - **Telegram topic**
   - The user-facing control lane in Telegram.
+  - It may be realized as:
+    - a forum topic in a topic-enabled chat
   - Commands, screenshots, progress notices, and final results are shown here.
+
+- **Topic transport identifier**
+  - Telegram API/storage token such as `message_thread_id`.
+  - It identifies a topic at the transport boundary, but it is not identical
+    to the topic object itself.
 
 - **Topic control policy**
   - The persisted rule attached to a topic that governs whether plain messages
@@ -167,6 +174,11 @@ The model must distinguish these relations:
 
 `normalized events -> Telegram notifications / history views`
 
+When a chat has no forum topics, the product may expose a separate shared
+main-chat control mode:
+
+`chat without forum topics -> no-topics main-chat mode (thread_id is None) -> binding -> ...`
+
 This is more precise than a single flat chain because `topic control policy` is
 not the same kind of thing as `window`, `process`, or `identity`. It governs
 whether binding and routing are permitted; it is not itself a live runtime lane.
@@ -245,6 +257,7 @@ These equalities are false and must stay false in code, docs, and tests:
 - `process == thread`
 - `process == rollout log`
 - `thread == rollout log`
+- `chat == topic`
 - `topic == thread`
 - `topic == window`
 - `literal ACP-protocol-over-stdio == acceptable primary control plane`
@@ -256,6 +269,12 @@ More precise statements:
   thread.
 - A rollout log is emitted evidence from process/thread activity, not the
   process itself.
+- A chat container may expose one shared no-topics main-chat mode when forum
+  topics are unavailable, but the raw chat container is not itself that mode's
+  control object.
+- `thread_id is None` may canonically mark that no-topics main-chat mode in the
+  current product surface, but `None` is still not the same thing as a topic
+  object or a topic transport identifier.
 - A Telegram topic is governed by topic control policy and routed bindings, not
   directly to a persisted log file.
 - A status message is a transport artifact for progress; it is not the same

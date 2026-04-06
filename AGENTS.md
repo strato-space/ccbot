@@ -67,6 +67,13 @@ runtimes without surrendering the live terminal surface.
 
 ## Recent Updates
 
+- 2026-04-06: Added surface-keyed topic/chat binding state so shared
+  group topics stay silent until explicitly addressed, no-topics main-chat
+  mode binds canonically by `chat_id`, and pending addressed text auto-sends
+  exactly once only after writable activation succeeds.
+- 2026-04-06: Synced README/topic-control/ontology docs and migration
+  regressions with the new group bind gate, read-only external bind guardrails,
+  and stale status-poll cleanup for no-topics main-chat surfaces.
 - 2026-04-05: Tightened compact delivery so ordinary user echo always remains
   visible, late commentary/orchestration cannot reopen a closed pre-final lane,
   and pending-input preview keeps queue-owned closure semantics across polling

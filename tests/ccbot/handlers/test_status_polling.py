@@ -5,11 +5,14 @@ model picker renders in the terminal, and the status poller detects it
 on its next 1s tick.
 """
 
+import asyncio
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from ccbot.handlers.status_polling import update_status_message
+from ccbot.handlers import status_polling as status_polling_mod
 
 
 @pytest.fixture
@@ -206,5 +209,32 @@ class TestStatusPollerSettingsDetection:
                 mock_bot, user_id=1, window_id="@5", thread_id=42
             )
 
-        mock_status.assert_awaited_once()
-        assert mock_status.await_args.kwargs["turn_generation"] == 11
+            mock_status.assert_awaited_once()
+            assert mock_status.await_args.kwargs["turn_generation"] == 11
+
+
+@pytest.mark.asyncio
+async def test_status_poll_loop_unbinds_stale_main_chat_surface_by_chat_id(
+    mock_bot: AsyncMock,
+):
+    with (
+        patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+        patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+        patch(
+            "ccbot.handlers.status_polling.clear_topic_state",
+            new_callable=AsyncMock,
+        ) as mock_clear,
+        patch(
+            "ccbot.handlers.status_polling.asyncio.sleep",
+            side_effect=asyncio.CancelledError,
+        ),
+    ):
+        mock_sm.iter_thread_bindings.return_value = [(1, None, "@7")]
+        mock_sm.resolve_chat_id.return_value = -100200300
+        mock_tmux.find_window_by_id = AsyncMock(return_value=None)
+
+        with pytest.raises(asyncio.CancelledError):
+            await status_polling_mod.status_poll_loop(mock_bot)
+
+    mock_sm.unbind_surface.assert_called_once_with(1, chat_id=-100200300)
+    mock_clear.assert_awaited_once_with(1, None, mock_bot)

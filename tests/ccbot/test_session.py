@@ -98,6 +98,96 @@ class TestThreadBindings:
         assert binding.window_name == "Thread One"
 
 
+
+
+class TestSurfaceKeyedBindings:
+    def test_make_surface_key_formats_topic_and_chat(self, mgr: SessionManager) -> None:
+        assert mgr.make_surface_key(thread_id=42) == "t:42"
+        assert mgr.make_surface_key(chat_id=-100123) == "c:-100123"
+
+    def test_bind_surface_chat_key_does_not_backfill_legacy_topic_maps(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.bind_surface(100, "@9", surface_key="c:-100123", window_name="main-chat")
+
+        assert mgr.get_window_for_surface(100, surface_key="c:-100123") == "@9"
+        assert mgr.get_window_for_thread(100, 42) is None
+        assert mgr.thread_bindings == {}
+
+    def test_bind_surface_topic_key_keeps_legacy_topic_wrappers_in_sync(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.bind_surface(100, "@7", surface_key="t:42", window_name="proj")
+
+        assert mgr.get_window_for_surface(100, surface_key="t:42") == "@7"
+        assert mgr.get_window_for_thread(100, 42) == "@7"
+
+    def test_external_surface_binding_round_trips_for_chat_surface(
+        self, mgr: SessionManager
+    ) -> None:
+        binding_window_id = mgr.bind_external_surface(
+            100,
+            runtime_kind="codex",
+            source_thread_id="thread-1",
+            summary="Main chat",
+            cwd="/tmp/project",
+            file_path="/tmp/rollout-thread-1.jsonl",
+            read_only=True,
+            surface_key="c:-100123",
+        )
+
+        assert binding_window_id == "external:codex:thread-1"
+        assert mgr.get_window_for_surface(100, surface_key="c:-100123") == binding_window_id
+        assert mgr.get_external_surface_binding(100, surface_key="c:-100123") == {
+            "runtime_kind": "codex",
+            "source_thread_id": "thread-1",
+            "summary": "Main chat",
+            "cwd": "/tmp/project",
+            "file_path": "/tmp/rollout-thread-1.jsonl",
+            "read_only": True,
+        }
+
+    def test_surface_pending_slot_latest_wins_and_consumes_once(
+        self, mgr: SessionManager
+    ) -> None:
+        first = mgr.set_surface_pending_slot(100, "hello", surface_key="t:42")
+        second = mgr.set_surface_pending_slot(100, "hello again", surface_key="t:42")
+
+        assert first["revision"] == 1
+        assert second["revision"] == 2
+        assert mgr.peek_surface_pending_slot(100, surface_key="t:42") == second
+
+        consumed = mgr.consume_surface_pending_slot(
+            100,
+            "activation-1",
+            surface_key="t:42",
+        )
+        assert consumed is not None
+        assert consumed["status"] == "consumed"
+        assert consumed["consumed_by_activation_id"] == "activation-1"
+        assert mgr.consume_surface_pending_slot(
+            100,
+            "activation-1",
+            surface_key="t:42",
+        ) is None
+        assert mgr.consume_surface_pending_slot(
+            100,
+            "activation-2",
+            surface_key="t:42",
+        ) is None
+
+    def test_clear_surface_pending_slot_returns_previous_record(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.set_surface_pending_slot(100, "queued", surface_key="c:-100123")
+
+        cleared = mgr.clear_surface_pending_slot(100, surface_key="c:-100123")
+
+        assert cleared is not None
+        assert cleared["text"] == "queued"
+        assert mgr.peek_surface_pending_slot(100, surface_key="c:-100123") is None
+
+
 class TestGroupChatId:
     """Tests for group chat_id routing (supergroup forum topic support).
 
@@ -147,12 +237,71 @@ class TestGroupChatId:
         assert mgr.resolve_chat_id(200, 1) == -222
 
     def test_set_group_chat_id_with_none_thread(self, mgr: SessionManager) -> None:
-        """set_group_chat_id handles None thread_id (mapped to 0)."""
+        """set_group_chat_id supports no-topics main-chat routing via the chat-wide slot."""
         mgr.set_group_chat_id(100, None, -999)
-        # thread_id=None in resolve falls back to user_id (by design)
-        assert mgr.resolve_chat_id(100, None) == 100
-        # The stored key is "100:0", only accessible with explicit thread_id=0
+        assert mgr.resolve_chat_id(100, None) == -999
         assert mgr.group_chat_ids.get("100:0") == -999
+
+    def test_make_surface_key_for_topic_and_chat(self, mgr: SessionManager) -> None:
+        assert mgr.make_surface_key(thread_id=42) == "t:42"
+        assert mgr.make_surface_key(chat_id=-100200300) == "c:-100200300"
+
+
+class TestSurfaceBindingsChatMode:
+    def test_bind_surface_for_chat_main_thread(self, mgr: SessionManager) -> None:
+        mgr.bind_surface(100, "@7", chat_id=-100200300, window_name="main-chat")
+
+        assert mgr.get_window_for_surface(100, chat_id=-100200300) == "@7"
+        assert mgr.resolve_window_for_thread(100, None, chat_id=-100200300) == "@7"
+        assert mgr.surface_bindings[100]["c:-100200300"] == "@7"
+
+        assert (100, None, "@7") in set(mgr.iter_thread_bindings())
+        assert any(
+            binding.thread_id is None and binding.window_id == "@7"
+            for binding in mgr.iter_topic_bindings()
+        )
+
+    def test_surface_policy_and_binding_state_for_chat(self, mgr: SessionManager) -> None:
+        mgr.require_manual_bind_for_surface(100, chat_id=-100200300)
+        assert mgr.get_surface_policy(100, chat_id=-100200300) == TOPIC_POLICY_MANUAL_BIND_REQUIRED
+        assert mgr.get_surface_binding_state(100, chat_id=-100200300) == BINDING_STATE_NONE
+
+        mgr.start_surface_bind_flow(100, chat_id=-100200300)
+        assert mgr.get_surface_binding_state(100, chat_id=-100200300) == BINDING_STATE_BIND_FLOW
+        version, nonce = mgr.get_surface_bind_flow_credentials(100, chat_id=-100200300)
+        assert mgr.validate_surface_bind_flow_callback(
+            100,
+            version,
+            nonce,
+            chat_id=-100200300,
+        )
+
+    def test_surface_pending_slot_is_consume_once(self, mgr: SessionManager) -> None:
+        pending = mgr.set_surface_pending_slot(100, "hello", chat_id=-100200300)
+        assert pending["revision"] == 1
+        assert pending["status"] == "pending"
+        assert mgr.peek_surface_pending_slot(100, chat_id=-100200300)["text"] == "hello"
+
+        overwritten = mgr.set_surface_pending_slot(100, "updated", chat_id=-100200300)
+        assert overwritten["revision"] == 2
+        assert mgr.peek_surface_pending_slot(100, chat_id=-100200300)["text"] == "updated"
+
+        consumed = mgr.consume_surface_pending_slot(
+            100,
+            "activation-1",
+            chat_id=-100200300,
+        )
+        assert consumed is not None
+        assert consumed["status"] == "consumed"
+        assert consumed["consumed_by_activation_id"] == "activation-1"
+        assert mgr.consume_surface_pending_slot(
+            100,
+            "activation-2",
+            chat_id=-100200300,
+        ) is None
+
+        mgr.clear_surface_pending_slot(100, chat_id=-100200300)
+        assert mgr.peek_surface_pending_slot(100, chat_id=-100200300) is None
 
 
 class TestRuntimeCapabilityRegistryIntegration:

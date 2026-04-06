@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from telegram import CallbackQuery, User
+from telegram import CallbackQuery, MessageEntity, User
 
 from ccbot import bot as bot_mod
 from ccbot.handlers.callback_data import append_bind_flow_token
@@ -28,6 +28,7 @@ def _make_topic_update(
     thread_id: int = 42,
     user_id: int = 1,
     chat_type: str = "supergroup",
+    text: str | None = None,
 ) -> MagicMock:
     update = MagicMock()
     update.effective_user = MagicMock()
@@ -38,13 +39,35 @@ def _make_topic_update(
     update.message.chat.id = 100
     update.message.chat.type = chat_type
     update.message.chat.send_action = AsyncMock()
+    update.message.text = text
+    update.message.entities = []
     update.effective_chat = update.message.chat
     return update
 
 
-def _make_context() -> MagicMock:
+def _make_main_chat_update(
+    *,
+    user_id: int = 1,
+    chat_id: int = -100200,
+    chat_type: str = "supergroup",
+    text: str | None = None,
+) -> MagicMock:
+    update = _make_topic_update(
+        thread_id=None,
+        user_id=user_id,
+        chat_type=chat_type,
+        text=text,
+    )
+    update.message.chat.id = chat_id
+    update.effective_chat.id = chat_id
+    return update
+
+
+def _make_context(*, bot_username: str = "ccbot", bot_id: int = 999) -> MagicMock:
     context = MagicMock()
     context.bot = AsyncMock()
+    context.bot.username = bot_username
+    context.bot.id = bot_id
     context.user_data = {}
     return context
 
@@ -181,6 +204,37 @@ class TestBotRegistration:
         assert "model" not in command_names
 
 
+class TestSurfacePendingSlots:
+    def test_put_pending_slot_uses_keyword_surface_key(self):
+        context = _make_context()
+        surface = bot_mod.ControlSurface(
+            kind="group_topic",
+            chat_id=100,
+            thread_id=42,
+            legacy_scope_id=42,
+            surface_key="t:42",
+            label="topic",
+            is_shared_group=True,
+            supports_bind_flow=True,
+        )
+
+        with (
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot._session_has_method", return_value=True),
+        ):
+            record = {"text": "hello", "revision": 1, "status": "pending"}
+            mock_sm.set_surface_pending_slot.return_value = record
+
+            result = bot_mod._put_pending_slot(context, 1, surface, "hello")
+
+        assert result == record
+        mock_sm.set_surface_pending_slot.assert_called_once_with(
+            1,
+            "hello",
+            surface_key="t:42",
+        )
+
+
 class TestCommandSurface:
     @pytest.mark.asyncio
     async def test_start_command_describes_codex_tmux_core_lane(self):
@@ -197,12 +251,12 @@ class TestCommandSurface:
         mock_reply.assert_awaited_once()
         text = mock_reply.await_args.args[1]
         assert "tmux runtime control" in text
-        assert "Each topic controls one live tmux window" in text
+        assert "Each bound topic or supported group main chat controls one live tmux window" in text
         assert "Codex" in text
         assert "queue mode" in text
         assert "steer" in text
-        assert "/bind or a supported /resume" in text
-        assert "After /unbind or Cancel" in text
+        assert "or use /bind or /resume" in text
+        assert "Shared group topics and no-topics main chats stay silent" in text
         assert "raw tmux terminal control" in text
         assert "explicit `/resume <thread-name|id>`" in text
         assert "Claude Code Monitor" not in text
@@ -341,15 +395,15 @@ class TestCommandSurface:
 
         mock_clear.assert_awaited_once_with(1, 42, context.bot, context.user_data)
         mock_sm.allow_implicit_bind.assert_called_once_with(1, 42)
-        mock_sm.bind_external_thread.assert_called_once_with(
+        mock_sm.bind_external_surface.assert_called_once_with(
             1,
-            42,
             runtime_kind="codex",
             source_thread_id="thread-1",
             summary="Thread One",
             cwd="/tmp/project",
             file_path="/tmp/rollout-thread-1.jsonl",
             read_only=True,
+            surface_key="t:42",
         )
         mock_sm.start_topic_bind_flow.assert_not_called()
         mock_reply.assert_awaited_once()
@@ -357,7 +411,7 @@ class TestCommandSurface:
 
     @pytest.mark.asyncio
     async def test_text_handler_manual_policy_blocks_implicit_bind(self):
-        update = _make_topic_update()
+        update = _make_topic_update(chat_type="private")
         update.message.text = "hello"
         context = _make_context()
 
@@ -438,6 +492,256 @@ class TestCommandSurface:
         assert "read-only" in mock_reply.await_args.args[1]
 
     @pytest.mark.asyncio
+    async def test_text_handler_group_unbound_ordinary_text_is_silent(self):
+        update = _make_topic_update(text="hello")
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot._start_bind_flow", new_callable=AsyncMock) as mock_start_bind,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+            mock_sm.get_topic_binding_state.return_value = BINDING_STATE_NONE
+            mock_sm.get_topic_policy.return_value = TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
+
+            await bot_mod.text_handler(update, context)
+
+        mock_start_bind.assert_not_awaited()
+        mock_sm.send_to_window.assert_not_called()
+        mock_reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_text_handler_group_unbound_at_mention_opens_bind_flow_without_runtime_send(self):
+        update = _make_topic_update(text="@ccbot hello")
+        update.message.entities = [
+            SimpleNamespace(type=MessageEntity.MENTION, offset=0, length=6)
+        ]
+        context = _make_context(bot_username="ccbot")
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot._start_bind_flow", new_callable=AsyncMock) as mock_start_bind,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+            mock_sm.get_topic_binding_state.return_value = BINDING_STATE_NONE
+            mock_sm.get_topic_policy.return_value = TOPIC_POLICY_MANUAL_BIND_REQUIRED
+
+            await bot_mod.text_handler(update, context)
+
+        mock_start_bind.assert_awaited_once()
+        assert mock_start_bind.await_args.kwargs["explicit"] is True
+        assert mock_start_bind.await_args.kwargs["pending_text"] == "hello"
+        assert context.user_data[bot_mod.PENDING_SURFACE_SLOTS_KEY]["t:42"]["text"] == "hello"
+        mock_sm.send_to_window.assert_not_called()
+        mock_reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_text_handler_no_topics_main_chat_unbound_ordinary_text_is_silent(self):
+        update = _make_main_chat_update(text="hello")
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot._start_bind_flow", new_callable=AsyncMock) as mock_start_bind,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+            mock_sm.get_topic_binding_state.return_value = BINDING_STATE_NONE
+            mock_sm.get_topic_policy.return_value = TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
+
+            await bot_mod.text_handler(update, context)
+
+        mock_start_bind.assert_not_awaited()
+        mock_reply.assert_not_awaited()
+        mock_sm.send_to_window.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_bind_command_no_topics_main_chat_starts_bind_flow(self):
+        update = _make_main_chat_update(text="/bind")
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce123")
+            mock_tmux.list_windows = AsyncMock(return_value=[])
+
+            await bot_mod.bind_command(update, context)
+
+        mock_sm.allow_implicit_bind.assert_called_once_with(1, -100200)
+        mock_sm.start_topic_bind_flow.assert_called_once_with(1, -100200)
+        mock_reply.assert_awaited_once()
+        assert "topic" not in mock_reply.await_args.args[1].lower()
+
+    @pytest.mark.asyncio
+    async def test_resume_command_no_topics_main_chat_no_longer_hard_rejects(self):
+        update = _make_main_chat_update(text="/resume planning-thread")
+        context = _make_context()
+
+        with (
+            patch.object(bot_mod.config, "claude_command", "codex"),
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.clear_topic_state", new_callable=AsyncMock),
+            patch("ccbot.bot._register_bound_window", new_callable=AsyncMock) as mock_register,
+            patch("ccbot.bot._maybe_autosend_pending_after_activation", new_callable=AsyncMock),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+            mock_sm.codex_thread_catalog = MagicMock()
+            mock_sm.codex_thread_catalog.resolve_resume_target.return_value = SimpleNamespace(
+                status="selected",
+                selected=SimpleNamespace(
+                    thread_id="thread-1",
+                    summary="Planning thread",
+                    cwd="/tmp/project",
+                ),
+            )
+            mock_sm.get_runtime_capability.return_value = SimpleNamespace(display_name="Codex")
+            mock_tmux.create_or_reuse_window = AsyncMock(
+                return_value=(True, "Reused window 'project' at /tmp/project", "project", "@7", True)
+            )
+
+            await bot_mod.resume_command(update, context)
+
+        mock_register.assert_awaited_once_with(
+            context,
+            update.effective_user,
+            -100200,
+            window_id="@7",
+            window_name="project",
+            selected_path="/tmp/project",
+            runtime_kind="codex",
+            surface=bot_mod.ControlSurface(
+                kind="group_main_chat",
+                chat_id=-100200,
+                thread_id=None,
+                legacy_scope_id=-100200,
+                surface_key="c:-100200",
+                label="chat",
+                is_shared_group=True,
+                supports_bind_flow=True,
+            ),
+            resume_session_id="thread-1",
+            sync_topic_title=False,
+        )
+        mock_reply.assert_awaited_once()
+        assert "only works in a topic" not in mock_reply.await_args.args[1].lower()
+
+    @pytest.mark.asyncio
+    async def test_bind_command_read_only_binding_does_not_autosend_pending(self):
+        update = _make_main_chat_update(text="/bind thread-1")
+        context = _make_context()
+        context.user_data[bot_mod.PENDING_SURFACE_SLOTS_KEY] = {
+            "c:-100200": {
+                "text": "queued hello",
+                "revision": 1,
+                "status": "pending",
+                "consumed_by_activation_id": None,
+            }
+        }
+
+        with (
+            patch.object(bot_mod.config, "claude_command", "codex"),
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._resolve_resume_command_target", new_callable=AsyncMock, return_value=(
+                bot_mod._ResumeCommandTarget(
+                    runtime_kind="codex",
+                    thread_id="thread-1",
+                    summary="Thread One",
+                    cwd="/tmp/project",
+                    file_path="/tmp/rollout-thread-1.jsonl",
+                ),
+                None,
+            )),
+            patch("ccbot.bot.clear_topic_state", new_callable=AsyncMock),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+            patch("ccbot.bot.session_manager") as mock_sm,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+
+            await bot_mod.bind_command(update, context)
+
+        mock_sm.send_to_window.assert_not_called()
+        assert context.user_data[bot_mod.PENDING_SURFACE_SLOTS_KEY]["c:-100200"]["status"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_pending_autosend_happens_once_per_writable_activation(self):
+        update = MagicMock()
+        update.effective_user = MagicMock(id=1)
+        update.effective_chat = MagicMock(type="supergroup", id=100)
+        update.callback_query = MagicMock()
+        update.callback_query.data = append_bind_flow_token(
+            f"{bot_mod.CB_WIN_BIND}0",
+            version=1,
+            nonce="nonce123",
+        )
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.message = MagicMock(
+            message_thread_id=42,
+            chat=update.effective_chat,
+        )
+        context = _make_context()
+        context.user_data = {
+            bot_mod.STATE_KEY: bot_mod.STATE_SELECTING_WINDOW,
+            bot_mod.UNBOUND_WINDOWS_KEY: ["@7"],
+            bot_mod.PENDING_SURFACE_STATE_KEY: {
+                "kind": "group_topic",
+                "chat_id": 100,
+                "thread_id": 42,
+                "legacy_scope_id": 42,
+                "surface_key": "t:42",
+                "label": "topic",
+                "is_shared_group": True,
+                "supports_bind_flow": True,
+            },
+            bot_mod.PENDING_SURFACE_SLOTS_KEY: {
+                "t:42": {
+                    "text": "queued hello",
+                    "revision": 1,
+                    "status": "pending",
+                    "consumed_by_activation_id": None,
+                }
+            },
+        }
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock),
+        ):
+            mock_sm.validate_topic_bind_flow_callback.return_value = True
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(
+                    window_id="@7",
+                    window_name="project",
+                    cwd="/tmp/project",
+                    pane_current_command="codex",
+                )
+            )
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.callback_handler(update, context)
+            assert mock_sm.send_to_window.await_count == 1
+
+            mock_sm.send_to_window.reset_mock()
+            await bot_mod.callback_handler(update, context)
+
+        mock_sm.send_to_window.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_unbind_command_on_bound_topic_sets_manual_bind_required(self):
         update = _make_topic_update()
         context = _make_context()
@@ -455,7 +759,7 @@ class TestCommandSurface:
 
             await bot_mod.unbind_command(update, context)
 
-        mock_sm.unbind_thread.assert_called_once_with(1, 42)
+        mock_sm.unbind_surface.assert_called_once_with(1, surface_key="t:42")
         mock_sm.require_manual_bind.assert_called_once_with(1, 42)
         mock_clear.assert_awaited_once_with(1, 42, context.bot, context.user_data)
         mock_reply.assert_awaited_once()
@@ -534,7 +838,18 @@ class TestCommandSurface:
             window_name="project",
             selected_path="/tmp/project",
             runtime_kind="codex",
+            surface=bot_mod.ControlSurface(
+                kind="group_topic",
+                chat_id=100,
+                thread_id=42,
+                legacy_scope_id=42,
+                surface_key="t:42",
+                label="topic",
+                is_shared_group=True,
+                supports_bind_flow=True,
+            ),
             resume_session_id="thread-1",
+            sync_topic_title=True,
         )
         mock_sm.allow_implicit_bind.assert_called_once_with(1, 42)
         reply_text = mock_reply.await_args.args[1]
@@ -820,6 +1135,17 @@ class TestCommandSurface:
             window_name="node",
             selected_path="/tmp/project",
             runtime_kind="codex",
+            surface=bot_mod.ControlSurface(
+                kind="group_topic",
+                chat_id=100,
+                thread_id=42,
+                legacy_scope_id=42,
+                surface_key="t:42",
+                label="topic",
+                is_shared_group=True,
+                supports_bind_flow=True,
+            ),
+            sync_topic_title=True,
         )
         mock_sm.bind_thread.assert_not_called()
 
@@ -1318,7 +1644,18 @@ class TestThreadPickerFlow:
             await bot_mod.callback_handler(update, context)
 
         mock_create.assert_awaited_once()
-        assert mock_create.await_args.kwargs == {}
+        assert mock_create.await_args.kwargs == {
+            "pending_surface": bot_mod.ControlSurface(
+                kind="group_topic",
+                chat_id=100,
+                thread_id=42,
+                legacy_scope_id=42,
+                surface_key="t:42",
+                label="topic",
+                is_shared_group=True,
+                supports_bind_flow=True,
+            )
+        }
 
 
 class TestTelegramDelivery:

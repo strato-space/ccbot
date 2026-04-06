@@ -54,6 +54,7 @@ These equalities are false:
 - `process == thread`
 - `process == replay evidence`
 - `thread == replay evidence`
+- `chat == topic`
 - `topic == thread`
 - `topic == window`
 - `literal ACP-protocol-over-stdio == acceptable primary control plane`
@@ -64,6 +65,11 @@ More precise statements:
 - a process may attach to an existing thread via resume, but is not that
   thread
 - replay evidence is emitted evidence, not the process itself
+- a chat container may expose one shared no-topics main-chat mode when forum
+  topics are unavailable, but the raw chat container is not itself the topic
+  object
+- `thread_id is None` may canonically mark that no-topics main-chat mode in the
+  product surface, but `None` is still not the same kind of thing as a topic
 - a Telegram topic is governed by policy and binding, not directly by a
   persisted log file
 - a status artifact is not the same kind of thing as final content

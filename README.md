@@ -15,7 +15,7 @@ CCBot solves this by letting you **seamlessly continue the same terminal-backed 
 
 - **Switch from desktop to phone mid-conversation** — Codex is working on a refactor? Walk away, keep monitoring and responding from Telegram.
 - **Switch back to desktop anytime** — Since the tmux session was never interrupted, just `tmux attach` and you're back in the terminal with full scrollback and context.
-- **Run multiple conversations in parallel** — Each Telegram topic maps to a separate tmux window, so you can juggle multiple projects from one chat group.
+- **Run multiple conversations in parallel** — Each Telegram topic, or one explicitly bound no-topics group main chat, maps to its own control surface, so you can juggle multiple projects from one chat group.
 
 Other Telegram bots often wrap a separate API session that cannot be resumed in your terminal. CCBot takes a different approach: it's just a thin control layer over tmux, so the terminal remains the live control surface and you never lose the ability to switch back.
 
@@ -207,12 +207,12 @@ uv run ccbot
 | Command       | Description                     |
 | ------------- | ------------------------------- |
 | `/start`      | Show welcome message |
-| `/history`    | Message history for this topic |
+| `/history`    | Message history for this topic or supported main chat |
 | `/screenshot` | Capture terminal screenshot |
 | `/esc`        | Send Escape to interrupt the active runtime |
-| `/bind`       | Start an explicit bind flow for this topic (`/bind <thread-name|id>` in Codex lane attaches external read-only replay) |
-| `/unbind`     | Detach this topic from its live window |
-| `/resume`     | Bind this topic to a persisted runtime thread when the configured lane supports deterministic explicit resume |
+| `/bind`       | Start an explicit bind flow for this topic or supported main chat (`/bind <thread-name|id>` in Codex lane attaches external read-only replay) |
+| `/unbind`     | Detach this topic or supported main chat from its live window |
+| `/resume`     | Bind this topic or supported main chat to a persisted runtime thread when the configured lane supports deterministic explicit resume |
 | `/rename`     | Rename the current tmux window and sync the topic title |
 
 **Supported Codex core-lane commands shown in the Telegram menu when the configured launch lane is Codex:**
@@ -230,9 +230,21 @@ Other raw `/command` inputs are still forwarded best-effort to the active tmux-h
 
 ### Topic Workflow
 
-**1 Topic = 1 binding at a time.** The bot runs in Telegram Forum (topics) mode.
+**1 control surface = 1 binding at a time.**
 
-Each topic controls one delivery source at a time:
+The canonical runtime ontology remains topic-centric:
+
+`Telegram topic -> binding -> tmux window -> runtime process -> runtime conversation identity -> replay evidence`
+
+For shared groups without topics, the current product surface may expose one
+explicit main-chat mode:
+
+`chat -> live tmux window`
+
+This no-topics path is **not** a claim that `chat == topic`; it is a separate
+chat-wide control surface that coexists with named-topic behavior.
+
+Each supported surface controls one delivery source at a time:
 
 - live tmux window (writable control lane)
 - external persisted Codex thread (read-only replay lane)
@@ -241,15 +253,21 @@ The concrete runtime lane depends on `CLAUDE_COMMAND`.
 
 **Creating a new session:**
 
-1. Create a new topic in the Telegram group
-2. Send any plain text message in the topic
+1. Create a new topic in the Telegram group, or use the main chat in a group where topics are disabled
+2. Enter via a valid opener for that surface
+   - private chats with topics enabled: a first plain text message may still open bind flow
+   - shared group topics: ordinary non-addressed text stays silent; use `@bot`, `/bind`, or `/resume`
+   - no-topics group main chat: ordinary non-addressed text stays silent; use `@bot`, `/bind`, or `/resume`
 3. A directory browser appears — select the project directory
 4. If the directory has existing Codex identities, an identity picker appears — choose one to resume or start fresh
-5. A tmux window is created, the configured runtime starts there (with resume wiring if resuming), and your pending message is forwarded
+5. A tmux window is created, the configured runtime starts there (with resume wiring if resuming), and any pending addressed text is auto-sent exactly once after writable activation succeeds
 
 **Explicit bind, explicit resume, and manual unbind:**
 
-- The first plain text message in a fresh topic may still trigger the bind flow automatically.
+- In **private chats with topics enabled**, the first plain text message in a fresh topic may still trigger the bind flow automatically.
+- In **group/supergroup topics**, ordinary non-addressed text in an unbound topic stays silent.
+- In **no-topics group main chat mode**, ordinary non-addressed text stays silent.
+- Explicit `@mention`, `/bind`, and `/resume` remain the valid explicit re-entry paths in shared group surfaces.
 - After an explicit `/unbind` or a picker cancel, the topic enters `manual_bind_required`.
 - In `manual_bind_required`, plain messages do not restart binding implicitly.
 - Use `/bind` to choose a live window or workspace again.

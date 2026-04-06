@@ -250,10 +250,20 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
 
 ### Topic Control Policy
 
-- A fresh topic may still start with implicit bind from the first plain message.
+The project ontology remains topic-centric:
+
+- `Telegram topic -> binding -> tmux window -> runtime process -> runtime conversation identity -> replay evidence`
+- `topic_policy` and `binding_state` remain separate persisted axes.
+- A no-topics group chat may expose one shared main-chat mode canonically
+  marked by `thread_id is None`; this is not a claim that `chat == topic`.
+
+Named-topic behavior:
+
+- In **private chats with topics enabled**, a fresh topic may still start with implicit bind from the first plain message.
+- In **group/supergroup topics**, an ordinary non-addressed message in an unbound topic must stay silent; it does not open bind flow.
+- In **group/supergroup topics**, explicit `/bind`, explicit `/resume`, and bot-addressed `@mention` remain valid explicit entry paths.
 - After explicit `/unbind` or picker cancel, the topic moves to `manual_bind_required`.
 - In `manual_bind_required`, plain messages do not re-trigger bind implicitly.
-- Only explicit `/bind` or explicit `/resume` may re-enter a bind-capable flow.
 - In Codex lane, `/bind <thread-name|id>` may attach an external persisted
   thread without tmux. This binding is replay-delivery first and marked
   read-only.
