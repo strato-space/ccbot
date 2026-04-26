@@ -7,6 +7,7 @@ on its next 1s tick.
 
 import asyncio
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -34,6 +35,15 @@ def _clear_interactive_state():
     yield
     _interactive_mode.clear()
     _interactive_msgs.clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_runtime_presence():
+    status_polling_mod._runtime_presence.clear()
+    status_polling_mod._last_pane_text.clear()
+    yield
+    status_polling_mod._runtime_presence.clear()
+    status_polling_mod._last_pane_text.clear()
 
 
 @pytest.mark.usefixtures("_clear_interactive_state")
@@ -221,6 +231,10 @@ async def test_status_poll_loop_unbinds_stale_main_chat_surface_by_chat_id(
         patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
         patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
         patch(
+            "ccbot.handlers.status_polling._enqueue_discontinuity_warning",
+            new_callable=AsyncMock,
+        ),
+        patch(
             "ccbot.handlers.status_polling.clear_topic_state",
             new_callable=AsyncMock,
         ) as mock_clear,
@@ -229,8 +243,13 @@ async def test_status_poll_loop_unbinds_stale_main_chat_surface_by_chat_id(
             side_effect=asyncio.CancelledError,
         ),
     ):
-        mock_sm.iter_thread_bindings.return_value = [(1, None, "@7")]
+        mock_sm.iter_topic_bindings.return_value = [
+            SimpleNamespace(user_id=1, thread_id=None, window_id="@7")
+        ]
+        mock_sm.is_external_binding_window_id.return_value = False
         mock_sm.resolve_chat_id.return_value = -100200300
+        mock_sm.resolve_thread_for_window = AsyncMock(return_value=None)
+        mock_sm.get_surface_coordinates_for_window.return_value = (None, -100200300, None)
         mock_tmux.find_window_by_id = AsyncMock(return_value=None)
 
         with pytest.raises(asyncio.CancelledError):
@@ -238,3 +257,333 @@ async def test_status_poll_loop_unbinds_stale_main_chat_surface_by_chat_id(
 
     mock_sm.unbind_surface.assert_called_once_with(1, chat_id=-100200300)
     mock_clear.assert_awaited_once_with(1, None, mock_bot)
+
+
+@pytest.mark.asyncio
+async def test_update_status_message_emits_runtime_exit_warning_with_images_first(
+    mock_bot: AsyncMock,
+):
+    status_polling_mod._runtime_presence[(1, "@5")] = True
+    mock_window = MagicMock()
+    mock_window.window_id = "@5"
+    mock_window.pane_current_command = "bash"
+
+    with (
+        patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+        patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.status_polling.enqueue_content_message",
+            new_callable=AsyncMock,
+        ) as mock_content,
+        patch(
+            "ccbot.handlers.status_polling.enqueue_pending_input_update",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "ccbot.handlers.status_polling.enqueue_status_update",
+            new_callable=AsyncMock,
+        ) as mock_status,
+        patch(
+            "ccbot.handlers.status_polling.build_discontinuity_image_data",
+            new_callable=AsyncMock,
+            return_value=[("discontinuity-screenshot.png", b"png-bytes")],
+        ),
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
+        mock_tmux.capture_pane = AsyncMock(
+            return_value="codex resume thread-1\nuser@host:/tmp$ "
+        )
+        mock_sm.get_process_descriptor.return_value = SimpleNamespace(runtime_kind="codex")
+        mock_sm.resolve_thread_for_window = AsyncMock(return_value=None)
+
+        await update_status_message(mock_bot, user_id=1, window_id="@5", thread_id=42)
+
+    mock_content.assert_awaited_once()
+    kwargs = mock_content.await_args.kwargs
+    assert kwargs["semantic_kind"] == "warning"
+    assert kwargs["warning_key"] == "runtime-discontinuity:exit:@5"
+    assert kwargs["image_data"] == [("discontinuity-screenshot.png", b"png-bytes")]
+    assert "codex resume thread-1" in kwargs["text"]
+    mock_status.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_status_message_detects_runtime_exit_even_when_pane_command_is_bash(
+    mock_bot: AsyncMock,
+):
+    status_polling_mod._runtime_presence[(1, "@5")] = True
+    mock_window = MagicMock()
+    mock_window.window_id = "@5"
+    mock_window.pane_current_command = "bash"
+    pane_text = (
+        "iqdoctor@str:/tools/ccbot$ codex --no-alt-screen\n"
+        "╭──────────────────────────────────────────────╮\n"
+        "│ >_ OpenAI Codex (v0.118.0)                   │\n"
+        "╰──────────────────────────────────────────────╯\n"
+        "Token usage: total=10 input=8 output=2\n"
+        "To continue this session, run codex resume thread-1\n"
+        "iqdoctor@str:/tools/ccbot$\n"
+    )
+
+    with (
+        patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+        patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.status_polling.enqueue_content_message",
+            new_callable=AsyncMock,
+        ) as mock_content,
+        patch(
+            "ccbot.handlers.status_polling.enqueue_pending_input_update",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "ccbot.handlers.status_polling.enqueue_status_update",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "ccbot.handlers.status_polling.build_discontinuity_image_data",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
+        mock_tmux.capture_pane = AsyncMock(return_value=pane_text)
+        mock_sm.get_process_descriptor.return_value = SimpleNamespace(runtime_kind="codex")
+        mock_sm.resolve_thread_for_window = AsyncMock(return_value=None)
+
+        await update_status_message(mock_bot, user_id=1, window_id="@5", thread_id=42)
+
+    mock_content.assert_awaited_once()
+    kwargs = mock_content.await_args.kwargs
+    assert kwargs["warning_key"] == "runtime-discontinuity:exit:@5"
+    assert "codex resume thread-1" in kwargs["text"]
+
+
+
+
+@pytest.mark.asyncio
+async def test_update_status_message_does_not_emit_exit_warning_for_active_codex_footer_without_banner(
+    mock_bot: AsyncMock,
+):
+    status_polling_mod._runtime_presence[(1, "@5")] = True
+    mock_window = MagicMock()
+    mock_window.window_id = "@5"
+    mock_window.pane_current_command = "node"
+    pane_text = (
+        "• Waited for background terminal · cd /home/tools/ComfyUI_next && ./.venv/bin/python compare.py\n\n"
+        "• Face-model pack уже скачался; теперь сам расчёт similarity по embeddings должен завершиться быстро.\n\n"
+        "› Improve documentation in @filename\n"
+        "· gpt-5.4 high · 21% left · /home/tools/server/comfy\n"
+        "──────────────────────────────────────\n"
+        "❯ \n"
+        "──────────────────────────────────────\n"
+        "  23% context left\n"
+    )
+
+    with (
+        patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+        patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.status_polling.enqueue_content_message",
+            new_callable=AsyncMock,
+        ) as mock_content,
+        patch(
+            "ccbot.handlers.status_polling.enqueue_pending_input_update",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "ccbot.handlers.status_polling.enqueue_status_update",
+            new_callable=AsyncMock,
+        ) as mock_status,
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
+        mock_tmux.capture_pane = AsyncMock(return_value=pane_text)
+        mock_sm.get_process_descriptor.return_value = SimpleNamespace(runtime_kind="codex")
+
+        await update_status_message(mock_bot, user_id=1, window_id="@5", thread_id=42)
+
+    mock_content.assert_not_awaited()
+    mock_status.assert_awaited_once()
+    assert mock_status.await_args.args[3] == "gpt-5.4 high · 21% left · /home/tools/server/comfy"
+
+
+@pytest.mark.asyncio
+async def test_update_status_message_does_not_emit_exit_warning_for_unknown_node_codex_footer(
+    mock_bot: AsyncMock,
+):
+    status_polling_mod._runtime_presence[(1, "@5")] = True
+    mock_window = MagicMock()
+    mock_window.window_id = "@5"
+    mock_window.pane_current_command = "node"
+    pane_text = (
+        "• Waiting for background terminal (\n"
+        "\n"
+        "… +23 lines (ctrl + t to view transcript)\n"
+        "\n"
+        "73                     2\n"
+        "tab to queue message                                    37% context left\n"
+    )
+
+    with (
+        patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+        patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.status_polling.enqueue_content_message",
+            new_callable=AsyncMock,
+        ) as mock_content,
+        patch(
+            "ccbot.handlers.status_polling.enqueue_pending_input_update",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "ccbot.handlers.status_polling.enqueue_status_update",
+            new_callable=AsyncMock,
+        ) as mock_status,
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
+        mock_tmux.capture_pane = AsyncMock(return_value=pane_text)
+        mock_sm.get_process_descriptor.return_value = SimpleNamespace(runtime_kind="codex")
+
+        await update_status_message(mock_bot, user_id=1, window_id="@5", thread_id=42)
+
+    mock_content.assert_not_awaited()
+    mock_status.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_update_status_message_usage_limit_banner_enqueues_durable_warning(
+    mock_bot: AsyncMock,
+):
+    mock_window = MagicMock()
+    mock_window.window_id = "@5"
+    mock_window.pane_current_command = "codex"
+    pane_text = (
+        "Running UserPromptSubmit hook: Applying OMX prompt routing\n\n"
+        "UserPromptSubmit hook (completed)\n\n"
+        "■ You've hit your usage limit. Upgrade to Pro, visit usage to purchase more credits or try again at Apr 11th, 2026 10:11 PM.\n\n"
+        "› Write tests for @filename\n"
+    )
+
+    with (
+        patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+        patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.status_polling.enqueue_content_message",
+            new_callable=AsyncMock,
+        ) as mock_content,
+        patch(
+            "ccbot.handlers.status_polling.enqueue_pending_input_update",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "ccbot.handlers.status_polling.handle_interactive_ui",
+            new_callable=AsyncMock,
+        ) as mock_ui,
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
+        mock_tmux.capture_pane = AsyncMock(return_value=pane_text)
+        mock_sm.get_process_descriptor.return_value = SimpleNamespace(runtime_kind="codex")
+        mock_sm.is_external_binding_window_id.return_value = False
+
+        await update_status_message(mock_bot, user_id=1, window_id="@5", thread_id=42)
+
+    mock_ui.assert_not_awaited()
+    mock_content.assert_awaited_once()
+    kwargs = mock_content.await_args.kwargs
+    assert kwargs["semantic_kind"] == "warning"
+    assert kwargs["warning_key"] == "usage-limit:@5"
+    assert "You've hit your usage limit" in kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_transition_missing_window_binding_chat_surface_rebinds_same_chat_to_external(
+    mock_bot: AsyncMock,
+):
+    with (
+        patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.status_polling.clear_topic_state",
+            new_callable=AsyncMock,
+        ) as mock_clear,
+        patch(
+            "ccbot.handlers.status_polling.enqueue_content_message",
+            new_callable=AsyncMock,
+        ) as mock_content,
+        patch(
+            "ccbot.handlers.status_polling.build_discontinuity_image_data",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        mock_sm.resolve_thread_for_window = AsyncMock(
+            return_value=SimpleNamespace(
+                thread_id="thread-chat-1",
+                runtime_kind="codex",
+                summary="Recovered chat thread",
+                cwd="/tmp/project",
+                file_path=__file__,
+            )
+        )
+        mock_sm.bind_external_surface.return_value = "external:codex:thread-chat-1"
+
+        await status_polling_mod._transition_missing_window_binding(
+            mock_bot,
+            user_id=1,
+            thread_id=None,
+            window_id="@14",
+            surface_key="c:-5081683643",
+            chat_id=-5081683643,
+        )
+
+    mock_sm.bind_external_surface.assert_called_once()
+    kwargs = mock_sm.bind_external_surface.call_args.kwargs
+    assert kwargs["surface_key"] == "c:-5081683643"
+    assert kwargs["chat_id"] == -5081683643
+    mock_clear.assert_awaited_once_with(1, None, mock_bot)
+    mock_content.assert_awaited_once()
+    assert mock_content.await_args.kwargs["window_id"] == "external:codex:thread-chat-1"
+
+
+@pytest.mark.asyncio
+async def test_transition_missing_window_binding_rebinds_external_when_replay_survives(
+    mock_bot: AsyncMock,
+):
+    with (
+        patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.status_polling.clear_topic_state",
+            new_callable=AsyncMock,
+        ) as mock_clear,
+        patch(
+            "ccbot.handlers.status_polling.enqueue_content_message",
+            new_callable=AsyncMock,
+        ) as mock_content,
+        patch(
+            "ccbot.handlers.status_polling.build_discontinuity_image_data",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        mock_sm.resolve_thread_for_window = AsyncMock(
+            return_value=SimpleNamespace(
+                thread_id="thread-1",
+                runtime_kind="codex",
+                summary="Recovered thread",
+                cwd="/tmp/project",
+                file_path=__file__,
+            )
+        )
+        mock_sm.bind_external_surface.return_value = "external:codex:thread-1"
+
+        await status_polling_mod._transition_missing_window_binding(
+            mock_bot,
+            user_id=1,
+            thread_id=42,
+            window_id="@7",
+        )
+
+    mock_sm.bind_external_surface.assert_called_once()
+    mock_clear.assert_awaited_once_with(1, 42, mock_bot)
+    mock_content.assert_awaited_once()
+    kwargs = mock_content.await_args.kwargs
+    assert kwargs["window_id"] == "external:codex:thread-1"
+    assert "read-only mode" in kwargs["text"] or "persisted replay evidence" in kwargs["text"]

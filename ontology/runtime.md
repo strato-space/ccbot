@@ -4,23 +4,56 @@ This note defines the core runtime nouns for `ccbot`.
 
 ## Definitions
 
+- **Telegram control surface**
+  - the canonical user-facing routing lane in Telegram
+  - current species:
+    - named topic control surface
+    - no-topics main-chat control surface
+
 - **Telegram topic**
-  - the user-facing control lane in Telegram
-  - may be realized as:
-    - a forum topic in a topic-enabled chat
+  - the named-topic species of Telegram control surface
+  - realized as a forum topic in a topic-enabled chat
+
+- **No-topics main-chat control surface**
+  - a chat-wide control surface used when forum topics are unavailable
+  - canonically represented in the current product surface by `thread_id is None`
+  - is not a claim that `chat == topic`
+
+- **Surface key**
+  - the canonical persisted local key for a Telegram control surface under one
+    user scope
+  - concrete shapes in the current code:
+    - `t:<thread_id>`
+    - `c:<chat_id>`
+  - this is a product persistence noun, not a Telegram API noun
+  - it is not the full control-surface identity by itself
+
+- **Control-surface identity**
+  - the full persisted identity for a control surface in the current storage
+    model
+  - current concrete shape: `(user_id, surface_key)`
+  - this prevents `t:<thread_id>` values from being treated as globally unique
+    outside their persisted user scope
 
 - **Topic transport identifier**
   - Telegram transport token such as `message_thread_id`
   - identifies a topic at the API/storage boundary
   - is not identical to the topic itself
 
+- **Control-surface policy**
+  - persisted rule that governs whether a control surface may trigger implicit
+    bind or instead requires explicit bind
+  - current canonical values:
+    - `implicit_bind_allowed`
+    - `manual_bind_required`
+
 - **Topic control policy**
-  - persisted rule that governs whether a topic may trigger implicit bind or
-    instead requires explicit bind
+  - the topic-shaped legacy compatibility wrapper around the canonical
+    control-surface policy
 
 - **Binding**
-  - persisted association from a Telegram topic to a delivery source, together
-    with runtime metadata needed for safe routing and delivery
+  - persisted association from a Telegram control surface to a delivery source,
+    together with runtime metadata needed for safe routing and delivery
   - binding scope is explicit:
     - `tmux` for a live terminal container
     - `external` for a persisted runtime thread without live tmux attachment
@@ -67,13 +100,13 @@ This note defines the core runtime nouns for `ccbot`.
 
 - **Input injection plane**
   - capability to inject text/keys into a live runtime process
-  - available only when the topic is bound to a live tmux scope
+  - available only when the control surface is bound to a live tmux scope
   - external-thread binding may stay read-only when no live injection plane is
     attached
 
 ## Canonical Model
 
-`Telegram topic --governed by topic control policy--> may or may not enter a binding flow`
+`Telegram control surface --governed by control-surface policy--> may or may not enter a binding flow`
 
 `binding -> delivery source`
 
@@ -97,7 +130,7 @@ This note defines the core runtime nouns for `ccbot`.
 
 Separate no-topics mode:
 
-`chat without forum topics -> no-topics main-chat mode (thread_id is None) -> binding -> ...`
+`chat without forum topics -> no-topics main-chat control surface (thread_id is None) -> binding -> ...`
 
 ## Message Plane vs Operator Layer
 
@@ -120,6 +153,7 @@ Raw operator control is different:
 ## Operational Invariants
 
 - a topic may bind to at most one delivery source at a time
+- a control surface may bind to at most one delivery source at a time
 - a chat without forum topics may expose one shared no-topics main-chat mode
   for the control plane
 - a tmux window may host at most one active runtime process at a time
@@ -130,7 +164,17 @@ Raw operator control is different:
   not restore the previous live process
 - history is reconstructed from normalized replay evidence, not from the live
   process buffer
+- surface-scoped maps are canonical; topic-scoped maps are compatibility
+  mirrors
+- surface-scoped policy/binding-state maps are canonical; topic-scoped maps are
+  compatibility mirrors
 - external-thread bind may deliver replay events without exposing a live input
   injection plane
+- when a tmux window disappears but replay evidence remains readable, the
+  control surface may transition from `binding_scope=tmux` to
+  `binding_scope=external` instead of being silently cleared
+- live-runtime presence is semantic rather than banner-bound: a visible active
+  Codex footer/status surface or input prompt still counts as a live runtime
+  surface even after the initial startup banner has scrolled out of the pane
 - if no live input injection plane exists, Telegram text/keys must fail closed
   as read-only rather than pretending to send into tmux

@@ -34,8 +34,8 @@ See also:
 | Stale callback invalidation | bind-flow version/nonce invalidation after restart, unbind, cancel | `tests/ccbot/test_bot_contracts.py`, `doc/topic-policy-migration.md` |
 | Late-event / stale-binding guards | queued status/content must fail closed after unbind or dead window | `tests/ccbot/handlers/test_message_queue.py`, `doc/telegram-delivery-pipeline.md` |
 | Claude parity against upstream | progress lifecycle, tool-result edit-in-place, final-result delivery | `tests/ccbot/test_claude_parity_contract.py`, `/home/tools/ccbot-upstream`, `doc/claude-parity-contract.md` |
-| queue / steer semantics | equal message channels at message layer, source does not affect priority, mode affects routing semantics | `tests/ccbot/test_bot_contracts.py`, `doc/runtime-ontology.md`, `doc/runtime-event-contract.md`, `doc/telegram-bot-features.md` |
-| Raw operator control separation | raw terminal control is never modeled as a queued semantic message | `tests/ccbot/test_docs_contracts.py`, `doc/runtime-ontology.md`, `doc/telegram-delivery-pipeline.md` |
+| queue / steer semantics | equal message channels at message layer, source does not affect priority, mode affects routing semantics | `tests/ccbot/test_bot_contracts.py`, `ontology/runtime.md`, `doc/runtime-ontology.md`, `doc/runtime-event-contract.md`, `doc/telegram-bot-features.md` |
+| Raw operator control separation | raw terminal control is never modeled as a queued semantic message | `tests/ccbot/test_docs_contracts.py`, `ontology/boundaries.md`, `doc/runtime-ontology.md`, `doc/telegram-delivery-pipeline.md` |
 | Non-regression: `voice`, `task`, `ACP-module` | shared surfaces stay intact while runtime work lands | `tests/ccbot/test_bot_contracts.py`, `doc/strato-ops-codex.md` |
 | Review gates | self-review, independent code review, ontology review when required | `doc/execution-review-policy.md` |
 

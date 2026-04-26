@@ -413,6 +413,69 @@ async def test_monitor_includes_external_codex_binding_without_tmux_window(
     assert source.file_path == rollout
 
 
+@pytest.mark.asyncio
+async def test_monitor_keeps_tmux_binding_when_window_is_gone_but_replay_survives(
+    tmp_path,
+    monkeypatch,
+):
+    codex_home = tmp_path / ".codex"
+    sessions_root = codex_home / "sessions" / "2026" / "04" / "02"
+    sessions_root.mkdir(parents=True)
+    thread_id = "019d4e76-7fae-7a90-bc40-2290ee269661"
+    (codex_home / "session_index.jsonl").write_text(
+        json.dumps(
+            {
+                "id": thread_id,
+                "thread_name": "Lost window thread",
+                "updated_at": "2026-04-02T14:00:00Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rollout = sessions_root / f"rollout-{thread_id}.jsonl"
+    rollout.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-02T14:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": thread_id, "cwd": "/tmp/project-9"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(session_module.config, "state_file", tmp_path / "state.json")
+    monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+    manager = SessionManager(
+        codex_thread_catalog=CodexThreadCatalog(codex_home=codex_home)
+    )
+    manager.register_live_process(
+        "@9",
+        "/tmp/project-9",
+        runtime_kind="codex",
+        thread_id=thread_id,
+    )
+    manager.bind_thread(100, 7, "@9", window_name="proj-9")
+    monkeypatch.setattr(session_module, "session_manager", manager)
+
+    monitor = SessionMonitor(
+        projects_path=tmp_path / "projects",
+        state_file=tmp_path / "monitor_state.json",
+    )
+    monkeypatch.setattr(
+        "ccbot.session_monitor.tmux_manager.list_windows",
+        AsyncMock(return_value=[]),
+    )
+
+    current_map = await monitor._load_current_session_map()
+
+    assert current_map == {"@9": thread_id}
+    assert thread_id in monitor._active_rollout_sources
+    assert monitor._active_rollout_sources[thread_id].file_path == rollout
+
+
 def test_state_json_persists_topic_policy_and_binding_state(tmp_path, monkeypatch):
     state_file = tmp_path / "state.json"
     monkeypatch.setattr(session_module.config, "state_file", state_file)
@@ -590,5 +653,4 @@ def test_surface_key_conflict_resolution_prefers_surface_maps_over_legacy(tmp_pa
     assert saved["thread_bindings"]["100"]["42"] == "@surface"
     assert saved["topic_policies"]["100"]["42"] == TOPIC_POLICY_MANUAL_BIND_REQUIRED
     assert saved["topic_binding_states"]["100"]["42"] == BINDING_STATE_BIND_FLOW
-
 

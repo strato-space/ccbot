@@ -30,6 +30,7 @@ a single "session" concept.
 Start with the compact ontology index:
 - [`ontology/README.md`](ontology/README.md)
 - [`ontology/runtime.md`](ontology/runtime.md)
+- [`ontology/topic-control.md`](ontology/topic-control.md)
 - [`ontology/delivery-surface.md`](ontology/delivery-surface.md)
 - [`ontology/boundaries.md`](ontology/boundaries.md)
 
@@ -40,7 +41,7 @@ Execution plans and companion specs live in:
 - [`specs/ccbot-codex-adaptation-plan-4.md`](specs/ccbot-codex-adaptation-plan-4.md)
 - [`specs/ccbot-fast-agent-jsonl-spec.md`](specs/ccbot-fast-agent-jsonl-spec.md)
 
-Then use the longer maintainer notes:
+Then use the longer derived maintainer notes:
 - [`doc/runtime-ontology.md`](doc/runtime-ontology.md)
 - [`doc/runtime-event-contract.md`](doc/runtime-event-contract.md)
 - [`doc/telegram-delivery-pipeline.md`](doc/telegram-delivery-pipeline.md)
@@ -51,11 +52,11 @@ Then use the longer maintainer notes:
 
 The canonical shape is:
 
-`Telegram topic -> binding -> tmux window -> runtime process -> runtime conversation identity -> replay evidence`
+`Telegram control surface -> binding -> tmux window -> runtime process -> runtime conversation identity -> replay evidence`
 
 External replay-only shape is also supported:
 
-`Telegram topic -> binding(binding_scope=external) -> runtime conversation identity -> replay evidence`
+`Telegram control surface -> binding(binding_scope=external) -> runtime conversation identity -> replay evidence`
 
 ## Strato Ops
 
@@ -108,10 +109,15 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   warning notices remain visible in Telegram while assistant-final semantics
   and post-final artifact closure remain intact. Repeated identical warning
   text reuses one warning bubble and adds a repeat counter only when `N > 2`.
+- **Runtime discontinuity guardrails** — True runtime termination or live tmux
+  surface loss is delivered as a warning artifact with replay-native evidence
+  first and screenshot fallback only for real loss. Active Codex panes that
+  render as `node` processes with unclassified footers are treated as live, so
+  status polling does not turn ordinary footer churn into repeated screenshots.
 - **Prompt-safe control lane** — Detect `input ready`, `busy`, and `blocked prompt` terminal states before sending input
 - **Voice messages** — Voice messages are transcribed via OpenAI and forwarded as text
 - **Send messages** — Forward text to Codex via tmux keystrokes
-- **Codex command forwarding** — Forward raw Codex slash commands, with a small supported menu surface for `/clear`, `/compact`, `/diff`, `/init`, `/review`, and `/status`
+- **Codex command forwarding** — Forward raw Codex slash commands, with a small supported menu surface for `/clear`, `/compact`, `/diff`, `/exit`, `/init`, `/review`, and `/status`
 - **Create new conversations** — Start Codex conversations from Telegram via directory browser
 - **Resume conversations** — Pick up where you left off by resuming an existing Codex identity in a directory
 - **Kill bindings** — Close a topic to auto-kill the associated tmux window
@@ -222,24 +228,25 @@ uv run ccbot
 | `/clear`   | Start a fresh chat in the bound window |
 | `/compact` | Compact the current thread context |
 | `/diff`    | Show git diff |
+| `/exit`    | Terminate the live Codex process in the bound window |
 | `/init`    | Create `AGENTS.md` for Codex |
 | `/review`  | Review current changes |
 | `/status`  | Show Codex session status |
 
-Other raw `/command` inputs are still forwarded best-effort to the active tmux-hosted runtime, but they are not part of the supported Telegram command surface unless documented above. This is intentional: commands that depend on prompt selection or other unsupported remote controls are not advertised in the menu even if a runtime can handle them locally. Claude-only commands such as `/cost`, `/help`, `/memory`, and `/usage` are not part of the supported Codex lane.
+Other raw `/command` inputs are still forwarded best-effort to the active tmux-hosted runtime, but they are not part of the supported Telegram command surface unless documented above. This is intentional: commands that depend on prompt selection or other unsupported remote controls are not advertised in the menu even if a runtime can handle them locally. Claude-only commands such as `/cost`, `/help`, `/memory`, and `/usage` are not part of the supported Codex lane, and `/quit` is explicitly rejected in favor of `/exit`.
 
 ### Topic Workflow
 
 **1 control surface = 1 binding at a time.**
 
-The canonical runtime ontology remains topic-centric:
+The canonical runtime ontology is control-surface centric:
 
-`Telegram topic -> binding -> tmux window -> runtime process -> runtime conversation identity -> replay evidence`
+`Telegram control surface -> binding -> tmux window -> runtime process -> runtime conversation identity -> replay evidence`
 
 For shared groups without topics, the current product surface may expose one
 explicit main-chat mode:
 
-`chat -> live tmux window`
+`no-topics main-chat control surface -> binding -> tmux window`
 
 This no-topics path is **not** a claim that `chat == topic`; it is a separate
 chat-wide control surface that coexists with named-topic behavior.
@@ -330,9 +337,12 @@ intentionally narrow:
   rendered as Codex-style human-facing milestone bubbles instead of raw
   `spawn_agent` / `wait_agent` / `<subagent_notification>` payloads
 - **Commentary** — Human-facing progress narrative remains visible as ordinary
-  content so execution context does not disappear under mutable status churn
+  content so execution context does not disappear under mutable status churn;
+  commentary may span multiple Telegram messages when needed to preserve the
+  full text
 - **Final assistant responses** — The completed assistant answer lands as
-  ordinary content
+  ordinary content as a fresh last message; it never replaces the visible
+  commentary artifact
 - **Turn ordering barrier** — Once a newer turn opens, stale pre-final,
   technical-status, and final artifacts from the older turn fail closed rather
   than surfacing below the newer turn

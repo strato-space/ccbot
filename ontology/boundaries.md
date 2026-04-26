@@ -47,7 +47,9 @@ indexes it.
 
 These equalities are false:
 
+- `control surface == topic`
 - `policy == binding`
+- `surface policy == binding state`
 - `bind flow == message routing`
 - `status notification == content delivery`
 - `window == thread`
@@ -57,6 +59,8 @@ These equalities are false:
 - `chat == topic`
 - `topic == thread`
 - `topic == window`
+- `surface key == Telegram transport identifier`
+- `surface key == full control-surface identity`
 - `literal ACP-protocol-over-stdio == acceptable primary control plane`
 
 More precise statements:
@@ -68,6 +72,10 @@ More precise statements:
 - a chat container may expose one shared no-topics main-chat mode when forum
   topics are unavailable, but the raw chat container is not itself the topic
   object
+- a control surface is the product-side routing genus; `topic` is only one
+  species of that genus
+- a surface key is only the local persisted key inside the current user-scoped
+  state map; full identity is `(user_id, surface_key)`
 - `thread_id is None` may canonically mark that no-topics main-chat mode in the
   product surface, but `None` is still not the same kind of thing as a topic
 - a Telegram topic is governed by policy and binding, not directly by a

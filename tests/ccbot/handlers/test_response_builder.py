@@ -1,10 +1,14 @@
-"""Tests for response_builder.build_response_parts."""
+"""Tests for response_builder helpers."""
 
 import json
 
 import pytest
 
-from ccbot.handlers.response_builder import build_response_parts, format_response_text
+from ccbot.handlers.response_builder import (
+    build_commentary_parts,
+    build_response_parts,
+    format_response_text,
+)
 from ccbot.transcript_parser import TranscriptParser
 
 EXP_START = TranscriptParser.EXPANDABLE_QUOTE_START
@@ -219,3 +223,24 @@ class TestBuildResponseParts:
         assert formatted.startswith("• Spawned Mill [explorer]")
         assert "Commentary" not in formatted
         assert "Tool" not in formatted
+
+
+class TestBuildCommentaryParts:
+    def test_commentary_is_not_clipped_at_3000_chars(self):
+        long_text = "a" * 3500
+
+        parts = build_commentary_parts(long_text)
+
+        assert len(parts) == 1
+        assert len(parts[0]) > 3000
+        assert "…" not in parts[0][-5:]
+
+    def test_commentary_splits_losslessly_when_exceeding_one_message(self):
+        text = "\n".join(f"line {i} " + ("x" * 120) for i in range(80))
+
+        parts = build_commentary_parts(text)
+
+        assert len(parts) > 1
+        assert parts[0].startswith("ℹ Commentary")
+        for index, part in enumerate(parts, start=1):
+            assert f"[{index}/{len(parts)}]" in part

@@ -9,8 +9,9 @@ Markdown conversion is NOT done here — the send layer (message_sender,
 message_queue) handles convert_markdown() so each message is converted
 exactly once.
 
-Key function:
+Key functions:
   - build_response_parts: Build paginated response messages
+  - build_commentary_parts: Build lossless commentary pages without 3000-char clipping
 """
 
 import json
@@ -275,6 +276,44 @@ def build_response_parts(
     # Split after formatting so content-type prefixes stay attached to the chunk
     # they describe. Use a conservative limit for MarkdownV2 expansion.
     text_chunks = split_message(text, max_length=3000)
+    total = len(text_chunks)
+
+    if total == 1:
+        return [text_chunks[0]]
+
+    parts = []
+    for i, chunk in enumerate(text_chunks, 1):
+        parts.append(f"{chunk}\n\n[{i}/{total}]")
+    return parts
+
+
+def build_commentary_parts(
+    text: str,
+    *,
+    content_type: str = "commentary",
+    role: str = "assistant",
+) -> list[str]:
+    """Build lossless commentary/orchestration pages near Telegram's size limit.
+
+    Commentary is a visible artifact, not ephemeral status. Unlike
+    ``build_status_text()``, this helper must preserve the full payload and only
+    split when required by Telegram-sized chunks.
+    """
+    text = format_response_text(
+        text,
+        is_complete=True,
+        content_type=content_type,
+        role=role,
+    )
+
+    if role == "user":
+        return [text]
+
+    if TranscriptParser.EXPANDABLE_QUOTE_START in text:
+        return [text]
+
+    text = convert_markdown_tables(text)
+    text_chunks = split_message(text, max_length=4000)
     total = len(text_chunks)
 
     if total == 1:

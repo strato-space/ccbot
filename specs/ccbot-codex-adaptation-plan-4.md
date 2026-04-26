@@ -1009,13 +1009,13 @@ By the end of this tranche:
   `user-visible user echo` and `user turn opener` as if they were the same
   thing. They are not. A new turn may begin through a hidden internal prompt
   scaffold, and stale close tasks from the previous turn must not re-close the
-  new turn after reopen. The queue therefore needs an explicit per-topic
+  new turn after reopen. The queue therefore needs an explicit per-control-surface
   `turn generation`, and Codex rollout needs to treat incremental
   `event_msg.user_message` as the opener of a new turn without reopening that
   same turn again when a later canonical duplicate arrives.
 - **status**: completed
 - **log**:
-  - per-topic turn generations now advance on each real user turn opener
+  - per-control-surface turn generations now advance on each real user turn opener
   - pre-final and technical-status close tasks are generation-scoped, so a
     stale close from an older turn fails closed instead of reclosing the newer
     turn
@@ -1243,7 +1243,7 @@ By the end of this tranche:
 
 - **description**: `warning` is a durable system artifact and must not flood a
   topic when the same warning repeats. Repeated warnings equal to the latest
-  warning in the same topic must reuse one bubble and expose an explicit
+  warning on the same control surface must reuse one bubble and expose an explicit
   repeat counter once the repetition cardinality is strictly greater than 2.
 - **status**: completed
 - **depends_on**: []
@@ -1263,7 +1263,7 @@ By the end of this tranche:
   - [runtime-event-contract.md](/home/tools/ccbot/doc/runtime-event-contract.md)
   - [telegram-delivery-pipeline.md](/home/tools/ccbot/doc/telegram-delivery-pipeline.md)
 - **acceptance criteria**:
-  - identical warning repeated in the same topic does not emit a new bubble
+  - identical warning repeated on the same control surface does not emit a new bubble
   - when repeat count becomes `N > 2`, the warning bubble shows a visible
     bottom counter
   - a different warning text creates a new warning bubble and resets counter

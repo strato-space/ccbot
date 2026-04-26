@@ -135,6 +135,7 @@ class TestBotRegistration:
             "clear",
             "compact",
             "diff",
+            "exit",
             "init",
             "review",
             "status",
@@ -197,6 +198,7 @@ class TestBotRegistration:
         ]
         assert "status" in command_names
         assert "diff" in command_names
+        assert "exit" in command_names
         assert "review" in command_names
         assert "resume" in command_names
         assert "rename" in command_names
@@ -259,6 +261,7 @@ class TestCommandSurface:
         assert "Shared group topics and no-topics main chats stay silent" in text
         assert "raw tmux terminal control" in text
         assert "explicit `/resume <thread-name|id>`" in text
+        assert "`/exit`" in text
         assert "Claude Code Monitor" not in text
 
     @pytest.mark.asyncio
@@ -1675,6 +1678,7 @@ class TestTelegramDelivery:
         with (
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.mark_runtime_presence_active") as mock_presence,
             patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
             patch("ccbot.bot.enqueue_commentary_update", new_callable=AsyncMock) as mock_commentary,
             patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
@@ -1688,6 +1692,24 @@ class TestTelegramDelivery:
         mock_status.assert_not_awaited()
         mock_commentary.assert_awaited_once()
         mock_content.assert_not_awaited()
+        mock_presence.assert_called_once_with(1, 42, "@7")
+
+    def test_compact_policy_does_not_clip_commentary_text(self):
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="x" * 1200,
+            is_complete=True,
+            content_type="commentary",
+            role="assistant",
+            event_kind="commentary",
+            runtime_kind="codex",
+        )
+
+        projected = apply_telegram_delivery_policy(msg, mode="compact")
+
+        assert projected.semantic_kind == "commentary"
+        assert projected.text == "x" * 1200
+        assert projected.status_message_eligible is False
 
     @pytest.mark.asyncio
     async def test_handle_new_message_compact_mode_routes_orchestration_to_latest_visible_artifact_in_commentary_lane(self):
@@ -2163,6 +2185,38 @@ class TestTelegramDelivery:
         mock_status.assert_not_awaited()
         mock_content.assert_awaited_once()
         assert mock_content.await_args.kwargs["tool_use_id"] == "toolu_1"
+
+    @pytest.mark.asyncio
+    async def test_handle_new_message_suppresses_codex_termination_summary_direct_delivery(
+        self,
+    ):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text=(
+                "Token usage: total=12 input=10 output=2\n"
+                "To continue this session, run codex resume comfy"
+            ),
+            is_complete=True,
+            content_type="text",
+            role="assistant",
+            event_kind="assistant_message",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
+            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch("ccbot.bot.get_interactive_msg_id", return_value=None),
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_status.assert_not_awaited()
+        mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_handle_new_message_skips_lifecycle_only_events(self):

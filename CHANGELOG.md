@@ -1,5 +1,70 @@
 # Changelog
 
+## 2026-04-26
+
+### PROBLEM SOLVED
+
+- **06:50-08:12** Telegram topics could be flooded by repeated
+  runtime-discontinuity screenshots when a live Codex TUI was running under a
+  `node` pane command and the visible footer had scrolled past the
+  `OpenAI Codex` banner. Status polling now treats non-shell,
+  non-termination Codex pane footers as active runtime surfaces and uses
+  stable warning identities so repeated discontinuity notices cannot bypass
+  warning deduplication.
+- **06:50-08:12** Ontology and delivery documentation had drifted across
+  `doc/`, `specs/`, and code. The compact `ontology/` folder is now the
+  master source for runtime, topic-control, delivery-surface, and boundary
+  nouns; longer docs and specs are derived witnesses.
+- **06:50-08:12** Compact Telegram delivery still had tail risks around
+  queued follow-up previews, hidden user-turn scaffolding, late
+  commentary/status artifacts, and raw command/tool preview noise. Queue,
+  policy, parser, and rollout normalization now preserve visible user echo,
+  close pre-final/status lanes after final delivery, and keep pending-input
+  previews mutable and separate.
+
+### FEATURE IMPLEMENTED
+
+- **06:50-08:12** Added `ontology/topic-control.md` and deepened the
+  ontology contract so Telegram control surfaces, tmux bindings, external
+  replay bindings, runtime conversations, and replay evidence stay separate.
+- **06:50-08:12** Added runtime-discontinuity delivery helpers that prefer
+  replay-native termination evidence, include screenshot fallback for true
+  live-surface loss, and transition stale tmux bindings to external
+  read-only continuity when replay evidence survives.
+- **06:50-08:12** Added regression coverage for active Codex `node` panes
+  whose visible footer is unclassified (`73`, `tab to queue message`,
+  context-left fragments), preventing recurrence of the screenshot spam
+  incident.
+
+### CHANGES
+
+- **06:50-08:12** Updated `ontology/`, `doc/`, `specs/`, `README.md`, and
+  `AGENTS.md` so ontology is master and docs/specs remain derived witnesses.
+- **06:50-08:12** Reworked compact delivery in `src/ccbot/bot.py`,
+  `src/ccbot/codex_rollout.py`, `src/ccbot/handlers/message_queue.py`,
+  `src/ccbot/handlers/response_builder.py`, `src/ccbot/session.py`,
+  `src/ccbot/session_monitor.py`, and
+  `src/ccbot/telegram_delivery_policy.py` with matching tests.
+- **06:50-08:12** Hardened `src/ccbot/handlers/status_polling.py` and added
+  `src/ccbot/runtime_discontinuity.py` with regressions in
+  `tests/ccbot/handlers/test_status_polling.py` and
+  `tests/ccbot/test_runtime_discontinuity.py`.
+- **08:12** Validation before closeout: `uv run --extra dev pytest -q
+  tests/ccbot/handlers/test_status_polling.py
+  tests/ccbot/handlers/test_message_queue.py
+  tests/ccbot/test_runtime_discontinuity.py
+  tests/ccbot/test_terminal_parser.py` (`106 passed`),
+  `uv run --extra dev pytest -q tests/ccbot/test_bot_contracts.py
+  tests/ccbot/test_codex_rollout.py
+  tests/ccbot/handlers/test_status_polling.py` (`135 passed`), and
+  `uv run --extra dev ruff check src/ccbot/handlers/status_polling.py
+  tests/ccbot/handlers/test_status_polling.py` (`All checks passed`).
+- **08:12** Live `str` hotfix validation before closeout: copied the status
+  polling/runtime-discontinuity fix into `/tools/ccbot`, ran the focused
+  pytest slice (`97 passed`), ran ruff (`All checks passed`), restarted
+  `ccbot.service`, and confirmed the post-restart journal had no
+  `Runtime exit warning enqueued` or screenshot-send spam.
+
 ## 2026-04-06
 
 ### PROBLEM SOLVED

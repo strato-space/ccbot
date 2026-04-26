@@ -141,8 +141,13 @@ from .handlers.message_sender import (
     send_with_fallback,
 )
 from .markdown_v2 import convert_markdown
-from .handlers.response_builder import build_response_parts, build_status_text
-from .handlers.status_polling import status_poll_loop
+from .handlers.response_builder import (
+    build_commentary_parts,
+    build_response_parts,
+    build_status_text,
+)
+from .handlers.status_polling import mark_runtime_presence_active, status_poll_loop
+from .runtime_discontinuity import is_codex_termination_summary_text
 from .runtime_types import (
     LIFECYCLE_SEMANTIC_KIND,
     USER_ECHO_SEMANTIC_KIND,
@@ -180,6 +185,7 @@ CODEX_MENU_COMMANDS: dict[str, str] = {
     "clear": "↗ Start a fresh Codex chat in this window",
     "compact": "↗ Compact the current Codex thread",
     "diff": "↗ Show git diff in the current workspace",
+    "exit": "↗ Terminate the live Codex process in this window",
     "init": "↗ Create AGENTS.md for Codex",
     "review": "↗ Review current changes",
     "status": "↗ Show Codex session status",
@@ -191,6 +197,10 @@ CLAUDE_ONLY_COMMAND_HINTS: dict[str, str] = {
     "memory": (
         "⚠️ `/memory` is Claude-only. Use `/init` or edit `AGENTS.md` directly in Codex projects."
     ),
+}
+
+CODEX_REJECTED_COMMAND_HINTS: dict[str, str] = {
+    "quit": "⚠️ `/quit` is no longer part of the supported Codex Telegram surface. Use `/exit` instead.",
 }
 
 UNBOUND_TOPIC_MESSAGE = "❌ No live tmux window is bound to this topic."
@@ -1296,7 +1306,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"{_build_start_resume_note(runtime_kind)}\n"
             "Use /bind when you want to choose a workspace explicitly, and use "
             "/resume when the current runtime lane supports deterministic explicit resume.\n"
-            "The menu only advertises the stable bot surface and any supported runtime core lane.",
+            "The menu only advertises the stable bot surface and any supported runtime core lane. "
+            "In the Codex lane, `/exit` is the supported public termination command.",
         )
 
 
@@ -1587,10 +1598,13 @@ async def esc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not update.message:
         return
 
-    thread_id = _get_thread_id(update)
-    wid = session_manager.resolve_window_for_thread(user.id, thread_id)
+    surface = control_surface_classifier(update)
+    if not surface.supports_bind_flow:
+        await safe_reply(update.message, _unsupported_surface_message(surface))
+        return
+    wid = _resolve_session_window_for_surface(user.id, surface)
     if not wid:
-        await safe_reply(update.message, UNBOUND_TOPIC_MESSAGE)
+        await safe_reply(update.message, _build_unbound_input_message(user.id, surface))
         return
 
     w = await tmux_manager.find_window_by_id(wid)
@@ -1616,10 +1630,13 @@ async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not update.message:
         return
 
-    thread_id = _get_thread_id(update)
-    wid = session_manager.resolve_window_for_thread(user.id, thread_id)
+    surface = control_surface_classifier(update)
+    if not surface.supports_bind_flow:
+        await safe_reply(update.message, _unsupported_surface_message(surface))
+        return
+    wid = _resolve_session_window_for_surface(user.id, surface)
     if not wid:
-        await safe_reply(update.message, UNBOUND_TOPIC_MESSAGE)
+        await safe_reply(update.message, _build_unbound_input_message(user.id, surface))
         return
 
     if _get_window_runtime_kind(wid) != "claude":
@@ -1636,7 +1653,7 @@ async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 context.bot,
                 user.id,
                 wid,
-                thread_id,
+                surface.thread_id,
                 reply_message=update.message,
             )
             return
@@ -1824,6 +1841,7 @@ async def forward_command_handler(
         return
 
     thread_id = _get_thread_id(update)
+    surface = control_surface_classifier(update)
 
     # Capture group chat_id for supergroup forum topic routing.
     # Required: Telegram Bot API needs group chat_id (not user_id) to send
@@ -1835,7 +1853,7 @@ async def forward_command_handler(
     cmd_text = update.message.text or ""
     # The full text is already a slash command like "/clear" or "/compact foo"
     cc_slash = cmd_text.split("@")[0]  # strip bot mention
-    wid = session_manager.resolve_window_for_thread(user.id, thread_id)
+    wid = _resolve_session_window_for_surface(user.id, surface)
     if not wid:
         await safe_reply(update.message, UNBOUND_TOPIC_MESSAGE)
         return
@@ -1851,6 +1869,9 @@ async def forward_command_handler(
     command_name = cc_slash[1:].split(None, 1)[0].lower()
     if runtime_kind == "codex" and command_name in CLAUDE_ONLY_COMMAND_HINTS:
         await safe_reply(update.message, CLAUDE_ONLY_COMMAND_HINTS[command_name])
+        return
+    if runtime_kind == "codex" and command_name in CODEX_REJECTED_COMMAND_HINTS:
+        await safe_reply(update.message, CODEX_REJECTED_COMMAND_HINTS[command_name])
         return
 
     logger.info(
@@ -2473,6 +2494,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             return
         await safe_reply(update.message, f"❌ {message}")
         return
+
+    if _get_window_runtime_kind(wid) == "codex" and input_surface and input_surface.kind in {"busy", "input_ready", "blocked_prompt"}:
+        mark_runtime_presence_active(user.id, surface.message_thread_id, wid)
 
     # Start background capture for ! bash command output
     if text.startswith("!") and len(text) > 1:
@@ -3409,6 +3433,19 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         f"text_len={len(msg.text)}"
     )
 
+    if (
+        msg.runtime_kind == "codex"
+        and msg.role == "assistant"
+        and msg.is_complete
+        and is_codex_termination_summary_text(msg.text)
+    ):
+        logger.info(
+            "Suppressing direct Telegram delivery of Codex termination summary for session %s; "
+            "status polling will re-deliver it as a discontinuity warning.",
+            msg.session_id,
+        )
+        return
+
     # Find users whose thread-bound window matches this session
     active_users = await session_manager.find_users_for_session(msg.session_id)
 
@@ -3417,6 +3454,9 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         return
 
     for user_id, wid, thread_id in active_users:
+        if msg.runtime_kind == "codex":
+            mark_runtime_presence_active(user_id, thread_id, wid)
+
         turn_generation = current_turn_generation(user_id, thread_id)
         if opens_new_turn:
             turn_generation = open_new_turn_generation(user_id, thread_id)
@@ -3501,17 +3541,18 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                     msg.content_type,
                 )
                 continue
-            commentary_text = build_status_text(
+            commentary_parts = build_commentary_parts(
                 msg.text,
-                is_complete=True,
                 content_type=msg.content_type,
                 role=msg.role,
             )
+            commentary_text = "\n\n".join(commentary_parts)
             await enqueue_commentary_update(
                 bot,
                 user_id,
                 wid,
                 commentary_text,
+                parts=commentary_parts,
                 thread_id=thread_id,
                 turn_generation=turn_generation,
             )

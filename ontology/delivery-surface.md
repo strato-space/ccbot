@@ -2,6 +2,9 @@
 
 This note defines the Telegram-facing ontology for turn delivery.
 
+Artifact ownership, deduplication, and closure are scoped to one Telegram
+control surface at a time.
+
 ## Turn Artifacts
 
 - **Terminal turn artifact**
@@ -36,8 +39,12 @@ This note defines the Telegram-facing ontology for turn delivery.
   - durable system notice
   - not a user turn opener
   - not a technical status artifact
-  - repeated warning text in the same topic deduplicates into one latest
-    warning bubble, with a visible repeat counter only when `N > 2`
+  - repeated warning text on the same control surface deduplicates into one
+    latest warning bubble, with a visible repeat counter only when `N > 2`
+  - usage-limit / quota-exhaustion notices are warning-artifact subtypes
+  - runtime-discontinuity system summaries are a warning-artifact subtype;
+    they may send screenshot evidence before raw text and may opt into a
+    distinct warning identity so separate exit/loss events do not collapse
 
 - **User turn opener**
   - semantic fact that a new user turn has begun
@@ -48,8 +55,8 @@ This note defines the Telegram-facing ontology for turn delivery.
     only while the lanes are still closed
 
 - **Turn generation**
-  - per-topic ordering generation used to prevent stale close tasks and stale
-    artifacts from reopening or reclosing a newer turn
+  - per-control-surface ordering generation used to prevent stale close tasks
+    and stale artifacts from reopening or reclosing a newer turn
 
 - **Turn identity**
   - runtime-side identity for a specific user turn
@@ -79,10 +86,14 @@ Durable bubbles in `compact` mode are intentionally narrow:
 In addition:
 
 - latest commentary stays visible as a dedicated artifact
+- one logical commentary artifact may be serialized into multiple Telegram
+  messages when needed to preserve the full text
 - latest pending input preview may stay visible as a separate mutable artifact
 - technical execution classes stay out of permanent bubbles by default
 - warning artifacts use latest-warning dedup semantics rather than technical
-  status churn semantics
+  status churn semantics; distinct runtime-discontinuity warnings may opt into
+  a separate warning identity so repeated exit/loss events do not collapse into
+  one bubble solely by identical text
 - when compactness and semantic clarity conflict, visibility-first mutable
   updates are preferred over ambiguous suppression
 
@@ -97,6 +108,8 @@ Technical execution classes include:
 
 - pre-final visible artifacts already queued may land before the terminal final
   answer
+- the terminal turn artifact is always delivered as a fresh message sequence;
+  it must not replace the visible commentary artifact
 - only after final assistant content has been delivered successfully does the
   pre-final visible surface close
 - only after final assistant content has been delivered successfully does the
@@ -107,7 +120,7 @@ Technical execution classes include:
   same turn
 - warning artifacts are outside the current-turn pre-final/status closure
   barrier and may remain visible across turns
-- warning dedup is keyed by topic and latest warning text, not by turn
+- warning dedup is keyed by control surface and latest warning text, not by turn
 - once the pre-final visible lane is closed, later commentary/orchestration
   facts for that same generation must drop rather than reopen the lane
 - lifecycle markers are not visible content by default, but `turn_started`

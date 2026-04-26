@@ -28,8 +28,8 @@ runtimes without surrendering the live terminal surface.
   instruction-looking heuristics alone.
 - Heads-up warnings are Telegram-visible system notices, but they must not
   steal assistant-final turn semantics.
-- Warning delivery is latest-warning dedup by topic: identical warning text
-  reuses one bubble and adds a visible `×N` counter only when `N > 2`.
+- Warning delivery is latest-warning dedup by control surface: identical warning
+  text reuses one bubble and adds a visible `×N` counter only when `N > 2`.
 - If compactness conflicts with semantic clarity, prefer visibility-first
   mutable updates over ambiguous suppression.
 - Ordinary user echo remains visible in `compact`; only explicit internal
@@ -67,6 +67,13 @@ runtimes without surrendering the live terminal surface.
 
 ## Recent Updates
 
+- 2026-04-26: Made `ontology/` the master source for runtime/topic-control,
+  delivery-surface, and boundary nouns; README, `doc/`, and `specs/` are now
+  derived witnesses that must stay aligned through docs-contract tests.
+- 2026-04-26: Hardened runtime-discontinuity polling so active Codex panes
+  running as `node` no longer produce repeated screenshot warnings when the
+  visible footer is unclassified; stable warning identities keep repeated
+  notices deduplicated.
 - 2026-04-06: Added surface-keyed topic/chat binding state so shared
   group topics stay silent until explicitly addressed, no-topics main-chat
   mode binds canonically by `chat_id`, and pending addressed text auto-sends

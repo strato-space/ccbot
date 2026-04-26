@@ -21,6 +21,23 @@ def _make_update(text: str, user_id: int = 1, thread_id: int = 42) -> MagicMock:
     return update
 
 
+def _make_main_chat_update(text: str, user_id: int = 1, chat_id: int = -100200) -> MagicMock:
+    update = MagicMock()
+    update.effective_user = MagicMock()
+    update.effective_user.id = user_id
+    update.message = MagicMock()
+    update.message.text = text
+    update.message.message_thread_id = None
+    update.message.chat = MagicMock()
+    update.message.chat.send_action = AsyncMock()
+    update.effective_chat = MagicMock()
+    update.effective_chat.type = "supergroup"
+    update.effective_chat.id = chat_id
+    update.message.chat.id = chat_id
+    update.message.chat.type = "supergroup"
+    return update
+
+
 def _make_context() -> MagicMock:
     """Build a minimal mock context."""
     context = MagicMock()
@@ -104,6 +121,31 @@ class TestForwardCommand:
             assert "/status" in mock_reply.await_args.args[1]
 
     @pytest.mark.asyncio
+    async def test_quit_command_is_rejected_for_codex_runtime(self):
+        update = _make_update("/quit")
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.resolve_window_for_thread.return_value = "@5"
+            mock_sm.get_window_state.return_value = MagicMock(runtime_kind="codex")
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+
+            from ccbot.bot import forward_command_handler
+
+            await forward_command_handler(update, context)
+
+            mock_sm.send_to_window.assert_not_called()
+            mock_reply.assert_awaited_once()
+            assert "/exit" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
     async def test_blocked_prompt_surfaces_read_only_snapshot(self):
         update = _make_update("/model")
         context = _make_context()
@@ -161,6 +203,51 @@ class TestForwardCommand:
 
             mock_sm.send_to_window.assert_called_once_with("@5", "/clear")
             mock_sm.clear_window_binding.assert_called_once_with("@5")
+
+    @pytest.mark.asyncio
+    async def test_main_chat_slash_command_uses_surface_resolution(self):
+        update = _make_main_chat_update("/status")
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot._resolve_session_window_for_surface", return_value="@7") as mock_resolve,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            from ccbot.bot import forward_command_handler
+
+            await forward_command_handler(update, context)
+
+            mock_resolve.assert_called_once()
+            mock_sm.send_to_window.assert_called_once_with("@7", "/status")
+
+    @pytest.mark.asyncio
+    async def test_main_chat_esc_uses_surface_resolution(self):
+        update = _make_main_chat_update("/esc")
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot._resolve_session_window_for_surface", return_value="@7") as mock_resolve,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_sm.send_special_key_to_window = AsyncMock(return_value=(True, "ok"))
+
+            from ccbot.bot import esc_command
+
+            await esc_command(update, context)
+
+            mock_resolve.assert_called_once()
+            mock_sm.send_special_key_to_window.assert_called_once_with("@7", "Escape")
 
     @pytest.mark.parametrize(
         "text, expected",

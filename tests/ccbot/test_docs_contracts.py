@@ -13,6 +13,7 @@ def test_readme_points_to_strato_ops_runbook() -> None:
 
     assert "ontology/README.md" in readme
     assert "ontology/runtime.md" in readme
+    assert "ontology/topic-control.md" in readme
     assert "ontology/delivery-surface.md" in readme
     assert "ontology/boundaries.md" in readme
     assert "specs/README.md" in readme
@@ -29,8 +30,11 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "external persisted Codex thread in read-only replay mode" in readme
     assert "/resume <thread-name|id>" in readme
     assert "/bind <thread-name|id>" in readme
+    assert "/exit" in readme
+    assert "/quit" in readme
+    assert "explicitly rejected in favor of `/exit`" in readme
     assert "manual_bind_required" in readme
-    assert "chat -> live tmux window" in readme
+    assert "control surface" in readme
     assert "no-topics group main chat" in readme
     assert "ordinary non-addressed text stays silent" in readme
     assert "shared group topics" in readme
@@ -42,6 +46,8 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "User echo" in readme
     assert "Commentary" in readme
     assert "Final assistant responses" in readme
+    assert "may span multiple Telegram messages" in readme
+    assert "fresh last message" in readme
     assert "Technical execution classes stay out of permanent bubbles by default" in readme
     assert "Queued follow-up preview" in readme
     assert "visibility-first" in readme
@@ -97,15 +103,19 @@ def test_runtime_ontology_note_uses_runtime_neutral_terms() -> None:
 
     assert "ontology/README.md" in ontology
     assert "ontology/runtime.md" in ontology
+    assert "ontology/topic-control.md" in ontology
     assert "ontology/delivery-surface.md" in ontology
     assert "ontology/boundaries.md" in ontology
-    assert "topic control policy" in ontology
+    assert "derived maintainer note" in ontology
+    assert "control-surface policy" in ontology
     assert "semantic emitter / supervisor" in ontology
     assert "live semantic stream" in ontology
     assert "persisted replay evidence" in ontology
     assert "binding_scope=external" in ontology
     assert "Input injection plane" in ontology
     assert "read-only rather than pretending to send into tmux" in ontology
+    assert "control surface" in ontology
+    assert "surface_key=t:<thread_id>" in ontology
     assert "queue" in ontology
     assert "steer" in ontology
     assert "literal ACP-protocol-over-stdio" in ontology
@@ -114,23 +124,44 @@ def test_runtime_ontology_note_uses_runtime_neutral_terms() -> None:
 def test_ontology_folder_collects_project_core_nouns() -> None:
     index = _read("ontology/README.md")
     runtime = _read("ontology/runtime.md")
+    topic_control = _read("ontology/topic-control.md")
     delivery = _read("ontology/delivery-surface.md")
     boundaries = _read("ontology/boundaries.md")
 
     assert "compact source of truth" in index
     assert "ontology/runtime.md" in index
+    assert "ontology/topic-control.md" in index
     assert "ontology/delivery-surface.md" in index
     assert "ontology/boundaries.md" in index
     assert "External replay-only variant" in index
+    assert "control surface -> control-surface identity" in index
+    assert "control-surface identity -> (user_id, surface_key)" in index
+    assert "surface_key -> local product key, not a global identity" in index
     assert "semantic emitter / supervisor" in runtime
     assert "runtime conversation identity" in runtime
     assert "persisted replay evidence" in runtime
     assert "binding_scope=external" in runtime
+    assert "Telegram control surface" in runtime
+    assert "Surface key" in runtime
+    assert "Control-surface identity" in runtime
+    assert "(user_id, surface_key)" in runtime
+    assert "Control-surface policy" in runtime
+    assert "surface-scoped maps are canonical" in runtime
+    assert "Topic And Surface Control Ontology" in topic_control
+    assert "Surface key" in topic_control
+    assert "full persisted identity" in topic_control
+    assert "pending slot" in topic_control
+    assert "no-topics main-chat control surface" in topic_control
+    assert "legacy `topic_*` maps are compatibility mirrors" in topic_control
     assert "terminal turn artifact" in delivery
     assert "pre-final visible artifact" in delivery
     assert "technical status artifact" in delivery
     assert "Pending input artifact" in delivery
     assert "Warning artifact" in delivery
+    assert "control surface" in delivery
+    assert "usage-limit / quota-exhaustion notices" in delivery
+    assert "serialized into multiple Telegram" in delivery
+    assert "fresh message sequence" in delivery
     assert "repeat counter only when `N > 2`" in delivery
     assert "visibility-first mutable" in delivery
     assert "must drop rather than reopen the lane" in delivery
@@ -138,7 +169,28 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "lifecycle `turn_started` may reopen the lanes idempotently" in delivery
     assert "ACP-protocol" in boundaries
     assert "ACP-module" in boundaries
+    assert "control surface == topic" in boundaries
+    assert "surface policy == binding state" in boundaries
+    assert "surface key == full control-surface identity" in boundaries
     assert "Replay evidence is written by" in boundaries
+
+
+def test_spec_corpus_is_subordinate_to_ontology_vocabulary() -> None:
+    specs_index = _read("specs/README.md")
+    plan2 = _read("specs/ccbot-codex-adaptation-plan-2.md")
+    plan4 = _read("specs/ccbot-codex-adaptation-plan-4.md")
+
+    assert "Plan files in this directory are execution/history artifacts" in specs_index
+    assert "the ontology folder wins" in specs_index
+    assert "control-surface vocabulary" in specs_index
+    assert "Telegram control surface -> binding -> tmux window" in plan2
+    assert "Vocabulary note" in plan2
+    assert "Control-surface policy" in plan2
+    assert "`bind_flow`" in plan2
+    assert "`binding_in_progress`" not in plan2
+    assert "Telegram topic -> binding -> tmux window" not in plan2
+    assert "per-control-surface turn generations" in plan4
+    assert "warning on the same control surface" in plan4
 
 
 def test_runtime_capability_registry_doc_describes_supported_profiles() -> None:
@@ -205,6 +257,7 @@ def test_topic_policy_migration_doc_captures_nonce_and_stale_callback_rules() ->
 def test_runtime_event_contract_doc_names_semantic_and_delivery_layers() -> None:
     doc = _read("doc/runtime-event-contract.md")
 
+    assert "per-control-surface ordering generation" in doc
     assert "ontology/delivery-surface.md" in doc
     assert "semantic_kind" in doc
     assert "delivery_class" in doc
@@ -221,6 +274,7 @@ def test_runtime_event_contract_doc_names_semantic_and_delivery_layers() -> None
     assert "technical status artifact" in doc
     assert "pending input artifact" in doc
     assert "warning" in doc
+    assert "usage-limit / quota-exhaustion notices are warning artifacts too" in doc
     assert "latest-warning dedup semantics" in doc
     assert "user turn opener" in doc
     assert "ordinary user-visible user echo remains eligible for compact Telegram" in doc
@@ -241,6 +295,7 @@ def test_runtime_event_contract_doc_names_semantic_and_delivery_layers() -> None
 def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> None:
     doc = _read("doc/telegram-delivery-pipeline.md")
 
+    assert "ontology/topic-control.md" in doc
     assert "ontology/delivery-surface.md" in doc
     assert "ontology/boundaries.md" in doc
     assert "status artifact" in doc
@@ -249,7 +304,9 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "pending-input artifact" in doc
     assert "human-facing orchestration milestones stay as ordinary content" in doc
     assert "warning artifacts stay visible as durable system notices" in doc
+    assert "usage-limit / quota-exhaustion banners are warning artifacts" in doc
     assert "repeat counter only when `N > 2`" in doc
+    assert "control surface" in doc
     assert "ordinary user echo remains visible in compact mode" in doc
     assert "reasoning and thinking summaries are routed through the mutable status" in doc
     assert "artifact" in doc
@@ -277,6 +334,8 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "durable Telegram content bubbles are" in doc
     assert "deliberately narrow" in doc
     assert "latest-only visible commentary artifact" in doc
+    assert "Commentary is not clipped by the internal status-helper ceiling" in doc
+    assert "fresh Telegram message sequence" in doc
     assert "latest-only pending-input artifact" in doc
     assert "queue-owned lifecycle changes" in doc
     assert "drop it instead of reopening the closed pre-final lane" in doc
@@ -295,6 +354,9 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
 
     assert "/bind <thread-name|id>" in doc
     assert "/resume <token>" in doc
+    assert "| `/exit` |" in doc
+    assert "| `/quit` |" not in doc
+    assert "`/quit` is runtime-rejected in favor of `/exit`" in doc
     assert "/rename <name>" in doc
     assert "manual_bind_required" in doc
     assert "queue" in doc
@@ -305,9 +367,16 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
     assert "user echo, orchestration milestones, and final assistant text as durable bubbles" in doc
     assert "visibility wins when silence would make runtime state ambiguous" in doc
     assert "latest commentary stays visible as a dedicated artifact" in doc
+    assert "multiple Telegram messages while remaining" in doc
     assert "Ordinary user echo stays visible in compact mode" in doc
     assert "Warning artifacts remain durable and visible" in doc
+    assert "Usage-limit / quota-exhaustion notices are warning artifacts too" in doc
     assert "`×N` counter when `N > 2`" in doc
+    assert "This section is a derived summary of" in doc
+    assert "ontology/topic-control.md" in doc
+    assert "ontology files remain the master source" in doc
+    assert "surface_policy" in doc
+    assert "(user_id, surface_key)" in doc
     assert "no-topics group chat" in doc or "no-topics group" in doc
     assert "ordinary non-addressed message in an unbound topic must stay silent" in doc
     assert "bot-addressed `@mention` remain valid explicit entry paths" in doc
@@ -318,6 +387,7 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
     assert "In external read-only bind mode" in doc
     assert "read-only warning and a hint to reattach writable live control" in doc
     assert "Draft answer artifact" in doc
+    assert "fresh Telegram message sequence" in doc
     assert "Expandable blockquote for debug reasoning" in doc
 
 

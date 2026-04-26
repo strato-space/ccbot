@@ -20,17 +20,17 @@ correct model is:
 
 ## Target Outcome
 
-Operate `fast-agent` from Telegram forum topics through `tmux`, while reading
-live semantic events from a side-channel that preserves ACP-equivalent meaning,
-and replaying them after restart from colocated append-only persisted replay
-evidence in `acp_log.jsonl`.
+Operate `fast-agent` from Telegram control surfaces through `tmux`, while
+reading live semantic events from a side-channel that preserves ACP-equivalent
+meaning, and replaying them after restart from colocated append-only persisted
+replay evidence in `acp_log.jsonl`.
 
 ## Non-Negotiable Rule
 
 For `fast-agent`, the bot must follow this split:
 
 - write path:
-  - `Telegram topic -> binding -> tmux window -> fast-agent process`
+  - `Telegram control surface -> binding -> tmux window -> fast-agent process`
 - live semantic read path:
   - `fast-agent process -> semantic emitter / supervisor -> live semantic stream -> normalized events -> Telegram`
 - replay / recovery path:
@@ -60,8 +60,9 @@ to `ACP-protocol` meaning. That surface may be implemented by:
 
 ## Ontology
 
-- **Telegram topic**
+- **Telegram control surface**
   - User-facing control lane in Telegram.
+  - Named forum topics are one species; no-topics main-chat mode is another.
 
 - **Binding**
   - Persisted association from Telegram topic to one live `tmux` window.

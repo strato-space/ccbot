@@ -79,6 +79,7 @@ class MessageTask:
     tool_use_id: str | None = None
     content_type: str = "text"
     semantic_kind: str = ""
+    warning_key: str | None = None
     thread_id: int | None = None  # Telegram topic thread_id for targeted send
     image_data: list[tuple[str, bytes]] | None = None  # From tool_result images
     turn_generation: int = 0
@@ -98,13 +99,20 @@ _status_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
 
 # Commentary message tracking: (user_id, thread_id_or_0) -> (message_id, window_id, last_text)
 _commentary_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
+# Extra commentary message ids for multi-part commentary artifacts.
+_commentary_extra_msg_ids: dict[tuple[int, int], tuple[int, ...]] = {}
 
 # Pending input preview tracking: (user_id, thread_id_or_0) -> (message_id, window_id, last_text)
 _pending_input_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
 # Last enqueued pending-input state per topic for queue-side dedupe.
 _pending_input_enqueued: dict[tuple[int, int], tuple[str, str | None]] = {}
-# Warning tracking: (user_id, thread_id_or_0) -> (message_id, window_id, warning_text, repeat_count)
-_warning_msg_info: dict[tuple[int, int], tuple[int, str, str, int]] = {}
+# Warning tracking:
+#   (user_id, thread_id_or_0, warning_key) -> (message_id, window_id, warning_text, repeat_count)
+# Ordinary warnings keep the default "latest-warning" key so the durable
+# latest-warning bubble semantics remain unchanged. Special families such as
+# runtime discontinuities can opt into distinct keys to avoid collapsing
+# separate events that happen to share the same text.
+_warning_msg_info: dict[tuple[int, int, str], tuple[int, str, str, int]] = {}
 
 # Latest visible pre-final artifact kind per topic. This keeps latest-only
 # commentary chronologically correct relative to durable orchestration milestones:
@@ -140,7 +148,13 @@ def _clear_warning_tracking_for_topic(
     thread_id_or_0: int,
 ) -> None:
     """Clear warning dedupe state for a topic."""
-    _warning_msg_info.pop((user_id, thread_id_or_0), None)
+    stale_keys = [
+        key
+        for key in _warning_msg_info
+        if key[0] == user_id and key[1] == thread_id_or_0
+    ]
+    for key in stale_keys:
+        _warning_msg_info.pop(key, None)
 
 
 def _is_stale_turn_generation(
@@ -201,6 +215,14 @@ def _can_merge_tasks(base: MessageTask, candidate: MessageTask) -> bool:
     if base.content_type in ("tool_use", "tool_result"):
         return False
     if candidate.content_type in ("tool_use", "tool_result"):
+        return False
+    if base.semantic_kind == WARNING_SEMANTIC_KIND:
+        return False
+    if candidate.semantic_kind == WARNING_SEMANTIC_KIND:
+        return False
+    if base.warning_key != candidate.warning_key:
+        return False
+    if base.image_data or candidate.image_data:
         return False
     return True
 
@@ -264,6 +286,7 @@ async def _merge_content_tasks(
             tool_use_id=first.tool_use_id,
             content_type=first.content_type,
             semantic_kind=first.semantic_kind,
+            warning_key=first.warning_key,
             thread_id=first.thread_id,
             turn_generation=first.turn_generation,
         ),
@@ -588,7 +611,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         sent = None
 
         # For first part, try to convert status message to content (edit instead of delete)
-        if first_part:
+        if first_part and not is_terminal_artifact:
             first_part = False
             converted_msg_id = await _convert_status_to_content(
                 bot,
@@ -667,7 +690,6 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         # partway through a multipart delivery.
         _mark_pre_final_visible_closed(user_id, task.thread_id)
         _mark_technical_status_closed(user_id, task.thread_id)
-        await _do_clear_commentary_message(bot, user_id, tid)
         await _do_clear_status_message(bot, user_id, tid)
         return
 
@@ -755,15 +777,30 @@ async def _process_warning_content_task(
 ) -> None:
     """Deduplicate repeated warning bubbles and add a counter for N>2."""
     text = (task.text or "\n\n".join(task.parts)).strip()
-    if not text:
+    if not text and not task.image_data:
         return
 
     thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
     chat_id = session_manager.resolve_chat_id(user_id, thread_id)
-    wkey = (user_id, thread_id_or_0)
+    warning_key = task.warning_key or "latest-warning"
+    wkey = (user_id, thread_id_or_0, warning_key)
     current = _warning_msg_info.get(wkey)
+    same_warning = (
+        current is not None
+        and text
+        and current[1] == window_id
+        and current[2] == text
+    )
 
-    if current is not None:
+    if task.image_data and not same_warning:
+        try:
+            await _send_task_images(bot, chat_id, task)
+        except RetryAfter:
+            raise
+        except Exception as exc:
+            logger.warning("Failed to send warning screenshot(s): %s", exc)
+
+    if current is not None and text:
         msg_id, stored_wid, last_text, repeat_count = current
         if stored_wid == window_id and last_text == text:
             new_count = repeat_count + 1
@@ -796,6 +833,9 @@ async def _process_warning_content_task(
                     raise
                 except Exception:
                     _warning_msg_info.pop(wkey, None)
+
+    if not text:
+        return
 
     sent = await send_with_fallback(
         bot,
@@ -975,7 +1015,10 @@ async def _process_commentary_update_task(
         await _do_clear_commentary_message(bot, user_id, tid)
         return
 
-    commentary_text = task.text or ""
+    commentary_parts = [part for part in task.parts if part]
+    if not commentary_parts and task.text:
+        commentary_parts = [task.text]
+    commentary_text = "\n\n".join(commentary_parts)
     if not commentary_text:
         await _do_clear_commentary_message(bot, user_id, tid)
         return
@@ -991,12 +1034,17 @@ async def _process_commentary_update_task(
 
     ckey = (user_id, tid)
     current_info = _commentary_msg_info.get(ckey)
+    extra_ids = _commentary_extra_msg_ids.get(ckey, ())
     if current_info:
         msg_id, stored_wid, last_text = current_info
-        if stored_wid == wid and last_text == commentary_text:
+        if (
+            stored_wid == wid
+            and last_text == commentary_text
+            and len(extra_ids) == max(0, len(commentary_parts) - 1)
+        ):
             return
         latest_kind = _latest_pre_final_visible_kind.get(ckey, "")
-        if stored_wid == wid and latest_kind == "commentary":
+        if stored_wid == wid and latest_kind == "commentary" and len(commentary_parts) == 1 and not extra_ids:
             chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
             try:
                 await bot.edit_message_text(
@@ -1025,7 +1073,7 @@ async def _process_commentary_update_task(
                 except Exception:
                     _commentary_msg_info.pop(ckey, None)
 
-    await _do_send_commentary_message(bot, user_id, tid, wid, commentary_text)
+    await _do_send_commentary_message(bot, user_id, tid, wid, commentary_parts, commentary_text)
 
 
 async def _do_send_commentary_message(
@@ -1033,27 +1081,39 @@ async def _do_send_commentary_message(
     user_id: int,
     thread_id_or_0: int,
     window_id: str,
-    text: str,
+    parts: list[str],
+    full_text: str,
 ) -> None:
     """Send a new commentary bubble when in-place reuse is unavailable."""
     ckey = (user_id, thread_id_or_0)
     thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
     chat_id = session_manager.resolve_chat_id(user_id, thread_id)
     old = _commentary_msg_info.pop(ckey, None)
+    old_extra = _commentary_extra_msg_ids.pop(ckey, ())
     if old:
         try:
             await bot.delete_message(chat_id=chat_id, message_id=old[0])
         except Exception:
             pass
+    for extra_id in old_extra:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=extra_id)
+        except Exception:
+            pass
 
-    sent = await send_with_fallback(
-        bot,
-        chat_id,
-        text,
-        **_send_kwargs(thread_id),  # type: ignore[arg-type]
-    )
-    if sent:
-        _commentary_msg_info[ckey] = (sent.message_id, window_id, text)
+    sent_ids: list[int] = []
+    for part in parts:
+        sent = await send_with_fallback(
+            bot,
+            chat_id,
+            part,
+            **_send_kwargs(thread_id),  # type: ignore[arg-type]
+        )
+        if sent:
+            sent_ids.append(sent.message_id)
+    if sent_ids:
+        _commentary_msg_info[ckey] = (sent_ids[0], window_id, full_text)
+        _commentary_extra_msg_ids[ckey] = tuple(sent_ids[1:])
         _latest_pre_final_visible_kind[ckey] = "commentary"
 
 
@@ -1200,6 +1260,7 @@ async def _do_clear_commentary_message(
     """Delete the tracked commentary message for a user/topic."""
     ckey = (user_id, thread_id_or_0)
     info = _commentary_msg_info.pop(ckey, None)
+    extra_ids = _commentary_extra_msg_ids.pop(ckey, ())
     if _latest_pre_final_visible_kind.get(ckey) == "commentary":
         _latest_pre_final_visible_kind.pop(ckey, None)
     if info:
@@ -1209,6 +1270,11 @@ async def _do_clear_commentary_message(
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
         except Exception as e:
             logger.debug(f"Failed to delete commentary message {msg_id}: {e}")
+        for extra_id in extra_ids:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=extra_id)
+            except Exception as e:
+                logger.debug(f"Failed to delete commentary message {extra_id}: {e}")
 
 
 async def _do_clear_pending_input_message(
@@ -1278,6 +1344,7 @@ async def enqueue_content_message(
     thread_id: int | None = None,
     image_data: list[tuple[str, bytes]] | None = None,
     turn_generation: int = 0,
+    warning_key: str | None = None,
 ) -> None:
     """Enqueue a content message task."""
     logger.debug(
@@ -1296,6 +1363,7 @@ async def enqueue_content_message(
         tool_use_id=tool_use_id,
         content_type=content_type,
         semantic_kind=semantic_kind,
+        warning_key=warning_key,
         thread_id=thread_id,
         image_data=image_data,
         turn_generation=turn_generation,
@@ -1349,6 +1417,8 @@ async def enqueue_commentary_update(
     user_id: int,
     window_id: str,
     commentary_text: str | None,
+    *,
+    parts: list[str] | None = None,
     thread_id: int | None = None,
     turn_generation: int = 0,
 ) -> None:
@@ -1363,6 +1433,7 @@ async def enqueue_commentary_update(
         task = MessageTask(
             task_type="commentary_update",
             text=commentary_text,
+            parts=list(parts or []),
             window_id=window_id,
             thread_id=thread_id,
             turn_generation=turn_generation,
@@ -1572,6 +1643,7 @@ async def clear_commentary_message(
     """Delete any tracked commentary message for a topic when a bot handle exists."""
     if bot is None:
         _commentary_msg_info.pop((user_id, thread_id or 0), None)
+        _commentary_extra_msg_ids.pop((user_id, thread_id or 0), None)
         return
     await _do_clear_commentary_message(bot, user_id, thread_id or 0)
 
@@ -1617,6 +1689,7 @@ async def shutdown_workers() -> None:
     _queue_locks.clear()
     _status_msg_info.clear()
     _commentary_msg_info.clear()
+    _commentary_extra_msg_ids.clear()
     _pending_input_msg_info.clear()
     _pending_input_enqueued.clear()
     _warning_msg_info.clear()

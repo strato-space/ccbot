@@ -82,7 +82,7 @@ Two higher-order ontological classes matter at delivery time:
   - may be represented by a visible user echo or by a hidden internal prompt
     scaffold that still begins a real runtime turn
 - `turn generation`
-  - per-topic ordering generation used by the bot layer so stale close tasks
+  - per-control-surface ordering generation used by the bot layer so stale close tasks
     from an older turn cannot re-close the surface of a newer turn
   - the same generation barrier also drops stale pre-final artifacts, stale
     technical-status artifacts, and stale terminal turn artifacts once a newer
@@ -126,6 +126,14 @@ At the contract level:
   - user-facing content candidates
 - `warning`
   - user-facing system notice candidate with latest-warning dedup semantics
+  - usage-limit / quota-exhaustion notices are warning artifacts too; they are
+    not technical status and not assistant-final
+  - runtime-discontinuity warnings may carry a distinct warning identity so
+    separate exit/loss events do not deduplicate into one notice purely by
+    matching text
+  - Codex live-surface detection must not require the startup banner to remain
+    visible in the pane; an active footer/status or prompt surface still
+    counts as a live runtime signal
 - `tool_result`, `command_execution`, `file_change`
   - history-worthy semantic facts even when the product surface chooses to
     collapse them into compact status delivery
@@ -172,11 +180,16 @@ At the default product-facing `compact` Telegram surface:
     completed subagent summaries
 - `commentary`
   - remains visible as a latest-only human-facing commentary artifact
+  - may span multiple Telegram messages while remaining one logical commentary
+    artifact
 - `warning`
   - remains visible as a durable system notice
-  - repeated identical warning text in the same topic reuses one bubble and
-    adds a repeat counter only when repetition cardinality is strictly greater
-    than 2
+  - repeated identical warning text on the same control surface reuses one
+    bubble and adds a repeat counter only when repetition cardinality is
+    strictly greater than 2
+- `assistant_final`
+  - remains a fresh terminal message sequence
+  - must not be materialized by editing/reusing commentary
 - queued follow-up preview
   - may remain visible as a separate mutable pending-input artifact modeled
     after the Codex bottom-pane pending-input preview

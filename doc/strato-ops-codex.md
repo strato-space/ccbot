@@ -12,7 +12,7 @@ Scope:
 
 Use this chain when reasoning about the system:
 
-`Telegram topic -> binding -> tmux window -> runtime process -> runtime conversation identity -> replay evidence`
+`Telegram control surface -> binding -> tmux window -> runtime process -> runtime conversation identity -> replay evidence`
 
 Operational consequences:
 

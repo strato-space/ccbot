@@ -165,6 +165,32 @@ def test_codex_rollout_keeps_assistant_heads_up_message_as_assistant_text() -> N
     assert events[0].role == "assistant"
 
 
+def test_codex_rollout_maps_usage_limit_error_events_to_warning_events() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-07T17:16:07.446Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "error",
+                "message": (
+                    "You've hit your usage limit. Upgrade to Pro, "
+                    "visit https://chatgpt.com/codex/settings/usage to purchase more credits "
+                    "or try again at Apr 11th, 2026 10:11 PM."
+                ),
+                "codex_error_info": "usage_limit_exceeded",
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].event_kind == "warning"
+    assert events[0].content_type == "warning"
+    assert events[0].role == "system"
+    assert "usage limit" in events[0].text.lower()
+
+
 def test_codex_rollout_command_execution_extracts_bash_lc_script_into_code_block() -> None:
     records = [
         {

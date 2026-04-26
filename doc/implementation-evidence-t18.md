@@ -73,7 +73,7 @@ Upstream Claude still provides the reference shape for the legacy lane:
   edits `tool_result` into the previously sent `tool_use` message and converts
   the status message into the first content part.
 - [upstream message_queue.py](/home/tools/ccbot-upstream/src/ccbot/handlers/message_queue.py#L449-L516)
-  keeps a mutable status message keyed by topic and edits it in place.
+  keeps a mutable status message keyed by control surface and edits it in place.
 - [upstream session_monitor.py](/home/tools/ccbot-upstream/src/ccbot/session_monitor.py#L1-L12)
   reads Claude JSONL session files with byte-offset tracking.
 - [upstream transcript_parser.py](/home/tools/ccbot-upstream/src/ccbot/transcript_parser.py#L1-L11)

@@ -18,7 +18,13 @@ This plan extends the completed Codex-only ontology migration into a true multi-
 
 The first plan already established the critical separation:
 
-`Telegram topic -> binding -> tmux window -> runtime process -> persisted conversation identity`
+`Telegram control surface -> binding -> tmux window -> runtime process -> persisted conversation identity`
+
+Vocabulary note: this plan predates the full `control surface` vocabulary in
+[`ontology/`](/home/tools/ccbot/ontology). The canonical nouns now live there;
+where this historical plan says `topic`, read that as the named-topic species of
+`Telegram control surface` unless the text is explicitly describing Telegram's
+forum-topic transport object.
 
 This continuation makes explicit the further split between:
 
@@ -53,18 +59,28 @@ The plan must not regress shared surfaces for `voice`, `task`, or the existing `
 This document is production-isolated, so the core nouns are repeated here instead
 of assuming the reader has the first plan open.
 
-- **Telegram topic**
+- **Telegram control surface**
   - The user-facing control lane in Telegram.
+  - Current species are named topic control surfaces and no-topics main-chat
+    control surfaces.
   - Commands, screenshots, progress notices, and final results are shown here.
 
-- **Topic control policy**
-  - The persisted control rule attached to a Telegram topic that governs whether
-    plain messages may trigger implicit bind or instead require explicit bind.
+- **Telegram topic**
+  - The named-topic species of Telegram control surface.
+
+- **Control-surface policy**
+  - The persisted control rule attached to a Telegram control surface that
+    governs whether plain messages may trigger implicit bind or instead require
+    explicit bind.
   - This is a normative routing guard, not a live runtime object and not a binding state.
 
+- **Topic control policy**
+  - The legacy topic-shaped compatibility view of control-surface policy.
+
 - **Binding**
-  - The bot's persisted association from a Telegram topic to a live tmux window,
-    together with the runtime metadata needed to route input and notifications safely.
+  - The bot's persisted association from a Telegram control surface to a
+    delivery source, together with the runtime metadata needed to route input
+    and notifications safely.
 
 - **tmux window**
   - The live terminal container managed by the bot.
@@ -162,15 +178,15 @@ of assuming the reader has the first plan open.
 
 ## Ontology
 
-The first plan established the correct distinction between topic, window,
-process, persisted identity, and log. That ontology remains valid here, but the
-persisted identity is now runtime-dependent rather than Codex-only.
+The first plan established the correct distinction between control surface,
+window, process, persisted identity, and log. That ontology remains valid here,
+but the persisted identity is now runtime-dependent rather than Codex-only.
 
 ### Canonical model
 
 The model must distinguish these relations:
 
-- `Telegram topic --governed by topic control policy--> may or may not enter a binding flow`
+- `Telegram control surface --governed by control-surface policy--> may or may not enter a binding flow`
 - `binding -> tmux window -> runtime process`
 - `runtime process -> binds to runtime conversation identity`
 - `runtime process -> semantic emitter / supervisor`
@@ -180,7 +196,7 @@ The model must distinguish these relations:
 - `live semantic stream and/or persisted replay evidence -> normalized events`
 - `normalized events -> Telegram notifications / history views`
 
-This is more precise than a single flat chain because `topic control policy` is
+This is more precise than a single flat chain because `control-surface policy` is
 not the same kind of thing as `window`, `process`, or `identity`. It governs
 whether binding and routing are permitted; it is not itself a live runtime lane.
 
@@ -248,30 +264,32 @@ That separation is required so that direct `tmux` attach remains possible
 without pretending that raw keystrokes and bot messages are the same kind of
 thing.
 
-### Required topic control axes
+### Required control-surface axes
 
-Topic policy and binding state must be modeled as distinct axes.
+Surface policy and binding state must be modeled as distinct axes.
 
-`topic_policy`:
+`surface_policy`:
 
 - `implicit_bind_allowed`
 - `manual_bind_required`
 
+`topic_policy` remains a legacy topic-shaped compatibility view.
+
 `binding_state`:
 
 - `none`
-- `binding_in_progress`
+- `bind_flow`
 - `bound`
 
-Once a topic enters `manual_bind_required` via explicit `/unbind` or explicit
-cancel of a bind flow, plain messages must not trigger implicit bind again.
+Once a control surface enters `manual_bind_required` via explicit `/unbind` or
+explicit cancel of a bind flow, plain messages must not trigger implicit bind again.
 Only explicit `/bind` or explicit `/resume` may re-enter a bind-capable flow.
 
 ### Write path
 
 Allowed write target:
 
-`Telegram topic, subject to topic policy, routes through current binding -> tmux window -> runtime process`
+`Telegram control surface, subject to surface policy, routes through current binding -> tmux window -> runtime process`
 
 Not allowed:
 

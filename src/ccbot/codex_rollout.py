@@ -172,6 +172,10 @@ _SUBAGENT_NOTIFICATION_RE = re.compile(
     re.DOTALL,
 )
 _HEADS_UP_WARNING_RE = re.compile(r"^\s*(?:⚠️?\s*)?heads up\b", re.IGNORECASE)
+_USAGE_LIMIT_WARNING_RE = re.compile(
+    r"(usage limit|purchase more credits|try again at|usage_limit_exceeded)",
+    re.IGNORECASE,
+)
 _PENDING_EVENT_FLUSH_WINDOW_SECONDS = 0.5
 _USER_MESSAGE_DUPLICATE_WINDOW_SECONDS = 0.5
 
@@ -1009,6 +1013,19 @@ def _warning_event(
     )
 
 
+def _is_usage_limit_warning_payload(payload: dict[str, Any]) -> bool:
+    """Return True when an event_msg payload represents a quota/usage warning."""
+    codex_error_info = _as_text(payload.get("codex_error_info")).strip()
+    if codex_error_info and _USAGE_LIMIT_WARNING_RE.search(codex_error_info):
+        return True
+    warning_text = _as_text(
+        payload.get("message") or payload.get("text") or payload.get("warning")
+    ).strip()
+    if not warning_text:
+        return False
+    return bool(_USAGE_LIMIT_WARNING_RE.search(warning_text))
+
+
 def _thread_id_from_payload(payload: Any) -> str:
     if not isinstance(payload, dict):
         return ""
@@ -1532,6 +1549,19 @@ def _normalize_event_msg_payload(
         return [event]
 
     if payload_type in {"warning", "heads_up"}:
+        warning_text = _as_text(
+            payload.get("message") or payload.get("text") or payload.get("warning")
+        ).strip()
+        return [
+            _warning_event(
+                thread_id=thread_id,
+                text=warning_text,
+                timestamp=timestamp,
+                runtime_kind=runtime_kind,
+            )
+        ]
+
+    if payload_type == "error" and _is_usage_limit_warning_payload(payload):
         warning_text = _as_text(
             payload.get("message") or payload.get("text") or payload.get("warning")
         ).strip()

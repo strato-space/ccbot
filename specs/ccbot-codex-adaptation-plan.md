@@ -28,7 +28,7 @@ Target outcome:
 ## Ontological Model
 The plan uses this model and must not collapse these entities:
 
-`Telegram topic -> binding -> tmux window -> Codex process -> Codex thread -> rollout log`
+`Telegram control surface -> binding -> tmux window -> Codex process -> Codex thread -> rollout log`
 
 Constraints:
 - A window is not a thread.

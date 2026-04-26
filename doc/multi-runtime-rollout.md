@@ -6,7 +6,7 @@ silently changing topic semantics.
 It complements:
 
 - `doc/strato-ops-codex.md` for the current Codex production lane
-- `doc/runtime-ontology.md` for the canonical nouns
+- `ontology/README.md` for the canonical nouns and `doc/runtime-ontology.md` for the derived maintainer explainer
 - `doc/multi-runtime-regression-matrix.md` for the frozen verification surface
 
 ## Scope

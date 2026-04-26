@@ -1523,6 +1523,25 @@ class SessionManager:
                 return user_id, surface_key, dict(metadata)
         return None
 
+    def get_surface_coordinates_for_window(
+        self,
+        user_id: int,
+        window_id: str,
+    ) -> tuple[str | None, int | None, int | None]:
+        """Return the bound surface key and coordinates for a user/window pair."""
+        bindings = self.surface_bindings.get(user_id) or {}
+        for surface_key, bound_window_id in bindings.items():
+            if bound_window_id != window_id:
+                continue
+            parsed = self._parse_surface_key(surface_key)
+            if parsed is None:
+                return surface_key, None, None
+            kind, numeric_id = parsed
+            if kind == "chat":
+                return surface_key, numeric_id, None
+            return surface_key, None, numeric_id
+        return None, None, None
+
     async def _resolve_external_thread_for_window(
         self,
         window_id: str,

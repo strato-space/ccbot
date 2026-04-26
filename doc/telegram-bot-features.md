@@ -4,8 +4,10 @@
 
 The current Codex adaptation only advertises the supported Telegram core lane:
 
-- topic -> live tmux window binding
-- topic -> external Codex persisted-thread bind (read-only replay mode)
+- control surface -> live tmux window binding
+- control surface -> external Codex persisted-thread bind (read-only replay mode)
+- control surface -> live tmux or external replay binding in the master
+  ontology
 - directory / thread picker
 - text / voice / photo forwarding
 - history and screenshot inspection
@@ -203,13 +205,13 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
 | `/approvals` | ✅ | Yes | ✅ Optional lane only | Requires positively identified approvals popup and remote prompt controls |
 | `/permissions` | ✅ | Yes | ✅ Optional lane only | Same as `/approvals`; TUI prompt driven |
 | `/logout` | ✅ | No | ❌ No | Destructive; should not be advertised in Telegram |
-| `/quit` / `/exit` | ✅ | No | ❌ No | Terminates the live Codex process |
+| `/exit` | ✅ | No | ✅ Supported in menu | Terminates the live Codex process |
 
 ### Surface Policy
 
 - Registered bot commands should describe only the stable topic-control surface and the configured runtime lane.
 - Prompt-driven commands stay out of the advertised menu unless the prompt parser can positively identify and drive the resulting TUI state.
-- Raw passthrough remains available for expert use, but undocumented commands are best-effort rather than release-contract behavior.
+- Raw passthrough remains available for expert use, but undocumented commands are best-effort rather than release-contract behavior; `/quit` is runtime-rejected in favor of `/exit`.
 - In compact delivery, the visible pre-final surface is deliberately narrow:
   - latest commentary artifact
   - orchestration milestone bubbles
@@ -229,10 +231,15 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
   - final assistant text
 - Latest commentary remains visible as a dedicated artifact, but it is not a
   durable ordinary content bubble.
+- Commentary is not clipped by the internal status-helper limit; if it exceeds
+  one Telegram message it may span multiple Telegram messages while remaining
+  one logical commentary artifact.
 - Ordinary user echo stays visible in compact mode; hidden internal payloads
   stay suppressed only when they match explicit tagged/internal shapes.
 - Warning artifacts remain durable and visible; repeated identical warning text
-  in one topic deduplicates into one bubble with a `×N` counter when `N > 2`.
+  on one control surface deduplicates into one bubble with a `×N` counter when `N > 2`.
+- Usage-limit / quota-exhaustion notices are warning artifacts too; they are
+  not ephemeral technical status and not assistant-final content.
 - Queued follow-up messages may remain visible as a separate pending-input
   artifact. They preview future input and are therefore not part of the
   current turn's pre-final visible artifact class.
@@ -250,12 +257,17 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
 
 ### Topic Control Policy
 
-The project ontology remains topic-centric:
+This section is a derived summary of
+[`ontology/topic-control.md`](/home/tools/ccbot/ontology/topic-control.md).
+The ontology files remain the master source for these nouns:
 
-- `Telegram topic -> binding -> tmux window -> runtime process -> runtime conversation identity -> replay evidence`
-- `topic_policy` and `binding_state` remain separate persisted axes.
-- A no-topics group chat may expose one shared main-chat mode canonically
-  marked by `thread_id is None`; this is not a claim that `chat == topic`.
+- `Telegram control surface -> binding -> tmux window -> runtime process -> runtime conversation identity -> replay evidence`
+- `surface_policy` and `binding_state` remain separate persisted axes.
+- `topic_policy` remains the legacy topic-shaped compatibility view.
+- Full persisted control-surface identity is `(user_id, surface_key)`; a
+  `surface_key` alone is a local product key.
+- A no-topics group chat may expose one shared main-chat mode described by the
+  ontology as `thread_id is None`; this is not a claim that `chat == topic`.
 
 Named-topic behavior:
 
@@ -280,6 +292,8 @@ Named-topic behavior:
 ### Compact Bubble Semantics
 
 - `assistant_final` is the terminal turn artifact.
+- `assistant_final` is always delivered as a fresh Telegram message sequence
+  and never by replacing the visible commentary artifact.
 - `commentary`, orchestration milestones, and any future surfaced preview
   bubble belong to the broader `pre-final visible artifact` class.
 - Once the terminal assistant bubble lands, no later member of that class may

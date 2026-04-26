@@ -261,6 +261,16 @@ class TestSurfaceBindingsChatMode:
             for binding in mgr.iter_topic_bindings()
         )
 
+    def test_get_surface_coordinates_for_chat_window(self, mgr: SessionManager) -> None:
+        mgr.bind_surface(100, "@7", chat_id=-100200300, window_name="main-chat")
+
+        surface_key, chat_id, thread_id = mgr.get_surface_coordinates_for_window(100, "@7")
+
+        assert surface_key == "c:-100200300"
+        assert chat_id == -100200300
+        assert thread_id is None
+
+
     def test_surface_policy_and_binding_state_for_chat(self, mgr: SessionManager) -> None:
         mgr.require_manual_bind_for_surface(100, chat_id=-100200300)
         assert mgr.get_surface_policy(100, chat_id=-100200300) == TOPIC_POLICY_MANUAL_BIND_REQUIRED
@@ -577,6 +587,38 @@ class TestRuntimeInputDriverIntegration:
         mock_driver.send_text.assert_awaited_once_with(
             "@1",
             "hello",
+            runtime_kind="codex",
+        )
+        mock_driver.send_raw_slash_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_send_to_window_allows_shell_fallback_in_surviving_tmux_window(
+        self, mgr: SessionManager
+    ):
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(window_id="@1")
+            )
+            mock_tmux.capture_pane = AsyncMock(return_value="user@host:/tmp/project$ ")
+            mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
+            mock_driver.send_raw_slash_command = AsyncMock()
+
+            success, message = await mgr.send_to_window("@1", "ls")
+
+        assert success is True
+        assert message == "Sent to @1"
+        mock_driver.send_text.assert_awaited_once_with(
+            "@1",
+            "ls",
             runtime_kind="codex",
         )
         mock_driver.send_raw_slash_command.assert_not_awaited()

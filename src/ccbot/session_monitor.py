@@ -566,12 +566,18 @@ class SessionMonitor:
         active_rollout_sources: dict[str, RolloutSource] = {}
 
         for binding in session_manager.iter_topic_bindings():
-            if (
+            tmux_window_missing = (
                 binding.binding_scope == "tmux"
                 and binding.window_id not in live_window_ids
+            )
+            resolved = await session_manager.resolve_thread_for_window(binding.window_id)
+            if tmux_window_missing and (
+                resolved is None
+                or not resolved.thread_id
+                or not resolved.file_path
+                or not Path(resolved.file_path).exists()
             ):
                 continue
-            resolved = await session_manager.resolve_thread_for_window(binding.window_id)
             if resolved is not None and resolved.thread_id:
                 window_to_session[binding.window_id] = resolved.thread_id
                 if resolved.file_path:
@@ -634,6 +640,13 @@ class SessionMonitor:
 
         for window_id in deleted_windows:
             old_session_id = self._last_binding_map[window_id]
+            if old_session_id in current_map.values():
+                logger.info(
+                    "Window '%s' disappeared but thread %s is still reachable via another binding",
+                    window_id,
+                    old_session_id,
+                )
+                continue
             logger.info(
                 "Window '%s' deleted, removing tracked thread %s",
                 window_id,

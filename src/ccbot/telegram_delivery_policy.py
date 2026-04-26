@@ -203,7 +203,10 @@ def apply_telegram_delivery_policy(
         COMMENTARY_SEMANTIC_KIND,
         ORCHESTRATION_SEMANTIC_KIND,
     }:
-        projected.text = _compact_single_block(text)
+        if projected.semantic_kind == ORCHESTRATION_SEMANTIC_KIND:
+            projected.text = _compact_single_block(text)
+        else:
+            projected.text = text
         projected.include_in_history = False
         projected.dispatch_to_telegram = True
         projected.status_message_eligible = False

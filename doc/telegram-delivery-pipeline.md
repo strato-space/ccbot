@@ -4,6 +4,7 @@ This note closes `T26` for the multi-runtime topic-control plan.
 
 The compact ontology companions for this note are:
 
+- [`/home/tools/ccbot/ontology/topic-control.md`](/home/tools/ccbot/ontology/topic-control.md)
 - [`/home/tools/ccbot/ontology/delivery-surface.md`](/home/tools/ccbot/ontology/delivery-surface.md)
 - [`/home/tools/ccbot/ontology/boundaries.md`](/home/tools/ccbot/ontology/boundaries.md)
 
@@ -41,8 +42,15 @@ The default Telegram surface is `compact`, not `verbose`.
   explicit internal payload shape
 - placeholder reasoning such as `[reasoning]` is suppressed
 - raw tool payloads, giant command stdout dumps, and full file bodies must be summarized before they reach Telegram
-- repeated identical warnings in one topic deduplicate into one latest warning
+- repeated identical warnings on one control surface deduplicate into one latest warning
   bubble, with a visible repeat counter only when `N > 2`
+- runtime-discontinuity system summaries are warning artifacts rather than
+  assistant-final messages; when both pane screenshot evidence and raw summary
+  text are available, screenshot delivery precedes the raw text bubble
+- live-runtime detection for Codex must treat a visible active footer/status or
+  prompt surface as authoritative even after the initial `OpenAI Codex` banner
+  has scrolled out of the pane; banner visibility alone is not a valid exit
+  signal
 - when tool or file summaries are surfaced, they should prefer Codex-style
   code-aware formatting: shell payloads in fenced `sh` blocks, JSON payloads
   in fenced `json` blocks, with truncation footers outside the fenced block
@@ -61,17 +69,19 @@ surface, but it is not the default product-facing mode.
 
 The delivery pipeline keeps:
 
-- one mutable progress/status artifact per `(user_id, topic)`
-- one latest-only visible commentary artifact per `(user_id, topic)`
-- one mutable pending-input artifact per `(user_id, topic)`
+- one mutable progress/status artifact per `(user_id, control surface)`
+- one latest-only visible commentary artifact per `(user_id, control surface)`
+- one mutable pending-input artifact per `(user_id, control surface)`
 - one ordered content queue per user
-- one current turn generation per `(user_id, topic)`
+- one current turn generation per `(user_id, control surface)`
 - one terminal turn artifact: `assistant_final`
 - one broader pre-final visible surface:
   - commentary
   - orchestration milestones
   - any future human-facing preview bubble that the product chooses to surface
-- one latest-warning artifact with warning-dedup state per `(user_id, topic)`
+- one latest-warning artifact with warning-dedup state per `(user_id, control surface)`
+  for ordinary warnings; runtime-discontinuity warnings may use a distinct
+  warning identity when separate events must remain separately visible
 
 Ordering guarantees:
 
@@ -93,9 +103,9 @@ Ordering guarantees:
 10. no late commentary, orchestration milestone, or surfaced preview bubble may
    appear below the final answer for the same turn
 11. warning artifacts are not members of the current-turn pre-final surface and
-    are not dropped by terminal closure; warning dedup state is keyed by topic
+    are not dropped by terminal closure; warning dedup state is keyed by control surface
     and latest warning text
-12. a new user turn advances the topic turn generation before the new turn's
+12. a new user turn advances the control-surface turn generation before the new turn's
     artifacts are enqueued
 13. stale close tasks from an older generation must fail closed instead of
     reclosing the newer turn's visible or status surface
@@ -236,7 +246,8 @@ deliberately narrow:
 
 - user-visible user echo
 - orchestration milestones such as spawned/waiting/completed subagent summaries
-- warning artifacts (latest-warning dedup with `×N` counter for `N > 2`)
+- warning artifacts (latest-warning dedup with `×N` counter for `N > 2`;
+  distinct runtime-discontinuity warnings may intentionally bypass collapse)
 - final assistant text
 
 In addition to those durable bubbles, `compact` keeps one latest-only visible
@@ -245,6 +256,9 @@ the chat shows the current human-readable execution narrative without
 accumulating a long stack of near-duplicate commentary bubbles. That commentary
 artifact is explicitly cleared when the final assistant answer is delivered and
 must not reappear below the final answer unless a new user turn has begun.
+Commentary is not clipped by the internal status-helper ceiling; if one
+Telegram message is insufficient, it may span multiple Telegram messages while
+remaining one logical commentary artifact.
 If a complete commentary or orchestration event arrives after that closure
 point, the bot must drop it instead of reopening the closed pre-final lane.
 
@@ -253,6 +267,9 @@ queued follow-up messages held behind the current running turn. Unlike
 commentary, that artifact belongs to future input, not current-turn output, so
 it is not closed by the terminal turn artifact unless the queue itself is
 cleared or rebound.
+
+The terminal final answer is always a fresh Telegram message sequence. It must
+not be materialized by editing/reusing the visible commentary artifact.
 
 Formatting ownership is intentionally split:
 
@@ -287,8 +304,13 @@ Warning artifacts are intentionally separate from both technical status churn
 and pre-final turn artifacts:
 
 - warnings are durable system notices
-- they are deduplicated against the latest warning text in the same topic
+- they are deduplicated against the latest warning text on the same control
+  surface
 - a different warning text creates a new warning bubble and resets the counter
+- usage-limit / quota-exhaustion banners are warning artifacts too; they are
+  not technical status and not assistant-final
+- runtime-discontinuity warnings may use a distinct warning identity so
+  separate exit/loss events with identical raw text remain separately visible
 
 Those classes must either:
 
@@ -311,8 +333,8 @@ one formatting contract:
 
 Late delivery must fail closed.
 
-- if a queued task no longer matches the current `(topic -> window)` binding,
-  it is dropped
+- if a queued task no longer matches the current control-surface binding, it is
+  dropped
 - if the bound tmux window is gone, queued delivery for that binding is dropped
 - explicit `/unbind`, topic close, or stale-window cleanup clears the tracked
   status artifact before normal cleanup continues

@@ -18,11 +18,26 @@ Key components:
 
 import asyncio
 import logging
+import re
+import shlex
 import time
+from pathlib import Path
 
 from telegram import Bot
 from telegram.error import BadRequest
 
+from ..runtime_discontinuity import (
+    build_discontinuity_image_data,
+    build_live_surface_loss_fallback_summary,
+    build_live_surface_loss_notice,
+    build_runtime_termination_fallback_summary,
+    extract_codex_termination_summary_from_rollout,
+    extract_nonzero_exit_code_from_rollout,
+    extract_terminal_tail_block,
+    is_codex_termination_summary_text,
+)
+from ..runtime_types import WARNING_SEMANTIC_KIND
+from ..runtime_types import runtime_capability_registry
 from ..session import session_manager
 from ..terminal_parser import classify_input_surface, extract_pending_input_preview
 from ..tmux_manager import tmux_manager
@@ -32,8 +47,10 @@ from .interactive_ui import (
     handle_interactive_ui,
 )
 from .cleanup import clear_topic_state
+from .message_sender import send_photo, send_with_fallback
 from .message_queue import (
     current_turn_generation,
+    enqueue_content_message,
     enqueue_pending_input_update,
     enqueue_status_update,
     get_message_queue,
@@ -46,6 +63,18 @@ STATUS_POLL_INTERVAL = 1.0  # seconds - faster response (rate limiting at send l
 
 # Topic existence probe interval
 TOPIC_CHECK_INTERVAL = 60.0  # seconds
+
+# Runtime-presence tracking per user-bound live window. This lets us emit a
+# discontinuity notice once when a live Codex pane falls back to shell while
+# preserving normal status polling for active panes, without colliding multiple
+# no-topics main-chat surfaces that all share `thread_id is None`.
+_runtime_presence: dict[tuple[int, str], bool] = {}
+_last_pane_text: dict[str, str] = {}
+_USAGE_LIMIT_NOTICE_RE = re.compile(
+    r"(you've hit your usage limit|purchase more credits|credits?\b.*try again at|usage to purchase more credits)",
+    re.IGNORECASE,
+)
+_SHELL_PROMPT_RE = re.compile(r"^[^\n]*[#$>]\s*$")
 
 
 def _clip_pending_input_line(text: str, *, max_chars: int = 96) -> str:
@@ -84,6 +113,369 @@ def _build_pending_input_text(pane_text: str) -> str | None:
     return "\n".join(parts)
 
 
+def _extract_usage_limit_notice(pane_text: str) -> str | None:
+    """Extract a durable usage-limit banner from visible terminal text."""
+    if not pane_text:
+        return None
+    lines = [line.rstrip() for line in pane_text.splitlines()]
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or not _USAGE_LIMIT_NOTICE_RE.search(stripped):
+            continue
+        collected: list[str] = []
+        for candidate in lines[idx:]:
+            piece = candidate.strip()
+            if not piece:
+                if collected:
+                    break
+                continue
+            if piece.startswith("›") and collected:
+                break
+            collected.append(piece)
+        if not collected:
+            continue
+        first = collected[0]
+        if first.startswith("■"):
+            first = "⚠️" + first[1:]
+        elif not first.startswith("⚠️"):
+            first = f"⚠️ {first}"
+        collected[0] = first
+        return "\n".join(collected)
+    return None
+
+
+def _clear_runtime_presence_for_window(user_id: int, window_id: str) -> None:
+    _runtime_presence.pop((user_id, window_id), None)
+
+
+def mark_runtime_presence_active(
+    user_id: int,
+    thread_id: int | None,
+    window_id: str,
+) -> None:
+    """Mark a control surface as having an active live runtime.
+
+    This supplements poll-based detection for short-lived Codex turns whose
+    live activity can complete between polling intervals. Once live delivery
+    observes any Codex event on a bound surface, a later transition back to a
+    shell prompt can be treated as a real runtime stop.
+    """
+    _runtime_presence[(user_id, window_id)] = True
+
+
+def _infer_known_runtime_kind_from_pane_command(command: str) -> str | None:
+    normalized = (command or "").strip()
+    if not normalized:
+        return None
+    try:
+        tokens = shlex.split(normalized)
+    except ValueError:
+        tokens = normalized.split()
+    if not tokens:
+        return None
+    inferred = runtime_capability_registry.infer_runtime_kind_from_command(normalized)
+    if inferred == runtime_capability_registry.default_runtime_kind:
+        executable = Path(tokens[0]).name.casefold()
+        default_capability = runtime_capability_registry.get(
+            runtime_capability_registry.default_runtime_kind
+        )
+        aliases = {
+            default_capability.launch_command_name.casefold(),
+            *(alias.casefold() for alias in default_capability.command_aliases),
+        }
+        if executable not in aliases:
+            return None
+    return inferred
+
+
+def _last_nonempty_pane_line(pane_text: str) -> str:
+    for line in reversed((pane_text or "").splitlines()):
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def _codex_surface_looks_active(pane_text: str) -> bool:
+    """Best-effort live Codex detection from pane text.
+
+    Production Codex panes often scroll the initial ``OpenAI Codex`` banner out
+    of view while still showing the active footer/status surface (for example
+    ``gpt-5.4 high · 22% left`` or ``tab to queue message``). Treat any
+    recognized Codex input surface as active, and fall back to shell-prompt
+    detection only when the parser cannot classify the visible footer.
+    """
+    text = pane_text or ""
+    if not text.strip():
+        return False
+
+    surface = classify_input_surface(text)
+    if surface.kind in {"busy", "input_ready", "blocked_prompt"}:
+        return True
+
+    last_line = _last_nonempty_pane_line(text)
+    if not last_line:
+        return False
+    if is_codex_termination_summary_text(text):
+        return False
+    if _SHELL_PROMPT_RE.match(last_line):
+        return False
+    return True
+
+
+def _raw_discontinuity_text(
+    *,
+    resolved: object | None,
+    pane_text: str | None,
+) -> str | None:
+    thread_id = str(getattr(resolved, "thread_id", "") or "").strip()
+    file_path = str(getattr(resolved, "file_path", "") or "").strip()
+    if thread_id and file_path:
+        raw = extract_codex_termination_summary_from_rollout(
+            file_path,
+            thread_id=thread_id,
+        )
+        if raw:
+            return raw
+    return extract_terminal_tail_block(pane_text)
+
+
+def _nonzero_exit_code(resolved: object | None) -> int | None:
+    file_path = str(getattr(resolved, "file_path", "") or "").strip()
+    if not file_path:
+        return None
+    return extract_nonzero_exit_code_from_rollout(file_path)
+
+
+async def _enqueue_discontinuity_warning(
+    bot: Bot,
+    *,
+    user_id: int,
+    window_id: str,
+    thread_id: int | None,
+    text: str | None,
+    image_data: list[tuple[str, bytes]] | None = None,
+    warning_key: str,
+) -> None:
+    parts = [text] if text else []
+    await enqueue_content_message(
+        bot=bot,
+        user_id=user_id,
+        window_id=window_id,
+        parts=parts,
+        content_type="warning",
+        semantic_kind=WARNING_SEMANTIC_KIND,
+        text=text,
+        thread_id=thread_id,
+        image_data=image_data,
+        turn_generation=current_turn_generation(user_id, thread_id),
+        warning_key=warning_key,
+    )
+
+
+async def _maybe_enqueue_runtime_exit_warning(
+    bot: Bot,
+    *,
+    user_id: int,
+    window_id: str,
+    thread_id: int | None,
+    pane_command: str,
+    pane_text: str,
+) -> None:
+    presence_key = (user_id, window_id)
+    expected_runtime = (
+        str(session_manager.get_process_descriptor(window_id).runtime_kind or "").strip()
+    )
+    observed = _runtime_presence.get(presence_key)
+
+    pane_command_text = pane_command if isinstance(pane_command, str) else ""
+    current_runtime = _infer_known_runtime_kind_from_pane_command(pane_command_text)
+    runtime_active = expected_runtime == "codex" and (
+        current_runtime == expected_runtime or _codex_surface_looks_active(pane_text)
+    )
+
+    if runtime_active:
+        _runtime_presence[presence_key] = True
+        return
+
+    previously_active = bool(observed)
+    _runtime_presence[presence_key] = False
+    if not previously_active:
+        return
+
+    resolved = await session_manager.resolve_thread_for_window(window_id)
+    raw_text = _raw_discontinuity_text(resolved=resolved, pane_text=pane_text)
+    exit_code = _nonzero_exit_code(resolved)
+    image_data = await build_discontinuity_image_data(pane_text)
+    if raw_text is None:
+        text = build_runtime_termination_fallback_summary(exit_code=exit_code)
+    else:
+        text = raw_text
+    logger.info(
+        "Runtime exit warning enqueued: user=%d window=%s thread=%s pane_command=%s surface_kind=%s last_line=%r replay_summary=%s exit_code=%s",
+        user_id,
+        window_id,
+        thread_id,
+        pane_command_text,
+        classify_input_surface(pane_text).kind,
+        _last_nonempty_pane_line(pane_text),
+        bool(raw_text),
+        exit_code,
+    )
+    await _enqueue_discontinuity_warning(
+        bot,
+        user_id=user_id,
+        window_id=window_id,
+        thread_id=thread_id,
+        text=text,
+        image_data=image_data,
+        warning_key=f"runtime-discontinuity:exit:{window_id}",
+    )
+
+
+async def _transition_missing_window_binding(
+    bot: Bot,
+    *,
+    user_id: int,
+    thread_id: int | None,
+    window_id: str,
+    surface_key: str | None = None,
+    chat_id: int | None = None,
+) -> None:
+    resolved = await session_manager.resolve_thread_for_window(window_id)
+    resolved_thread_id = str(getattr(resolved, "thread_id", "") or "").strip()
+    resolved_file_path = str(getattr(resolved, "file_path", "") or "").strip()
+    resolved_runtime_kind = (
+        str(getattr(resolved, "runtime_kind", "") or "codex").strip() or "codex"
+    )
+    resolved_summary = (
+        str(getattr(resolved, "summary", "") or resolved_thread_id).strip()
+        or resolved_thread_id
+    )
+    resolved_cwd = str(getattr(resolved, "cwd", "") or "").strip()
+    replay_readable = bool(
+        resolved and resolved_thread_id and resolved_file_path and Path(resolved_file_path).exists()
+    )
+    pane_snapshot = _last_pane_text.pop(window_id, None)
+    raw_text = _raw_discontinuity_text(
+        resolved=resolved,
+        pane_text=pane_snapshot,
+    )
+    exit_code = _nonzero_exit_code(resolved)
+    image_data = await build_discontinuity_image_data(pane_snapshot)
+
+    if replay_readable and resolved is not None and resolved_thread_id:
+        if thread_id is None:
+            resolved_chat_id = chat_id if chat_id is not None else session_manager.resolve_chat_id(user_id, None)
+            rebound_window_id = session_manager.bind_external_surface(
+                user_id,
+                runtime_kind=resolved_runtime_kind,
+                source_thread_id=resolved_thread_id,
+                summary=resolved_summary,
+                cwd=resolved_cwd,
+                file_path=resolved_file_path,
+                read_only=True,
+                surface_key=surface_key,
+                chat_id=resolved_chat_id,
+            )
+        else:
+            rebound_window_id = session_manager.bind_external_surface(
+                user_id,
+                runtime_kind=resolved_runtime_kind,
+                source_thread_id=resolved_thread_id,
+                summary=resolved_summary,
+                cwd=resolved_cwd,
+                file_path=resolved_file_path,
+                read_only=True,
+                surface_key=surface_key,
+                thread_id=thread_id,
+            )
+        await clear_topic_state(user_id, thread_id, bot)
+        if raw_text:
+            await _enqueue_discontinuity_warning(
+                bot,
+                user_id=user_id,
+                window_id=rebound_window_id,
+                thread_id=thread_id,
+                text=raw_text,
+                image_data=image_data,
+                warning_key=f"runtime-discontinuity:window-loss:{window_id}",
+            )
+        await _enqueue_discontinuity_warning(
+            bot,
+            user_id=user_id,
+            window_id=rebound_window_id,
+            thread_id=thread_id,
+            text=(
+                build_live_surface_loss_notice(
+                    window_name=session_manager.get_display_name(window_id),
+                    replay_readable=replay_readable,
+                )
+                if raw_text
+                else build_live_surface_loss_fallback_summary(
+                    window_name=session_manager.get_display_name(window_id),
+                    replay_readable=replay_readable,
+                    exit_code=exit_code,
+                )
+            ),
+            image_data=None if raw_text else image_data,
+            warning_key=f"runtime-discontinuity:window-loss-notice:{window_id}",
+        )
+        logger.info(
+            "Converted stale tmux binding to external continuity: user=%d thread=%s window_id=%s external=%s replay_readable=%s",
+            user_id,
+            thread_id,
+            window_id,
+            rebound_window_id,
+            replay_readable,
+        )
+        _clear_runtime_presence_for_window(user_id, window_id)
+        return
+
+    resolved_chat_id = chat_id if thread_id is None and chat_id is not None else session_manager.resolve_chat_id(user_id, thread_id)
+    if image_data:
+        await send_photo(
+            bot,
+            resolved_chat_id,
+            image_data,
+            **({"message_thread_id": thread_id} if thread_id is not None else {}),
+        )
+    await send_with_fallback(
+        bot,
+        resolved_chat_id,
+        build_live_surface_loss_fallback_summary(
+            window_name=session_manager.get_display_name(window_id),
+            replay_readable=False,
+            exit_code=exit_code,
+        ),
+        **({"message_thread_id": thread_id} if thread_id is not None else {}),
+    )
+    if thread_id is None:
+        if surface_key is not None:
+            session_manager.unbind_surface(user_id, surface_key=surface_key)
+        else:
+            resolved_chat_id = chat_id if chat_id is not None else session_manager.resolve_chat_id(user_id, None)
+            if resolved_chat_id != user_id:
+                session_manager.unbind_surface(user_id, chat_id=resolved_chat_id)
+            else:
+                logger.warning(
+                    "Unable to resolve chat id for stale main-chat binding "
+                    "(user=%d, window_id=%s)",
+                    user_id,
+                    window_id,
+                )
+    else:
+        session_manager.unbind_thread(user_id, thread_id)
+    await clear_topic_state(user_id, thread_id, bot)
+    _clear_runtime_presence_for_window(user_id, window_id)
+    logger.info(
+        "Detached stale binding with no replay continuity: user=%d thread=%s window_id=%s",
+        user_id,
+        thread_id,
+        window_id,
+    )
+
+
 async def update_status_message(
     bot: Bot,
     user_id: int,
@@ -101,8 +493,21 @@ async def update_status_message(
     interactive mode when found.
     """
     turn_generation = current_turn_generation(user_id, thread_id)
+    if session_manager.is_external_binding_window_id(window_id) is True:
+        _clear_runtime_presence_for_window(user_id, window_id)
+        if not skip_status:
+            await enqueue_status_update(
+                bot,
+                user_id,
+                window_id,
+                None,
+                thread_id=thread_id,
+                turn_generation=turn_generation,
+            )
+        return
     w = await tmux_manager.find_window_by_id(window_id)
     if not w:
+        _clear_runtime_presence_for_window(user_id, window_id)
         # Window gone, enqueue clear (unless skipping status)
         if not skip_status:
             await enqueue_status_update(
@@ -119,6 +524,7 @@ async def update_status_message(
     if not pane_text:
         # Transient capture failure - keep existing status message
         return
+    _last_pane_text[window_id] = pane_text
     surface = classify_input_surface(pane_text)
     pending_input_text = _build_pending_input_text(pane_text)
     await enqueue_pending_input_update(
@@ -127,6 +533,32 @@ async def update_status_message(
         window_id,
         pending_input_text,
         thread_id=thread_id,
+    )
+
+    usage_limit_notice = _extract_usage_limit_notice(pane_text)
+    if usage_limit_notice:
+        await clear_interactive_msg(user_id, bot, thread_id)
+        await enqueue_content_message(
+            bot=bot,
+            user_id=user_id,
+            window_id=window_id,
+            parts=[usage_limit_notice],
+            content_type="warning",
+            semantic_kind=WARNING_SEMANTIC_KIND,
+            text=usage_limit_notice,
+            thread_id=thread_id,
+            turn_generation=turn_generation,
+            warning_key=f"usage-limit:{window_id}",
+        )
+        return
+
+    await _maybe_enqueue_runtime_exit_warning(
+        bot,
+        user_id=user_id,
+        window_id=window_id,
+        thread_id=thread_id,
+        pane_command=getattr(w, "pane_current_command", ""),
+        pane_text=pane_text,
     )
 
     interactive_window = get_interactive_window(user_id, thread_id)
@@ -219,30 +651,25 @@ async def status_poll_loop(bot: Bot) -> None:
                             e,
                         )
 
-            for user_id, thread_id, wid in list(session_manager.iter_thread_bindings()):
+            for binding in list(session_manager.iter_topic_bindings()):
+                user_id = binding.user_id
+                thread_id = binding.thread_id
+                wid = binding.window_id
                 try:
+                    if session_manager.is_external_binding_window_id(wid) is True:
+                        _clear_runtime_presence_for_window(user_id, wid)
+                        continue
                     # Clean up stale bindings (window no longer exists)
                     w = await tmux_manager.find_window_by_id(wid)
                     if not w:
-                        if thread_id is None:
-                            chat_id = session_manager.resolve_chat_id(user_id, None)
-                            if chat_id != user_id:
-                                session_manager.unbind_surface(user_id, chat_id=chat_id)
-                            else:
-                                logger.warning(
-                                    "Unable to resolve chat id for stale main-chat binding "
-                                    "(user=%d, window_id=%s)",
-                                    user_id,
-                                    wid,
-                                )
-                        else:
-                            session_manager.unbind_thread(user_id, thread_id)
-                        await clear_topic_state(user_id, thread_id, bot)
-                        logger.info(
-                            "Cleaned up stale binding: user=%d thread=%s window_id=%s",
-                            user_id,
-                            thread_id,
-                            wid,
+                        surface_key, chat_id, resolved_thread_id = session_manager.get_surface_coordinates_for_window(user_id, wid)
+                        await _transition_missing_window_binding(
+                            bot,
+                            user_id=user_id,
+                            thread_id=thread_id if thread_id is not None else resolved_thread_id,
+                            window_id=wid,
+                            surface_key=surface_key,
+                            chat_id=chat_id,
                         )
                         continue
 
