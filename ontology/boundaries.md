@@ -31,6 +31,12 @@ Accepted order of priority:
 This is not anti-ACP. It is a boundary claim: human observability, injection,
 and operator control outrank protocol purity for the live execution surface.
 
+Telegram text injection into a writable live tmux binding is a two-step
+operator-layer act: deliver the payload, then deliver the runtime submit key.
+Raw paste success alone is not a message-layer turn opener. Paste failure or
+submit failure must surface as explicit delivery failure rather than as a
+successful queued message.
+
 ## Replay Evidence Write Ownership
 
 Replay evidence is written by:

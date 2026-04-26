@@ -298,6 +298,9 @@ Routing note:
 - Telegram text and voice inputs enter the equal message layer in `queue` mode by default.
 - `steer` is a routing semantic for runtime-aware control flows; it is not the same thing as raw terminal takeover.
 - Raw terminal control in tmux remains a separate operator layer and is never modeled as an ordinary queued message.
+- Multiline text sent to a writable live tmux runtime is pasted as one
+  bracketed-paste-aware payload and then submitted with a separate runtime
+  submit key; paste-only success is not considered successful message delivery.
 - Pending-input previews preserve queued message text literally (except explicit
   Codex checkbox marker glyph stripping), so command-like user text does not
   get normalized away.

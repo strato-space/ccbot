@@ -3,6 +3,16 @@ import pytest
 from ccbot.tmux_manager import TmuxManager, TmuxWindow
 
 
+class _FakeProcess:
+    def __init__(self, returncode: int, communicated: list[bytes | None]) -> None:
+        self.returncode = returncode
+        self._communicated = communicated
+
+    async def communicate(self, stdin: bytes | None = None) -> tuple[bytes, bytes]:
+        self._communicated.append(stdin)
+        return b"", b""
+
+
 class _FakePane:
     def __init__(self) -> None:
         self.commands: list[tuple[str, bool]] = []
@@ -38,6 +48,58 @@ class _RecordingSession:
         self.created_names.append(window_name)
         self._window.window_name = window_name
         return self._window
+
+
+@pytest.mark.asyncio
+async def test_send_submit_key_uses_c_m_without_literal_or_extra_enter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = TmuxManager(session_name="ccbot-test")
+    calls: list[tuple[str, str, bool, bool]] = []
+
+    async def _send_keys(
+        window_id: str,
+        text: str,
+        *,
+        enter: bool,
+        literal: bool,
+    ) -> bool:
+        calls.append((window_id, text, enter, literal))
+        return True
+
+    monkeypatch.setattr(manager, "_send_keys", _send_keys)
+
+    assert await manager.send_submit_key("@1") is True
+    assert calls == [("@1", "C-m", False, False)]
+
+
+@pytest.mark.asyncio
+async def test_send_pasted_text_uses_tmux_buffer_paste_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = TmuxManager(session_name="ccbot-test")
+    commands: list[tuple[str, ...]] = []
+    communicated: list[bytes | None] = []
+
+    async def _create_subprocess_exec(*args, **_kwargs):
+        commands.append(tuple(args))
+        return _FakeProcess(0, communicated)
+
+    monkeypatch.setattr(
+        "ccbot.tmux_manager.asyncio.create_subprocess_exec",
+        _create_subprocess_exec,
+    )
+    monkeypatch.setattr(
+        "ccbot.tmux_manager.uuid.uuid4",
+        lambda: type("FakeUuid", (), {"hex": "abc123"})(),
+    )
+
+    assert await manager.send_pasted_text("@1", "a\nb") is True
+    assert commands == [
+        ("tmux", "load-buffer", "-b", "ccbot-abc123", "-"),
+        ("tmux", "paste-buffer", "-p", "-d", "-b", "ccbot-abc123", "-t", "@1"),
+    ]
+    assert communicated == [b"a\nb", None]
 
 
 @pytest.mark.asyncio

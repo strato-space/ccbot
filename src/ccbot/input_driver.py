@@ -252,16 +252,34 @@ class RuntimeInputDriver:
                 if not await self._tmux.send_literal_text(window_id, rest):
                     return False, "Failed to send shell-command body"
         else:
-            if not await self._tmux.send_literal_text(window_id, text):
+            multiline = "\n" in text
+            if multiline:
+                if not await self._tmux.send_pasted_text(window_id, text):
+                    return False, "Failed to paste multiline text"
+                logger.debug(
+                    "Pasted multiline text to %s via tmux paste-buffer "
+                    "(runtime=%s, chars=%d)",
+                    window_id,
+                    runtime_kind,
+                    len(text),
+                )
+            elif not await self._tmux.send_literal_text(window_id, text):
                 return False, "Failed to send text"
 
         if not submit:
             return True, f"Sent text to {window_id}"
 
         await asyncio.sleep(self._submit_delay)
-        if not await self._tmux.send_enter(window_id):
+        if not await self._send_submit_key(window_id):
             return False, "Failed to submit text"
         return True, f"Sent text to {window_id}"
+
+    async def _send_submit_key(self, window_id: str) -> bool:
+        """Submit typed text using the tmux key path reserved for text turns."""
+        send_submit_key = getattr(self._tmux, "send_submit_key", None)
+        if send_submit_key is not None:
+            return await send_submit_key(window_id)
+        return await self._tmux.send_enter(window_id)
 
     async def _send_special_key(
         self,

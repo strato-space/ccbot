@@ -367,6 +367,17 @@ Raw terminal control is not part of this equal message layer.
 Direct human `tmux` input remains a separate operator intervention surface and
 is not modeled as an ordinary queued semantic message.
 
+For writable live tmux bindings, queued Telegram text enters that operator
+surface as an injection operation with distinct phases:
+
+- payload delivery
+- runtime submit-key delivery
+
+Multiline text is injected through tmux's paste-buffer path so alternate-screen
+TUIs such as Codex can treat it as one paste event. A paste-only success is not
+a turn opener; if payload delivery or submit-key delivery fails, the bot must
+return an explicit delivery failure instead of reporting the message as sent.
+
 External-thread bind follows the same split:
 
 - replay/event delivery may remain active without tmux

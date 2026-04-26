@@ -237,6 +237,9 @@ T1 ──┬── T2 ──┬── T3 ──┬── T4 ──┬── T6 �
   - Added `input_driver.py` as the Codex-oriented input layer that owns submit timing, shell-transition splitting for `!`, multiline paste, raw slash-command dispatch, and explicit special-key handling.
   - Refactored `session.py` and `bot.py` to route text and control input through the driver instead of direct Claude-shaped `send_keys` calls, with unsupported controls failing closed.
   - Added conservative terminal-surface classification in `terminal_parser.py` for future prompt-safe input gating and added focused tests for driver semantics, session routing, bot contracts, and parser classification.
+  - 2026-04-26 `server-np4` repair: multiline text submission now uses tmux
+    paste-buffer payload delivery followed by a separate `C-m` submit key, so
+    paste-only success is not reported as a completed queued message.
   - Validated with focused `pytest` and `ruff check` on the touched files.
 - **files edited/created**:
   - `/home/tools/ccbot/src/ccbot/input_driver.py`

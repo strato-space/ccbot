@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shlex
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -317,6 +318,70 @@ class TmuxManager:
     async def send_literal_text(self, window_id: str, text: str) -> bool:
         """Send literal text to a pane without submitting it."""
         return await self._send_keys(window_id, text, enter=False, literal=True)
+
+    async def send_pasted_text(self, window_id: str, text: str) -> bool:
+        """Paste text through tmux's bracketed-paste aware buffer path.
+
+        This is used for multiline runtime input. Unlike ``send-keys -l``,
+        ``paste-buffer -p`` lets alternate-screen TUIs that support bracketed
+        paste treat the payload as one paste event rather than as a fast stream
+        of character and Enter key events.
+        """
+        if not text:
+            return False
+
+        buffer_name = f"ccbot-{uuid.uuid4().hex}"
+
+        async def _run_tmux(*args: str, stdin: bytes | None = None) -> bool:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "tmux",
+                    *args,
+                    stdin=asyncio.subprocess.PIPE if stdin is not None else None,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await proc.communicate(stdin)
+                if proc.returncode == 0:
+                    return True
+                logger.error(
+                    "tmux %s failed for window %s: %s",
+                    " ".join(args[:1]),
+                    window_id,
+                    stderr.decode("utf-8", errors="replace").strip(),
+                )
+                return False
+            except Exception as e:
+                logger.error("Failed to run tmux for pasted text to %s: %s", window_id, e)
+                return False
+
+        loaded = await _run_tmux(
+            "load-buffer",
+            "-b",
+            buffer_name,
+            "-",
+            stdin=text.encode("utf-8"),
+        )
+        if not loaded:
+            return False
+
+        pasted = await _run_tmux(
+            "paste-buffer",
+            "-p",
+            "-d",
+            "-b",
+            buffer_name,
+            "-t",
+            window_id,
+        )
+        if not pasted:
+            await _run_tmux("delete-buffer", "-b", buffer_name)
+            return False
+        return True
+
+    async def send_submit_key(self, window_id: str) -> bool:
+        """Send the canonical carriage-return submit key for text input."""
+        return await self._send_keys(window_id, "C-m", enter=False, literal=False)
 
     async def send_key(self, window_id: str, key: str) -> bool:
         """Send a named tmux key such as Escape, Up, Tab, or C-c."""
