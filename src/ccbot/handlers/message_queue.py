@@ -2175,6 +2175,12 @@ def open_new_turn_generation(
     generation = _turn_generations.get(key, 0) + 1
     _turn_generations[key] = generation
     reopen_pre_final_visible_lane(user_id, thread_id)
+    # Plan artifacts are latest-only within one assistant turn. Reusing an old
+    # plan bubble across a new user turn edits history above the current chat
+    # tail, making the plan appear missing even though Telegram accepted the
+    # edit. Drop only the pointer; the old message remains as historical
+    # evidence and the next plan update opens a fresh visible bubble.
+    _plan_update_msg_info.pop(key, None)
     return generation
 
 

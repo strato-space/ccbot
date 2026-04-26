@@ -1655,3 +1655,14 @@ async def test_poll_only_write_stdin_updates_existing_status_bubble(
     assert rows[-1]["semantic_kind"] == "technical_status"
 
     mq._status_msg_info.clear()
+
+
+def test_open_new_turn_generation_does_not_reuse_previous_plan_artifact() -> None:
+    _plan_update_msg_info[(1, 42)] = (901, "@7", "• Updated Plan\n  ☑ Old")
+    try:
+        generation = open_new_turn_generation(1, 42)
+        assert generation >= 1
+        assert (1, 42) not in _plan_update_msg_info
+    finally:
+        clear_commentary_lane_state(1, 42)
+        _plan_update_msg_info.pop((1, 42), None)

@@ -74,7 +74,9 @@ The delivery pipeline keeps:
 
 - one mutable progress/status artifact per `(user_id, control surface)`
 - one latest-only visible commentary artifact per `(user_id, control surface)`
-- one mutable plan-update artifact per `(user_id, control surface)`
+- one mutable plan-update artifact per `(user_id, control surface)` within the
+  current assistant turn; opening a new user turn drops the old tracking pointer
+  so a new plan appears at the chat tail rather than editing history up-thread
 - one mutable pending-input artifact per `(user_id, control surface)`
 - one ordered content queue per user
 - one current turn generation per `(user_id, control surface)`
