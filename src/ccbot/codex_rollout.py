@@ -110,6 +110,12 @@ def _json_fragment(value: Any) -> str:
         return str(value)
 
 
+def _tool_name_is(name: str | None, expected: str) -> bool:
+    lowered = (name or "").strip().lower()
+    expected_lower = expected.lower()
+    return lowered == expected_lower or lowered.endswith(f".{expected_lower}")
+
+
 def _text_from_content(content: Any) -> str:
     if isinstance(content, list):
         parts: list[str] = []
@@ -384,13 +390,15 @@ def _tool_call_summary(name: str, arguments: Any) -> str:
 
     if isinstance(arguments, str):
         text = arguments.strip()
-        if lowered == "apply_patch":
+        if _tool_name_is(lowered, "apply_patch"):
             line_count = len(text.splitlines())
             return f"{name}(patch {line_count} lines)"
-        if lowered.endswith("state_write") or lowered in {"state_write", "omx_state.state_write"}:
-            parsed_arguments = _structured_json(text)
-            if isinstance(parsed_arguments, dict):
-                return _tool_call_summary(name, parsed_arguments)
+        parsed_arguments = _structured_json(text)
+        if isinstance(parsed_arguments, dict) and any(
+            _tool_name_is(lowered, expected)
+            for expected in ("exec_command", "write_stdin", "apply_patch", "state_write")
+        ):
+            return _tool_call_summary(name, parsed_arguments)
         json_block = _tool_json_code_block(text)
         if json_block:
             return "\n".join([name, json_block])
@@ -398,7 +406,7 @@ def _tool_call_summary(name: str, arguments: Any) -> str:
         return f"{name}({summary})" if summary else name
 
     if isinstance(arguments, dict):
-        if lowered == "exec_command":
+        if _tool_name_is(lowered, "exec_command"):
             cmd = _as_text(arguments.get("cmd")).strip()
             workdir = _as_text(arguments.get("workdir")).strip()
             parts = ["exec_command"]
@@ -408,7 +416,7 @@ def _tool_call_summary(name: str, arguments: Any) -> str:
             if workdir:
                 parts.append(_compact_inline(workdir, max_chars=120))
             return "\n".join(part for part in parts if part)
-        if lowered == "write_stdin":
+        if _tool_name_is(lowered, "write_stdin"):
             session_id = _as_text(arguments.get("session_id")).strip()
             chars = _as_text(arguments.get("chars"))
             if chars.strip():
@@ -421,11 +429,11 @@ def _tool_call_summary(name: str, arguments: Any) -> str:
             if session_id:
                 return f"write_stdin(session {session_id}, poll)"
             return "write_stdin(poll)"
-        if lowered == "apply_patch":
+        if _tool_name_is(lowered, "apply_patch"):
             patch_text = _as_text(arguments.get("patch") or arguments.get("input")).strip()
             if patch_text:
                 return f"{name}(patch {len(patch_text.splitlines())} lines)"
-        if lowered.endswith("state_write") or lowered in {"state_write", "omx_state.state_write"}:
+        if _tool_name_is(lowered, "state_write"):
             mode = _as_text(arguments.get("mode")).strip() or "state"
             phase = _as_text(arguments.get("current_phase")).strip()
             active = arguments.get("active")
@@ -485,7 +493,7 @@ def _tool_output_summary(tool_name: str | None, text: str) -> str:
         return f"Updated {file_count} file(s)"
 
     lowered = (tool_name or "").lower()
-    if lowered == "exec_command":
+    if _tool_name_is(lowered, "exec_command"):
         preview = _tool_json_code_block(text, max_lines=20) or _tool_text_code_block(
             text,
             language="sh",
@@ -494,7 +502,7 @@ def _tool_output_summary(tool_name: str | None, text: str) -> str:
         if preview:
             return preview
         return f"output {len(lines)} line(s)"
-    if lowered == "write_stdin":
+    if _tool_name_is(lowered, "write_stdin"):
         preview = _tool_json_code_block(text, max_lines=20) or _tool_text_code_block(
             text,
             language="text",

@@ -51,7 +51,7 @@ _STATUS_ONLY_SEMANTIC_KINDS = {
     COMMAND_EXECUTION_SEMANTIC_KIND,
     FILE_CHANGE_SEMANTIC_KIND,
 }
-_COMPACT_STATUS_LIMIT = 280
+_COMPACT_STATUS_LIMIT = 560
 
 
 def is_internal_user_payload(text: str) -> bool:
@@ -79,8 +79,6 @@ def _clip_inline(text: str, *, max_chars: int) -> str:
 
 def _compact_single_block(text: str, *, max_chars: int = _COMPACT_STATUS_LIMIT) -> str:
     text = text.strip()
-    if len(text) <= max_chars:
-        return text
     if "```" in text:
         lines = text.splitlines()
         fence_start = next(
@@ -105,13 +103,19 @@ def _compact_single_block(text: str, *, max_chars: int = _COMPACT_STATUS_LIMIT) 
             else:
                 body = lines[fence_start + 1 : close_index]
                 trailing = lines[close_index + 1 :]
+            if (
+                len(text) <= max_chars
+                and len([line for line in body if line.strip()]) <= 10
+                and not [line for line in trailing if line.strip()]
+            ):
+                return text
             prefix_lines = [
                 _clip_inline(line, max_chars=80)
                 for line in lines[:fence_start]
                 if line.strip()
             ][:2]
             clipped_body = [
-                _clip_inline(line, max_chars=72) for line in body[:5]
+                _clip_inline(line, max_chars=72) for line in body[:10]
             ]
             compact_lines = [*prefix_lines, lines[fence_start], *clipped_body, "```"]
             omitted = (
@@ -159,6 +163,8 @@ def _compact_single_block(text: str, *, max_chars: int = _COMPACT_STATUS_LIMIT) 
             if len(plain) <= max_chars:
                 return plain
             return _clip_inline(" ".join(plain.split()), max_chars=max_chars)
+    if len(text) <= max_chars:
+        return text
     return text[: max_chars - 1].rstrip() + "…"
 
 

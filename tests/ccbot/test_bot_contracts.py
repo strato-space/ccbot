@@ -2490,7 +2490,7 @@ class TestTelegramDelivery:
         assert projected.status_message_eligible is True
         assert projected.text.count("```") % 2 == 0
         assert "\n```\n\npreview " in projected.text
-        assert len(projected.text) <= 280
+        assert len(projected.text) <= 560
 
     def test_compact_policy_clips_oversized_first_code_line_within_budget(self):
         event = NormalizedEvent(
@@ -2508,7 +2508,7 @@ class TestTelegramDelivery:
 
         assert projected.status_message_eligible is True
         assert projected.text.count("```") % 2 == 0
-        assert len(projected.text) <= 280
+        assert len(projected.text) <= 560
         assert "\n```\n\npreview " in projected.text
 
     def test_compact_policy_keeps_balanced_code_fence_with_prefix_line(self):
@@ -2529,7 +2529,7 @@ class TestTelegramDelivery:
         assert projected.text.startswith("completed\n```sh\n")
         assert projected.text.count("```") % 2 == 0
         assert "\n```\n\npreview " in projected.text
-        assert len(projected.text) <= 280
+        assert len(projected.text) <= 560
 
     def test_compact_policy_overflow_fallback_never_leaves_unbalanced_fence(self):
         event = NormalizedEvent(
@@ -2549,7 +2549,7 @@ class TestTelegramDelivery:
         projected = apply_telegram_delivery_policy(event, mode="compact")
 
         assert projected.status_message_eligible is True
-        assert len(projected.text) <= 280
+        assert len(projected.text) <= 560
         assert projected.text.count("```") in {0, 2}
 
     def test_compact_policy_forces_dispatch_for_ordinary_user_echo(self):
@@ -2571,3 +2571,25 @@ class TestTelegramDelivery:
         assert projected.include_in_history is True
         assert projected.status_message_eligible is False
         assert projected.is_complete is True
+
+
+def test_compact_policy_status_preview_shows_ten_code_lines_after_budget_increase():
+    from ccbot.runtime_types import NormalizedEvent
+    from ccbot.telegram_delivery_policy import apply_telegram_delivery_policy
+
+    event = NormalizedEvent(
+        thread_id="thread-1",
+        text="```sh\n" + "\n".join(f"line {i}" for i in range(20)) + "\n```",
+        is_complete=True,
+        content_type="command_execution",
+        role="assistant",
+        event_kind="command_execution",
+    )
+
+    projected = apply_telegram_delivery_policy(event, mode="compact")
+
+    assert projected.status_message_eligible is True
+    assert "line 9" in projected.text
+    assert "line 10" not in projected.text
+    assert "preview 10/20 lines" in projected.text
+    assert len(projected.text) <= 560

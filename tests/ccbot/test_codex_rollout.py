@@ -1674,3 +1674,31 @@ def test_codex_rollout_summarizes_omx_state_write_without_raw_json() -> None:
     assert "phase=starting" in events[0].text
     assert "Idle-safe InfiniteTalk runner" in events[0].text
     assert '"mode"' not in events[0].text
+
+
+def test_codex_rollout_formats_namespaced_exec_command_as_shell_preview() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-26T18:00:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "functions.exec_command",
+                "call_id": "call_exec",
+                "arguments": json.dumps(
+                    {
+                        "cmd": "/bin/bash -lc 'echo one && echo two'",
+                        "workdir": "/home/tools/ccbot",
+                    }
+                ),
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].tool_name == "functions.exec_command"
+    assert "```sh" in events[0].text
+    assert "echo one && echo two" in events[0].text
+    assert '"cmd"' not in events[0].text
