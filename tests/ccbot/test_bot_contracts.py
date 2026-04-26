@@ -2359,6 +2359,11 @@ class TestTelegramDelivery:
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=0),
             patch("ccbot.bot.open_new_turn_generation", return_value=1) as mock_open_turn,
+            patch(
+                "ccbot.bot.flush_terminal_artifacts_before_new_turn",
+                new_callable=AsyncMock,
+                return_value=1,
+            ) as mock_flush_terminal,
             patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
             patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
             patch("ccbot.bot.get_interactive_msg_id", return_value=None),
@@ -2368,6 +2373,7 @@ class TestTelegramDelivery:
 
             await bot_mod.handle_new_message(msg, bot)
 
+        mock_flush_terminal.assert_awaited_once_with(bot, 1, 42)
         mock_open_turn.assert_called_once_with(1, 42)
         mock_status.assert_not_awaited()
         mock_content.assert_awaited_once()

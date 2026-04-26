@@ -162,6 +162,7 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "usage-limit / quota-exhaustion notices" in delivery
     assert "serialized into multiple Telegram" in delivery
     assert "fresh message sequence" in delivery
+    assert "before a new user turn advances" in delivery
     assert "repeat counter only when `N > 2`" in delivery
     assert "visibility-first mutable" in delivery
     assert "must drop rather than reopen the lane" in delivery

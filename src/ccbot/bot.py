@@ -128,6 +128,7 @@ from .handlers.message_queue import (
     enqueue_content_message,
     enqueue_plan_update,
     enqueue_status_update,
+    flush_terminal_artifacts_before_new_turn,
     get_message_queue,
     is_pre_final_visible_lane_closed,
     open_new_turn_generation,
@@ -3461,6 +3462,7 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
 
         turn_generation = current_turn_generation(user_id, thread_id)
         if opens_new_turn:
+            await flush_terminal_artifacts_before_new_turn(bot, user_id, thread_id)
             turn_generation = open_new_turn_generation(user_id, thread_id)
         elif is_turn_started_lifecycle and is_pre_final_visible_lane_closed(
             user_id, thread_id

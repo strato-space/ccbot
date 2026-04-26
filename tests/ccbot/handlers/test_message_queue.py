@@ -1,10 +1,12 @@
 """Focused tests for message queue merge invariants and stale-delivery guards."""
 
+import asyncio
 import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+import ccbot.handlers.message_queue as mq
 from ccbot.handlers.message_queue import (
     MessageTask,
     _check_and_send_status,
@@ -22,6 +24,7 @@ from ccbot.handlers.message_queue import (
     current_turn_generation,
     enqueue_pending_input_update,
     enqueue_plan_update,
+    flush_terminal_artifacts_before_new_turn,
     get_message_queue,
     shutdown_workers,
     _mark_commentary_closed,
@@ -1116,6 +1119,83 @@ async def test_stale_turn_final_is_dropped_after_new_generation() -> None:
         mock_send.assert_not_awaited()
     finally:
         clear_commentary_lane_state(1, 42)
+
+
+@pytest.mark.asyncio
+async def test_flush_terminal_artifacts_delivers_final_before_generation_advances() -> None:
+    mq._message_queues[1] = asyncio.Queue()
+    mq._queue_locks[1] = asyncio.Lock()
+    queue = mq._message_queues[1]
+    await queue.put(
+        MessageTask(
+            task_type="status_update",
+            window_id="@7",
+            thread_id=42,
+            text="Working",
+            turn_generation=1,
+        )
+    )
+    await queue.put(
+        MessageTask(
+            task_type="content",
+            window_id="@7",
+            thread_id=42,
+            parts=["Готово.\n\nFinal answer"],
+            content_type="text",
+            semantic_kind="assistant_final",
+            turn_generation=1,
+        )
+    )
+
+    sent_final = AsyncMock()
+    sent_final.message_id = 901
+
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.current_turn_generation",
+                return_value=1,
+            ),
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                return_value=sent_final,
+            ) as mock_send,
+            patch(
+                "ccbot.handlers.message_queue._check_and_send_status",
+                new_callable=AsyncMock,
+            ) as mock_status,
+            patch(
+                "ccbot.handlers.message_queue._send_task_images",
+                new_callable=AsyncMock,
+            ) as mock_images,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+
+            flushed = await flush_terminal_artifacts_before_new_turn(
+                AsyncMock(),
+                1,
+                42,
+            )
+
+        assert flushed == 1
+        mock_send.assert_awaited_once()
+        assert mock_send.await_args.args[2].startswith("Готово.")
+        mock_status.assert_not_awaited()
+        mock_images.assert_awaited_once()
+        assert queue.qsize() == 1
+        remaining = queue.get_nowait()
+        assert remaining.task_type == "status_update"
+        queue.task_done()
+    finally:
+        clear_commentary_lane_state(1, 42)
+        mq._message_queues.pop(1, None)
+        mq._queue_locks.pop(1, None)
 
 
 @pytest.mark.asyncio

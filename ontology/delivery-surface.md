@@ -113,6 +113,9 @@ Technical execution classes include:
   answer
 - the terminal turn artifact is always delivered as a fresh message sequence;
   it must not replace the visible commentary artifact
+- before a new user turn advances the control-surface generation, any already
+  queued terminal turn artifact for the previous generation must be flushed so
+  it is delivered or explicitly send-failed, never silently stale-dropped
 - only after final assistant content has been delivered successfully does the
   pre-final visible surface close
 - only after final assistant content has been delivered successfully does the

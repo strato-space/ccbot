@@ -1021,9 +1021,11 @@ By the end of this tranche:
     turn
   - stale-turn commentary/status/pre-final visible tasks are dropped when
     their generation no longer matches the current topic turn
-  - stale `assistant_final` delivery also fails closed once a newer turn has
-    already opened, so an older turn cannot land below the newer terminal
-    surface
+  - already queued `assistant_final` delivery is flushed before a newer user
+    turn advances the surface generation, so the previous terminal answer is
+    not silently stale-dropped behind technical/status churn
+  - actually late or stale-binding terminal artifacts still fail closed rather
+    than landing below a newer terminal surface
   - stateless Codex one-shot normalization no longer buffers unmatched
     signature-bearing `event_msg` records behind the duplicate window
   - incremental `event_msg.user_message` now opens the new turn immediately,

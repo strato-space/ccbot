@@ -419,6 +419,64 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
             logger.error(f"Unexpected error in queue worker for user {user_id}: {e}")
 
 
+async def flush_terminal_artifacts_before_new_turn(
+    bot: Bot,
+    user_id: int,
+    thread_id: int | None,
+) -> int:
+    """Deliver queued terminal artifacts before a new user turn advances generation.
+
+    A terminal assistant response is the close of the previous turn. It is not
+    ephemeral progress noise, so it must not be stranded behind status updates
+    and then stale-dropped after the next user message opens a new generation.
+
+    The function extracts only already-queued terminal content tasks for the
+    same topic, leaves all other tasks in order, and processes the terminal
+    tasks while the current generation is still valid.
+    """
+    queue = get_message_queue(user_id)
+    lock = _queue_locks.get(user_id)
+    if queue is None or lock is None:
+        return 0
+
+    tid = thread_id or 0
+    terminal_tasks: list[MessageTask] = []
+
+    async with lock:
+        items = _inspect_queue(queue)
+        remaining: list[MessageTask] = []
+        for task in items:
+            if (
+                task.task_type == "content"
+                and (task.thread_id or 0) == tid
+                and task.semantic_kind == ASSISTANT_FINAL_SEMANTIC_KIND
+            ):
+                terminal_tasks.append(task)
+            else:
+                remaining.append(task)
+
+        for task in remaining:
+            queue.put_nowait(task)
+            # The task was already counted when originally queued; compensate
+            # for the new put() so queue.join() accounting remains correct.
+            queue.task_done()
+
+    for task in terminal_tasks:
+        try:
+            await _process_content_task(bot, user_id, task)
+        finally:
+            queue.task_done()
+
+    if terminal_tasks:
+        logger.info(
+            "Flushed %d terminal artifact(s) before new turn: user=%d thread=%s",
+            len(terminal_tasks),
+            user_id,
+            thread_id,
+        )
+    return len(terminal_tasks)
+
+
 def _send_kwargs(thread_id: int | None) -> dict[str, int]:
     """Build message_thread_id kwargs for bot.send_message()."""
     if thread_id is not None:

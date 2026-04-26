@@ -107,13 +107,16 @@ Ordering guarantees:
 11. warning artifacts are not members of the current-turn pre-final surface and
     are not dropped by terminal closure; warning dedup state is keyed by control surface
     and latest warning text
-12. a new user turn advances the control-surface turn generation before the new turn's
-    artifacts are enqueued
-13. stale close tasks from an older generation must fail closed instead of
+12. before a new user turn advances the control-surface turn generation, the
+    queue flushes any already-queued terminal turn artifact for that surface so
+    the previous answer lands before the next turn is opened
+13. a new user turn then advances the control-surface turn generation before the
+    new turn's artifacts are enqueued
+14. stale close tasks from an older generation must fail closed instead of
     reclosing the newer turn's visible or status surface
-14. this ordering contract applies to the whole `pre-final visible artifact`
+15. this ordering contract applies to the whole `pre-final visible artifact`
     class, not only to commentary
-15. if an already-started multipart content send becomes stale mid-flight, the
+16. if an already-started multipart content send becomes stale mid-flight, the
     remaining parts and trailing image/status sends must abort rather than
     surfacing below a newer turn or below the terminal turn artifact
 
@@ -205,9 +208,11 @@ The reopen side of the contract is semantic, not merely visual:
 - a message is not hidden merely because it resembles instructions text; hidden
   payload classification must rely on explicit tagged/internal shapes so a
   user can still paste repository guidance or XML-like snippets visibly
-- once a newer turn opens, stale pre-final, technical-status, and stale final
-  artifacts from the older turn must fail closed instead of surfacing below
-  the newer turn
+- once a newer turn opens, stale pre-final and technical-status artifacts from
+  the older turn must fail closed instead of surfacing below the newer turn
+- terminal final artifacts are different: if already queued when the next user
+  turn arrives, they must be flushed before generation advances; only an
+  actually late/unbound terminal artifact may fail closed
 
 This fallback is intentionally narrow:
 
