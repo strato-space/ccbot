@@ -62,6 +62,7 @@ Two higher-order ontological classes matter at delivery time:
   - today this includes:
     - `commentary`
     - `orchestration`
+    - `plan_update`
     - any future surfaced preview bubble the product chooses to expose
 - `technical status artifact`
   - mutable progress/status surface for ephemeral execution detail
@@ -122,7 +123,7 @@ At the contract level:
   - not included in `/history`
 - `commentary`, `reasoning`, `tool_start`, `tool_progress`
   - eligible to drive status/progress handling
-- `user_echo`, `orchestration`, `commentary`, `assistant_final`
+- `user_echo`, `orchestration`, `commentary`, `plan_update`, `assistant_final`
   - user-facing content candidates
 - `warning`
   - user-facing system notice candidate with latest-warning dedup semantics
@@ -182,6 +183,10 @@ At the default product-facing `compact` Telegram surface:
   - remains visible as a latest-only human-facing commentary artifact
   - may span multiple Telegram messages while remaining one logical commentary
     artifact
+- `plan_update`
+  - remains visible as a dedicated mutable plan artifact
+  - is updated only by newer `plan_update` events, never by commentary/status
+  - is generated from Codex `update_plan` function calls, not from raw tool text
 - `warning`
   - remains visible as a durable system notice
   - repeated identical warning text on the same control surface reuses one

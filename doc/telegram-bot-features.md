@@ -215,6 +215,7 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
 - In compact delivery, the visible pre-final surface is deliberately narrow:
   - latest commentary artifact
   - orchestration milestone bubbles
+  - mutable Codex plan-update artifact
   - any future surfaced preview bubble explicitly promoted by product policy
 - Once the final assistant answer lands, that whole pre-final visible surface is
   closed until the next user turn, and the mutable technical status artifact
@@ -231,6 +232,8 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
   - final assistant text
 - Latest commentary remains visible as a dedicated artifact, but it is not a
   durable ordinary content bubble.
+- Codex `update_plan` calls render as a separate mutable plan artifact; new plan
+  events edit that artifact and commentary/status/tool output must not replace it.
 - Commentary is not clipped by the internal status-helper limit; if it exceeds
   one Telegram message it may span multiple Telegram messages while remaining
   one logical commentary artifact.
@@ -297,8 +300,8 @@ Named-topic behavior:
 - `assistant_final` is the terminal turn artifact.
 - `assistant_final` is always delivered as a fresh Telegram message sequence
   and never by replacing the visible commentary artifact.
-- `commentary`, orchestration milestones, and any future surfaced preview
-  bubble belong to the broader `pre-final visible artifact` class.
+- `commentary`, orchestration milestones, `plan_update`, and any future surfaced
+  preview bubble belong to the broader `pre-final visible artifact` class.
 - Once the terminal assistant bubble lands, no later member of that class may
   appear below it for the same turn.
 - The same turn boundary also closes the mutable technical status artifact.

@@ -16,6 +16,7 @@ from .message_queue import (
     clear_commentary_lane_state,
     clear_commentary_message,
     clear_pending_input_message,
+    clear_plan_update_message,
     clear_status_message,
     clear_tool_msg_ids_for_topic,
 )
@@ -37,6 +38,7 @@ async def clear_topic_state(
       - _status_msg_info (status message tracking)
       - _tool_msg_ids (tool_use → message_id mapping)
       - _commentary_msg_info (latest commentary artifact tracking)
+      - _plan_update_msg_info (latest mutable plan artifact tracking)
       - _interactive_msgs and _interactive_mode (interactive UI state)
       - user_data pending state (_pending_thread_id, _pending_thread_text)
     """
@@ -44,6 +46,7 @@ async def clear_topic_state(
     await clear_status_message(bot, user_id, thread_id)
     await clear_commentary_message(bot, user_id, thread_id)
     await clear_pending_input_message(bot, user_id, thread_id)
+    await clear_plan_update_message(bot, user_id, thread_id)
     clear_commentary_lane_state(user_id, thread_id)
 
     # Clear tool message ID tracking

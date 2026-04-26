@@ -14,11 +14,15 @@ from ccbot.handlers.message_queue import (
     _is_stale_turn_generation,
     _pending_input_enqueued,
     _pending_input_msg_info,
+    _plan_update_msg_info,
     _process_pending_input_clear_task,
+    _process_plan_update_task,
     _warning_msg_info,
     clear_commentary_lane_state,
     current_turn_generation,
     enqueue_pending_input_update,
+    enqueue_plan_update,
+    get_message_queue,
     shutdown_workers,
     _mark_commentary_closed,
     open_new_turn_generation,
@@ -543,6 +547,70 @@ async def test_stale_binding_content_task_clears_warning_tracking() -> None:
 
 
 @pytest.mark.asyncio
+async def test_process_plan_update_task_edits_existing_plan_artifact() -> None:
+    first = MessageTask(
+        task_type="plan_update",
+        window_id="@7",
+        thread_id=42,
+        text="• Updated Plan\n  ☐ First",
+        turn_generation=1,
+    )
+    second = MessageTask(
+        task_type="plan_update",
+        window_id="@7",
+        thread_id=42,
+        text="• Updated Plan\n  ☑ First\n  ▶ Second",
+        turn_generation=1,
+    )
+    sent = AsyncMock()
+    sent.message_id = 901
+    bot = AsyncMock()
+
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch("ccbot.handlers.message_queue.current_turn_generation", return_value=1),
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                return_value=sent,
+            ) as mock_send,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+
+            await _process_plan_update_task(bot, 1, first)
+            await _process_plan_update_task(bot, 1, second)
+
+        mock_send.assert_awaited_once()
+        bot.edit_message_text.assert_awaited_once()
+        assert bot.edit_message_text.await_args.kwargs["message_id"] == 901
+        assert _plan_update_msg_info[(1, 42)][2] == second.text
+    finally:
+        _plan_update_msg_info.pop((1, 42), None)
+
+
+@pytest.mark.asyncio
+async def test_enqueue_plan_update_suppresses_after_final_answer() -> None:
+    _mark_commentary_closed(1, 42)
+    try:
+        await enqueue_plan_update(
+            AsyncMock(),
+            user_id=1,
+            window_id="@7",
+            plan_text="• Updated Plan",
+            thread_id=42,
+        )
+        assert get_message_queue(1) is None
+    finally:
+        clear_commentary_lane_state(1, 42)
+        await shutdown_workers()
+
+
+@pytest.mark.asyncio
 async def test_process_pending_input_task_reuses_visible_preview_in_place() -> None:
     first = MessageTask(
         task_type="pending_input_update",
@@ -587,6 +655,8 @@ async def test_process_pending_input_task_reuses_visible_preview_in_place() -> N
     assert kwargs["chat_id"] == 100
     assert kwargs["message_id"] == 201
     assert "continue infra" in kwargs["text"]
+
+
 
 
 @pytest.mark.asyncio
@@ -815,6 +885,71 @@ async def test_commentary_after_orchestration_re_emits_at_tail_instead_of_editin
         assert 301 in deleted_ids
     finally:
         clear_commentary_lane_state(1, 42)
+
+
+@pytest.mark.asyncio
+async def test_commentary_after_plan_update_re_emits_at_tail_instead_of_editing_old_bubble() -> None:
+    commentary = MessageTask(
+        task_type="commentary_update",
+        window_id="@7",
+        thread_id=42,
+        text="Starting implementation",
+        turn_generation=1,
+    )
+    plan_update = MessageTask(
+        task_type="plan_update",
+        window_id="@7",
+        thread_id=42,
+        text="• Updated Plan\n  ▶ Implement delivery",
+        turn_generation=1,
+    )
+    commentary_update = MessageTask(
+        task_type="commentary_update",
+        window_id="@7",
+        thread_id=42,
+        text="Implementation still running",
+        turn_generation=1,
+    )
+
+    commentary_msg = AsyncMock()
+    commentary_msg.message_id = 401
+    plan_msg = AsyncMock()
+    plan_msg.message_id = 402
+    commentary_tail_msg = AsyncMock()
+    commentary_tail_msg.message_id = 403
+
+    bot = AsyncMock()
+
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch("ccbot.handlers.message_queue.current_turn_generation", return_value=1),
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                side_effect=[commentary_msg, plan_msg, commentary_tail_msg],
+            ) as mock_send,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+
+            await _process_commentary_update_task(bot, 1, commentary)
+            await _process_plan_update_task(bot, 1, plan_update)
+            await _process_commentary_update_task(bot, 1, commentary_update)
+
+        assert mock_send.await_count == 3
+        bot.edit_message_text.assert_not_awaited()
+        assert bot.delete_message.await_count >= 1
+        deleted_ids = {
+            call.kwargs["message_id"] for call in bot.delete_message.await_args_list
+        }
+        assert 401 in deleted_ids
+    finally:
+        clear_commentary_lane_state(1, 42)
+        _plan_update_msg_info.pop((1, 42), None)
 
 
 @pytest.mark.asyncio

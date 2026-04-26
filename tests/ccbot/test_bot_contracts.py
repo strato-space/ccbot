@@ -1711,6 +1711,39 @@ class TestTelegramDelivery:
         assert projected.text == "x" * 1200
         assert projected.status_message_eligible is False
 
+
+    @pytest.mark.asyncio
+    async def test_handle_new_message_compact_mode_routes_plan_update_to_dedicated_artifact(self):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="• Updated Plan\n  ▶ Implement delivery",
+            is_complete=True,
+            content_type="plan_update",
+            role="assistant",
+            event_kind="plan_update",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
+            patch("ccbot.bot.enqueue_commentary_update", new_callable=AsyncMock) as mock_commentary,
+            patch("ccbot.bot.enqueue_plan_update", new_callable=AsyncMock) as mock_plan,
+            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch("ccbot.bot.get_interactive_msg_id", return_value=None),
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_status.assert_not_awaited()
+        mock_commentary.assert_not_awaited()
+        mock_plan.assert_awaited_once()
+        mock_content.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_handle_new_message_compact_mode_routes_orchestration_to_latest_visible_artifact_in_commentary_lane(self):
         bot = AsyncMock()

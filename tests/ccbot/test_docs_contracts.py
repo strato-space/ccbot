@@ -330,7 +330,7 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "turn generation" in doc
     assert "hidden internal prompt scaffold" in doc
     assert "lifecycle `turn_started` is allowed to reopen turn generation" in doc
-    assert "orchestration milestone, or surfaced preview bubble" in doc
+    assert "orchestration milestone, plan update, or surfaced preview bubble" in doc
     assert "durable Telegram content bubbles are" in doc
     assert "deliberately narrow" in doc
     assert "latest-only visible commentary artifact" in doc

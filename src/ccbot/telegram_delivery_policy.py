@@ -26,6 +26,7 @@ from .runtime_types import (
     COMMENTARY_SEMANTIC_KIND,
     FILE_CHANGE_SEMANTIC_KIND,
     ORCHESTRATION_SEMANTIC_KIND,
+    PLAN_UPDATE_SEMANTIC_KIND,
     REASONING_SEMANTIC_KIND,
     TOOL_RESULT_SEMANTIC_KIND,
     TOOL_START_SEMANTIC_KIND,
@@ -202,6 +203,7 @@ def apply_telegram_delivery_policy(
     if projected.semantic_kind in {
         COMMENTARY_SEMANTIC_KIND,
         ORCHESTRATION_SEMANTIC_KIND,
+        PLAN_UPDATE_SEMANTIC_KIND,
     }:
         if projected.semantic_kind == ORCHESTRATION_SEMANTIC_KIND:
             projected.text = _compact_single_block(text)

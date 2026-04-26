@@ -240,6 +240,9 @@ T1 ──┬── T2 ──┬── T3 ──┬── T4 ──┬── T6 �
   - 2026-04-26 `server-np4` repair: multiline text submission now uses tmux
     paste-buffer payload delivery followed by a separate `C-m` submit key, so
     paste-only success is not reported as a completed queued message.
+  - 2026-04-26 `server-z2p` repair: Codex `update_plan` function calls now
+    normalize to `plan_update` and render as a dedicated mutable Telegram plan
+    artifact, updated only by newer plan events.
   - Validated with focused `pytest` and `ruff check` on the touched files.
 - **files edited/created**:
   - `/home/tools/ccbot/src/ccbot/input_driver.py`

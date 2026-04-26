@@ -17,6 +17,7 @@ control surface at a time.
   - current examples:
     - `commentary`
     - `orchestration`
+    - `plan_update`
     - any future surfaced preview bubble explicitly promoted by product policy
 
 - **Technical status artifact**
@@ -88,6 +89,8 @@ In addition:
 - latest commentary stays visible as a dedicated artifact
 - one logical commentary artifact may be serialized into multiple Telegram
   messages when needed to preserve the full text
+- latest Codex plan update stays visible as a separate mutable artifact and is
+  updated only by newer `plan_update` events
 - latest pending input preview may stay visible as a separate mutable artifact
 - technical execution classes stay out of permanent bubbles by default
 - warning artifacts use latest-warning dedup semantics rather than technical
@@ -121,7 +124,7 @@ Technical execution classes include:
 - warning artifacts are outside the current-turn pre-final/status closure
   barrier and may remain visible across turns
 - warning dedup is keyed by control surface and latest warning text, not by turn
-- once the pre-final visible lane is closed, later commentary/orchestration
+- once the pre-final visible lane is closed, later commentary/orchestration/plan
   facts for that same generation must drop rather than reopen the lane
 - lifecycle markers are not visible content by default, but `turn_started`
   may act as a lane-reopen fallback when hidden opener scaffolding already

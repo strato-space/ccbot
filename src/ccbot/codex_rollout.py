@@ -578,6 +578,61 @@ def _spawn_request_suffix(agent: _AgentDescriptor | None) -> str:
     return ""
 
 
+
+def _plan_status_symbol(status: str) -> str:
+    normalized = status.strip().lower()
+    if normalized == "completed":
+        return "☑"
+    if normalized == "in_progress":
+        return "▶"
+    return "☐"
+
+
+def _plan_update_text(arguments: Any) -> str:
+    parsed = _structured_json(arguments)
+    if not isinstance(parsed, dict):
+        return "• Updated Plan"
+
+    lines = ["• Updated Plan"]
+    explanation = _as_text(parsed.get("explanation")).strip()
+    if explanation:
+        lines.append(f"  └ {explanation}")
+
+    plan = parsed.get("plan")
+    if isinstance(plan, list):
+        for item in plan:
+            if not isinstance(item, dict):
+                step = _as_text(item).strip()
+                status = ""
+            else:
+                step = _as_text(item.get("step") or item.get("description")).strip()
+                status = _as_text(item.get("status")).strip()
+            if not step:
+                continue
+            symbol = _plan_status_symbol(status)
+            lines.append(f"  {symbol} {step}")
+    return "\n".join(lines)
+
+
+def _plan_update_event(
+    *,
+    thread_id: str,
+    arguments: Any,
+    timestamp: str | None,
+    runtime_kind: str = "codex",
+) -> NormalizedEvent:
+    return NormalizedEvent(
+        thread_id=thread_id,
+        text=_plan_update_text(arguments),
+        is_complete=True,
+        content_type="plan_update",
+        role="assistant",
+        timestamp=timestamp,
+        runtime_kind=runtime_kind,
+        event_kind="plan_update",
+        tool_name="update_plan",
+    )
+
 def _orchestration_event(
     *,
     thread_id: str,
@@ -1771,7 +1826,15 @@ class CodexRolloutNormalizer:
                     tool_name = _as_text(payload.get("name")).strip()
                     call_id = _as_text(payload.get("call_id")).strip()
                     arguments = _structured_json(payload.get("arguments") or payload.get("input"))
-                    if tool_name == "spawn_agent":
+                    if tool_name == "update_plan":
+                        events = [
+                            _plan_update_event(
+                                thread_id=current_thread_id,
+                                arguments=payload.get("arguments"),
+                                timestamp=timestamp,
+                            )
+                        ]
+                    elif tool_name == "spawn_agent":
                         if call_id and isinstance(arguments, dict):
                             state.pending_spawns[call_id] = _SpawnCall(
                                 role=_as_text(arguments.get("agent_type")).strip(),
@@ -2110,6 +2173,14 @@ class CodexRolloutNormalizer:
                     )
                 ]
             if response_type == "function_call":
+                if _as_text(payload.get("name")).strip() == "update_plan":
+                    return [
+                        _plan_update_event(
+                            thread_id=active_thread_id,
+                            arguments=payload.get("arguments"),
+                            timestamp=timestamp,
+                        )
+                    ]
                 return [
                     _tool_call_event(
                         thread_id=active_thread_id,

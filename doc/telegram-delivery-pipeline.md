@@ -71,6 +71,7 @@ The delivery pipeline keeps:
 
 - one mutable progress/status artifact per `(user_id, control surface)`
 - one latest-only visible commentary artifact per `(user_id, control surface)`
+- one mutable plan-update artifact per `(user_id, control surface)`
 - one mutable pending-input artifact per `(user_id, control surface)`
 - one ordered content queue per user
 - one current turn generation per `(user_id, control surface)`
@@ -78,6 +79,7 @@ The delivery pipeline keeps:
 - one broader pre-final visible surface:
   - commentary
   - orchestration milestones
+  - plan updates
   - any future human-facing preview bubble that the product chooses to surface
 - one latest-warning artifact with warning-dedup state per `(user_id, control surface)`
   for ordinary warnings; runtime-discontinuity warnings may use a distinct
@@ -100,8 +102,8 @@ Ordering guarantees:
 8. "delivered successfully" means the final assistant content finished
    successfully in full; a partial multipart send does not close the surface
 9. no late status artifact may appear below the final answer for the same turn
-10. no late commentary, orchestration milestone, or surfaced preview bubble may
-   appear below the final answer for the same turn
+10. no late commentary, orchestration milestone, plan update, or surfaced preview bubble
+    may appear below the final answer for the same turn
 11. warning artifacts are not members of the current-turn pre-final surface and
     are not dropped by terminal closure; warning dedup state is keyed by control surface
     and latest warning text

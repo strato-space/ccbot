@@ -69,6 +69,8 @@ class MessageTask:
         "commentary_clear",
         "pending_input_update",
         "pending_input_clear",
+        "plan_update",
+        "plan_clear",
         "commentary_close",
         "pre_final_close",
     ]
@@ -106,6 +108,9 @@ _commentary_extra_msg_ids: dict[tuple[int, int], tuple[int, ...]] = {}
 _pending_input_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
 # Last enqueued pending-input state per topic for queue-side dedupe.
 _pending_input_enqueued: dict[tuple[int, int], tuple[str, str | None]] = {}
+
+# Plan update artifact tracking: (user_id, thread_id_or_0) -> (message_id, window_id, last_text)
+_plan_update_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
 # Warning tracking:
 #   (user_id, thread_id_or_0, warning_key) -> (message_id, window_id, warning_text, repeat_count)
 # Ordinary warnings keep the default "latest-warning" key so the durable
@@ -309,7 +314,7 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                 if flood_end > 0:
                     remaining = flood_end - time.monotonic()
                     if remaining > 0:
-                        if task.task_type not in {"content", "commentary_update"}:
+                        if task.task_type not in {"content", "commentary_update", "plan_update"}:
                             # Status is ephemeral — safe to drop
                             if task.task_type in {
                                 "pending_input_update",
@@ -346,6 +351,10 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                     await _process_commentary_update_task(bot, user_id, task)
                 elif task.task_type == "pending_input_update":
                     await _process_pending_input_update_task(bot, user_id, task)
+                elif task.task_type == "plan_update":
+                    await _process_plan_update_task(bot, user_id, task)
+                elif task.task_type == "plan_clear":
+                    await _do_clear_plan_update_message(bot, user_id, task.thread_id or 0)
                 elif task.task_type == "status_update":
                     await _process_status_update_task(bot, user_id, task)
                 elif task.task_type == "status_clear":
@@ -375,6 +384,7 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                     await _do_clear_commentary_message(
                         bot, user_id, task.thread_id or 0
                     )
+                    await _do_clear_plan_update_message(bot, user_id, task.thread_id or 0)
                     await _do_clear_status_message(bot, user_id, task.thread_id or 0)
             except RetryAfter as e:
                 retry_secs = (
@@ -479,6 +489,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         await _do_clear_status_message(bot, user_id, tid)
         await _do_clear_commentary_message(bot, user_id, tid)
         await _do_clear_pending_input_message(bot, user_id, tid)
+        await _do_clear_plan_update_message(bot, user_id, tid)
         _clear_warning_tracking_for_topic(user_id, tid)
         clear_tool_msg_ids_for_topic(user_id, task.thread_id)
         return
@@ -864,6 +875,7 @@ async def _process_status_update_task(
         await _do_clear_status_message(bot, user_id, tid)
         await _do_clear_commentary_message(bot, user_id, tid)
         await _do_clear_pending_input_message(bot, user_id, tid)
+        await _do_clear_plan_update_message(bot, user_id, tid)
         _clear_warning_tracking_for_topic(user_id, tid)
         return
     if _is_stale_turn_generation(task.turn_generation, current_generation):
@@ -1117,6 +1129,118 @@ async def _do_send_commentary_message(
         _latest_pre_final_visible_kind[ckey] = "commentary"
 
 
+async def _process_plan_update_task(
+    bot: Bot,
+    user_id: int,
+    task: MessageTask,
+) -> None:
+    """Keep a dedicated mutable Codex plan artifact updated in place."""
+    wid = task.window_id or ""
+    tid = task.thread_id or 0
+    current_generation = current_turn_generation(user_id, task.thread_id)
+    if not await _is_task_binding_active(user_id, wid, task.thread_id):
+        logger.debug(
+            "Dropping stale plan-update task: user=%d window=%s thread=%s",
+            user_id,
+            wid,
+            task.thread_id,
+        )
+        await _do_clear_plan_update_message(bot, user_id, tid)
+        return
+    if _is_stale_turn_generation(task.turn_generation, current_generation):
+        logger.debug(
+            "Dropping stale-turn plan-update task: user=%d window=%s thread=%s generation=%d current=%d",
+            user_id,
+            wid,
+            task.thread_id,
+            task.turn_generation,
+            current_generation,
+        )
+        await _do_clear_plan_update_message(bot, user_id, tid)
+        return
+    if (user_id, tid) in _pre_final_visible_closed:
+        logger.debug(
+            "Dropping plan update after final answer: user=%d window=%s thread=%s",
+            user_id,
+            wid,
+            task.thread_id,
+        )
+        return
+
+    plan_text = task.text or ""
+    if not plan_text:
+        await _do_clear_plan_update_message(bot, user_id, tid)
+        return
+
+    pkey = (user_id, tid)
+    current_info = _plan_update_msg_info.get(pkey)
+    if current_info:
+        msg_id, stored_wid, last_text = current_info
+        if stored_wid == wid and last_text == plan_text:
+            return
+        if stored_wid == wid:
+            chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=_ensure_formatted(plan_text),
+                    parse_mode=PARSE_MODE,
+                    link_preview_options=NO_LINK_PREVIEW,
+                )
+                _plan_update_msg_info[pkey] = (msg_id, wid, plan_text)
+                _latest_pre_final_visible_kind[pkey] = "plan_update"
+                return
+            except RetryAfter:
+                raise
+            except Exception:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=msg_id,
+                        text=plan_text,
+                        link_preview_options=NO_LINK_PREVIEW,
+                    )
+                    _plan_update_msg_info[pkey] = (msg_id, wid, plan_text)
+                    _latest_pre_final_visible_kind[pkey] = "plan_update"
+                    return
+                except RetryAfter:
+                    raise
+                except Exception:
+                    _plan_update_msg_info.pop(pkey, None)
+
+    await _do_send_plan_update_message(bot, user_id, tid, wid, plan_text)
+
+
+async def _do_send_plan_update_message(
+    bot: Bot,
+    user_id: int,
+    thread_id_or_0: int,
+    window_id: str,
+    text: str,
+) -> None:
+    """Send a new dedicated plan artifact."""
+    pkey = (user_id, thread_id_or_0)
+    thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
+    chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+    old = _plan_update_msg_info.pop(pkey, None)
+    if old:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=old[0])
+        except Exception:
+            pass
+
+    sent = await send_with_fallback(
+        bot,
+        chat_id,
+        text,
+        **_send_kwargs(thread_id),  # type: ignore[arg-type]
+    )
+    if sent:
+        _plan_update_msg_info[pkey] = (sent.message_id, window_id, text)
+        _latest_pre_final_visible_kind[pkey] = "plan_update"
+
+
 async def _process_pending_input_update_task(
     bot: Bot,
     user_id: int,
@@ -1275,6 +1399,24 @@ async def _do_clear_commentary_message(
                 await bot.delete_message(chat_id=chat_id, message_id=extra_id)
             except Exception as e:
                 logger.debug(f"Failed to delete commentary message {extra_id}: {e}")
+
+
+async def _do_clear_plan_update_message(
+    bot: Bot,
+    user_id: int,
+    thread_id_or_0: int = 0,
+) -> None:
+    """Delete the tracked plan update artifact for a user/topic."""
+    pkey = (user_id, thread_id_or_0)
+    info = _plan_update_msg_info.pop(pkey, None)
+    if info:
+        chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=info[0])
+        except Exception as e:
+            logger.debug(f"Failed to delete plan update message {info[0]}: {e}")
+    if _latest_pre_final_visible_kind.get(pkey) == "plan_update":
+        _latest_pre_final_visible_kind.pop(pkey, None)
 
 
 async def _do_clear_pending_input_message(
@@ -1444,6 +1586,38 @@ async def enqueue_commentary_update(
     queue.put_nowait(task)
 
 
+async def enqueue_plan_update(
+    bot: Bot,
+    user_id: int,
+    window_id: str,
+    plan_text: str | None,
+    thread_id: int | None = None,
+    turn_generation: int = 0,
+) -> None:
+    """Enqueue a dedicated mutable Codex plan update artifact."""
+    tid = thread_id or 0
+    if plan_text and (user_id, tid) in _pre_final_visible_closed:
+        return
+
+    queue = get_or_create_queue(bot, user_id)
+    if plan_text:
+        task = MessageTask(
+            task_type="plan_update",
+            text=plan_text,
+            window_id=window_id,
+            thread_id=thread_id,
+            turn_generation=turn_generation,
+        )
+    else:
+        task = MessageTask(
+            task_type="plan_clear",
+            window_id=window_id,
+            thread_id=thread_id,
+            turn_generation=turn_generation,
+        )
+    queue.put_nowait(task)
+
+
 async def enqueue_pending_input_update(
     bot: Bot,
     user_id: int,
@@ -1578,6 +1752,7 @@ def clear_pre_final_visible_lane_state(
     _turn_generations.pop(key, None)
     _latest_pre_final_visible_kind.pop(key, None)
     _pending_input_enqueued.pop(key, None)
+    _plan_update_msg_info.pop(key, None)
 
 
 def is_pre_final_visible_lane_closed(
@@ -1648,6 +1823,18 @@ async def clear_commentary_message(
     await _do_clear_commentary_message(bot, user_id, thread_id or 0)
 
 
+async def clear_plan_update_message(
+    bot: Bot | None,
+    user_id: int,
+    thread_id: int | None = None,
+) -> None:
+    """Delete any tracked plan update artifact for a topic when a bot handle exists."""
+    if bot is None:
+        _plan_update_msg_info.pop((user_id, thread_id or 0), None)
+        return
+    await _do_clear_plan_update_message(bot, user_id, thread_id or 0)
+
+
 async def clear_pending_input_message(
     bot: Bot | None,
     user_id: int,
@@ -1690,6 +1877,7 @@ async def shutdown_workers() -> None:
     _status_msg_info.clear()
     _commentary_msg_info.clear()
     _commentary_extra_msg_ids.clear()
+    _plan_update_msg_info.clear()
     _pending_input_msg_info.clear()
     _pending_input_enqueued.clear()
     _warning_msg_info.clear()

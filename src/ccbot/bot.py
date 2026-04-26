@@ -126,6 +126,7 @@ from .handlers.message_queue import (
     current_turn_generation,
     enqueue_commentary_update,
     enqueue_content_message,
+    enqueue_plan_update,
     enqueue_status_update,
     get_message_queue,
     is_pre_final_visible_lane_closed,
@@ -150,6 +151,7 @@ from .handlers.status_polling import mark_runtime_presence_active, status_poll_l
 from .runtime_discontinuity import is_codex_termination_summary_text
 from .runtime_types import (
     LIFECYCLE_SEMANTIC_KIND,
+    PLAN_UPDATE_SEMANTIC_KIND,
     USER_ECHO_SEMANTIC_KIND,
     runtime_capability_registry,
 )
@@ -3526,6 +3528,36 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 thread_id=thread_id,
                 turn_generation=turn_generation,
             )
+            continue
+
+        if (
+            config.telegram_delivery_mode == "compact"
+            and msg.is_complete
+            and msg.semantic_kind == PLAN_UPDATE_SEMANTIC_KIND
+        ):
+            if is_pre_final_visible_lane_closed(user_id, thread_id):
+                logger.debug(
+                    "Skipping post-final plan update artifact: user=%d thread=%s",
+                    user_id,
+                    thread_id,
+                )
+                continue
+            await enqueue_plan_update(
+                bot,
+                user_id,
+                wid,
+                msg.text,
+                thread_id=thread_id,
+                turn_generation=turn_generation,
+            )
+
+            session = await session_manager.resolve_session_for_window(wid)
+            if session and session.file_path:
+                try:
+                    file_size = Path(session.file_path).stat().st_size
+                    session_manager.update_user_window_offset(user_id, wid, file_size)
+                except OSError:
+                    pass
             continue
 
         if (

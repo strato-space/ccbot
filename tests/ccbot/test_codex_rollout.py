@@ -76,6 +76,44 @@ def test_codex_rollout_preserves_event_taxonomy() -> None:
     assert tool_output.content_type == "tool_result"
 
 
+
+def test_codex_update_plan_function_call_emits_plan_update_event() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-26T15:04:58.427Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "update_plan",
+                "arguments": json.dumps(
+                    {
+                        "explanation": "Продолжаю Ralph-итерацию hardening",
+                        "plan": [
+                            {"step": "Уточнить текущий diff", "status": "completed"},
+                            {"step": "Внедрить watchdog памяти", "status": "in_progress"},
+                            {"step": "Прогнать проверки", "status": "pending"},
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                "call_id": "call_plan",
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].semantic_kind == "plan_update"
+    assert events[0].content_type == "plan_update"
+    assert events[0].tool_name == "update_plan"
+    assert events[0].dispatch_to_telegram is True
+    assert events[0].text.startswith("• Updated Plan")
+    assert "└ Продолжаю Ralph-итерацию hardening" in events[0].text
+    assert "☑ Уточнить текущий diff" in events[0].text
+    assert "▶ Внедрить watchdog памяти" in events[0].text
+    assert "☐ Прогнать проверки" in events[0].text
+
 def test_codex_rollout_handles_command_and_file_change_turns() -> None:
     records = [
         {
