@@ -301,6 +301,8 @@ Routing note:
 - Multiline text sent to a writable live tmux runtime is pasted as one
   bracketed-paste-aware payload and then submitted with a separate runtime
   submit key; paste-only success is not considered successful message delivery.
+  For Codex multiline paste, the submit primitive is bare `Enter` rather than
+  `C-m`, matching the observed TUI path that actually opens the turn.
 - Pending-input previews preserve queued message text literally (except explicit
   Codex checkbox marker glyph stripping), so command-like user text does not
   get normalized away.

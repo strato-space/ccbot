@@ -292,8 +292,10 @@ Named-topic behavior:
 - `steer` is a routing semantic for runtime-aware control actions, not a claim that tmux keystrokes are ordinary chat messages.
 - Raw terminal control remains a separate operator layer. A human typing directly in tmux is not modeled as an equal queued message channel.
 - Multiline Telegram text delivered to a writable live tmux runtime uses a
-  paste-buffer payload followed by a separate submit key. The bot must not
-  report paste-only success as a completed queued message.
+  paste-buffer payload followed by a separate submit key. Codex multiline
+  paste is submitted with bare `Enter`, not `C-m`, because `server-np4` showed
+  `C-m` can leave the payload in the composer. The bot must not report
+  paste-only success as a completed queued message.
 
 ### Compact Bubble Semantics
 

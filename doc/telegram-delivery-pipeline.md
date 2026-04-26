@@ -377,8 +377,11 @@ surface as an injection operation with distinct phases:
 
 Multiline text is injected through tmux's paste-buffer path so alternate-screen
 TUIs such as Codex can treat it as one paste event. A paste-only success is not
-a turn opener; if payload delivery or submit-key delivery fails, the bot must
-return an explicit delivery failure instead of reporting the message as sent.
+a turn opener. For Codex, the post-paste turn opener uses bare `Enter` rather
+than `C-m`, because live `server-np4` evidence showed `C-m` can leave
+multiline Telegram text in the composer. If payload delivery or submit-key
+delivery fails, the bot must return an explicit delivery failure instead of
+reporting the message as sent.
 
 External-thread bind follows the same split:
 

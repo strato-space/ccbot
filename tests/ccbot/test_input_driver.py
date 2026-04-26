@@ -52,7 +52,7 @@ async def test_multiline_codex_text_uses_bracketed_paste_and_submit_key() -> Non
     assert message == "Sent text to @1"
     assert fake_tmux.calls == [
         ("paste", "@1", text),
-        ("submit", "@1", None),
+        ("enter", "@1", None),
     ]
 
 
@@ -91,9 +91,74 @@ async def test_multiline_paste_failure_fails_before_submit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_submit_failure_is_reported_after_successful_paste() -> None:
+async def test_single_line_submit_failure_is_reported_after_successful_text() -> None:
     fake_tmux = _FakeTmux()
     fake_tmux.submit_result = False
+    driver = RuntimeInputDriver(fake_tmux, submit_delay=0)
+
+    success, message = await driver.send_text(
+        "@1",
+        "line one",
+        runtime_kind="codex",
+    )
+
+    assert success is False
+    assert message == "Failed to submit text"
+    assert fake_tmux.calls == [
+        ("literal", "@1", "line one"),
+        ("submit", "@1", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_multiline_submit_failure_is_reported_after_successful_paste() -> None:
+    class FailingEnterTmux(_FakeTmux):
+        async def send_enter(self, window_id: str) -> bool:
+            self.calls.append(("enter", window_id, None))
+            return False
+
+    fake_tmux = FailingEnterTmux()
+    driver = RuntimeInputDriver(fake_tmux, submit_delay=0)
+
+    success, message = await driver.send_text(
+        "@1",
+        "line one\nline two\n$ralph",
+        runtime_kind="codex",
+    )
+
+    assert success is False
+    assert message == "Failed to submit text"
+    assert fake_tmux.calls == [
+        ("paste", "@1", "line one\nline two\n$ralph"),
+        ("enter", "@1", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_multiline_non_codex_text_keeps_submit_key_path() -> None:
+    fake_tmux = _FakeTmux()
+    driver = RuntimeInputDriver(fake_tmux, submit_delay=0)
+
+    success, message = await driver.send_text(
+        "@1",
+        "line one\nline two",
+        runtime_kind="claude",
+    )
+
+    assert success is True
+    assert message == "Sent text to @1"
+    assert fake_tmux.calls == [
+        ("paste", "@1", "line one\nline two"),
+        ("submit", "@1", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_codex_multiline_without_enter_fails_closed() -> None:
+    class NoEnterTmux(_FakeTmux):
+        send_enter = None
+
+    fake_tmux = NoEnterTmux()
     driver = RuntimeInputDriver(fake_tmux, submit_delay=0)
 
     success, message = await driver.send_text(
@@ -106,5 +171,4 @@ async def test_submit_failure_is_reported_after_successful_paste() -> None:
     assert message == "Failed to submit text"
     assert fake_tmux.calls == [
         ("paste", "@1", "line one\nline two"),
-        ("submit", "@1", None),
     ]

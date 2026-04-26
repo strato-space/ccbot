@@ -256,8 +256,8 @@ class RuntimeInputDriver:
             if multiline:
                 if not await self._tmux.send_pasted_text(window_id, text):
                     return False, "Failed to paste multiline text"
-                logger.debug(
-                    "Pasted multiline text to %s via tmux paste-buffer "
+                logger.info(
+                    "input_delivery: pasted multiline payload to %s "
                     "(runtime=%s, chars=%d)",
                     window_id,
                     runtime_kind,
@@ -270,8 +270,34 @@ class RuntimeInputDriver:
             return True, f"Sent text to {window_id}"
 
         await asyncio.sleep(self._submit_delay)
-        if not await self._send_submit_key(window_id):
+        if multiline:
+            submitted = await self._send_multiline_submit_key(
+                window_id, runtime_kind=runtime_kind
+            )
+            submit_path = "multiline-enter" if runtime_kind == "codex" else "submit-key"
+        else:
+            submitted = await self._send_submit_key(window_id)
+            submit_path = "submit-key"
+        if not submitted:
+            logger.warning(
+                "input_delivery: failed to submit text to %s via %s "
+                "(runtime=%s, multiline=%s, chars=%d)",
+                window_id,
+                submit_path,
+                runtime_kind,
+                multiline,
+                len(text),
+            )
             return False, "Failed to submit text"
+        logger.info(
+            "input_delivery: submitted text to %s via %s "
+            "(runtime=%s, multiline=%s, chars=%d)",
+            window_id,
+            submit_path,
+            runtime_kind,
+            multiline,
+            len(text),
+        )
         return True, f"Sent text to {window_id}"
 
     async def _send_submit_key(self, window_id: str) -> bool:
@@ -280,6 +306,31 @@ class RuntimeInputDriver:
         if send_submit_key is not None:
             return await send_submit_key(window_id)
         return await self._tmux.send_enter(window_id)
+
+    async def _send_multiline_submit_key(
+        self, window_id: str, *, runtime_kind: str
+    ) -> bool:
+        """Submit bracketed-paste text with runtime-specific semantics.
+
+        Codex accepts pasted multiline composer content as a single payload, but
+        field evidence from `server-np4` showed that `C-m` after tmux
+        paste-buffer can leave the payload sitting in the composer while a
+        normal `send-keys Enter` opens the turn. Keep the regular submit-key
+        path for other runtimes and reserve bare Enter for the Codex post-paste
+        turn opener.
+        """
+        if runtime_kind != "codex":
+            return await self._send_submit_key(window_id)
+
+        send_enter = getattr(self._tmux, "send_enter", None)
+        if send_enter is None:
+            logger.warning(
+                "input_delivery: Codex multiline submit requires send_enter "
+                "for %s; refusing to fall back to C-m",
+                window_id,
+            )
+            return False
+        return await send_enter(window_id)
 
     async def _send_special_key(
         self,

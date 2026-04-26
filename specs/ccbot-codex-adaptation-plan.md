@@ -238,8 +238,11 @@ T1 ──┬── T2 ──┬── T3 ──┬── T4 ──┬── T6 �
   - Refactored `session.py` and `bot.py` to route text and control input through the driver instead of direct Claude-shaped `send_keys` calls, with unsupported controls failing closed.
   - Added conservative terminal-surface classification in `terminal_parser.py` for future prompt-safe input gating and added focused tests for driver semantics, session routing, bot contracts, and parser classification.
   - 2026-04-26 `server-np4` repair: multiline text submission now uses tmux
-    paste-buffer payload delivery followed by a separate `C-m` submit key, so
-    paste-only success is not reported as a completed queued message.
+    paste-buffer payload delivery followed by a separate submit primitive, so
+    paste-only success is not reported as a completed queued message. A later
+    same-day live recurrence showed Codex may ignore post-paste `C-m`; the
+    implementation now uses bare `Enter` for multiline post-paste turn opening
+    and keeps `C-m` for single-line typed submits.
   - 2026-04-26 `server-z2p` repair: Codex `update_plan` function calls now
     normalize to `plan_update` and render as a dedicated mutable Telegram plan
     artifact, updated only by newer plan events.
