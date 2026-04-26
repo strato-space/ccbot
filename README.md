@@ -438,3 +438,12 @@ Thanks to all the people who contribute! We encourage using Codex to collaborate
 <a href="https://github.com/strato-space/ccbot/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=strato-space/ccbot" />
 </a>
+
+### Telegram delivery audit
+
+CCBot writes a compact local audit of Telegram delivery attempts to
+`telegram_delivery_audit.jsonl` under `CCBOT_DIR`. Each row records the send/edit
+action, topic/control surface, semantic class, success flag, message id when
+available, and a short hash/preview of the rendered artifact. This is used to
+compare what Telegram actually showed with the Codex/tmux human surface without
+storing full raw tool payloads.

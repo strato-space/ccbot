@@ -176,6 +176,10 @@ _USAGE_LIMIT_WARNING_RE = re.compile(
     r"(usage limit|purchase more credits|try again at|usage_limit_exceeded)",
     re.IGNORECASE,
 )
+_HOOK_PROMPT_RE = re.compile(
+    r'^\s*<hook_prompt\b[^>]*>(?P<body>[\s\S]*?)</hook_prompt>\s*$',
+    re.IGNORECASE,
+)
 _PENDING_EVENT_FLUSH_WINDOW_SECONDS = 0.5
 _USER_MESSAGE_DUPLICATE_WINDOW_SECONDS = 0.5
 
@@ -306,7 +310,7 @@ def _preserve_existing_fenced_preview(text: str) -> str:
 def _command_code_block(
     command: str,
     *,
-    max_lines: int = 10,
+    max_lines: int = 20,
     max_chars: int = 180,
 ) -> str:
     payload = _extract_shell_payload(command)
@@ -336,7 +340,7 @@ def _tool_text_code_block(
     text: str,
     *,
     language: str = "text",
-    max_lines: int = 10,
+    max_lines: int = 20,
     max_chars: int = 180,
 ) -> str:
     preserved = _preserve_existing_fenced_preview(text)
@@ -383,6 +387,10 @@ def _tool_call_summary(name: str, arguments: Any) -> str:
         if lowered == "apply_patch":
             line_count = len(text.splitlines())
             return f"{name}(patch {line_count} lines)"
+        if lowered.endswith("state_write") or lowered in {"state_write", "omx_state.state_write"}:
+            parsed_arguments = _structured_json(text)
+            if isinstance(parsed_arguments, dict):
+                return _tool_call_summary(name, parsed_arguments)
         json_block = _tool_json_code_block(text)
         if json_block:
             return "\n".join([name, json_block])
@@ -417,6 +425,29 @@ def _tool_call_summary(name: str, arguments: Any) -> str:
             patch_text = _as_text(arguments.get("patch") or arguments.get("input")).strip()
             if patch_text:
                 return f"{name}(patch {len(patch_text.splitlines())} lines)"
+        if lowered.endswith("state_write") or lowered in {"state_write", "omx_state.state_write"}:
+            mode = _as_text(arguments.get("mode")).strip() or "state"
+            phase = _as_text(arguments.get("current_phase")).strip()
+            active = arguments.get("active")
+            iteration = _as_text(arguments.get("iteration")).strip()
+            task = _as_text(arguments.get("task_description")).strip()
+            state_payload = arguments.get("state") if isinstance(arguments.get("state"), dict) else {}
+            snapshot = _as_text(state_payload.get("context_snapshot_path") if isinstance(state_payload, dict) else "").strip()
+            lines = [f"state_write: {mode}"]
+            details = []
+            if phase:
+                details.append(f"phase={phase}")
+            if active is not None:
+                details.append(f"active={str(active).lower()}")
+            if iteration:
+                details.append(f"iteration={iteration}")
+            if details:
+                lines.append("  └ " + ", ".join(details))
+            if task:
+                lines.append("    " + _compact_inline(task, max_chars=180))
+            if snapshot:
+                lines.append("    snapshot: " + _compact_inline(snapshot, max_chars=160))
+            return "\n".join(lines)
         json_block = _tool_json_code_block(arguments)
         if json_block:
             return "\n".join([name, json_block])
@@ -455,19 +486,19 @@ def _tool_output_summary(tool_name: str | None, text: str) -> str:
 
     lowered = (tool_name or "").lower()
     if lowered == "exec_command":
-        preview = _tool_json_code_block(text, max_lines=10) or _tool_text_code_block(
+        preview = _tool_json_code_block(text, max_lines=20) or _tool_text_code_block(
             text,
             language="sh",
-            max_lines=10,
+            max_lines=20,
         )
         if preview:
             return preview
         return f"output {len(lines)} line(s)"
     if lowered == "write_stdin":
-        preview = _tool_json_code_block(text, max_lines=10) or _tool_text_code_block(
+        preview = _tool_json_code_block(text, max_lines=20) or _tool_text_code_block(
             text,
             language="text",
-            max_lines=10,
+            max_lines=20,
         )
         if preview:
             return preview
@@ -1014,10 +1045,10 @@ def _command_execution_summary(
             parts.append(_compact_multiline(command))
     lines = _nonempty_lines(output)
     if lines:
-        preview = _tool_json_code_block(output, max_lines=10) or _tool_text_code_block(
+        preview = _tool_json_code_block(output, max_lines=20) or _tool_text_code_block(
             output,
             language="sh",
-            max_lines=10,
+            max_lines=20,
         )
         if preview:
             parts.append(preview)
@@ -1046,6 +1077,34 @@ def _is_warning_text(text: str, *, phase: str) -> bool:
     if phase not in _COMMENTARY_PHASES:
         return False
     return bool(_HEADS_UP_WARNING_RE.match(text.strip()))
+
+
+def _extract_hook_prompt_text(text: str) -> str | None:
+    match = _HOOK_PROMPT_RE.match(text.strip())
+    if not match:
+        return None
+    body = reflow_whitespace(match.group("body"))
+    return body or "Codex operator hook prompt"
+
+
+def _operator_prompt_event(
+    *,
+    thread_id: str,
+    text: str,
+    timestamp: str | None,
+    runtime_kind: str = "codex",
+) -> NormalizedEvent:
+    body = _extract_hook_prompt_text(text) or text.strip() or "Codex operator hook prompt"
+    return NormalizedEvent(
+        thread_id=thread_id,
+        text=f"⚠ Operator prompt\n{body}",
+        is_complete=True,
+        content_type="warning",
+        role="system",
+        timestamp=timestamp,
+        runtime_kind=runtime_kind,
+        event_kind="operator_prompt",
+    )
 
 
 def _warning_event(
@@ -1148,6 +1207,13 @@ def _message_event(
     runtime_kind: str = "codex",
 ) -> NormalizedEvent:
     if role == "user":
+        if _extract_hook_prompt_text(text) is not None:
+            return _operator_prompt_event(
+                thread_id=thread_id,
+                text=text,
+                timestamp=timestamp,
+                runtime_kind=runtime_kind,
+            )
         return NormalizedEvent(
             thread_id=thread_id,
             text=text,

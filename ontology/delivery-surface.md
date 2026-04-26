@@ -148,3 +148,38 @@ When command/tool/file previews are surfaced:
 - structured payloads that are genuinely JSON prefer `json`
 - the UI should not add a redundant footer like `completed · output 1 line(s)`
   when the preview already makes the outcome obvious
+
+## Human Surface Audit And Operator Prompt Repair
+
+The Telegram artifact is not the raw runtime payload. A runtime may emit
+`exec_command`, `write_stdin`, `omx_state.state_write`, `<hook_prompt>`, file
+change, or warning data as JSON or XML-shaped transport, but Telegram must
+render the semantic fact first and keep the technical payload only as compact
+preview evidence.
+
+Additional artifact rules:
+
+- **Operator prompt artifact**
+  - hook/control prompts such as `<hook_prompt ...>...</hook_prompt>` are
+    system/operator notices, not user messages
+  - they must not be echoed as `👤 ...`
+  - they render as warning-family artifacts with the hook body, not the raw XML
+- **State update artifact**
+  - OMX state writes render as a short semantic state transition such as
+    `state_write: ralph`, phase, active flag, iteration, task summary, and
+    context snapshot path
+  - raw state JSON is debug evidence, not the default human artifact
+- **Delivery audit artifact**
+  - every Telegram send/edit attempt should be recorded in a local JSONL audit
+    with action, topic, artifact class, text length/hash, compact preview, and
+    success/error
+  - the audit is not itself Telegram content; it is a self-improvement ledger
+    for comparing Telegram readability with the Codex/tmux surface
+
+Preview refinements:
+
+- command and tool previews should be long enough to be useful before saying
+  `preview N/M lines`; the default target is about twenty lines, not one-line
+  summaries when a small real preview is available
+- `write_stdin` with empty chars is a poll, not meaningful user content; it
+  should summarize as a poll against a session rather than a raw JSON blob

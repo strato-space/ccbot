@@ -1425,3 +1425,40 @@ Reason:
 - first determine what is actually coupled
 - then decide whether the persisted schema should move at all
 - only then cut names and aliases
+
+### T64: Human-Readable Telegram Runtime Surface And Delivery Audit
+
+- **description**: Telegram must render Codex/OMX runtime facts as human
+  artifacts rather than leaking raw transport. Tool calls, tool outputs,
+  `omx_state.state_write`, `update_plan`, file changes, warnings, and
+  `<hook_prompt>` all need stable semantic projections and a local delivery
+  audit so future self-improvement can compare Telegram output with the Codex
+  CLI surface.
+- **status**: completed
+- **log**:
+  - mapped `<hook_prompt>` user-shaped rollout records to operator warning
+    artifacts instead of `👤` user echo
+  - summarized `omx_state.state_write` as mode/phase/active/iteration/task and
+    snapshot path rather than raw JSON
+  - widened command/tool previews toward a useful Codex-style twenty-line
+    preview before truncation footer
+  - added local JSONL Telegram delivery audit rows for send/edit attempts on
+    content, warning, status, commentary, and plan artifacts
+  - documented that `update_plan` owns a dedicated mutable plan artifact with
+    the plan body, not a terse label
+- **files edited**:
+  - [codex_rollout.py](/home/tools/ccbot/src/ccbot/codex_rollout.py)
+  - [response_builder.py](/home/tools/ccbot/src/ccbot/handlers/response_builder.py)
+  - [message_queue.py](/home/tools/ccbot/src/ccbot/handlers/message_queue.py)
+  - [delivery_audit.py](/home/tools/ccbot/src/ccbot/delivery_audit.py)
+  - [config.py](/home/tools/ccbot/src/ccbot/config.py)
+  - [test_codex_rollout.py](/home/tools/ccbot/tests/ccbot/test_codex_rollout.py)
+  - [test_delivery_audit.py](/home/tools/ccbot/tests/ccbot/test_delivery_audit.py)
+- **acceptance criteria**:
+  - hook prompts are warning/operator artifacts, not user echoes
+  - state writes are human-readable state summaries
+  - useful command/tool previews are shown in fenced blocks with footer outside
+  - Telegram delivery attempts are auditable locally without raw secret payloads
+- **validation**:
+  - focused rollout and audit tests cover hook prompt conversion, state-write
+    summary, and JSONL audit row shape

@@ -69,6 +69,7 @@ class Config:
         self.state_file = self.config_dir / "state.json"
         self.session_map_file = self.config_dir / "session_map.json"
         self.monitor_state_file = self.config_dir / "monitor_state.json"
+        self.telegram_delivery_audit_file = self.config_dir / "telegram_delivery_audit.jsonl"
         self.state_schema_version = SCHEMA_VERSION
         self.state_backup_suffix = LEGACY_BACKUP_SUFFIX
         self.default_runtime_kind = DEFAULT_RUNTIME_KIND

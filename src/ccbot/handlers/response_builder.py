@@ -45,7 +45,7 @@ _REDUNDANT_OUTPUT_FOOTER_RE = re.compile(
 def _clip_code_lines(
     lines: list[str],
     *,
-    max_lines: int = 10,
+    max_lines: int = 20,
     max_chars: int = 180,
 ) -> tuple[list[str], int]:
     clipped = [
@@ -185,7 +185,7 @@ def _format_tool_like_text(text: str, *, content_type: str) -> str:
         multiline_block = _format_multiline_code_block(
             stripped,
             language="text",
-            max_lines=10,
+            max_lines=20,
             max_chars=180,
             always_wrap=(content_type == "tool_result"),
         )
@@ -195,7 +195,7 @@ def _format_tool_like_text(text: str, *, content_type: str) -> str:
             return _format_multiline_code_block(
                 stripped,
                 language="text",
-                max_lines=10,
+                max_lines=20,
                 max_chars=180,
                 always_wrap=True,
             )

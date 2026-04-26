@@ -257,3 +257,14 @@ External-thread bind is first-class for replay delivery, but it is not equal to
 live tmux control. If a topic is bound to external replay without a live tmux
 injection plane, Telegram input must fail closed with an explicit read-only
 warning and a next-step hint to reattach writable control.
+
+## Operator Prompts And Human Artifact Projection
+
+`hook_prompt` transport is an operator-control notice. It is not a user echo and
+must not open a visible user turn as `👤 <hook_prompt ...>`. The normalized event
+kind is `operator_prompt`, rendered in the warning family.
+
+`omx_state.state_write` is likewise a state-transition fact, not a raw JSON
+conversation message. The runtime-neutral contract allows the normalizer to
+project it into a compact tool-start summary while keeping the original replay
+file as technical evidence.

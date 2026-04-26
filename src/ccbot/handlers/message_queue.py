@@ -36,6 +36,7 @@ from ..runtime_types import (
 )
 from ..state_schema import BINDING_STATE_BOUND
 from ..terminal_parser import parse_status_line
+from ..delivery_audit import log_telegram_delivery
 from ..tmux_manager import tmux_manager
 from .message_sender import (
     NO_LINK_PREVIEW,
@@ -425,6 +426,38 @@ def _send_kwargs(thread_id: int | None) -> dict[str, int]:
     return {}
 
 
+def _audit_task_delivery(
+    *,
+    action: str,
+    user_id: int,
+    chat_id: int,
+    task: MessageTask | None,
+    text: str = "",
+    message_id: int | None = None,
+    success: bool = True,
+    error: str | None = None,
+    thread_id: int | None = None,
+    window_id: str | None = None,
+    task_type: str | None = None,
+    content_type: str | None = None,
+    semantic_kind: str | None = None,
+) -> None:
+    log_telegram_delivery(
+        action=action,
+        user_id=user_id,
+        chat_id=chat_id,
+        thread_id=(task.thread_id if task else thread_id),
+        message_id=message_id,
+        window_id=(task.window_id if task else window_id),
+        task_type=(task.task_type if task else task_type),
+        content_type=(task.content_type if task else content_type),
+        semantic_kind=(task.semantic_kind if task else semantic_kind),
+        text=text,
+        success=success,
+        error=error,
+    )
+
+
 async def _send_task_images(bot: Bot, chat_id: int, task: MessageTask) -> None:
     """Send images attached to a task, if any."""
     if not task.image_data:
@@ -544,6 +577,14 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                     parse_mode=PARSE_MODE,
                     link_preview_options=NO_LINK_PREVIEW,
                 )
+                _audit_task_delivery(
+                    action="edit",
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    task=task,
+                    text=full_text,
+                    message_id=edit_msg_id,
+                )
                 await _send_task_images(bot, chat_id, task)
                 await _check_and_send_status(
                     bot,
@@ -641,6 +682,15 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             chat_id,
             part,
             **_send_kwargs(task.thread_id),  # type: ignore[arg-type]
+        )
+        _audit_task_delivery(
+            action="send",
+            user_id=user_id,
+            chat_id=chat_id,
+            task=task,
+            text=part,
+            message_id=(sent.message_id if sent else None),
+            success=sent is not None,
         )
 
         if sent:
@@ -749,6 +799,16 @@ async def _convert_status_to_content(
             parse_mode=PARSE_MODE,
             link_preview_options=NO_LINK_PREVIEW,
         )
+        log_telegram_delivery(
+            action="edit",
+            user_id=user_id,
+            chat_id=chat_id,
+            thread_id=(thread_id_or_0 or None),
+            message_id=msg_id,
+            window_id=window_id,
+            task_type="content",
+            text=content_text,
+        )
         return msg_id
     except RetryAfter:
         raise
@@ -854,6 +914,15 @@ async def _process_warning_content_task(
         text,
         **_send_kwargs(thread_id),  # type: ignore[arg-type]
     )
+    _audit_task_delivery(
+        action="send",
+        user_id=user_id,
+        chat_id=chat_id,
+        task=task,
+        text=text,
+        message_id=(sent.message_id if sent else None),
+        success=sent is not None,
+    )
     if sent:
         _warning_msg_info[wkey] = (sent.message_id, window_id, text, 1)
 
@@ -939,6 +1008,18 @@ async def _process_status_update_task(
                     parse_mode=PARSE_MODE,
                     link_preview_options=NO_LINK_PREVIEW,
                 )
+                log_telegram_delivery(
+                    action="edit",
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    thread_id=task.thread_id,
+                    message_id=msg_id,
+                    window_id=wid,
+                    task_type="status_update",
+                    content_type="status",
+                    semantic_kind="technical_status",
+                    text=status_text,
+                )
                 _status_msg_info[skey] = (msg_id, wid, status_text)
             except RetryAfter:
                 raise
@@ -994,6 +1075,19 @@ async def _do_send_status_message(
         chat_id,
         text,
         **_send_kwargs(thread_id),  # type: ignore[arg-type]
+    )
+    log_telegram_delivery(
+        action="send",
+        user_id=user_id,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        message_id=(sent.message_id if sent else None),
+        window_id=window_id,
+        task_type="status_update",
+        content_type="status",
+        semantic_kind="technical_status",
+        text=text,
+        success=sent is not None,
     )
     if sent:
         _status_msg_info[skey] = (sent.message_id, window_id, text)
@@ -1066,6 +1160,18 @@ async def _process_commentary_update_task(
                     parse_mode=PARSE_MODE,
                     link_preview_options=NO_LINK_PREVIEW,
                 )
+                log_telegram_delivery(
+                    action="edit",
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    thread_id=task.thread_id,
+                    message_id=msg_id,
+                    window_id=wid,
+                    task_type="commentary_update",
+                    content_type="commentary",
+                    semantic_kind="commentary",
+                    text=commentary_text,
+                )
                 _commentary_msg_info[ckey] = (msg_id, wid, commentary_text)
                 return
             except RetryAfter:
@@ -1120,6 +1226,19 @@ async def _do_send_commentary_message(
             chat_id,
             part,
             **_send_kwargs(thread_id),  # type: ignore[arg-type]
+        )
+        log_telegram_delivery(
+            action="send",
+            user_id=user_id,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            message_id=(sent.message_id if sent else None),
+            window_id=window_id,
+            task_type="commentary_update",
+            content_type="commentary",
+            semantic_kind="commentary",
+            text=part,
+            success=sent is not None,
         )
         if sent:
             sent_ids.append(sent.message_id)
@@ -1188,6 +1307,18 @@ async def _process_plan_update_task(
                     parse_mode=PARSE_MODE,
                     link_preview_options=NO_LINK_PREVIEW,
                 )
+                log_telegram_delivery(
+                    action="edit",
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    thread_id=task.thread_id,
+                    message_id=msg_id,
+                    window_id=wid,
+                    task_type="plan_update",
+                    content_type="plan_update",
+                    semantic_kind="plan_update",
+                    text=plan_text,
+                )
                 _plan_update_msg_info[pkey] = (msg_id, wid, plan_text)
                 _latest_pre_final_visible_kind[pkey] = "plan_update"
                 return
@@ -1235,6 +1366,19 @@ async def _do_send_plan_update_message(
         chat_id,
         text,
         **_send_kwargs(thread_id),  # type: ignore[arg-type]
+    )
+    log_telegram_delivery(
+        action="send",
+        user_id=user_id,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        message_id=(sent.message_id if sent else None),
+        window_id=window_id,
+        task_type="plan_update",
+        content_type="plan_update",
+        semantic_kind="plan_update",
+        text=text,
+        success=sent is not None,
     )
     if sent:
         _plan_update_msg_info[pkey] = (sent.message_id, window_id, text)
@@ -1284,6 +1428,18 @@ async def _process_pending_input_update_task(
                     text=_ensure_formatted(pending_text),
                     parse_mode=PARSE_MODE,
                     link_preview_options=NO_LINK_PREVIEW,
+                )
+                log_telegram_delivery(
+                    action="edit",
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    thread_id=task.thread_id,
+                    message_id=msg_id,
+                    window_id=wid,
+                    task_type="pending_input_update",
+                    content_type="pending_input",
+                    semantic_kind="pending_input",
+                    text=pending_text,
                 )
                 _pending_input_msg_info[pkey] = (msg_id, wid, pending_text)
                 return
@@ -1349,6 +1505,19 @@ async def _do_send_pending_input_message(
         chat_id,
         text,
         **_send_kwargs(thread_id),  # type: ignore[arg-type]
+    )
+    log_telegram_delivery(
+        action="send",
+        user_id=user_id,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        message_id=(sent.message_id if sent else None),
+        window_id=window_id,
+        task_type="pending_input_update",
+        content_type="pending_input",
+        semantic_kind="pending_input",
+        text=text,
+        success=sent is not None,
     )
     if sent:
         _pending_input_msg_info[pkey] = (sent.message_id, window_id, text)

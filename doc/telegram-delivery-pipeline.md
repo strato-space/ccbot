@@ -397,3 +397,28 @@ External-thread bind follows the same split:
 Human observability, injection, and operator control outrank protocol purity,
 so semantic delivery is rebuilt on runtime-neutral events without surrendering
 the live CLI stdio to literal `ACP-protocol` transport ownership.
+
+## Human Rendering And Delivery Audit
+
+The Telegram pipeline has a normalization boundary between runtime transport
+and human artifacts. Raw tool JSON is never the product artifact by itself.
+Compact rendering uses these projections:
+
+- `exec_command` and command execution: show the shell payload in a fenced `sh`
+  preview and keep truncation metadata outside the fence.
+- `tool_result`: show JSON only when the result is genuine JSON; otherwise show
+  a compact text/code preview. Empty or metadata-only output may be summarized.
+- `write_stdin`: show `write_stdin(session X, poll)` for empty polls and only
+  show a code block when real characters are injected.
+- `omx_state.state_write`: show the state transition (`mode`, `phase`,
+  `active`, `iteration`, task summary, snapshot) rather than the raw JSON.
+- `<hook_prompt>`: deliver as an operator warning artifact, never as user echo.
+- file-change events: show file paths plus available preview lines in `sh`.
+- `update_plan`: update the dedicated plan artifact with the actual plan body,
+  not merely a `Plan updated` label.
+
+For self-improvement, every Telegram send/edit attempt is appended to
+`telegram_delivery_audit.jsonl` under the ccbot config directory. The audit row
+contains action, control surface, task/content/semantic class, message id when
+available, success flag, text length/hash, and a compact preview. It deliberately
+omits full raw payloads and secrets.

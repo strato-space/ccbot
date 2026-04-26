@@ -1619,3 +1619,58 @@ def test_codex_rollout_subagent_notification_does_not_flush_buffered_assistant_e
     assert [event.text for event in third if event.dispatch_to_telegram] == [
         "Буферизованный комментарий."
     ]
+
+
+def test_codex_rollout_maps_hook_prompt_user_echo_to_operator_warning() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-26T16:52:00.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": '<hook_prompt hook_run_id="stop:4:/root/.codex/hooks.json">OMX Ralph is still active (phase: executing); continue the task.</hook_prompt>',
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].event_kind == "operator_prompt"
+    assert events[0].content_type == "warning"
+    assert events[0].role == "system"
+    assert "OMX Ralph is still active" in events[0].text
+    assert "hook_prompt" not in events[0].text
+
+
+def test_codex_rollout_summarizes_omx_state_write_without_raw_json() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-26T16:13:45.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "omx_state.state_write",
+                "call_id": "call_state",
+                "arguments": json.dumps(
+                    {
+                        "mode": "ralph",
+                        "active": True,
+                        "iteration": 1,
+                        "current_phase": "starting",
+                        "task_description": "Idle-safe InfiniteTalk runner",
+                        "state": {"context_snapshot_path": "/tmp/context.md"},
+                    }
+                ),
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].event_kind == "tool_call"
+    assert "state_write: ralph" in events[0].text
+    assert "phase=starting" in events[0].text
+    assert "Idle-safe InfiniteTalk runner" in events[0].text
+    assert '"mode"' not in events[0].text
