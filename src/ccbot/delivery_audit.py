@@ -19,6 +19,8 @@ from .config import config
 
 logger = logging.getLogger(__name__)
 
+SCHEMA_VERSION = 1
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -49,6 +51,12 @@ def log_telegram_delivery(
     text: str = "",
     success: bool = True,
     error: str | None = None,
+    reason: str | None = None,
+    turn_generation: int | None = None,
+    tool_use_id: str | None = None,
+    part_index: int | None = None,
+    part_count: int | None = None,
+    render_mode: str | None = None,
 ) -> None:
     """Append a single Telegram delivery audit row.
 
@@ -58,6 +66,7 @@ def log_telegram_delivery(
         path: Path = config.telegram_delivery_audit_file
         path.parent.mkdir(parents=True, exist_ok=True)
         row: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
             "ts": _utc_now(),
             "action": action,
             "success": success,
@@ -73,6 +82,15 @@ def log_telegram_delivery(
             "text_sha16": _sha(text or ""),
             "preview": _preview(text or ""),
         }
+        optional: dict[str, Any] = {
+            "reason": reason,
+            "turn_generation": turn_generation,
+            "tool_use_id": tool_use_id,
+            "part_index": part_index,
+            "part_count": part_count,
+            "render_mode": render_mode,
+        }
+        row.update({key: value for key, value in optional.items() if value is not None})
         if error:
             row["error"] = _preview(error, max_chars=180)
         with path.open("a", encoding="utf-8") as handle:

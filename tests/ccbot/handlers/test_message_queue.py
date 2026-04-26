@@ -1,12 +1,14 @@
 """Focused tests for message queue merge invariants and stale-delivery guards."""
 
 import asyncio
+import json
 import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 import ccbot.handlers.message_queue as mq
+from ccbot import delivery_audit
 from ccbot.handlers.message_queue import (
     MessageTask,
     _check_and_send_status,
@@ -75,7 +77,9 @@ def test_can_merge_tasks_rejects_different_topics_for_same_window():
 
 
 @pytest.mark.asyncio
-async def test_is_task_binding_active_accepts_external_binding_without_tmux_probe() -> None:
+async def test_is_task_binding_active_accepts_external_binding_without_tmux_probe() -> (
+    None
+):
     with (
         patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
         patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
@@ -103,7 +107,9 @@ async def test_process_content_task_drops_stale_binding() -> None:
     with (
         patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
         patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
-        patch("ccbot.handlers.message_queue.send_with_fallback", new_callable=AsyncMock) as mock_send,
+        patch(
+            "ccbot.handlers.message_queue.send_with_fallback", new_callable=AsyncMock
+        ) as mock_send,
     ):
         mock_tmux.find_window_by_id = AsyncMock(return_value=object())
         mock_sm.get_window_for_thread.return_value = None
@@ -220,7 +226,9 @@ async def test_process_commentary_task_sends_multi_part_commentary_losslessly() 
 
 
 @pytest.mark.asyncio
-async def test_process_warning_task_deduplicates_and_shows_counter_after_third_repeat() -> None:
+async def test_process_warning_task_deduplicates_and_shows_counter_after_third_repeat() -> (
+    None
+):
     first = MessageTask(
         task_type="content",
         window_id="@7",
@@ -335,7 +343,9 @@ async def test_process_warning_task_new_text_opens_new_warning_bubble() -> None:
 
 
 @pytest.mark.asyncio
-async def test_process_warning_task_distinct_warning_keys_open_distinct_bubbles() -> None:
+async def test_process_warning_task_distinct_warning_keys_open_distinct_bubbles() -> (
+    None
+):
     first = MessageTask(
         task_type="content",
         window_id="@7",
@@ -444,7 +454,9 @@ async def test_process_warning_task_sends_images_before_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_process_warning_task_fallbacks_to_plain_edit_after_markdown_failure() -> None:
+async def test_process_warning_task_fallbacks_to_plain_edit_after_markdown_failure() -> (
+    None
+):
     first = MessageTask(
         task_type="content",
         window_id="@7",
@@ -573,7 +585,9 @@ async def test_process_plan_update_task_edits_existing_plan_artifact() -> None:
         with (
             patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
             patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
-            patch("ccbot.handlers.message_queue.current_turn_generation", return_value=1),
+            patch(
+                "ccbot.handlers.message_queue.current_turn_generation", return_value=1
+            ),
             patch(
                 "ccbot.handlers.message_queue.send_with_fallback",
                 new_callable=AsyncMock,
@@ -660,10 +674,10 @@ async def test_process_pending_input_task_reuses_visible_preview_in_place() -> N
     assert "continue infra" in kwargs["text"]
 
 
-
-
 @pytest.mark.asyncio
-async def test_process_pending_input_task_fallbacks_to_plain_edit_after_markdown_failure() -> None:
+async def test_process_pending_input_task_fallbacks_to_plain_edit_after_markdown_failure() -> (
+    None
+):
     first = MessageTask(
         task_type="pending_input_update",
         window_id="@7",
@@ -814,7 +828,9 @@ async def test_process_commentary_task_drops_updates_after_final_answer() -> Non
 
 
 @pytest.mark.asyncio
-async def test_commentary_after_orchestration_re_emits_at_tail_instead_of_editing_old_bubble() -> None:
+async def test_commentary_after_orchestration_re_emits_at_tail_instead_of_editing_old_bubble() -> (
+    None
+):
     commentary = MessageTask(
         task_type="commentary_update",
         window_id="@7",
@@ -891,7 +907,9 @@ async def test_commentary_after_orchestration_re_emits_at_tail_instead_of_editin
 
 
 @pytest.mark.asyncio
-async def test_commentary_after_plan_update_re_emits_at_tail_instead_of_editing_old_bubble() -> None:
+async def test_commentary_after_plan_update_re_emits_at_tail_instead_of_editing_old_bubble() -> (
+    None
+):
     commentary = MessageTask(
         task_type="commentary_update",
         window_id="@7",
@@ -927,7 +945,9 @@ async def test_commentary_after_plan_update_re_emits_at_tail_instead_of_editing_
         with (
             patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
             patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
-            patch("ccbot.handlers.message_queue.current_turn_generation", return_value=1),
+            patch(
+                "ccbot.handlers.message_queue.current_turn_generation", return_value=1
+            ),
             patch(
                 "ccbot.handlers.message_queue.send_with_fallback",
                 new_callable=AsyncMock,
@@ -1122,7 +1142,9 @@ async def test_stale_turn_final_is_dropped_after_new_generation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_flush_terminal_artifacts_delivers_final_before_generation_advances() -> None:
+async def test_flush_terminal_artifacts_delivers_final_before_generation_advances() -> (
+    None
+):
     mq._message_queues[1] = asyncio.Queue()
     mq._queue_locks[1] = asyncio.Lock()
     queue = mq._message_queues[1]
@@ -1199,7 +1221,9 @@ async def test_flush_terminal_artifacts_delivers_final_before_generation_advance
 
 
 @pytest.mark.asyncio
-async def test_in_flight_multpart_content_aborts_when_turn_generation_advances() -> None:
+async def test_in_flight_multpart_content_aborts_when_turn_generation_advances() -> (
+    None
+):
     task = MessageTask(
         task_type="content",
         window_id="@7",
@@ -1545,3 +1569,89 @@ async def test_partial_multipart_final_does_not_close_pre_final_visible_lane() -
         mock_images.assert_awaited_once()
     finally:
         clear_commentary_lane_state(1, 42)
+
+
+@pytest.mark.asyncio
+async def test_poll_only_write_stdin_does_not_create_status_bubble(
+    monkeypatch, tmp_path
+) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(
+        delivery_audit.config, "telegram_delivery_audit_file", audit_path
+    )
+    mq._status_msg_info.clear()
+
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="🛠 Tool\nwrite_stdin(session 82998, poll)",
+        turn_generation=0,
+    )
+    bot = AsyncMock()
+
+    with (
+        patch(
+            "ccbot.handlers.message_queue._is_task_binding_active",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("ccbot.handlers.message_queue.current_turn_generation", return_value=0),
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+    ):
+        mock_sm.resolve_chat_id.return_value = 100
+        await _process_status_update_task(bot, 1, task)
+
+    bot.send_message.assert_not_awaited()
+    bot.edit_message_text.assert_not_awaited()
+    rows = [
+        json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[-1]["action"] == "suppress"
+    assert rows[-1]["reason"] == "poll_without_existing_status"
+    assert rows[-1]["content_type"] == "status"
+    assert rows[-1]["semantic_kind"] == "technical_status"
+
+
+@pytest.mark.asyncio
+async def test_poll_only_write_stdin_updates_existing_status_bubble(
+    monkeypatch, tmp_path
+) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(
+        delivery_audit.config, "telegram_delivery_audit_file", audit_path
+    )
+    mq._status_msg_info.clear()
+    mq._status_msg_info[(1, 42)] = (501, "@7", "🛠 Tool\nwrite_stdin(session 1, poll)")
+
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="🛠 Tool\nwrite_stdin(session 82998, poll)",
+        turn_generation=0,
+    )
+    bot = AsyncMock()
+
+    with (
+        patch(
+            "ccbot.handlers.message_queue._is_task_binding_active",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("ccbot.handlers.message_queue.current_turn_generation", return_value=0),
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+    ):
+        mock_sm.resolve_chat_id.return_value = 100
+        await _process_status_update_task(bot, 1, task)
+
+    bot.send_message.assert_not_awaited()
+    bot.edit_message_text.assert_awaited_once()
+    rows = [
+        json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[-1]["action"] == "edit"
+    assert rows[-1]["content_type"] == "status"
+    assert rows[-1]["semantic_kind"] == "technical_status"
+
+    mq._status_msg_info.clear()

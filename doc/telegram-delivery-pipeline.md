@@ -33,6 +33,9 @@ The default Telegram surface is `compact`, not `verbose`.
 - reasoning and thinking summaries are routed through the mutable status
   artifact
 - tool lifecycle summaries are routed through the mutable status artifact
+- poll-only tool lifecycle updates such as empty `write_stdin(..., poll)` may
+  update an existing status artifact but must not create a standalone `Tool`
+  bubble in compact mode
 - command-execution summaries, including Claude-style `local_command`, are
   routed through the mutable status artifact
 - file-change summaries are routed through the mutable status artifact
@@ -422,8 +425,13 @@ Compact rendering uses these projections:
 - `update_plan`: update the dedicated plan artifact with the actual plan body,
   not merely a `Plan updated` label.
 
-For self-improvement, every Telegram send/edit attempt is appended to
-`telegram_delivery_audit.jsonl` under the ccbot config directory. The audit row
-contains action, control surface, task/content/semantic class, message id when
-available, success flag, text length/hash, and a compact preview. It deliberately
-omits full raw payloads and secrets.
+For self-improvement, every Telegram delivery lifecycle decision is appended to
+`telegram_delivery_audit.jsonl` under the ccbot config directory. The audit is
+schema-versioned and records both positive and negative lifecycle events.
+`send`, `edit`, and `delete` rows describe Telegram API attempts; `suppress`
+rows explain intentional non-delivery such as stale turn output or a poll-only
+`write_stdin` update arriving when no mutable status artifact exists. Rows
+include action, control surface, task/content/semantic class, message id when
+available, success flag, reason/error, turn generation and tool-use correlation
+where available, text length/hash, and a compact preview. It deliberately omits
+full raw payloads and secrets.

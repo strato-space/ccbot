@@ -173,9 +173,12 @@ Additional artifact rules:
     context snapshot path
   - raw state JSON is debug evidence, not the default human artifact
 - **Delivery audit artifact**
-  - every Telegram send/edit attempt should be recorded in a local JSONL audit
-    with action, topic, artifact class, text length/hash, compact preview, and
-    success/error
+  - every Telegram send/edit/delete/suppress attempt should be recorded in a local JSONL audit
+    with schema version, action, topic, artifact class, turn/tool correlation
+    where available, text length/hash, compact preview, reason, and success/error
+  - negative lifecycle rows (`suppress`, failed `delete`, failed send/edit) are
+    first-class evidence, not debug noise; without them the audit cannot explain
+    why a Codex/tmux-visible artifact did not appear in Telegram
   - the audit is not itself Telegram content; it is a self-improvement ledger
     for comparing Telegram readability with the Codex/tmux surface
 
@@ -186,3 +189,7 @@ Preview refinements:
   summaries when a small real preview is available
 - `write_stdin` with empty chars is a poll, not meaningful user content; it
   should summarize as a poll against a session rather than a raw JSON blob
+- poll-only `write_stdin` updates are allowed to edit an already-visible mutable
+  technical status artifact, but must not create a new Telegram bubble by
+  themselves; if no status artifact exists, suppress the poll and record the
+  suppression in the delivery audit

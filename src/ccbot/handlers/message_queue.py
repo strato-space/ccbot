@@ -19,6 +19,7 @@ Key components:
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Literal
@@ -315,7 +316,11 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                 if flood_end > 0:
                     remaining = flood_end - time.monotonic()
                     if remaining > 0:
-                        if task.task_type not in {"content", "commentary_update", "plan_update"}:
+                        if task.task_type not in {
+                            "content",
+                            "commentary_update",
+                            "plan_update",
+                        }:
                             # Status is ephemeral — safe to drop
                             if task.task_type in {
                                 "pending_input_update",
@@ -355,7 +360,9 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                 elif task.task_type == "plan_update":
                     await _process_plan_update_task(bot, user_id, task)
                 elif task.task_type == "plan_clear":
-                    await _do_clear_plan_update_message(bot, user_id, task.thread_id or 0)
+                    await _do_clear_plan_update_message(
+                        bot, user_id, task.thread_id or 0
+                    )
                 elif task.task_type == "status_update":
                     await _process_status_update_task(bot, user_id, task)
                 elif task.task_type == "status_clear":
@@ -367,7 +374,9 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                 elif task.task_type == "pending_input_clear":
                     await _process_pending_input_clear_task(bot, user_id, task)
                 elif task.task_type in {"commentary_close", "pre_final_close"}:
-                    current_generation = current_turn_generation(user_id, task.thread_id)
+                    current_generation = current_turn_generation(
+                        user_id, task.thread_id
+                    )
                     if _is_stale_turn_generation(
                         task.turn_generation,
                         current_generation,
@@ -385,7 +394,9 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                     await _do_clear_commentary_message(
                         bot, user_id, task.thread_id or 0
                     )
-                    await _do_clear_plan_update_message(bot, user_id, task.thread_id or 0)
+                    await _do_clear_plan_update_message(
+                        bot, user_id, task.thread_id or 0
+                    )
                     await _do_clear_status_message(bot, user_id, task.thread_id or 0)
             except RetryAfter as e:
                 retry_secs = (
@@ -499,20 +510,55 @@ def _audit_task_delivery(
     task_type: str | None = None,
     content_type: str | None = None,
     semantic_kind: str | None = None,
+    reason: str | None = None,
+    part_index: int | None = None,
+    part_count: int | None = None,
+    render_mode: str | None = None,
 ) -> None:
     log_telegram_delivery(
         action=action,
         user_id=user_id,
         chat_id=chat_id,
-        thread_id=(task.thread_id if task else thread_id),
+        thread_id=(
+            thread_id if thread_id is not None else (task.thread_id if task else None)
+        ),
         message_id=message_id,
-        window_id=(task.window_id if task else window_id),
-        task_type=(task.task_type if task else task_type),
-        content_type=(task.content_type if task else content_type),
-        semantic_kind=(task.semantic_kind if task else semantic_kind),
+        window_id=(
+            window_id if window_id is not None else (task.window_id if task else None)
+        ),
+        task_type=(
+            task_type if task_type is not None else (task.task_type if task else None)
+        ),
+        content_type=(
+            content_type
+            if content_type is not None
+            else (task.content_type if task else None)
+        ),
+        semantic_kind=(
+            semantic_kind
+            if semantic_kind is not None
+            else (task.semantic_kind if task else None)
+        ),
         text=text,
         success=success,
         error=error,
+        reason=reason,
+        turn_generation=(task.turn_generation if task else None),
+        tool_use_id=(task.tool_use_id if task else None),
+        part_index=part_index,
+        part_count=part_count,
+        render_mode=render_mode,
+    )
+
+
+def _is_poll_only_status_text(text: str) -> bool:
+    """Return True for low-value empty write_stdin poll status updates."""
+    compact = " ".join((text or "").split())
+    return bool(
+        re.fullmatch(
+            r"(?:🛠\s*)?Tool\s+write_stdin\((?:session\s+[^,()]+,\s*)?poll\)",
+            compact,
+        )
     )
 
 
@@ -583,6 +629,14 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         await _do_clear_plan_update_message(bot, user_id, tid)
         _clear_warning_tracking_for_topic(user_id, tid)
         clear_tool_msg_ids_for_topic(user_id, task.thread_id)
+        _audit_task_delivery(
+            action="suppress",
+            user_id=user_id,
+            chat_id=session_manager.resolve_chat_id(user_id, task.thread_id),
+            task=task,
+            text=task.text or "\n\n".join(task.parts),
+            reason="stale_binding",
+        )
         return
     if _is_stale_turn_generation(task.turn_generation, current_generation):
         logger.debug(
@@ -593,6 +647,14 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             task.semantic_kind,
             task.turn_generation,
             current_generation,
+        )
+        _audit_task_delivery(
+            action="suppress",
+            user_id=user_id,
+            chat_id=session_manager.resolve_chat_id(user_id, task.thread_id),
+            task=task,
+            text=task.text or "\n\n".join(task.parts),
+            reason="stale_turn_generation",
         )
         return
     if (
@@ -605,6 +667,14 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             wid,
             task.thread_id,
             task.semantic_kind,
+        )
+        _audit_task_delivery(
+            action="suppress",
+            user_id=user_id,
+            chat_id=session_manager.resolve_chat_id(user_id, task.thread_id),
+            task=task,
+            text=task.text or "\n\n".join(task.parts),
+            reason="pre_final_after_terminal",
         )
         return
     if task.semantic_kind == WARNING_SEMANTIC_KIND:
@@ -798,9 +868,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
     if delivered_parts > 0 and is_pre_final_visible_semantic_kind(task.semantic_kind):
         _latest_pre_final_visible_kind[(user_id, tid)] = task.semantic_kind
 
-    final_delivery_complete = (
-        expected_parts == 0 or delivered_parts == expected_parts
-    )
+    final_delivery_complete = expected_parts == 0 or delivered_parts == expected_parts
 
     if is_terminal_artifact and last_msg_id is not None and final_delivery_complete:
         # Terminal ordering closes only after a final artifact has actually
@@ -915,10 +983,7 @@ async def _process_warning_content_task(
     wkey = (user_id, thread_id_or_0, warning_key)
     current = _warning_msg_info.get(wkey)
     same_warning = (
-        current is not None
-        and text
-        and current[1] == window_id
-        and current[2] == text
+        current is not None and text and current[1] == window_id and current[2] == text
     )
 
     if task.image_data and not same_warning:
@@ -1004,6 +1069,16 @@ async def _process_status_update_task(
         await _do_clear_pending_input_message(bot, user_id, tid)
         await _do_clear_plan_update_message(bot, user_id, tid)
         _clear_warning_tracking_for_topic(user_id, tid)
+        _audit_task_delivery(
+            action="suppress",
+            user_id=user_id,
+            chat_id=session_manager.resolve_chat_id(user_id, task.thread_id),
+            task=task,
+            text=task.text or "",
+            content_type="status",
+            semantic_kind="technical_status",
+            reason="stale_binding",
+        )
         return
     if _is_stale_turn_generation(task.turn_generation, current_generation):
         logger.debug(
@@ -1015,6 +1090,16 @@ async def _process_status_update_task(
             current_generation,
         )
         await _do_clear_status_message(bot, user_id, tid)
+        _audit_task_delivery(
+            action="suppress",
+            user_id=user_id,
+            chat_id=session_manager.resolve_chat_id(user_id, task.thread_id),
+            task=task,
+            text=task.text or "",
+            content_type="status",
+            semantic_kind="technical_status",
+            reason="stale_turn_generation",
+        )
         return
     if (user_id, tid) in _technical_status_closed:
         logger.debug(
@@ -1024,6 +1109,16 @@ async def _process_status_update_task(
             task.thread_id,
         )
         await _do_clear_status_message(bot, user_id, tid)
+        _audit_task_delivery(
+            action="suppress",
+            user_id=user_id,
+            chat_id=session_manager.resolve_chat_id(user_id, task.thread_id),
+            task=task,
+            text=task.text or "",
+            content_type="status",
+            semantic_kind="technical_status",
+            reason="technical_status_closed",
+        )
         return
     chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
     skey = (user_id, tid)
@@ -1035,6 +1130,19 @@ async def _process_status_update_task(
         return
 
     current_info = _status_msg_info.get(skey)
+
+    if current_info is None and _is_poll_only_status_text(status_text):
+        _audit_task_delivery(
+            action="suppress",
+            user_id=user_id,
+            chat_id=chat_id,
+            task=task,
+            text=status_text,
+            content_type="status",
+            semantic_kind="technical_status",
+            reason="poll_without_existing_status",
+        )
+        return
 
     if current_info:
         msg_id, stored_wid, last_text = current_info
@@ -1066,17 +1174,15 @@ async def _process_status_update_task(
                     parse_mode=PARSE_MODE,
                     link_preview_options=NO_LINK_PREVIEW,
                 )
-                log_telegram_delivery(
+                _audit_task_delivery(
                     action="edit",
                     user_id=user_id,
                     chat_id=chat_id,
-                    thread_id=task.thread_id,
+                    task=task,
+                    text=status_text,
                     message_id=msg_id,
-                    window_id=wid,
-                    task_type="status_update",
                     content_type="status",
                     semantic_kind="technical_status",
-                    text=status_text,
                 )
                 _status_msg_info[skey] = (msg_id, wid, status_text)
             except RetryAfter:
@@ -1208,7 +1314,12 @@ async def _process_commentary_update_task(
         ):
             return
         latest_kind = _latest_pre_final_visible_kind.get(ckey, "")
-        if stored_wid == wid and latest_kind == "commentary" and len(commentary_parts) == 1 and not extra_ids:
+        if (
+            stored_wid == wid
+            and latest_kind == "commentary"
+            and len(commentary_parts) == 1
+            and not extra_ids
+        ):
             chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
             try:
                 await bot.edit_message_text(
@@ -1249,7 +1360,9 @@ async def _process_commentary_update_task(
                 except Exception:
                     _commentary_msg_info.pop(ckey, None)
 
-    await _do_send_commentary_message(bot, user_id, tid, wid, commentary_parts, commentary_text)
+    await _do_send_commentary_message(
+        bot, user_id, tid, wid, commentary_parts, commentary_text
+    )
 
 
 async def _do_send_commentary_message(
@@ -1529,7 +1642,9 @@ async def _process_pending_input_clear_task(
     """Clear pending-input preview only when the clear still belongs to the active topic state."""
     wid = task.window_id or ""
     tid = task.thread_id or 0
-    if task.window_id and not await _is_task_binding_active(user_id, wid, task.thread_id):
+    if task.window_id and not await _is_task_binding_active(
+        user_id, wid, task.thread_id
+    ):
         logger.debug(
             "Dropping stale pending-input clear: user=%d window=%s thread=%s",
             user_id,
@@ -1599,7 +1714,33 @@ async def _do_clear_status_message(
         chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
         try:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            log_telegram_delivery(
+                action="delete",
+                user_id=user_id,
+                chat_id=chat_id,
+                thread_id=thread_id_or_0 or None,
+                message_id=msg_id,
+                window_id=info[1],
+                task_type="status_clear",
+                content_type="status",
+                semantic_kind="technical_status",
+                reason="clear_status",
+            )
         except Exception as e:
+            log_telegram_delivery(
+                action="delete",
+                user_id=user_id,
+                chat_id=chat_id,
+                thread_id=thread_id_or_0 or None,
+                message_id=msg_id,
+                window_id=info[1],
+                task_type="status_clear",
+                content_type="status",
+                semantic_kind="technical_status",
+                success=False,
+                error=str(e),
+                reason="clear_status_failed",
+            )
             logger.debug(f"Failed to delete status message {msg_id}: {e}")
 
 
@@ -1640,7 +1781,33 @@ async def _do_clear_plan_update_message(
         chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
         try:
             await bot.delete_message(chat_id=chat_id, message_id=info[0])
+            log_telegram_delivery(
+                action="delete",
+                user_id=user_id,
+                chat_id=chat_id,
+                thread_id=thread_id_or_0 or None,
+                message_id=info[0],
+                window_id=info[1],
+                task_type="plan_clear",
+                content_type="plan_update",
+                semantic_kind="plan_update",
+                reason="clear_plan_update",
+            )
         except Exception as e:
+            log_telegram_delivery(
+                action="delete",
+                user_id=user_id,
+                chat_id=chat_id,
+                thread_id=thread_id_or_0 or None,
+                message_id=info[0],
+                window_id=info[1],
+                task_type="plan_clear",
+                content_type="plan_update",
+                semantic_kind="plan_update",
+                success=False,
+                error=str(e),
+                reason="clear_plan_update_failed",
+            )
             logger.debug(f"Failed to delete plan update message {info[0]}: {e}")
     if _latest_pre_final_visible_kind.get(pkey) == "plan_update":
         _latest_pre_final_visible_kind.pop(pkey, None)
