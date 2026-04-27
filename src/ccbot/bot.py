@@ -151,6 +151,7 @@ from .handlers.response_builder import (
 from .handlers.status_polling import mark_runtime_presence_active, status_poll_loop
 from .runtime_discontinuity import is_codex_termination_summary_text
 from .runtime_types import (
+    ASSISTANT_FINAL_SEMANTIC_KIND,
     LIFECYCLE_SEMANTIC_KIND,
     PLAN_UPDATE_SEMANTIC_KIND,
     USER_ECHO_SEMANTIC_KIND,
@@ -493,15 +494,15 @@ def _surface_from_state(state: object) -> ControlSurface | None:
     surface_key = state.get("surface_key")
     kind = state.get("kind")
     label = state.get("label")
-    if not isinstance(surface_key, str) or not isinstance(kind, str) or not isinstance(
-        label, str
+    if (
+        not isinstance(surface_key, str)
+        or not isinstance(kind, str)
+        or not isinstance(label, str)
     ):
         return None
     return ControlSurface(
         kind=kind,
-        chat_id=state.get("chat_id")
-        if isinstance(state.get("chat_id"), int)
-        else None,
+        chat_id=state.get("chat_id") if isinstance(state.get("chat_id"), int) else None,
         thread_id=state.get("thread_id")
         if isinstance(state.get("thread_id"), int)
         else None,
@@ -525,7 +526,9 @@ def _pending_surface_from_user_data(user_data: dict | None) -> ControlSurface | 
     return _surface_from_state(user_data.get(PENDING_SURFACE_STATE_KEY))
 
 
-def _set_pending_surface(user_data: dict | None, surface: ControlSurface | None) -> None:
+def _set_pending_surface(
+    user_data: dict | None, surface: ControlSurface | None
+) -> None:
     if user_data is None:
         return
     if surface is None:
@@ -650,7 +653,9 @@ def _consume_pending_slot(
     return text
 
 
-def _get_session_window_for_surface(user_id: int, surface: ControlSurface) -> str | None:
+def _get_session_window_for_surface(
+    user_id: int, surface: ControlSurface
+) -> str | None:
     if surface.surface_key and _session_has_method("get_window_for_surface"):
         return session_manager.get_window_for_surface(
             user_id,
@@ -662,7 +667,9 @@ def _get_session_window_for_surface(user_id: int, surface: ControlSurface) -> st
     return session_manager.get_window_for_thread(user_id, legacy_scope_id)
 
 
-def _resolve_session_window_for_surface(user_id: int, surface: ControlSurface) -> str | None:
+def _resolve_session_window_for_surface(
+    user_id: int, surface: ControlSurface
+) -> str | None:
     if surface.surface_key and _session_has_method("resolve_window_for_surface"):
         return session_manager.resolve_window_for_surface(
             user_id,
@@ -776,7 +783,9 @@ def _validate_surface_bind_flow_callback(
     version: int,
     nonce: str,
 ) -> bool:
-    if surface.surface_key and _session_has_method("validate_surface_bind_flow_callback"):
+    if surface.surface_key and _session_has_method(
+        "validate_surface_bind_flow_callback"
+    ):
         return session_manager.validate_surface_bind_flow_callback(
             user_id,
             version,
@@ -834,7 +843,11 @@ def parse_addressed_event(
     elif first.type == MessageEntity.TEXT_MENTION:
         bot_id = getattr(context.bot, "id", None)
         entity_user = getattr(first, "user", None)
-        if bot_id is None or entity_user is None or getattr(entity_user, "id", None) != bot_id:
+        if (
+            bot_id is None
+            or entity_user is None
+            or getattr(entity_user, "id", None) != bot_id
+        ):
             return AddressedEvent(is_addressed=False)
     else:
         return AddressedEvent(is_addressed=False)
@@ -1228,11 +1241,15 @@ async def bind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if len(parts) > 1 and parts[1].strip():
         runtime_kind = _default_launch_runtime_kind()
         if runtime_kind != "codex":
-            await safe_reply(update.message, _build_resume_degraded_message(runtime_kind))
+            await safe_reply(
+                update.message, _build_resume_degraded_message(runtime_kind)
+            )
             return
 
         token = " ".join(parts[1].split())
-        target, error_message = await _resolve_resume_command_target(runtime_kind, token)
+        target, error_message = await _resolve_resume_command_target(
+            runtime_kind, token
+        )
         if target is None:
             await safe_reply(
                 update.message,
@@ -1259,12 +1276,16 @@ async def bind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             read_only=True,
             surface_key=surface.surface_key,
         )
-        topic_synced = await _sync_topic_title(
-            context.bot,
-            user.id,
-            surface.message_thread_id,
-            target.summary or target.thread_id,
-        ) if surface.message_thread_id is not None else True
+        topic_synced = (
+            await _sync_topic_title(
+                context.bot,
+                user.id,
+                surface.message_thread_id,
+                target.summary or target.thread_id,
+            )
+            if surface.message_thread_id is not None
+            else True
+        )
 
         response_lines = [
             f"✅ Bound this {_surface_subject(surface)} to persisted Codex replay.",
@@ -1273,9 +1294,7 @@ async def bind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "Use `/unbind` then `/resume <thread-name|id>` (or `/bind`) to attach writable control.",
         ]
         if not topic_synced:
-            response_lines.append(
-                "⚠️ Topic title sync failed; binding is still active."
-            )
+            response_lines.append("⚠️ Topic title sync failed; binding is still active.")
         await safe_reply(update.message, "\n".join(response_lines))
         return
 
@@ -1461,7 +1480,10 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     token = " ".join(parts[1].split())
     target, error_message = await _resolve_resume_command_target(runtime_kind, token)
     if target is None:
-        await safe_reply(update.message, error_message or _build_resume_degraded_message(runtime_kind))
+        await safe_reply(
+            update.message,
+            error_message or _build_resume_degraded_message(runtime_kind),
+        )
         return
 
     await clear_topic_state(
@@ -1473,7 +1495,13 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     _clear_same_thread_picker_state(context.user_data, surface)
     _allow_implicit_bind(user.id, surface)
 
-    success, message, final_name, created_wid, reused_existing = await tmux_manager.create_or_reuse_window(
+    (
+        success,
+        message,
+        final_name,
+        created_wid,
+        reused_existing,
+    ) = await tmux_manager.create_or_reuse_window(
         target.cwd,
         start_claude=True,
         resume_session_id=target.thread_id,
@@ -1561,7 +1589,10 @@ async def rename_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     runtime_kind = _get_window_runtime_kind(wid)
     capability = session_manager.get_runtime_capability(runtime_kind)
-    identity_changed, identity_note = await session_manager.rename_runtime_identity_for_window(
+    (
+        identity_changed,
+        identity_note,
+    ) = await session_manager.rename_runtime_identity_for_window(
         wid,
         final_name,
     )
@@ -1806,7 +1837,10 @@ async def topic_edited_handler(
         await _sync_topic_title(context.bot, user.id, thread_id, final_name)
     runtime_kind = _get_window_runtime_kind(wid)
     capability = session_manager.get_runtime_capability(runtime_kind)
-    identity_changed, identity_note = await session_manager.rename_runtime_identity_for_window(
+    (
+        identity_changed,
+        identity_note,
+    ) = await session_manager.rename_runtime_identity_for_window(
         wid,
         final_name,
     )
@@ -1887,7 +1921,9 @@ async def forward_command_handler(
         # If /clear command was sent, clear the persisted identity binding
         # so we can detect the next runtime-provided identity after first input.
         if cc_slash.strip().lower() == "/clear":
-            logger.info("Clearing persisted binding for window %s after /clear", display)
+            logger.info(
+                "Clearing persisted binding for window %s after /clear", display
+            )
             session_manager.clear_window_binding(wid)
 
         # Prompt-producing commands are surfaced by the status poller when the
@@ -2319,10 +2355,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         context.user_data.pop("_pending_thread_text", None)
 
     # Ignore text in thread-picker mode (only for the same topic)
-    if (
-        context.user_data
-        and context.user_data.get(STATE_KEY) == STATE_SELECTING_THREAD
-    ):
+    if context.user_data and context.user_data.get(STATE_KEY) == STATE_SELECTING_THREAD:
         pending_surface = _pending_surface_from_user_data(context.user_data)
         if _same_surface(pending_surface, surface):
             await safe_reply(
@@ -2498,7 +2531,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await safe_reply(update.message, f"❌ {message}")
         return
 
-    if _get_window_runtime_kind(wid) == "codex" and input_surface and input_surface.kind in {"busy", "input_ready", "blocked_prompt"}:
+    if (
+        _get_window_runtime_kind(wid) == "codex"
+        and input_surface
+        and input_surface.kind in {"busy", "input_ready", "blocked_prompt"}
+    ):
         mark_runtime_presence_active(user.id, surface.message_thread_id, wid)
 
     # Start background capture for ! bash command output
@@ -2546,19 +2583,25 @@ async def _create_and_bind_window(
 
     assert isinstance(query, CallbackQuery)
     assert isinstance(user, User)
-    pending_surface = pending_surface or _pending_surface_from_user_data(context.user_data)
+    pending_surface = pending_surface or _pending_surface_from_user_data(
+        context.user_data
+    )
 
     resolved_runtime_kind = runtime_kind or _default_launch_runtime_kind()
     if reuse_existing:
-        success, message, created_wname, created_wid, _reused_existing = (
-            await tmux_manager.create_or_reuse_window(
-                selected_path,
-                start_claude=True,
-                resume_session_id=resume_session_id,
-                runtime_kind=resolved_runtime_kind,
-                launch_command=launch_command,
-                reuse_existing=True,
-            )
+        (
+            success,
+            message,
+            created_wname,
+            created_wid,
+            _reused_existing,
+        ) = await tmux_manager.create_or_reuse_window(
+            selected_path,
+            start_claude=True,
+            resume_session_id=resume_session_id,
+            runtime_kind=resolved_runtime_kind,
+            launch_command=launch_command,
+            reuse_existing=True,
         )
     else:
         success, message, created_wname, created_wid = await tmux_manager.create_window(
@@ -3427,7 +3470,8 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         and not is_non_turn_user_notification(msg.text)
     )
     is_turn_started_lifecycle = (
-        msg.semantic_kind == LIFECYCLE_SEMANTIC_KIND and msg.text.strip() == "turn_started"
+        msg.semantic_kind == LIFECYCLE_SEMANTIC_KIND
+        and msg.text.strip() == "turn_started"
     )
 
     status = "complete" if msg.is_complete else "streaming"
@@ -3509,12 +3553,14 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
             await clear_interactive_msg(user_id, bot, thread_id)
 
         # Skip tool call notifications when CCBOT_SHOW_TOOL_CALLS=false
-        if not config.show_tool_calls and msg.content_type in ("tool_use", "tool_result"):
+        if not config.show_tool_calls and msg.content_type in (
+            "tool_use",
+            "tool_result",
+        ):
             continue
 
-        if (
-            msg.status_message_eligible
-            and (not msg.is_complete or msg.content_type == "tool_progress")
+        if msg.status_message_eligible and (
+            not msg.is_complete or msg.content_type == "tool_progress"
         ):
             status_text = build_status_text(
                 msg.text,
@@ -3624,6 +3670,11 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 image_data=msg.image_data,
                 turn_generation=turn_generation,
             )
+
+            if msg.semantic_kind == ASSISTANT_FINAL_SEMANTIC_KIND:
+                queue = get_message_queue(user_id)
+                if queue is not None:
+                    await queue.join()
 
             # Update user's read offset to current file position
             # This marks these messages as "read" for this user

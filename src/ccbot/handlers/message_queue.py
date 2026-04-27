@@ -32,6 +32,7 @@ from ..markdown_v2 import convert_markdown
 from ..session import session_manager
 from ..runtime_types import (
     ASSISTANT_FINAL_SEMANTIC_KIND,
+    USER_ECHO_SEMANTIC_KIND,
     WARNING_SEMANTIC_KIND,
     is_pre_final_visible_semantic_kind,
 )
@@ -791,7 +792,11 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         sent = None
 
         # For first part, try to convert status message to content (edit instead of delete)
-        if first_part and not is_terminal_artifact:
+        if (
+            first_part
+            and not is_terminal_artifact
+            and task.semantic_kind != USER_ECHO_SEMANTIC_KIND
+        ):
             first_part = False
             converted_msg_id = await _convert_status_to_content(
                 bot,

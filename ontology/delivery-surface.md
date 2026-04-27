@@ -196,3 +196,7 @@ Preview refinements:
 - plan-update artifacts are latest-only within one assistant turn, not across
   turns; a new user turn must open a fresh plan artifact instead of editing the
   previous turn's plan bubble up-thread
+- final assistant artifacts are terminal turn barriers; once a final answer is
+  observed it must be delivered before a later queued user turn can advance the
+  surface generation, and a user echo must never be rendered by editing an old
+  technical status bubble

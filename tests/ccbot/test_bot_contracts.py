@@ -186,7 +186,9 @@ class TestBotRegistration:
 
         with (
             patch.object(bot_mod.config, "claude_command", "codex"),
-            patch("ccbot.bot.session_manager.resolve_stale_ids", new_callable=AsyncMock),
+            patch(
+                "ccbot.bot.session_manager.resolve_stale_ids", new_callable=AsyncMock
+            ),
             patch("ccbot.bot.SessionMonitor", return_value=_StubMonitor()),
             patch("ccbot.bot.asyncio.create_task", side_effect=_capture_task),
         ):
@@ -253,7 +255,10 @@ class TestCommandSurface:
         mock_reply.assert_awaited_once()
         text = mock_reply.await_args.args[1]
         assert "tmux runtime control" in text
-        assert "Each bound topic or supported group main chat controls one live tmux window" in text
+        assert (
+            "Each bound topic or supported group main chat controls one live tmux window"
+            in text
+        )
         assert "Codex" in text
         assert "queue mode" in text
         assert "steer" in text
@@ -312,7 +317,9 @@ class TestCommandSurface:
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
             mock_sm.resolve_window_for_thread.return_value = "@7"
-            mock_sm.get_window_state.return_value = SimpleNamespace(runtime_kind="codex")
+            mock_sm.get_window_state.return_value = SimpleNamespace(
+                runtime_kind="codex"
+            )
 
             await bot_mod.usage_command(update, context)
 
@@ -389,7 +396,9 @@ class TestCommandSurface:
                 ),
             ),
             patch("ccbot.bot.clear_topic_state", new_callable=AsyncMock) as mock_clear,
-            patch("ccbot.bot._sync_topic_title", new_callable=AsyncMock, return_value=True),
+            patch(
+                "ccbot.bot._sync_topic_title", new_callable=AsyncMock, return_value=True
+            ),
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
             mock_sm.get_window_for_thread.return_value = None
@@ -450,13 +459,17 @@ class TestCommandSurface:
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
             mock_sm.get_window_for_thread.return_value = None
-            mock_sm.get_topic_binding_state.return_value = bot_mod.BINDING_STATE_BIND_FLOW
+            mock_sm.get_topic_binding_state.return_value = (
+                bot_mod.BINDING_STATE_BIND_FLOW
+            )
             mock_sm.get_topic_policy.return_value = TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
 
             await bot_mod.text_handler(update, context)
 
         mock_tmux.list_windows.assert_not_called()
-        mock_reply.assert_awaited_once_with(update.message, bot_mod.BIND_FLOW_ACTIVE_MESSAGE)
+        mock_reply.assert_awaited_once_with(
+            update.message, bot_mod.BIND_FLOW_ACTIVE_MESSAGE
+        )
 
     @pytest.mark.asyncio
     async def test_text_handler_external_binding_returns_read_only_warning(self):
@@ -502,7 +515,9 @@ class TestCommandSurface:
         with (
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot._start_bind_flow", new_callable=AsyncMock) as mock_start_bind,
+            patch(
+                "ccbot.bot._start_bind_flow", new_callable=AsyncMock
+            ) as mock_start_bind,
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
             mock_sm.get_window_for_thread.return_value = None
@@ -516,7 +531,9 @@ class TestCommandSurface:
         mock_reply.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_text_handler_group_unbound_at_mention_opens_bind_flow_without_runtime_send(self):
+    async def test_text_handler_group_unbound_at_mention_opens_bind_flow_without_runtime_send(
+        self,
+    ):
         update = _make_topic_update(text="@ccbot hello")
         update.message.entities = [
             SimpleNamespace(type=MessageEntity.MENTION, offset=0, length=6)
@@ -526,7 +543,9 @@ class TestCommandSurface:
         with (
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot._start_bind_flow", new_callable=AsyncMock) as mock_start_bind,
+            patch(
+                "ccbot.bot._start_bind_flow", new_callable=AsyncMock
+            ) as mock_start_bind,
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
             mock_sm.get_window_for_thread.return_value = None
@@ -538,19 +557,26 @@ class TestCommandSurface:
         mock_start_bind.assert_awaited_once()
         assert mock_start_bind.await_args.kwargs["explicit"] is True
         assert mock_start_bind.await_args.kwargs["pending_text"] == "hello"
-        assert context.user_data[bot_mod.PENDING_SURFACE_SLOTS_KEY]["t:42"]["text"] == "hello"
+        assert (
+            context.user_data[bot_mod.PENDING_SURFACE_SLOTS_KEY]["t:42"]["text"]
+            == "hello"
+        )
         mock_sm.send_to_window.assert_not_called()
         mock_reply.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_text_handler_no_topics_main_chat_unbound_ordinary_text_is_silent(self):
+    async def test_text_handler_no_topics_main_chat_unbound_ordinary_text_is_silent(
+        self,
+    ):
         update = _make_main_chat_update(text="hello")
         context = _make_context()
 
         with (
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot._start_bind_flow", new_callable=AsyncMock) as mock_start_bind,
+            patch(
+                "ccbot.bot._start_bind_flow", new_callable=AsyncMock
+            ) as mock_start_bind,
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
             mock_sm.get_window_for_thread.return_value = None
@@ -594,25 +620,40 @@ class TestCommandSurface:
             patch.object(bot_mod.config, "claude_command", "codex"),
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot.clear_topic_state", new_callable=AsyncMock),
-            patch("ccbot.bot._register_bound_window", new_callable=AsyncMock) as mock_register,
-            patch("ccbot.bot._maybe_autosend_pending_after_activation", new_callable=AsyncMock),
+            patch(
+                "ccbot.bot._register_bound_window", new_callable=AsyncMock
+            ) as mock_register,
+            patch(
+                "ccbot.bot._maybe_autosend_pending_after_activation",
+                new_callable=AsyncMock,
+            ),
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
             mock_sm.get_window_for_thread.return_value = None
             mock_sm.codex_thread_catalog = MagicMock()
-            mock_sm.codex_thread_catalog.resolve_resume_target.return_value = SimpleNamespace(
-                status="selected",
-                selected=SimpleNamespace(
-                    thread_id="thread-1",
-                    summary="Planning thread",
-                    cwd="/tmp/project",
-                ),
+            mock_sm.codex_thread_catalog.resolve_resume_target.return_value = (
+                SimpleNamespace(
+                    status="selected",
+                    selected=SimpleNamespace(
+                        thread_id="thread-1",
+                        summary="Planning thread",
+                        cwd="/tmp/project",
+                    ),
+                )
             )
-            mock_sm.get_runtime_capability.return_value = SimpleNamespace(display_name="Codex")
+            mock_sm.get_runtime_capability.return_value = SimpleNamespace(
+                display_name="Codex"
+            )
             mock_tmux.create_or_reuse_window = AsyncMock(
-                return_value=(True, "Reused window 'project' at /tmp/project", "project", "@7", True)
+                return_value=(
+                    True,
+                    "Reused window 'project' at /tmp/project",
+                    "project",
+                    "@7",
+                    True,
+                )
             )
 
             await bot_mod.resume_command(update, context)
@@ -657,16 +698,20 @@ class TestCommandSurface:
         with (
             patch.object(bot_mod.config, "claude_command", "codex"),
             patch("ccbot.bot.is_user_allowed", return_value=True),
-            patch("ccbot.bot._resolve_resume_command_target", new_callable=AsyncMock, return_value=(
-                bot_mod._ResumeCommandTarget(
-                    runtime_kind="codex",
-                    thread_id="thread-1",
-                    summary="Thread One",
-                    cwd="/tmp/project",
-                    file_path="/tmp/rollout-thread-1.jsonl",
+            patch(
+                "ccbot.bot._resolve_resume_command_target",
+                new_callable=AsyncMock,
+                return_value=(
+                    bot_mod._ResumeCommandTarget(
+                        runtime_kind="codex",
+                        thread_id="thread-1",
+                        summary="Thread One",
+                        cwd="/tmp/project",
+                        file_path="/tmp/rollout-thread-1.jsonl",
+                    ),
+                    None,
                 ),
-                None,
-            )),
+            ),
             patch("ccbot.bot.clear_topic_state", new_callable=AsyncMock),
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
             patch("ccbot.bot.session_manager") as mock_sm,
@@ -676,7 +721,10 @@ class TestCommandSurface:
             await bot_mod.bind_command(update, context)
 
         mock_sm.send_to_window.assert_not_called()
-        assert context.user_data[bot_mod.PENDING_SURFACE_SLOTS_KEY]["c:-100200"]["status"] == "pending"
+        assert (
+            context.user_data[bot_mod.PENDING_SURFACE_SLOTS_KEY]["c:-100200"]["status"]
+            == "pending"
+        )
 
     @pytest.mark.asyncio
     async def test_pending_autosend_happens_once_per_writable_activation(self):
@@ -802,26 +850,36 @@ class TestCommandSurface:
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot._get_thread_id", return_value=42),
             patch("ccbot.bot.clear_topic_state", new_callable=AsyncMock),
-            patch("ccbot.bot._register_bound_window", new_callable=AsyncMock) as mock_register,
+            patch(
+                "ccbot.bot._register_bound_window", new_callable=AsyncMock
+            ) as mock_register,
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
             mock_sm.get_window_for_thread.return_value = None
             mock_sm.codex_thread_catalog = MagicMock()
-            mock_sm.codex_thread_catalog.resolve_resume_target.return_value = SimpleNamespace(
-                status="selected",
-                selected=SimpleNamespace(
-                    thread_id="thread-1",
-                    summary="Planning thread",
-                    cwd="/tmp/project",
-                ),
+            mock_sm.codex_thread_catalog.resolve_resume_target.return_value = (
+                SimpleNamespace(
+                    status="selected",
+                    selected=SimpleNamespace(
+                        thread_id="thread-1",
+                        summary="Planning thread",
+                        cwd="/tmp/project",
+                    ),
+                )
             )
             mock_sm.get_runtime_capability.return_value = SimpleNamespace(
                 display_name="Codex"
             )
             mock_tmux.create_or_reuse_window = AsyncMock(
-                return_value=(True, "Reused window 'project' at /tmp/project", "project", "@7", True)
+                return_value=(
+                    True,
+                    "Reused window 'project' at /tmp/project",
+                    "project",
+                    "@7",
+                    True,
+                )
             )
 
             await bot_mod.resume_command(update, context)
@@ -921,14 +979,22 @@ class TestCommandSurface:
             mock_sm.rename_runtime_identity_for_window = AsyncMock(
                 return_value=(True, "fast-agent session title metadata updated")
             )
-            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(window_id="@7")
+            )
             mock_tmux.rename_window_with_suffixes = AsyncMock(
-                return_value=(True, "Renamed window to 'Daily planner'", "Daily planner")
+                return_value=(
+                    True,
+                    "Renamed window to 'Daily planner'",
+                    "Daily planner",
+                )
             )
 
             await bot_mod.rename_command(update, context)
 
-        mock_tmux.rename_window_with_suffixes.assert_awaited_once_with("@7", "Daily planner")
+        mock_tmux.rename_window_with_suffixes.assert_awaited_once_with(
+            "@7", "Daily planner"
+        )
         mock_sm.update_display_name.assert_called_once_with("@7", "Daily planner")
         mock_sm.rename_runtime_identity_for_window.assert_awaited_once_with(
             "@7",
@@ -963,7 +1029,9 @@ class TestCommandSurface:
             mock_sm.rename_runtime_identity_for_window = AsyncMock(
                 return_value=(False, "persisted identity unchanged")
             )
-            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(window_id="@7")
+            )
             mock_tmux.rename_window_with_suffixes = AsyncMock(
                 return_value=(True, "Renamed window to 'core'", "core")
             )
@@ -1121,7 +1189,9 @@ class TestCommandSurface:
             patch("ccbot.bot._get_thread_id", return_value=42),
             patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot._register_bound_window", new_callable=AsyncMock) as mock_register,
+            patch(
+                "ccbot.bot._register_bound_window", new_callable=AsyncMock
+            ) as mock_register,
             patch("ccbot.bot.safe_edit", new_callable=AsyncMock),
             patch.object(bot_mod.config, "claude_command", "codex --no-alt-screen"),
         ):
@@ -1186,7 +1256,9 @@ class TestCommandSurface:
             patch("ccbot.bot._get_thread_id", return_value=42),
             patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot._register_bound_window", new_callable=AsyncMock) as mock_register,
+            patch(
+                "ccbot.bot._register_bound_window", new_callable=AsyncMock
+            ) as mock_register,
             patch("ccbot.bot.safe_edit", new_callable=AsyncMock),
         ):
             mock_sm.validate_topic_bind_flow_callback.return_value = True
@@ -1269,7 +1341,11 @@ class TestTopicCleanup:
                 return_value=(True, "fast-agent session title metadata updated")
             )
             mock_tmux.rename_window_with_suffixes = AsyncMock(
-                return_value=(True, "Renamed window to 'new-topic-name'", "new-topic-name")
+                return_value=(
+                    True,
+                    "Renamed window to 'new-topic-name'",
+                    "new-topic-name",
+                )
             )
 
             await bot_mod.topic_edited_handler(update, context)
@@ -1287,9 +1363,7 @@ class TestTopicCleanup:
 
 class TestMediaForwarding:
     @pytest.mark.asyncio
-    async def test_photo_forwarding_downloads_and_sends_attachment_path(
-        self, tmp_path
-    ):
+    async def test_photo_forwarding_downloads_and_sends_attachment_path(self, tmp_path):
         update = _make_topic_update()
         context = _make_context()
         update.message.caption = "look at this"
@@ -1356,7 +1430,11 @@ class TestMediaForwarding:
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.tmux_manager") as mock_tmux,
-            patch("ccbot.bot.transcribe_voice", new_callable=AsyncMock, return_value="Hello from voice"),
+            patch(
+                "ccbot.bot.transcribe_voice",
+                new_callable=AsyncMock,
+                return_value="Hello from voice",
+            ),
             patch("ccbot.bot.clear_status_msg_info"),
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
         ):
@@ -1385,7 +1463,9 @@ class TestRuntimeInputRouting:
         ):
             mock_sm.resolve_window_for_thread.return_value = "@7"
             mock_sm.get_display_name.return_value = "project"
-            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(window_id="@7")
+            )
             mock_sm.send_special_key_to_window = AsyncMock(
                 return_value=(True, "Sent Escape")
             )
@@ -1407,11 +1487,15 @@ class TestRuntimeInputRouting:
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
-            patch("ccbot.bot.handle_interactive_ui", new_callable=AsyncMock) as mock_handle_ui,
+            patch(
+                "ccbot.bot.handle_interactive_ui", new_callable=AsyncMock
+            ) as mock_handle_ui,
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
             mock_sm.get_window_for_thread.return_value = "@7"
-            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(window_id="@7")
+            )
             mock_tmux.capture_pane = AsyncMock(
                 return_value="OpenAI Codex\n› ping\n■ Approval required\n"
             )
@@ -1422,8 +1506,7 @@ class TestRuntimeInputRouting:
         mock_sm.send_to_window.assert_not_called()
         mock_reply.assert_awaited_once()
         assert (
-            "Terminal prompt is waiting for a decision"
-            in mock_reply.await_args.args[1]
+            "Terminal prompt is waiting for a decision" in mock_reply.await_args.args[1]
         )
 
     @pytest.mark.asyncio
@@ -1438,7 +1521,9 @@ class TestRuntimeInputRouting:
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
             mock_sm.resolve_window_for_thread.return_value = "@7"
-            mock_sm.get_window_state.return_value = SimpleNamespace(runtime_kind="codex")
+            mock_sm.get_window_state.return_value = SimpleNamespace(
+                runtime_kind="codex"
+            )
 
             await bot_mod.usage_command(update, context)
 
@@ -1459,7 +1544,9 @@ class TestRuntimeInputRouting:
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
             mock_sm.resolve_window_for_thread.return_value = "@7"
-            mock_sm.get_window_state.return_value = SimpleNamespace(runtime_kind="claude")
+            mock_sm.get_window_state.return_value = SimpleNamespace(
+                runtime_kind="claude"
+            )
             mock_sm.send_to_window = AsyncMock(return_value=(True, "Sent to @7"))
 
             await bot_mod.usage_command(update, context)
@@ -1475,7 +1562,9 @@ class TestRuntimeInputRouting:
         update.callback_query = MagicMock()
         update.callback_query.data = f"{bot_mod.CB_ASK_UP}@7"
         update.callback_query.answer = AsyncMock()
-        update.callback_query.message = MagicMock(message_thread_id=42, chat=update.effective_chat)
+        update.callback_query.message = MagicMock(
+            message_thread_id=42, chat=update.effective_chat
+        )
         context = _make_context()
 
         with (
@@ -1498,9 +1587,17 @@ class TestLauncherRegistration:
     def test_infer_runtime_kind_from_wrapped_command(self):
         assert bot_mod.infer_runtime_kind_from_command("env FOO=1 codex") == "codex"
         assert bot_mod.infer_runtime_kind_from_command("bash -lc codex") == "codex"
-        assert bot_mod.infer_runtime_kind_from_command("/usr/local/bin/codex --json") == "codex"
+        assert (
+            bot_mod.infer_runtime_kind_from_command("/usr/local/bin/codex --json")
+            == "codex"
+        )
         assert bot_mod.infer_runtime_kind_from_command("uvx codex --help") == "codex"
-        assert bot_mod.infer_runtime_kind_from_command("claude --dangerously-skip-permissions") == "claude"
+        assert (
+            bot_mod.infer_runtime_kind_from_command(
+                "claude --dangerously-skip-permissions"
+            )
+            == "claude"
+        )
 
     @pytest.mark.asyncio
     async def test_create_and_bind_window_registers_codex_without_hook_wait(self):
@@ -1517,7 +1614,12 @@ class TestLauncherRegistration:
             patch.object(bot_mod.config, "claude_command", "codex"),
         ):
             mock_tmux.create_window = AsyncMock(
-                return_value=(True, "Created window 'proj' at /tmp/project", "proj", "@7")
+                return_value=(
+                    True,
+                    "Created window 'proj' at /tmp/project",
+                    "proj",
+                    "@7",
+                )
             )
             mock_sm.register_live_process = MagicMock()
             mock_sm.wait_for_session_map_entry = AsyncMock(return_value=True)
@@ -1580,7 +1682,9 @@ class TestThreadPickerFlow:
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot._get_thread_id", return_value=42),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot.build_thread_picker", return_value=("picker", MagicMock())),
+            patch(
+                "ccbot.bot.build_thread_picker", return_value=("picker", MagicMock())
+            ),
             patch("ccbot.bot.safe_edit", new_callable=AsyncMock) as mock_edit,
         ):
             mock_sm.validate_topic_bind_flow_callback.return_value = True
@@ -1614,7 +1718,9 @@ class TestThreadPickerFlow:
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot._get_thread_id", return_value=42),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot._create_and_bind_window", new_callable=AsyncMock) as mock_create,
+            patch(
+                "ccbot.bot._create_and_bind_window", new_callable=AsyncMock
+            ) as mock_create,
         ):
             mock_sm.validate_topic_bind_flow_callback.return_value = True
             await bot_mod.callback_handler(update, context)
@@ -1641,7 +1747,9 @@ class TestThreadPickerFlow:
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot._get_thread_id", return_value=42),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot._create_and_bind_window", new_callable=AsyncMock) as mock_create,
+            patch(
+                "ccbot.bot._create_and_bind_window", new_callable=AsyncMock
+            ) as mock_create,
         ):
             mock_sm.validate_topic_bind_flow_callback.return_value = True
             await bot_mod.callback_handler(update, context)
@@ -1663,7 +1771,9 @@ class TestThreadPickerFlow:
 
 class TestTelegramDelivery:
     @pytest.mark.asyncio
-    async def test_handle_new_message_compact_mode_routes_commentary_to_latest_visible_artifact(self):
+    async def test_handle_new_message_compact_mode_routes_commentary_to_latest_visible_artifact(
+        self,
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -1679,9 +1789,15 @@ class TestTelegramDelivery:
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.mark_runtime_presence_active") as mock_presence,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_commentary_update", new_callable=AsyncMock) as mock_commentary,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_commentary_update", new_callable=AsyncMock
+            ) as mock_commentary,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
             patch("ccbot.bot.get_interactive_msg_id", return_value=None),
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
@@ -1711,9 +1827,10 @@ class TestTelegramDelivery:
         assert projected.text == "x" * 1200
         assert projected.status_message_eligible is False
 
-
     @pytest.mark.asyncio
-    async def test_handle_new_message_compact_mode_routes_plan_update_to_dedicated_artifact(self):
+    async def test_handle_new_message_compact_mode_routes_plan_update_to_dedicated_artifact(
+        self,
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -1728,10 +1845,16 @@ class TestTelegramDelivery:
         with (
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_commentary_update", new_callable=AsyncMock) as mock_commentary,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_commentary_update", new_callable=AsyncMock
+            ) as mock_commentary,
             patch("ccbot.bot.enqueue_plan_update", new_callable=AsyncMock) as mock_plan,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
             patch("ccbot.bot.get_interactive_msg_id", return_value=None),
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
@@ -1745,7 +1868,9 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_compact_mode_routes_orchestration_to_latest_visible_artifact_in_commentary_lane(self):
+    async def test_handle_new_message_compact_mode_routes_orchestration_to_latest_visible_artifact_in_commentary_lane(
+        self,
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -1760,9 +1885,15 @@ class TestTelegramDelivery:
         with (
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_commentary_update", new_callable=AsyncMock) as mock_commentary,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_commentary_update", new_callable=AsyncMock
+            ) as mock_commentary,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
             patch("ccbot.bot.get_interactive_msg_id", return_value=None),
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
@@ -1775,7 +1906,9 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_compact_mode_does_not_preclose_surface_before_final_answer(self):
+    async def test_handle_new_message_compact_mode_does_not_preclose_surface_before_final_answer(
+        self,
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -1795,8 +1928,12 @@ class TestTelegramDelivery:
         with (
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", side_effect=_record_content) as mock_content,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", side_effect=_record_content
+            ) as mock_content,
             patch("ccbot.bot.get_interactive_msg_id", return_value=None),
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
@@ -1809,7 +1946,9 @@ class TestTelegramDelivery:
         assert call_order == ["content"]
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_compact_mode_suppresses_internal_skill_user_echo(self):
+    async def test_handle_new_message_compact_mode_suppresses_internal_skill_user_echo(
+        self,
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -1825,9 +1964,15 @@ class TestTelegramDelivery:
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=0),
-            patch("ccbot.bot.open_new_turn_generation", return_value=1) as mock_open_turn,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.open_new_turn_generation", return_value=1
+            ) as mock_open_turn,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
             mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
@@ -1839,7 +1984,9 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_compact_mode_keeps_literal_agents_instructions_echo_visible(self):
+    async def test_handle_new_message_compact_mode_keeps_literal_agents_instructions_echo_visible(
+        self,
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -1855,9 +2002,15 @@ class TestTelegramDelivery:
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=0),
-            patch("ccbot.bot.open_new_turn_generation", return_value=1) as mock_open_turn,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.open_new_turn_generation", return_value=1
+            ) as mock_open_turn,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
             mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
@@ -1876,7 +2029,9 @@ class TestTelegramDelivery:
             "Please review this pasted policy.\n<INSTRUCTIONS>\nkeep calm\n</INSTRUCTIONS>",
         ],
     )
-    async def test_handle_new_message_compact_mode_keeps_literal_instruction_like_user_text_visible(self, text: str):
+    async def test_handle_new_message_compact_mode_keeps_literal_instruction_like_user_text_visible(
+        self, text: str
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -1892,9 +2047,15 @@ class TestTelegramDelivery:
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=0),
-            patch("ccbot.bot.open_new_turn_generation", return_value=1) as mock_open_turn,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.open_new_turn_generation", return_value=1
+            ) as mock_open_turn,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
             mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
@@ -1922,9 +2083,15 @@ class TestTelegramDelivery:
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=0),
-            patch("ccbot.bot.open_new_turn_generation", return_value=1) as mock_open_turn,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.open_new_turn_generation", return_value=1
+            ) as mock_open_turn,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
             mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
@@ -1936,7 +2103,9 @@ class TestTelegramDelivery:
         mock_content.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_compact_mode_suppresses_turn_aborted_user_echo(self):
+    async def test_handle_new_message_compact_mode_suppresses_turn_aborted_user_echo(
+        self,
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -1952,9 +2121,15 @@ class TestTelegramDelivery:
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=0),
-            patch("ccbot.bot.open_new_turn_generation", return_value=1) as mock_open_turn,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.open_new_turn_generation", return_value=1
+            ) as mock_open_turn,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
             mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
@@ -1966,7 +2141,9 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_compact_mode_suppresses_placeholder_reasoning(self):
+    async def test_handle_new_message_compact_mode_suppresses_placeholder_reasoning(
+        self,
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -1981,8 +2158,12 @@ class TestTelegramDelivery:
         with (
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
             mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
@@ -2008,8 +2189,12 @@ class TestTelegramDelivery:
         with (
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
             mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
@@ -2020,7 +2205,9 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_compact_mode_routes_command_execution_to_status(self):
+    async def test_handle_new_message_compact_mode_routes_command_execution_to_status(
+        self,
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -2035,8 +2222,12 @@ class TestTelegramDelivery:
         with (
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
             patch("ccbot.bot.get_interactive_msg_id", return_value=None),
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
@@ -2062,8 +2253,12 @@ class TestTelegramDelivery:
         with (
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
             patch("ccbot.bot.get_interactive_msg_id", return_value=None),
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
@@ -2091,8 +2286,12 @@ class TestTelegramDelivery:
         with (
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
             patch("ccbot.bot.get_interactive_msg_id", return_value=None),
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
@@ -2103,7 +2302,9 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_compact_mode_routes_tool_result_to_status_only(self):
+    async def test_handle_new_message_compact_mode_routes_tool_result_to_status_only(
+        self,
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -2120,8 +2321,12 @@ class TestTelegramDelivery:
         with (
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
             patch("ccbot.bot.get_interactive_msg_id", return_value=None),
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
@@ -2132,7 +2337,9 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_compact_mode_routes_orchestration_to_latest_visible_artifact(self):
+    async def test_handle_new_message_compact_mode_routes_orchestration_to_latest_visible_artifact(
+        self,
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -2147,9 +2354,15 @@ class TestTelegramDelivery:
         with (
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_commentary_update", new_callable=AsyncMock) as mock_commentary,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_commentary_update", new_callable=AsyncMock
+            ) as mock_commentary,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
             patch("ccbot.bot.get_interactive_msg_id", return_value=None),
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
@@ -2177,8 +2390,12 @@ class TestTelegramDelivery:
         with (
             patch.object(bot_mod.config, "telegram_delivery_mode", "verbose"),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
             patch("ccbot.bot.get_interactive_msg_id", return_value=None),
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
@@ -2206,8 +2423,12 @@ class TestTelegramDelivery:
         with (
             patch.object(bot_mod.config, "telegram_delivery_mode", "verbose"),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
             patch("ccbot.bot.get_interactive_msg_id", return_value=None),
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
@@ -2240,8 +2461,12 @@ class TestTelegramDelivery:
         with (
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
             patch("ccbot.bot.get_interactive_msg_id", return_value=None),
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
@@ -2268,8 +2493,12 @@ class TestTelegramDelivery:
         with (
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
 
@@ -2279,7 +2508,9 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_reopens_turn_on_lifecycle_turn_started_when_lane_closed(self):
+    async def test_handle_new_message_reopens_turn_on_lifecycle_turn_started_when_lane_closed(
+        self,
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -2297,9 +2528,15 @@ class TestTelegramDelivery:
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=4),
             patch("ccbot.bot.is_pre_final_visible_lane_closed", return_value=True),
-            patch("ccbot.bot.open_new_turn_generation", return_value=5) as mock_open_turn,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.open_new_turn_generation", return_value=5
+            ) as mock_open_turn,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
 
@@ -2310,7 +2547,9 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_does_not_reopen_turn_on_lifecycle_turn_started_when_lane_open(self):
+    async def test_handle_new_message_does_not_reopen_turn_on_lifecycle_turn_started_when_lane_open(
+        self,
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -2328,9 +2567,15 @@ class TestTelegramDelivery:
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=4),
             patch("ccbot.bot.is_pre_final_visible_lane_closed", return_value=False),
-            patch("ccbot.bot.open_new_turn_generation", return_value=5) as mock_open_turn,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.open_new_turn_generation", return_value=5
+            ) as mock_open_turn,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
 
@@ -2341,7 +2586,9 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_reopens_pre_final_lane_for_ordinary_user_echo(self):
+    async def test_handle_new_message_reopens_pre_final_lane_for_ordinary_user_echo(
+        self,
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -2358,14 +2605,20 @@ class TestTelegramDelivery:
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=0),
-            patch("ccbot.bot.open_new_turn_generation", return_value=1) as mock_open_turn,
+            patch(
+                "ccbot.bot.open_new_turn_generation", return_value=1
+            ) as mock_open_turn,
             patch(
                 "ccbot.bot.flush_terminal_artifacts_before_new_turn",
                 new_callable=AsyncMock,
                 return_value=1,
             ) as mock_flush_terminal,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
             patch("ccbot.bot.get_interactive_msg_id", return_value=None),
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
@@ -2379,7 +2632,9 @@ class TestTelegramDelivery:
         mock_content.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_drops_post_final_commentary_when_lane_closed(self):
+    async def test_handle_new_message_drops_post_final_commentary_when_lane_closed(
+        self,
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -2396,9 +2651,15 @@ class TestTelegramDelivery:
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=5),
             patch("ccbot.bot.is_pre_final_visible_lane_closed", return_value=True),
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_commentary_update", new_callable=AsyncMock) as mock_commentary,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_commentary_update", new_callable=AsyncMock
+            ) as mock_commentary,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
             patch("ccbot.bot.get_interactive_msg_id", return_value=None),
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
@@ -2411,7 +2672,9 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_does_not_reopen_pre_final_lane_for_subagent_notification(self):
+    async def test_handle_new_message_does_not_reopen_pre_final_lane_for_subagent_notification(
+        self,
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -2428,9 +2691,15 @@ class TestTelegramDelivery:
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=0),
-            patch("ccbot.bot.open_new_turn_generation", return_value=1) as mock_open_turn,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.open_new_turn_generation", return_value=1
+            ) as mock_open_turn,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
 
@@ -2452,7 +2721,9 @@ class TestTelegramDelivery:
             "<bash-input>ls -la</bash-input>",
         ],
     )
-    async def test_handle_new_message_does_not_reopen_pre_final_lane_for_hidden_internal_non_turn_payloads(self, text: str):
+    async def test_handle_new_message_does_not_reopen_pre_final_lane_for_hidden_internal_non_turn_payloads(
+        self, text: str
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -2469,9 +2740,15 @@ class TestTelegramDelivery:
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=0),
-            patch("ccbot.bot.open_new_turn_generation", return_value=1) as mock_open_turn,
-            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock) as mock_status,
-            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch(
+                "ccbot.bot.open_new_turn_generation", return_value=1
+            ) as mock_open_turn,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
 
@@ -2502,7 +2779,8 @@ class TestTelegramDelivery:
         event = NormalizedEvent(
             thread_id="thread-1",
             text="```sh\n"
-            + "python3 - <<'PY' " + ("x" * 500)
+            + "python3 - <<'PY' "
+            + ("x" * 500)
             + "\nprint('done')\n```\ncompleted",
             is_complete=True,
             content_type="command_execution",
@@ -2541,7 +2819,9 @@ class TestTelegramDelivery:
         event = NormalizedEvent(
             thread_id="thread-1",
             text=(
-                "completed " + ("very long prefix " * 20) + "\n```sh\n"
+                "completed "
+                + ("very long prefix " * 20)
+                + "\n```sh\n"
                 + "\n".join(f"line {i}" for i in range(20))
                 + "\n```\n"
                 + ("very long suffix " * 20)
@@ -2599,3 +2879,40 @@ def test_compact_policy_status_preview_shows_ten_code_lines_after_budget_increas
     assert "line 10" not in projected.text
     assert "preview 10/20 lines" in projected.text
     assert len(projected.text) <= 560
+
+
+@pytest.mark.asyncio
+async def test_handle_new_message_waits_for_assistant_final_queue_before_next_turn_can_advance():
+    bot = AsyncMock()
+    msg = NormalizedEvent(
+        thread_id="thread-1",
+        text="First final answer",
+        is_complete=True,
+        content_type="text",
+        role="assistant",
+        event_kind="message",
+        runtime_kind="codex",
+    )
+    joined = False
+
+    class QueueProbe:
+        async def join(self):
+            nonlocal joined
+            joined = True
+
+    with (
+        patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+        patch("ccbot.bot.session_manager") as mock_sm,
+        patch(
+            "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+        ) as mock_content,
+        patch("ccbot.bot.get_message_queue", return_value=QueueProbe()),
+        patch("ccbot.bot.get_interactive_msg_id", return_value=None),
+    ):
+        mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+        mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
+
+        await bot_mod.handle_new_message(msg, bot)
+
+    mock_content.assert_awaited_once()
+    assert joined is True

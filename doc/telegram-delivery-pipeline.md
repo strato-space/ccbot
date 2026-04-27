@@ -106,22 +106,26 @@ Ordering guarantees:
    artifact is also closed until the next user turn
 8. "delivered successfully" means the final assistant content finished
    successfully in full; a partial multipart send does not close the surface
-9. no late status artifact may appear below the final answer for the same turn
-10. no late commentary, orchestration milestone, plan update, or surfaced preview bubble
+9. when a final assistant artifact is observed, delivery must wait for that
+   terminal artifact before a queued follow-up user turn advances the generation
+10. a user echo opens a new turn as ordinary content and must not be created by
+    editing a previous technical status artifact
+11. no late status artifact may appear below the final answer for the same turn
+12. no late commentary, orchestration milestone, plan update, or surfaced preview bubble
     may appear below the final answer for the same turn
-11. warning artifacts are not members of the current-turn pre-final surface and
+13. warning artifacts are not members of the current-turn pre-final surface and
     are not dropped by terminal closure; warning dedup state is keyed by control surface
     and latest warning text
-12. before a new user turn advances the control-surface turn generation, the
+14. before a new user turn advances the control-surface turn generation, the
     queue flushes any already-queued terminal turn artifact for that surface so
     the previous answer lands before the next turn is opened
-13. a new user turn then advances the control-surface turn generation before the
+15. a new user turn then advances the control-surface turn generation before the
     new turn's artifacts are enqueued
-14. stale close tasks from an older generation must fail closed instead of
+16. stale close tasks from an older generation must fail closed instead of
     reclosing the newer turn's visible or status surface
-15. this ordering contract applies to the whole `pre-final visible artifact`
+17. this ordering contract applies to the whole `pre-final visible artifact`
     class, not only to commentary
-16. if an already-started multipart content send becomes stale mid-flight, the
+18. if an already-started multipart content send becomes stale mid-flight, the
     remaining parts and trailing image/status sends must abort rather than
     surfacing below a newer turn or below the terminal turn artifact
 

@@ -1666,3 +1666,65 @@ def test_open_new_turn_generation_does_not_reuse_previous_plan_artifact() -> Non
     finally:
         clear_commentary_lane_state(1, 42)
         _plan_update_msg_info.pop((1, 42), None)
+
+
+@pytest.mark.asyncio
+async def test_user_echo_does_not_convert_existing_status_to_content(
+    monkeypatch, tmp_path
+) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(
+        delivery_audit.config, "telegram_delivery_audit_file", audit_path
+    )
+    mq._status_msg_info.clear()
+    mq._status_msg_info[(1, 42)] = (501, "@7", "🛠 Tool\nexec_command(...)")
+
+    task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["👤 queued follow-up"],
+        content_type="text",
+        semantic_kind="user_echo",
+        text="queued follow-up",
+        turn_generation=1,
+    )
+    sent = AsyncMock()
+    sent.message_id = 777
+
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.current_turn_generation", return_value=1
+            ),
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                return_value=sent,
+            ) as mock_send,
+            patch(
+                "ccbot.handlers.message_queue._check_and_send_status",
+                new_callable=AsyncMock,
+            ),
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+
+            await _process_content_task(AsyncMock(), 1, task)
+
+        mock_send.assert_awaited_once()
+        assert mock_send.await_args.args[2] == "👤 queued follow-up"
+        assert (1, 42) in mq._status_msg_info
+        rows = [
+            json.loads(line)
+            for line in audit_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert rows[-1]["action"] == "send"
+        assert rows[-1]["semantic_kind"] == "user_echo"
+    finally:
+        mq._status_msg_info.clear()
+        clear_commentary_lane_state(1, 42)
