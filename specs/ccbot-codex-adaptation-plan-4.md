@@ -1464,3 +1464,17 @@ Reason:
 - **validation**:
   - focused rollout and audit tests cover hook prompt conversion, state-write
     summary, and JSONL audit row shape
+
+### T76: Idempotent Tool Poll Status Edits
+
+- **status**: completed
+- **problem**: Telegram may answer `message is not modified` when a mutable
+  technical status edit is semantically identical after Markdown conversion.
+  The previous fallback path treated that no-op as an edit failure, cleared
+  status tracking, and sent a fresh `🛠 Tool write_stdin(..., poll)` bubble.
+- **decision**: Treat `message is not modified` as idempotent success for the
+  mutable technical status artifact. Record `edit_noop` in delivery audit, keep
+  the tracked message id, and never create a replacement bubble for a poll-only
+  `write_stdin` update.
+- **validation**: Queue tests cover poll-only suppression, in-place poll edits,
+  and the no-op edit path that must not call `send_with_fallback`.

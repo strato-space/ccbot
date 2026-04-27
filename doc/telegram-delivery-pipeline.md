@@ -36,6 +36,9 @@ The default Telegram surface is `compact`, not `verbose`.
 - poll-only tool lifecycle updates such as empty `write_stdin(..., poll)` may
   update an existing status artifact but must not create a standalone `Tool`
   bubble in compact mode
+- Telegram no-op edit errors (`message is not modified`) are idempotent
+  success for mutable technical status; they keep the same Telegram message id
+  and are audited as `edit_noop` rather than causing a fresh `Tool` bubble
 - command-execution summaries, including Claude-style `local_command`, are
   routed through the mutable status artifact
 - file-change summaries are routed through the mutable status artifact

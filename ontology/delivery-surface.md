@@ -193,6 +193,9 @@ Preview refinements:
   technical status artifact, but must not create a new Telegram bubble by
   themselves; if no status artifact exists, suppress the poll and record the
   suppression in the delivery audit
+- Telegram `message is not modified` responses for mutable technical status
+  edits are idempotent success, not send failures; they update local tracking
+  and audit as `edit_noop` instead of creating a replacement bubble
 - plan-update artifacts are latest-only within one assistant turn, not across
   turns; a new user turn must open a fresh plan artifact instead of editing the
   previous turn's plan bubble up-thread

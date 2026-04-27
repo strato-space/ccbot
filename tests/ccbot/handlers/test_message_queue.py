@@ -1614,6 +1614,61 @@ async def test_poll_only_write_stdin_does_not_create_status_bubble(
 
 
 @pytest.mark.asyncio
+async def test_status_edit_not_modified_does_not_create_duplicate_bubble(
+    monkeypatch, tmp_path
+) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(
+        delivery_audit.config, "telegram_delivery_audit_file", audit_path
+    )
+    mq._status_msg_info.clear()
+    mq._status_msg_info[(1, 42)] = (
+        501,
+        "@7",
+        "🛠 Tool\nwrite_stdin(session 82770, poll) ",
+    )
+
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="🛠 Tool\nwrite_stdin(session 82770, poll)",
+        turn_generation=0,
+    )
+    bot = AsyncMock()
+    bot.edit_message_text.side_effect = Exception(
+        "Message is not modified: specified new message content and reply markup "
+        "are exactly the same as a current content and reply markup of the message"
+    )
+
+    with (
+        patch(
+            "ccbot.handlers.message_queue._is_task_binding_active",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("ccbot.handlers.message_queue.current_turn_generation", return_value=0),
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.message_queue.send_with_fallback",
+            new_callable=AsyncMock,
+        ) as mock_send,
+    ):
+        mock_sm.resolve_chat_id.return_value = 100
+        await _process_status_update_task(bot, 1, task)
+
+    mock_send.assert_not_awaited()
+    assert mq._status_msg_info[(1, 42)] == (501, "@7", task.text)
+    rows = [
+        json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[-1]["action"] == "edit_noop"
+    assert rows[-1]["reason"] == "message_not_modified"
+
+    mq._status_msg_info.clear()
+
+
+@pytest.mark.asyncio
 async def test_poll_only_write_stdin_updates_existing_status_bubble(
     monkeypatch, tmp_path
 ) -> None:

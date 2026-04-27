@@ -26,7 +26,7 @@ from typing import Literal
 
 from telegram import Bot
 from telegram.constants import ChatAction
-from telegram.error import RetryAfter
+from telegram.error import BadRequest, RetryAfter
 
 from ..markdown_v2 import convert_markdown
 from ..session import session_manager
@@ -54,6 +54,16 @@ logger = logging.getLogger(__name__)
 def _ensure_formatted(text: str) -> str:
     """Convert markdown to MarkdownV2."""
     return convert_markdown(text)
+
+
+def _is_message_not_modified_error(exc: Exception) -> bool:
+    """Return True for Telegram edit no-op errors.
+
+    Telegram raises BadRequest when an edit would not change the rendered
+    message. That is a successful idempotent status update for mutable
+    artifacts; treating it as a failed edit causes duplicate status bubbles.
+    """
+    return "message is not modified" in str(exc).lower()
 
 
 # Merge limit for content messages
@@ -1192,7 +1202,21 @@ async def _process_status_update_task(
                 _status_msg_info[skey] = (msg_id, wid, status_text)
             except RetryAfter:
                 raise
-            except Exception:
+            except (BadRequest, Exception) as exc:
+                if _is_message_not_modified_error(exc):
+                    _status_msg_info[skey] = (msg_id, wid, status_text)
+                    _audit_task_delivery(
+                        action="edit_noop",
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        task=task,
+                        text=status_text,
+                        message_id=msg_id,
+                        content_type="status",
+                        semantic_kind="technical_status",
+                        reason="message_not_modified",
+                    )
+                    return
                 try:
                     await bot.edit_message_text(
                         chat_id=chat_id,
@@ -1203,7 +1227,21 @@ async def _process_status_update_task(
                     _status_msg_info[skey] = (msg_id, wid, status_text)
                 except RetryAfter:
                     raise
-                except Exception as e:
+                except (BadRequest, Exception) as e:
+                    if _is_message_not_modified_error(e):
+                        _status_msg_info[skey] = (msg_id, wid, status_text)
+                        _audit_task_delivery(
+                            action="edit_noop",
+                            user_id=user_id,
+                            chat_id=chat_id,
+                            task=task,
+                            text=status_text,
+                            message_id=msg_id,
+                            content_type="status",
+                            semantic_kind="technical_status",
+                            reason="message_not_modified",
+                        )
+                        return
                     logger.debug(f"Failed to edit status message: {e}")
                     _status_msg_info.pop(skey, None)
                     await _do_send_status_message(bot, user_id, tid, wid, status_text)
