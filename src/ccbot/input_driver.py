@@ -262,6 +262,8 @@ class RuntimeInputDriver:
         if not text:
             return False, "No text to send"
 
+        multiline = "\n" in text
+
         # Codex and Claude both treat a leading ! as a shell command prompt.
         # We split the first character so the terminal can transition into
         # shell mode before the rest of the command arrives.
@@ -274,7 +276,6 @@ class RuntimeInputDriver:
                 if not await self._tmux.send_literal_text(window_id, rest):
                     return False, "Failed to send shell-command body"
         else:
-            multiline = "\n" in text
             if multiline:
                 if not await self._tmux.send_pasted_text(window_id, text):
                     return False, "Failed to paste multiline text"

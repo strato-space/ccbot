@@ -40,7 +40,6 @@ Key functions: create_bot(), handle_new_message().
 import asyncio
 import io
 import logging
-import shlex
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -1020,29 +1019,6 @@ def _is_non_bindable_codex_helper_window(window_id: str) -> bool:
         return False
 
 
-def _infer_known_runtime_kind_from_pane_command(command: str) -> str | None:
-    """Infer a runtime from an active pane command without default fallback."""
-    normalized = (command or "").strip()
-    if not normalized:
-        return None
-    try:
-        tokens = shlex.split(normalized)
-    except ValueError:
-        tokens = normalized.split()
-    if not tokens:
-        return None
-
-    executable = Path(tokens[0]).name.casefold()
-    for runtime_kind, capability in runtime_capability_registry.items():
-        aliases = {
-            capability.launch_command_name.casefold(),
-            *(alias.casefold() for alias in capability.command_aliases),
-        }
-        if executable in aliases:
-            return runtime_kind
-    return None
-
-
 def _get_registered_window_runtime_kind(window_id: str) -> str | None:
     """Return a trusted persisted runtime kind for an already-registered window."""
     window_states = getattr(session_manager, "window_states", None)
@@ -1063,12 +1039,14 @@ def _get_registered_window_runtime_kind(window_id: str) -> str | None:
     return None
 
 
-def _resolve_existing_window_runtime_kind(window_id: str, pane_command: str) -> str:
+def _resolve_existing_window_runtime_kind(
+    window_id: str,
+    pane_command: str,
+) -> str | None:
     """Resolve the runtime kind for a live tmux window selected via /bind."""
     return (
-        _infer_known_runtime_kind_from_pane_command(pane_command)
+        runtime_capability_registry.known_runtime_kind_from_command(pane_command)
         or _get_registered_window_runtime_kind(window_id)
-        or _default_launch_runtime_kind()
     )
 
 
@@ -3342,6 +3320,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             selected_wid,
             w.pane_current_command,
         )
+        if runtime_kind is None:
+            await query.answer(
+                f"Window '{display}' is not running a known runtime",
+                show_alert=True,
+            )
+            return
         await _register_bound_window(
             context,
             user,

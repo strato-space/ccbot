@@ -3,7 +3,11 @@
 from types import SimpleNamespace
 
 from ccbot.handlers.callback_data import CB_BIND_FLOW_SUFFIX
-from ccbot.handlers.directory_browser import build_thread_picker, build_window_picker
+from ccbot.handlers.directory_browser import (
+    build_session_picker,
+    build_thread_picker,
+    build_window_picker,
+)
 
 
 def test_build_thread_picker_uses_thread_language():
@@ -46,3 +50,25 @@ def test_build_window_picker_offers_new_thread():
         button.callback_data for row in keyboard.inline_keyboard for button in row
     ]
     assert all(CB_BIND_FLOW_SUFFIX in item for item in callback_data)
+
+
+def test_build_session_picker_forwards_bind_flow_credentials():
+    _text, keyboard = build_session_picker(
+        [
+            SimpleNamespace(
+                thread_id="thread-1",
+                summary="Existing Codex thread",
+                message_count=12,
+                file_path="/tmp/project/thread-1.jsonl",
+            )
+        ],
+        bind_flow_version=9,
+        bind_flow_nonce="session-nonce",
+    )
+
+    callback_data = [
+        button.callback_data for row in keyboard.inline_keyboard for button in row
+    ]
+    assert callback_data
+    assert all(CB_BIND_FLOW_SUFFIX in item for item in callback_data)
+    assert all(item.endswith(":9:session-nonce") for item in callback_data)

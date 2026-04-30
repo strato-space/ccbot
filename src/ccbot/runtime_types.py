@@ -441,11 +441,11 @@ class RuntimeCapabilityRegistry:
             ),
         }
 
-    def infer_runtime_kind_from_command(self, command: str) -> str:
-        """Infer a runtime kind from a launcher command string."""
+    def known_runtime_kind_from_command(self, command: str) -> str | None:
+        """Return the runtime kind named by a command, or None for shell/unknown."""
         command = (command or "").strip().casefold()
         if not command:
-            return self.default_runtime_kind
+            return None
         try:
             tokens = shlex.split(command)
         except ValueError:
@@ -459,6 +459,13 @@ class RuntimeCapabilityRegistry:
             executable = Path(token).name.casefold()
             if executable in self._command_index:
                 return self._command_index[executable]
+        return None
+
+    def infer_runtime_kind_from_command(self, command: str) -> str:
+        """Infer a runtime kind from a launcher command string."""
+        known_runtime = self.known_runtime_kind_from_command(command)
+        if known_runtime:
+            return known_runtime
         return self.default_runtime_kind
 
     def build_launch_command(

@@ -70,3 +70,6 @@ venv.bak/
 .uv/
 uv.lock
 .omx/
+.codex
+.desloppify/
+scorecard.png

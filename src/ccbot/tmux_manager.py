@@ -30,28 +30,6 @@ from .runtime_types import runtime_capability_registry
 logger = logging.getLogger(__name__)
 
 
-def _known_runtime_kind_from_command(command: str) -> str | None:
-    """Return a known runtime kind for an active command, or None for shell/unknown."""
-    normalized = (command or "").strip()
-    if not normalized:
-        return None
-    try:
-        tokens = shlex.split(normalized)
-    except ValueError:
-        tokens = normalized.split()
-    if not tokens:
-        return None
-    executable = Path(tokens[0]).name.casefold()
-    for runtime_kind, capability in runtime_capability_registry.items():
-        aliases = {
-            capability.launch_command_name.casefold(),
-            *(alias.casefold() for alias in capability.command_aliases),
-        }
-        if executable in aliases:
-            return runtime_kind
-    return None
-
-
 @dataclass
 class TmuxWindow:
     """Information about a tmux window."""
@@ -632,7 +610,7 @@ class TmuxManager:
                         False,
                     )
 
-                active_runtime = _known_runtime_kind_from_command(
+                active_runtime = runtime_capability_registry.known_runtime_kind_from_command(
                     existing.pane_current_command
                 )
                 requested_runtime = runtime_kind or infer_runtime_kind_from_command(

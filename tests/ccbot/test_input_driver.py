@@ -111,6 +111,26 @@ async def test_single_line_codex_text_still_uses_literal_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_shell_command_submit_path_has_defined_multiline_state() -> None:
+    fake_tmux = _FakeTmux()
+    driver = RuntimeInputDriver(
+        fake_tmux,
+        submit_delay=0,
+        shell_transition_delay=0,
+    )
+
+    success, message = await driver.send_text("@1", "!pwd", runtime_kind="codex")
+
+    assert success is True
+    assert message == "Sent text to @1"
+    assert fake_tmux.calls == [
+        ("literal", "@1", "!"),
+        ("literal", "@1", "pwd"),
+        ("submit", "@1", None),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_multiline_paste_failure_fails_before_submit() -> None:
     fake_tmux = _FakeTmux()
     fake_tmux.paste_result = False

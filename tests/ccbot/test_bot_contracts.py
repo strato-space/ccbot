@@ -1349,6 +1349,73 @@ class TestCommandSurface:
         }
         window = SimpleNamespace(
             window_id="@7",
+            window_name="codex",
+            cwd="/tmp/project",
+            pane_current_command="codex",
+        )
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch(
+                "ccbot.bot._register_bound_window", new_callable=AsyncMock
+            ) as mock_register,
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock),
+            patch.object(bot_mod.config, "claude_command", "codex --no-alt-screen"),
+        ):
+            mock_sm.validate_topic_bind_flow_callback.return_value = True
+            mock_tmux.find_window_by_id = AsyncMock(return_value=window)
+
+            await bot_mod.callback_handler(update, context)
+
+        mock_register.assert_awaited_once_with(
+            context,
+            update.effective_user,
+            42,
+            window_id="@7",
+            window_name="codex",
+            selected_path="/tmp/project",
+            runtime_kind="codex",
+            surface=bot_mod.ControlSurface(
+                kind="group_topic",
+                chat_id=100,
+                thread_id=42,
+                legacy_scope_id=42,
+                surface_key="t:42",
+                label="topic",
+                is_shared_group=True,
+                supports_bind_flow=True,
+            ),
+            sync_topic_title=True,
+        )
+        mock_sm.bind_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_window_picker_bind_shell_only_window_fails_closed(self):
+        update = MagicMock()
+        update.effective_user = MagicMock(id=1)
+        update.effective_chat = MagicMock(type="supergroup", id=100)
+        update.callback_query = MagicMock()
+        update.callback_query.data = append_bind_flow_token(
+            f"{bot_mod.CB_WIN_BIND}0",
+            version=2,
+            nonce="nonce123",
+        )
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.message = MagicMock(
+            message_thread_id=42,
+            chat=update.effective_chat,
+        )
+        context = _make_context()
+        context.user_data = {
+            "_pending_thread_id": 42,
+            bot_mod.STATE_KEY: bot_mod.STATE_SELECTING_WINDOW,
+            bot_mod.UNBOUND_WINDOWS_KEY: ["@7"],
+        }
+        window = SimpleNamespace(
+            window_id="@7",
             window_name="node",
             cwd="/tmp/project",
             pane_current_command="node",
@@ -1366,6 +1433,66 @@ class TestCommandSurface:
             patch.object(bot_mod.config, "claude_command", "codex --no-alt-screen"),
         ):
             mock_sm.validate_topic_bind_flow_callback.return_value = True
+            mock_tmux.find_window_by_id = AsyncMock(return_value=window)
+
+            await bot_mod.callback_handler(update, context)
+
+        mock_register.assert_not_awaited()
+        mock_sm.bind_thread.assert_not_called()
+        update.callback_query.answer.assert_awaited_once_with(
+            "Window 'node' is not running a known runtime",
+            show_alert=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_window_picker_bind_uses_registered_runtime_for_shell_pane(self):
+        update = MagicMock()
+        update.effective_user = MagicMock(id=1)
+        update.effective_chat = MagicMock(type="supergroup", id=100)
+        update.callback_query = MagicMock()
+        update.callback_query.data = append_bind_flow_token(
+            f"{bot_mod.CB_WIN_BIND}0",
+            version=2,
+            nonce="nonce123",
+        )
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.message = MagicMock(
+            message_thread_id=42,
+            chat=update.effective_chat,
+        )
+        context = _make_context()
+        context.user_data = {
+            "_pending_thread_id": 42,
+            bot_mod.STATE_KEY: bot_mod.STATE_SELECTING_WINDOW,
+            bot_mod.UNBOUND_WINDOWS_KEY: ["@7"],
+        }
+        window = SimpleNamespace(
+            window_id="@7",
+            window_name="node",
+            cwd="/tmp/project",
+            pane_current_command="node",
+        )
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch(
+                "ccbot.bot._register_bound_window", new_callable=AsyncMock
+            ) as mock_register,
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock),
+            patch.object(bot_mod.config, "claude_command", "codex --no-alt-screen"),
+        ):
+            mock_sm.validate_topic_bind_flow_callback.return_value = True
+            mock_sm.window_states = {
+                "@7": SimpleNamespace(
+                    runtime_kind="codex",
+                    cwd="/tmp/project",
+                    thread_id="thread-1",
+                )
+            }
+            mock_sm.codex_thread_catalog = None
             mock_tmux.find_window_by_id = AsyncMock(return_value=window)
 
             await bot_mod.callback_handler(update, context)

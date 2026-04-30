@@ -94,6 +94,10 @@ def build_window_picker(
 
     Args:
         windows: List of (window_id, window_name, cwd) tuples.
+        bind_flow_version: Bind-flow credential version embedded in callbacks
+            so stale picker actions cannot mutate a newer bind flow.
+        bind_flow_nonce: Bind-flow credential nonce embedded in callbacks so
+            stale picker actions cannot mutate a newer bind flow.
 
     Returns: (text, keyboard, window_ids) where window_ids is the ordered list for caching.
     """
@@ -304,6 +308,10 @@ def build_thread_picker(
 
     Args:
         threads: List of ThreadLocator objects (sorted by recency).
+        bind_flow_version: Bind-flow credential version embedded in callbacks
+            so stale picker actions cannot mutate a newer bind flow.
+        bind_flow_nonce: Bind-flow credential nonce embedded in callbacks so
+            stale picker actions cannot mutate a newer bind flow.
 
     Returns: (text, keyboard).
     """
@@ -368,6 +376,13 @@ def build_thread_picker(
 
 def build_session_picker(
     sessions: list[ThreadLocator],
+    *,
+    bind_flow_version: int = 0,
+    bind_flow_nonce: str = "",
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Backward-compatible alias for build_thread_picker()."""
-    return build_thread_picker(sessions)
+    return build_thread_picker(
+        sessions,
+        bind_flow_version=bind_flow_version,
+        bind_flow_nonce=bind_flow_nonce,
+    )

@@ -19,7 +19,6 @@ Key components:
 import asyncio
 import logging
 import re
-import shlex
 import time
 from pathlib import Path
 
@@ -164,31 +163,6 @@ def mark_runtime_presence_active(
     _runtime_presence[(user_id, window_id)] = True
 
 
-def _infer_known_runtime_kind_from_pane_command(command: str) -> str | None:
-    normalized = (command or "").strip()
-    if not normalized:
-        return None
-    try:
-        tokens = shlex.split(normalized)
-    except ValueError:
-        tokens = normalized.split()
-    if not tokens:
-        return None
-    inferred = runtime_capability_registry.infer_runtime_kind_from_command(normalized)
-    if inferred == runtime_capability_registry.default_runtime_kind:
-        executable = Path(tokens[0]).name.casefold()
-        default_capability = runtime_capability_registry.get(
-            runtime_capability_registry.default_runtime_kind
-        )
-        aliases = {
-            default_capability.launch_command_name.casefold(),
-            *(alias.casefold() for alias in default_capability.command_aliases),
-        }
-        if executable not in aliases:
-            return None
-    return inferred
-
-
 def _last_nonempty_pane_line(pane_text: str) -> str:
     for line in reversed((pane_text or "").splitlines()):
         stripped = line.strip()
@@ -290,7 +264,9 @@ async def _maybe_enqueue_runtime_exit_warning(
     observed = _runtime_presence.get(presence_key)
 
     pane_command_text = pane_command if isinstance(pane_command, str) else ""
-    current_runtime = _infer_known_runtime_kind_from_pane_command(pane_command_text)
+    current_runtime = runtime_capability_registry.known_runtime_kind_from_command(
+        pane_command_text
+    )
     runtime_active = expected_runtime == "codex" and (
         current_runtime == expected_runtime or _codex_surface_looks_active(pane_text)
     )
