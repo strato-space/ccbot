@@ -1349,6 +1349,7 @@ class SessionManager:
             self._save_state()
         if not versioned:
             self._write_session_map_entries(session_map)
+        self.cleanup_helper_window_bindings()
 
     # --- Window state management ---
 
@@ -1401,6 +1402,114 @@ class SessionManager:
     def clear_window_session(self, window_id: str) -> None:
         """Backward-compatible alias for clear_window_binding()."""
         self.clear_window_binding(window_id)
+
+    def _is_codex_helper_window(self, window_id: str) -> bool:
+        """Return True when a tmux window is a Codex helper/subagent session."""
+        state = self.window_states.get(window_id)
+        if (
+            state is None
+            or state.runtime_kind != "codex"
+            or not state.thread_id
+            or self.codex_thread_catalog is None
+        ):
+            return False
+        try:
+            return bool(self.codex_thread_catalog.is_helper_thread_fast(state.thread_id))
+        except Exception as exc:
+            logger.warning(
+                "Unable to classify Codex helper window %s (%s): %s",
+                window_id,
+                state.thread_id,
+                exc,
+            )
+            return False
+
+    def _is_inactive_or_helper_tmux_binding(self, window_id: str) -> bool:
+        """Return True for tmux bindings that must fail closed.
+
+        External persisted-thread bindings are intentionally not tmux windows.
+        For real tmux ids, absence of a live process descriptor means the
+        binding has lost the metadata needed to prove it is a writable user
+        surface; fail closed instead of delivering or accepting input.
+        """
+        if self.is_external_binding_window_id(window_id):
+            return False
+        if not self._is_window_id(window_id):
+            return False
+        if window_id not in self.window_states:
+            return True
+        return self._is_codex_helper_window(window_id)
+
+    def cleanup_helper_window_bindings(self) -> list[TopicBinding]:
+        """Remove persisted topic bindings that point at helper/inactive windows.
+
+        Codex native subagent/helper windows may share the parent's cwd and can
+        appear in tmux, but they are not user-addressable control surfaces.
+        Existing bindings from older bot versions must be pruned fail-closed so
+        a helper transcript cannot keep delivering into its own Telegram topic
+        or accept user input as if it were an independent session. A tmux id
+        without a process descriptor is also inactive because the bot cannot
+        prove it is a writable user surface.
+        """
+        removed: list[TopicBinding] = []
+        helper_window_ids = {
+            window_id
+            for window_id in {
+                bound_window_id
+                for bindings in self.surface_bindings.values()
+                for bound_window_id in bindings.values()
+            }
+            if self._is_inactive_or_helper_tmux_binding(window_id)
+        }
+        if not helper_window_ids:
+            return removed
+
+        changed = False
+        for user_id, bindings in list(self.surface_bindings.items()):
+            for surface_key, window_id in list(bindings.items()):
+                if window_id not in helper_window_ids:
+                    continue
+                removed.append(
+                    TopicBinding(
+                        user_id=user_id,
+                        thread_id=self._topic_thread_id_from_surface_key(surface_key),
+                        window_id=window_id,
+                        window_name=self.get_display_name(window_id),
+                        runtime_kind=self.get_process_descriptor(window_id).runtime_kind,
+                    )
+                )
+                del bindings[surface_key]
+                self.surface_binding_states.setdefault(user_id, {})[surface_key] = (
+                    BINDING_STATE_NONE
+                )
+                external = self.external_surface_bindings.get(user_id)
+                if external and surface_key in external:
+                    del external[surface_key]
+                    self._prune_empty_surface_entry(
+                        self.external_surface_bindings,
+                        user_id,
+                )
+                changed = True
+                logger.warning(
+                    "Removed binding from surface %s to inactive/helper window %s for user %d",
+                    surface_key,
+                    window_id,
+                    user_id,
+                )
+            self._prune_empty_surface_entry(self.surface_bindings, user_id)
+
+        for user_id, offsets in list(self.user_window_offsets.items()):
+            for window_id in helper_window_ids:
+                if window_id in offsets:
+                    del offsets[window_id]
+                    changed = True
+            if not offsets:
+                del self.user_window_offsets[user_id]
+
+        if changed:
+            self._sync_legacy_topic_views_from_surface()
+            self._save_state()
+        return removed
 
     @staticmethod
     def _encode_cwd(cwd: str) -> str:
@@ -1927,7 +2036,10 @@ class SessionManager:
         bindings = self.surface_bindings.get(user_id)
         if not bindings:
             return None
-        return bindings.get(resolved_surface_key)
+        window_id = bindings.get(resolved_surface_key)
+        if window_id and self._is_inactive_or_helper_tmux_binding(window_id):
+            return None
+        return window_id
 
     def resolve_window_for_surface(
         self,
@@ -1985,6 +2097,8 @@ class SessionManager:
         )
         bindings = self.surface_bindings.setdefault(user_id, {})
         bindings[resolved_surface_key] = window_id
+        if self._is_window_id(window_id):
+            self.get_process_descriptor(window_id)
         external = self.external_surface_bindings.get(user_id)
         if external and resolved_surface_key in external:
             del external[resolved_surface_key]
@@ -2526,6 +2640,8 @@ class SessionManager:
         window_id = self.get_window_for_thread(user_id, thread_id)
         if not window_id:
             return None
+        if self._is_inactive_or_helper_tmux_binding(window_id):
+            return None
         if self.is_external_binding_window_id(window_id):
             external = self.get_external_topic_binding(user_id, thread_id) or {}
             runtime_kind = (
@@ -2578,6 +2694,13 @@ class SessionManager:
                         binding_scope="external",
                         source_thread_id=source_thread_id,
                         read_only=bool(external.get("read_only", True)),
+                    )
+                    continue
+                if self._is_inactive_or_helper_tmux_binding(window_id):
+                    logger.warning(
+                        "Skipping persisted binding to inactive/helper window %s for user %d",
+                        window_id,
+                        user_id,
                     )
                     continue
                 yield TopicBinding(

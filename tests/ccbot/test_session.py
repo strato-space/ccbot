@@ -76,6 +76,78 @@ class TestThreadBindings:
         binding = next(mgr.iter_topic_bindings())
         assert binding.runtime_kind == "codex"
 
+    def test_helper_codex_window_binding_is_pruned_fail_closed(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.codex_thread_catalog = SimpleNamespace(
+            is_helper_thread_fast=lambda thread_id: thread_id == "helper-thread"
+        )
+        mgr.bind_thread(100, 1, "@45", window_name="comfy-agent-spec")
+        mgr.bind_thread(100, 2, "@0", window_name="comfy-agent")
+        helper_state = mgr.get_window_state("@45")
+        helper_state.runtime_kind = "codex"
+        helper_state.thread_id = "helper-thread"
+        parent_state = mgr.get_window_state("@0")
+        parent_state.runtime_kind = "codex"
+        parent_state.thread_id = "parent-thread"
+        mgr.user_window_offsets = {100: {"@45": 123, "@0": 456}}
+
+        removed = mgr.cleanup_helper_window_bindings()
+
+        assert [(b.user_id, b.thread_id, b.window_id) for b in removed] == [
+            (100, 1, "@45")
+        ]
+        assert mgr.get_window_for_thread(100, 1) is None
+        assert mgr.get_topic_binding(100, 1) is None
+        assert mgr.get_window_for_thread(100, 2) == "@0"
+        assert {(b.user_id, b.thread_id, b.window_id) for b in mgr.iter_topic_bindings()} == {
+            (100, 2, "@0")
+        }
+        assert mgr.topic_binding_states[100][1] == BINDING_STATE_NONE
+        assert mgr.user_window_offsets == {100: {"@0": 456}}
+
+    def test_helper_codex_window_binding_is_hidden_before_cleanup(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.codex_thread_catalog = SimpleNamespace(
+            is_helper_thread_fast=lambda thread_id: thread_id == "helper-thread"
+        )
+        mgr.bind_thread(100, 1, "@45", window_name="comfy-agent-spec")
+        helper_state = mgr.get_window_state("@45")
+        helper_state.runtime_kind = "codex"
+        helper_state.thread_id = "helper-thread"
+
+        assert mgr.get_window_for_thread(100, 1) is None
+        assert mgr.get_topic_binding(100, 1) is None
+        assert list(mgr.iter_topic_bindings()) == []
+
+    def test_state_less_tmux_binding_is_pruned_fail_closed(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.surface_bindings = {100: {"t:1": "@45"}}
+        mgr.thread_bindings = {100: {1: "@45"}}
+        mgr.surface_binding_states = {100: {"t:1": BINDING_STATE_BOUND}}
+        mgr.topic_binding_states = {100: {1: BINDING_STATE_BOUND}}
+        mgr.window_states = {}
+
+        removed = mgr.cleanup_helper_window_bindings()
+
+        assert [(b.user_id, b.thread_id, b.window_id) for b in removed] == [
+            (100, 1, "@45")
+        ]
+        assert mgr.get_window_for_thread(100, 1) is None
+        assert mgr.get_topic_binding(100, 1) is None
+        assert list(mgr.iter_topic_bindings()) == []
+        assert mgr.topic_binding_states[100][1] == BINDING_STATE_NONE
+
+    def test_bind_thread_creates_window_descriptor_for_live_tmux_id(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.bind_thread(100, 1, "@45", window_name="manual-window")
+
+        assert "@45" in mgr.window_states
+        assert mgr.get_window_for_thread(100, 1) == "@45"
+
     def test_bind_external_thread_exposes_external_topic_binding(self, mgr: SessionManager) -> None:
         binding_window_id = mgr.bind_external_thread(
             100,

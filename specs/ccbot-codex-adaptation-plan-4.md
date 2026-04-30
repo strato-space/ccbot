@@ -1570,8 +1570,13 @@ Reason:
   poll-only `write_stdin`, strip command-output wrapper metadata, and render the
   real stdout/stderr preview. Treat Codex `source.subagent.thread_spawn`
   sessions as non-resumable helper threads and hide/reject them in ordinary
-  bind flows.
+  bind flows. Existing persisted helper-window bindings are pruned fail-closed
+  on state refresh, and binding getters/iterators treat them as unbound until
+  cleanup lands. A tmux id with no live process descriptor is also treated as
+  inactive/unbound, while new explicit binds create a descriptor immediately.
 - **validation**:
   - queue tests cover poll suppression and wrapper stripping in status updates
   - Codex catalog tests cover native subagent source detection
-  - bot contract tests cover bind-picker hiding and stale callback rejection
+  - bot/session contract tests cover bind-picker hiding, stale callback
+    rejection, pruning of already persisted helper-window bindings, and
+    metadata-less stale tmux binding fail-closed behavior

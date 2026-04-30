@@ -99,6 +99,11 @@ If this note conflicts with any explanatory note in `doc/`, this note wins.
     control surface
   - default bind pickers must hide it, and stale picker callbacks that still
     reference it must fail closed
+  - stale persisted bindings to helper windows must be pruned fail-closed on
+    state refresh; while awaiting cleanup, getters and binding iterators must
+    treat them as unbound
+  - a tmux-window binding with no live process descriptor is also treated as
+    inactive/unbound because the bot cannot prove it is a writable user surface
   - if helper telemetry is ever exposed to Telegram, it must be projected as
     parent orchestration milestones, not as a separately writable topic binding
 

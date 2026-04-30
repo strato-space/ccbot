@@ -77,7 +77,9 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
 - **Topic-based control** — Each Telegram topic binds to one delivery source at a time: either a live tmux window, or an external persisted Codex thread in read-only replay mode
 - **Helper-window isolation** — Codex native subagent/helper tmux windows remain
   parent-owned evidence surfaces and are hidden from ordinary `/bind` pickers;
-  stale callbacks that target them fail closed
+  stale callbacks that target them fail closed, and pre-existing bindings to
+  helper or metadata-less inactive windows are pruned fail-closed on state
+  refresh
 - **Compact Telegram delivery** — In the default production surface, user echo,
   orchestration milestones, and final assistant answers remain ordinary content
   bubbles, the latest human-facing commentary stays visible as a dedicated

@@ -559,6 +559,7 @@ class SessionMonitor:
         from .session import session_manager
 
         await session_manager.load_session_map()
+        session_manager.cleanup_helper_window_bindings()
         live_window_ids = {
             window.window_id for window in await tmux_manager.list_windows()
         }
