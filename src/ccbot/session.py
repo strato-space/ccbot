@@ -103,6 +103,60 @@ SURFACE_PENDING_STATUS_PENDING = PENDING_SLOT_STATUS_PENDING
 SURFACE_PENDING_STATUS_CONSUMED = PENDING_SLOT_STATUS_CONSUMED
 
 
+@dataclass(frozen=True)
+class PendingSurfaceSlot:
+    """Deferred user input for one canonical Telegram control surface."""
+
+    text: str
+    revision: int
+    status: str = PENDING_SLOT_STATUS_PENDING
+    consumed_by_activation_id: str = ""
+
+    @classmethod
+    def from_record(cls, record: Any) -> "PendingSurfaceSlot | None":
+        """Normalize persisted or in-memory pending-slot records."""
+        if isinstance(record, cls):
+            return record
+        if not isinstance(record, dict):
+            return None
+        text = str(record.get("text") or "")
+        if not text:
+            return None
+        try:
+            revision = max(int(record.get("revision") or 0), 1)
+        except (TypeError, ValueError):
+            revision = 1
+        status = str(record.get("status") or PENDING_SLOT_STATUS_PENDING)
+        consumed_by_activation_id = str(record.get("consumed_by_activation_id") or "")
+        if status != PENDING_SLOT_STATUS_CONSUMED:
+            status = PENDING_SLOT_STATUS_PENDING
+            consumed_by_activation_id = ""
+        return cls(
+            text=text,
+            revision=revision,
+            status=status,
+            consumed_by_activation_id=consumed_by_activation_id,
+        )
+
+    def consume(self, activation_id: str) -> "PendingSurfaceSlot":
+        """Mark this pending slot as consumed by one writable activation."""
+        return PendingSurfaceSlot(
+            text=self.text,
+            revision=self.revision,
+            status=PENDING_SLOT_STATUS_CONSUMED,
+            consumed_by_activation_id=activation_id,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to the stable JSON storage shape."""
+        return {
+            "text": self.text,
+            "revision": self.revision,
+            "status": self.status,
+            "consumed_by_activation_id": self.consumed_by_activation_id,
+        }
+
+
 def _codex_rollout_file_size(file_path: Path) -> int:
     try:
         return file_path.stat().st_size
@@ -190,7 +244,7 @@ class SessionManager:
     surface_policies: user_id -> {surface_key -> topic policy}
     surface_binding_states: user_id -> {surface_key -> binding state}
     surface_bind_flow_versions/nonces: user_id -> {surface_key -> bind-flow credentials}
-    surface_pending_slots: user_id -> {surface_key -> pending input metadata}
+    surface_pending_slots: user_id -> {surface_key -> PendingSurfaceSlot}
     thread_bindings/external_topic_bindings/topic_*: compatibility-only topic mirrors
     window_display_names: window_id -> window_name (for display)
     group_chat_ids: "user_id:thread_id" -> group chat_id (for supergroup routing)
@@ -206,7 +260,7 @@ class SessionManager:
     surface_binding_states: dict[int, dict[str, str]] = field(default_factory=dict)
     surface_bind_flow_versions: dict[int, dict[str, int]] = field(default_factory=dict)
     surface_bind_flow_nonces: dict[int, dict[str, str]] = field(default_factory=dict)
-    surface_pending_slots: dict[int, dict[str, dict[str, Any]]] = field(
+    surface_pending_slots: dict[int, dict[str, PendingSurfaceSlot]] = field(
         default_factory=dict
     )
     thread_bindings: dict[int, dict[int, str]] = field(default_factory=dict)
@@ -281,7 +335,7 @@ class SessionManager:
             },
             SURFACE_PENDING_SLOTS_KEY: {
                 str(uid): {
-                    surface_key: normalized_pending
+                    surface_key: normalized_pending.to_dict()
                     for surface_key, pending in pending_slots.items()
                     if (
                         normalized_pending := self._normalize_pending_slot_record(pending)
@@ -448,36 +502,17 @@ class SessionManager:
         return cls.make_surface_key(chat_id=numeric_id)
 
     @staticmethod
-    def _normalize_pending_slot_record(record: Any) -> dict[str, Any] | None:
-        if not isinstance(record, dict):
-            return None
-        text = str(record.get("text") or "")
-        if not text:
-            return None
-        try:
-            revision = max(int(record.get("revision") or 0), 1)
-        except (TypeError, ValueError):
-            revision = 1
-        consumed_by_activation_id = str(record.get("consumed_by_activation_id") or "")
-        status = str(record.get("status") or PENDING_SLOT_STATUS_PENDING)
-        if status != PENDING_SLOT_STATUS_CONSUMED:
-            status = PENDING_SLOT_STATUS_PENDING
-            consumed_by_activation_id = ""
-        return {
-            "text": text,
-            "revision": revision,
-            "status": status,
-            "consumed_by_activation_id": consumed_by_activation_id,
-        }
+    def _normalize_pending_slot_record(record: Any) -> PendingSurfaceSlot | None:
+        return PendingSurfaceSlot.from_record(record)
 
     @classmethod
     def _normalize_surface_pending_slots(
         cls,
         raw: Any,
-    ) -> dict[int, dict[str, dict[str, Any]]]:
-        normalized: dict[int, dict[str, dict[str, Any]]] = {}
+    ) -> dict[int, dict[str, PendingSurfaceSlot]]:
+        normalized: dict[int, dict[str, PendingSurfaceSlot]] = {}
         for user_id, payload in cls._normalize_surface_map(raw).items():
-            normalized_payload: dict[str, dict[str, Any]] = {}
+            normalized_payload: dict[str, PendingSurfaceSlot] = {}
             for surface_key, record in payload.items():
                 normalized_record = cls._normalize_pending_slot_record(record)
                 if normalized_record is None:
@@ -2402,7 +2437,7 @@ class SessionManager:
         )
         if pending is None:
             return None
-        return dict(pending)
+        return pending.to_dict()
 
     def set_surface_pending_slot(
         self,
@@ -2428,7 +2463,7 @@ class SessionManager:
         next_revision = revision
         if next_revision is None:
             next_revision = normalize_bind_flow_version(current.get("revision")) + 1
-        record = self._normalize_pending_slot_record(
+        record = PendingSurfaceSlot.from_record(
             {
                 "text": text,
                 "revision": next_revision,
@@ -2439,7 +2474,7 @@ class SessionManager:
         assert record is not None
         self.surface_pending_slots.setdefault(user_id, {})[resolved_surface_key] = record
         self._save_state()
-        return dict(record)
+        return record.to_dict()
 
     def clear_surface_pending_slot(
         self,
@@ -2466,7 +2501,7 @@ class SessionManager:
             return None
         self._prune_empty_surface_entry(self.surface_pending_slots, user_id)
         self._save_state()
-        return dict(pending)
+        return pending.to_dict()
 
     def consume_surface_pending_slot(
         self,
@@ -2491,14 +2526,12 @@ class SessionManager:
         )
         if pending is None:
             return None
-        if pending.get("status") == PENDING_SLOT_STATUS_CONSUMED:
+        if pending.status == PENDING_SLOT_STATUS_CONSUMED:
             return None
-        consumed = dict(pending)
-        consumed["status"] = PENDING_SLOT_STATUS_CONSUMED
-        consumed["consumed_by_activation_id"] = activation_id
+        consumed = pending.consume(activation_id)
         pending_slots[resolved_surface_key] = consumed
         self._save_state()
-        return dict(consumed)
+        return consumed.to_dict()
 
     def _rotate_topic_bind_flow_credentials(
         self, user_id: int, thread_id: int

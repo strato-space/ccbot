@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from ccbot.codex_threads import CodexThreadCatalog
-from ccbot.session import SessionManager
+from ccbot.session import PendingSurfaceSlot, SessionManager
 from ccbot.runtime_types import LiveProcessDescriptor, ThreadLocator
 from ccbot.state_schema import (
     BINDING_STATE_BIND_FLOW,
@@ -227,6 +227,7 @@ class TestSurfaceKeyedBindings:
 
         assert first["revision"] == 1
         assert second["revision"] == 2
+        assert isinstance(mgr.surface_pending_slots[100]["t:42"], PendingSurfaceSlot)
         assert mgr.peek_surface_pending_slot(100, surface_key="t:42") == second
 
         consumed = mgr.consume_surface_pending_slot(
@@ -268,6 +269,30 @@ class TestSurfaceKeyedBindings:
 
         assert cleared is None
         assert mgr.peek_surface_pending_slot(100, surface_key="t:41") is not None
+
+    def test_pending_surface_slot_normalizes_storage_records(self) -> None:
+        slot = PendingSurfaceSlot.from_record(
+            {
+                "text": "queued",
+                "revision": "not-an-int",
+                "status": "unexpected",
+                "consumed_by_activation_id": "stale",
+            }
+        )
+
+        assert slot is not None
+        assert slot.to_dict() == {
+            "text": "queued",
+            "revision": 1,
+            "status": "pending",
+            "consumed_by_activation_id": "",
+        }
+        assert slot.consume("activation-1").to_dict() == {
+            "text": "queued",
+            "revision": 1,
+            "status": "consumed",
+            "consumed_by_activation_id": "activation-1",
+        }
 
 
 class TestGroupChatId:

@@ -164,7 +164,7 @@ from .state_schema import (
     BINDING_STATE_NONE,
     TOPIC_POLICY_MANUAL_BIND_REQUIRED,
 )
-from .session import BLOCKED_PROMPT_SEND_MESSAGE, session_manager
+from .session import BLOCKED_PROMPT_SEND_MESSAGE, PendingSurfaceSlot, session_manager
 from .session_monitor import NewMessage, SessionMonitor
 from .telegram_delivery_policy import apply_telegram_delivery_policy
 from .telegram_delivery_policy import is_non_turn_user_notification
@@ -592,14 +592,9 @@ def _put_pending_slot(
             surface_key=surface.surface_key,
         )
     slots = _pending_slots(context.user_data)
-    current = slots.get(surface.surface_key, {})
-    revision = int(current.get("revision", 0) or 0) + 1
-    record = {
-        "text": text,
-        "revision": revision,
-        "status": "pending",
-        "consumed_by_activation_id": None,
-    }
+    current = PendingSurfaceSlot.from_record(slots.get(surface.surface_key))
+    revision = (current.revision if current is not None else 0) + 1
+    record = PendingSurfaceSlot(text=text, revision=revision).to_dict()
     slots[surface.surface_key] = record
     return record
 
@@ -618,7 +613,8 @@ def _peek_pending_slot(
         )
     slots = _pending_slots(context.user_data)
     record = slots.get(surface.surface_key)
-    return record if isinstance(record, dict) else None
+    slot = PendingSurfaceSlot.from_record(record)
+    return slot.to_dict() if slot is not None else None
 
 
 def _clear_pending_slot(
@@ -657,18 +653,13 @@ def _consume_pending_slot(
         text = record.get("text")
         return text if isinstance(text, str) and text else None
     slots = _pending_slots(context.user_data)
-    record = slots.get(surface.surface_key)
-    if not isinstance(record, dict):
+    slot = PendingSurfaceSlot.from_record(slots.get(surface.surface_key))
+    if slot is None:
         return None
-    if record.get("status") != "pending":
+    if slot.status != "pending":
         return None
-    text = record.get("text")
-    if not isinstance(text, str) or not text:
-        return None
-    record["status"] = "consumed"
-    record["consumed_by_activation_id"] = activation_id
-    slots[surface.surface_key] = record
-    return text
+    slots[surface.surface_key] = slot.consume(activation_id).to_dict()
+    return slot.text
 
 
 def _get_session_window_for_surface(

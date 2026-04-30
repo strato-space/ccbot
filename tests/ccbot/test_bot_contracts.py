@@ -238,6 +238,52 @@ class TestSurfacePendingSlots:
             surface_key="t:42",
         )
 
+    def test_pending_slot_fallback_uses_domain_normalizer(self):
+        context = _make_context()
+        surface = bot_mod.ControlSurface(
+            kind="group_topic",
+            chat_id=100,
+            thread_id=42,
+            legacy_scope_id=42,
+            surface_key="t:42",
+            label="topic",
+            is_shared_group=True,
+            supports_bind_flow=True,
+        )
+        context.user_data[bot_mod.PENDING_SURFACE_SLOTS_KEY] = {
+            "t:42": {
+                "text": "old",
+                "revision": "not-an-int",
+                "status": "unexpected",
+                "consumed_by_activation_id": "stale",
+            }
+        }
+
+        with patch("ccbot.bot._session_has_method", return_value=False):
+            record = bot_mod._put_pending_slot(context, 1, surface, "hello")
+            peeked = bot_mod._peek_pending_slot(context, 1, surface)
+            consumed = bot_mod._consume_pending_slot(
+                context,
+                1,
+                surface,
+                "activation-1",
+            )
+
+        assert record == {
+            "text": "hello",
+            "revision": 2,
+            "status": "pending",
+            "consumed_by_activation_id": "",
+        }
+        assert peeked == record
+        assert consumed == "hello"
+        assert context.user_data[bot_mod.PENDING_SURFACE_SLOTS_KEY]["t:42"] == {
+            "text": "hello",
+            "revision": 2,
+            "status": "consumed",
+            "consumed_by_activation_id": "activation-1",
+        }
+
 
 class TestCommandSurface:
     @pytest.mark.asyncio
