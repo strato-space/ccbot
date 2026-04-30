@@ -436,6 +436,21 @@ class TestRuntimeCapabilityRegistryIntegration:
 
 
 class TestWindowState:
+    def test_get_process_descriptor_is_read_only(
+        self, mgr: SessionManager
+    ) -> None:
+        assert mgr.get_process_descriptor("@missing") is None
+        assert "@missing" not in mgr.window_states
+
+    def test_get_or_create_process_descriptor_creates_descriptor(
+        self, mgr: SessionManager
+    ) -> None:
+        state = mgr.get_or_create_process_descriptor("@created")
+
+        assert isinstance(state, LiveProcessDescriptor)
+        assert mgr.get_process_descriptor("@created") is state
+        assert "@created" in mgr.window_states
+
     def test_get_creates_new(self, mgr: SessionManager) -> None:
         state = mgr.get_window_state("@0")
         assert state.session_id == ""

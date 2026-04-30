@@ -258,9 +258,10 @@ async def _maybe_enqueue_runtime_exit_warning(
     pane_text: str,
 ) -> None:
     presence_key = (user_id, window_id)
-    expected_runtime = (
-        str(session_manager.get_process_descriptor(window_id).runtime_kind or "").strip()
-    )
+    descriptor = session_manager.get_process_descriptor(window_id)
+    expected_runtime = str(
+        getattr(descriptor, "runtime_kind", "") or ""
+    ).strip()
     observed = _runtime_presence.get(presence_key)
 
     pane_command_text = pane_command if isinstance(pane_command, str) else ""

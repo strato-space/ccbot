@@ -1388,8 +1388,12 @@ class SessionManager:
 
     # --- Window state management ---
 
-    def get_process_descriptor(self, window_id: str) -> LiveProcessDescriptor:
-        """Get or create the live process descriptor for a tmux window."""
+    def get_process_descriptor(self, window_id: str) -> LiveProcessDescriptor | None:
+        """Return the live process descriptor for a tmux window without mutation."""
+        return self.window_states.get(window_id)
+
+    def get_or_create_process_descriptor(self, window_id: str) -> LiveProcessDescriptor:
+        """Return the live process descriptor, creating it for write-path callers."""
         if window_id not in self.window_states:
             self.window_states[window_id] = LiveProcessDescriptor()
         return self.window_states[window_id]
@@ -1403,8 +1407,8 @@ class SessionManager:
         )
 
     def get_window_state(self, window_id: str) -> WindowState:
-        """Backward-compatible alias for get_process_descriptor()."""
-        return self.get_process_descriptor(window_id)
+        """Backward-compatible mutating alias for legacy write-path callers."""
+        return self.get_or_create_process_descriptor(window_id)
 
     def register_live_process(
         self,
@@ -1416,7 +1420,7 @@ class SessionManager:
         thread_id: str = "",
     ) -> WindowState:
         """Register a live process before its persisted thread is known."""
-        state = self.get_process_descriptor(window_id)
+        state = self.get_or_create_process_descriptor(window_id)
         state.cwd = cwd
         if window_name:
             state.window_name = window_name
@@ -1429,7 +1433,7 @@ class SessionManager:
 
     def clear_window_binding(self, window_id: str) -> None:
         """Clear the persisted identity binding for a live window."""
-        state = self.get_process_descriptor(window_id)
+        state = self.get_or_create_process_descriptor(window_id)
         state.thread_id = ""
         self._save_state()
         logger.info("Cleared persisted binding for window_id %s", window_id)
@@ -1504,13 +1508,16 @@ class SessionManager:
             for surface_key, window_id in list(bindings.items()):
                 if window_id not in helper_window_ids:
                     continue
+                descriptor = self.get_process_descriptor(window_id)
                 removed.append(
                     TopicBinding(
                         user_id=user_id,
                         thread_id=self._topic_thread_id_from_surface_key(surface_key),
                         window_id=window_id,
                         window_name=self.get_display_name(window_id),
-                        runtime_kind=self.get_process_descriptor(window_id).runtime_kind,
+                        runtime_kind=descriptor.runtime_kind
+                        if descriptor is not None
+                        else config.default_runtime_kind,
                     )
                 )
                 del bindings[surface_key]
@@ -1704,6 +1711,8 @@ class SessionManager:
             return await self._resolve_external_thread_for_window(window_id)
 
         state = self.get_process_descriptor(window_id)
+        if state is None:
+            return None
         resolution = await self.resolve_thread_candidate(window_id)
         if resolution is None:
             return None
@@ -1846,6 +1855,8 @@ class SessionManager:
     ) -> CodexThreadResolution | FastAgentSessionResolution | None:
         """Resolve a live window to a runtime-specific thread candidate."""
         state = self.get_process_descriptor(window_id)
+        if state is None:
+            return None
         if not state.cwd:
             return None
 
@@ -2133,7 +2144,7 @@ class SessionManager:
         bindings = self.surface_bindings.setdefault(user_id, {})
         bindings[resolved_surface_key] = window_id
         if self._is_window_id(window_id):
-            self.get_process_descriptor(window_id)
+            self.get_or_create_process_descriptor(window_id)
         external = self.external_surface_bindings.get(user_id)
         if external and resolved_surface_key in external:
             del external[resolved_surface_key]
@@ -2692,12 +2703,15 @@ class SessionManager:
                 source_thread_id=source_thread_id,
                 read_only=bool(external.get("read_only", True)),
             )
+        descriptor = self.get_process_descriptor(window_id)
         return TopicBinding(
             user_id=user_id,
             thread_id=thread_id,
             window_id=window_id,
             window_name=self.get_display_name(window_id),
-            runtime_kind=self.get_process_descriptor(window_id).runtime_kind,
+            runtime_kind=descriptor.runtime_kind
+            if descriptor is not None
+            else config.default_runtime_kind,
         )
 
     def iter_topic_bindings(self) -> Iterator[TopicBinding]:
@@ -2736,12 +2750,15 @@ class SessionManager:
                         user_id,
                     )
                     continue
+                descriptor = self.get_process_descriptor(window_id)
                 yield TopicBinding(
                     user_id=user_id,
                     thread_id=thread_id,
                     window_id=window_id,
                     window_name=self.get_display_name(window_id),
-                    runtime_kind=self.get_process_descriptor(window_id).runtime_kind,
+                    runtime_kind=descriptor.runtime_kind
+                    if descriptor is not None
+                    else config.default_runtime_kind,
                 )
 
     def iter_thread_bindings(self) -> Iterator[tuple[int, int | None, str]]:
@@ -2993,6 +3010,8 @@ class SessionManager:
     ) -> tuple[bool, str]:
         """Rename the persisted runtime identity when the runtime supports it."""
         state = self.get_process_descriptor(window_id)
+        if state is None:
+            return False, "runtime metadata unavailable"
         capability = self.get_runtime_capability(state.runtime_kind)
 
         if capability.rename_identity_mode != "title_only":
