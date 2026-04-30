@@ -38,6 +38,8 @@ _SUPPORTED_SPECIAL_KEYS = {
     "C-c",
 }
 
+_CODEX_MULTILINE_MIN_SUBMIT_DELAY_SECONDS = 0.1
+
 _SPECIAL_KEY_ALIASES = {
     "esc": "Escape",
     "escape": "Escape",
@@ -187,6 +189,26 @@ class RuntimeInputDriver:
             InputDispatch.special_key(key, runtime_kind=runtime_kind).action,
         )
 
+    async def send_multiline_submit_key(
+        self,
+        window_id: str,
+        *,
+        runtime_kind: str = DEFAULT_RUNTIME_KIND,
+    ) -> tuple[bool, str]:
+        """Submit already-pasted multiline text using runtime-specific semantics."""
+        window = await self._tmux.find_window_by_id(window_id)
+        if not window:
+            return False, "Window not found (may have been closed)"
+
+        normalized_runtime = normalize_runtime_kind(runtime_kind)
+        submitted = await self._send_multiline_submit_key(
+            window.window_id,
+            runtime_kind=normalized_runtime,
+        )
+        if not submitted:
+            return False, "Failed to submit text"
+        return True, f"Submitted text to {window.window_id}"
+
     async def send_dispatch(
         self,
         window_id: str,
@@ -269,7 +291,12 @@ class RuntimeInputDriver:
         if not submit:
             return True, f"Sent text to {window_id}"
 
-        await asyncio.sleep(self._submit_delay)
+        await asyncio.sleep(
+            self._submit_delay_seconds(
+                runtime_kind=runtime_kind,
+                multiline=multiline,
+            )
+        )
         if multiline:
             submitted = await self._send_multiline_submit_key(
                 window_id, runtime_kind=runtime_kind
@@ -299,6 +326,18 @@ class RuntimeInputDriver:
             len(text),
         )
         return True, f"Sent text to {window_id}"
+
+    def _submit_delay_seconds(self, *, runtime_kind: str, multiline: bool) -> float:
+        """Return the delay between payload delivery and submit key delivery.
+
+        Codex needs a tiny readiness gap after tmux bracketed paste before the
+        submit key. The authoritative success signal is not this delay, but a
+        later persisted Codex JSONL turn event observed by the session layer.
+        Keep the normal fast path for single-line turns and non-Codex runtimes.
+        """
+        if multiline and runtime_kind == "codex":
+            return max(self._submit_delay, _CODEX_MULTILINE_MIN_SUBMIT_DELAY_SECONDS)
+        return self._submit_delay
 
     async def _send_submit_key(self, window_id: str) -> bool:
         """Submit typed text using the tmux key path reserved for text turns."""

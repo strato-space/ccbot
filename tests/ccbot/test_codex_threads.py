@@ -43,6 +43,8 @@ def _write_codex_thread(
     cwd: str,
     thread_name: str,
     updated_at: str,
+    originator: str = "codex-tui",
+    source: object = "cli",
 ) -> None:
     sessions_root = codex_home / "sessions" / "2026" / "04" / "02"
     sessions_root.mkdir(parents=True, exist_ok=True)
@@ -66,7 +68,12 @@ def _write_codex_thread(
                     {
                         "timestamp": updated_at,
                         "type": "session_meta",
-                        "payload": {"id": thread_id, "cwd": cwd},
+                        "payload": {
+                            "id": thread_id,
+                            "cwd": cwd,
+                            "originator": originator,
+                            "source": source,
+                        },
                     }
                 ),
                 json.dumps(
@@ -140,10 +147,8 @@ def test_catalog_enumerates_available_candidates_and_orphans(
 ) -> None:
     candidates = fixture_catalog.candidates
     assert [candidate.thread_id for candidate in candidates] == [
-        "019d4e76-7fae-7a90-bc40-2290ee269660",
         "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9",
         "019d4d8b-65d8-7c60-9317-459cdb087487",
-        "019cd6ee-1188-7640-acbd-2c628477bde5",
         "019d3932-39e4-74e3-9e72-136b65c3841a",
     ]
     assert all(candidate.rollout_file.exists() for candidate in candidates)
@@ -153,6 +158,139 @@ def test_catalog_enumerates_available_candidates_and_orphans(
         "019d4e63-f279-79b1-8dfd-be785dc4a419",
         "019dffff-0000-7000-8000-stale0000000",
     }
+
+
+def test_catalog_hides_codex_exec_helper_sessions_from_resume_candidates(
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / ".codex"
+    _write_codex_thread(
+        codex_home,
+        thread_id="019d5000-0000-7000-8000-000000000010",
+        cwd="/workspace/app",
+        thread_name="Visible interactive thread",
+        updated_at="2026-04-02T14:00:00Z",
+    )
+    _write_codex_thread(
+        codex_home,
+        thread_id="019d5000-0000-7000-8000-000000000011",
+        cwd="/workspace/app",
+        thread_name="Hidden helper thread",
+        updated_at="2026-04-02T14:01:00Z",
+        originator="codex_exec",
+        source="exec",
+    )
+
+    catalog = CodexThreadCatalog(codex_home=codex_home)
+
+    candidates = catalog.list_candidates_for_cwd("/workspace/app")
+    assert [candidate.thread_id for candidate in candidates] == [
+        "019d5000-0000-7000-8000-000000000010",
+    ]
+    assert candidates[0].originator == "codex-tui"
+    assert candidates[0].source == "cli"
+
+
+def test_catalog_hides_codex_native_subagent_sessions_from_resume_candidates(
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / ".codex"
+    parent_id = "019d5000-0000-7000-8000-000000000020"
+    subagent_id = "019d5000-0000-7000-8000-000000000021"
+    _write_codex_thread(
+        codex_home,
+        thread_id=parent_id,
+        cwd="/workspace/app",
+        thread_name="Parent interactive thread",
+        updated_at="2026-04-02T14:00:00Z",
+    )
+    _write_codex_thread(
+        codex_home,
+        thread_id=subagent_id,
+        cwd="/workspace/app",
+        thread_name="Boole helper thread",
+        updated_at="2026-04-02T14:01:00Z",
+        source={
+            "subagent": {
+                "thread_spawn": {
+                    "parent_thread_id": parent_id,
+                    "agent_nickname": "Boole",
+                    "agent_role": "default",
+                }
+            }
+        },
+    )
+
+    catalog = CodexThreadCatalog(codex_home=codex_home)
+
+    assert [candidate.thread_id for candidate in catalog.list_candidates_for_cwd("/workspace/app")] == [
+        parent_id,
+    ]
+    assert catalog.is_helper_thread_fast(subagent_id) is True
+    assert catalog.get_identity_fast(subagent_id).source == "subagent"  # type: ignore[union-attr]
+
+
+def test_catalog_uses_first_human_codex_user_message_as_unnamed_preview(
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / ".codex"
+    sessions_root = codex_home / "sessions" / "2026" / "04" / "02"
+    sessions_root.mkdir(parents=True)
+    thread_id = "019d5000-0000-7000-8000-000000000012"
+    rollout = sessions_root / f"rollout-{thread_id}.jsonl"
+    rollout.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "timestamp": "2026-04-02T14:00:00Z",
+                        "type": "session_meta",
+                        "payload": {
+                            "id": thread_id,
+                            "cwd": "/workspace/app",
+                            "originator": "codex-tui",
+                            "source": "cli",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-04-02T14:00:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": "# AGENTS.md instructions\n<INSTRUCTIONS>\nAUTONOMY DIRECTIVE",
+                                }
+                            ],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-04-02T14:00:01Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "ping"}],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    catalog = CodexThreadCatalog(codex_home=codex_home)
+
+    candidates = catalog.list_candidates_for_cwd("/workspace/app")
+    assert len(candidates) == 1
+    assert candidates[0].summary == "ping"
 
 
 def test_catalog_resolution_prefers_explicit_ids_then_launcher_then_cwd(
@@ -178,12 +316,10 @@ def test_catalog_resolution_prefers_explicit_ids_then_launcher_then_cwd(
     assert launcher.reason == "explicit_launcher_registration"
 
     cwd_resolution = fixture_catalog.resolve(cwd="/home")
-    assert cwd_resolution.status == "ambiguous"
-    assert [candidate.thread_id for candidate in cwd_resolution.candidates] == [
-        "019d4e76-7fae-7a90-bc40-2290ee269660",
-        "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9",
-    ]
-    assert cwd_resolution.reason == "normalized_cwd_ambiguous"
+    assert cwd_resolution.status == "selected"
+    assert cwd_resolution.selected is not None
+    assert cwd_resolution.selected.thread_id == "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9"
+    assert cwd_resolution.reason == "normalized_cwd"
 
     root_resolution = fixture_catalog.resolve(cwd="/root")
     assert root_resolution.status == "selected"
@@ -362,12 +498,10 @@ async def test_session_manager_lists_codex_candidates_for_directory(
     session_manager: SessionManager,
 ) -> None:
     sessions = await session_manager.list_threads_for_directory("/home")
-    assert [session.thread_id for session in sessions[:2]] == [
-        "019d4e76-7fae-7a90-bc40-2290ee269660",
+    assert [session.thread_id for session in sessions[:1]] == [
         "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9",
     ]
-    assert [session.summary for session in sessions[:2]] == [
-        "Capture Codex evidence fixtures",
+    assert [session.summary for session in sessions[:1]] == [
         "Investigate ccbot bug",
     ]
 
@@ -387,10 +521,7 @@ async def test_session_manager_preserves_legacy_claude_threads_in_mixed_director
 
     sessions = await session_manager.list_threads_for_directory("/home")
 
-    assert [session.thread_id for session in sessions[:2]] == [
-        "019d4e76-7fae-7a90-bc40-2290ee269660",
-        "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9",
-    ]
+    assert sessions[0].thread_id == "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9"
     assert any(session.thread_id == "legacy-claude-thread" for session in sessions)
     legacy = next(
         session for session in sessions if session.thread_id == "legacy-claude-thread"

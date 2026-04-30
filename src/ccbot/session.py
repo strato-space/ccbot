@@ -82,6 +82,11 @@ EXTERNAL_BINDING_READ_ONLY_MESSAGE = (
     "Topic is bound to an external persisted thread in read-only mode. "
     "Attach a live tmux window via /bind or /resume to inject input."
 )
+CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS = 0.1
+CODEX_MULTILINE_ACK_TIMEOUT_SECONDS = 6.5
+CODEX_MULTILINE_ACK_POLL_SECONDS = 0.1
+CODEX_MULTILINE_ACK_RETRY_SECONDS = 2.0
+CODEX_MULTILINE_ACK_MAX_ATTEMPTS = 3
 
 SURFACE_BINDINGS_KEY = "surface_bindings"
 EXTERNAL_SURFACE_BINDINGS_KEY = "external_surface_bindings"
@@ -96,6 +101,79 @@ PENDING_SLOT_STATUS_PENDING = "pending"
 PENDING_SLOT_STATUS_CONSUMED = "consumed"
 SURFACE_PENDING_STATUS_PENDING = PENDING_SLOT_STATUS_PENDING
 SURFACE_PENDING_STATUS_CONSUMED = PENDING_SLOT_STATUS_CONSUMED
+
+
+def _codex_rollout_file_size(file_path: Path) -> int:
+    try:
+        return file_path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _codex_content_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(
+                    str(
+                        item.get("text")
+                        or item.get("content")
+                        or item.get("message")
+                        or ""
+                    )
+                )
+            else:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part)
+    if isinstance(content, dict):
+        return str(
+            content.get("text")
+            or content.get("content")
+            or content.get("message")
+            or ""
+        )
+    return str(content)
+
+
+def _codex_text_matches_expected(observed: str, expected: str) -> bool:
+    observed_norm = observed.replace("\r\n", "\n").replace("\r", "\n").strip()
+    expected_norm = expected.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return bool(
+        observed_norm
+        and expected_norm
+        and (observed_norm == expected_norm or expected_norm in observed_norm)
+    )
+
+
+def _codex_record_confirms_submit(record: dict[str, Any], expected_text: str) -> bool:
+    """Return True when a Codex rollout record proves a submitted turn exists."""
+    record_type = str(record.get("type") or "").strip()
+    payload = record.get("payload")
+    if record_type == "turn_context":
+        return True
+    if not isinstance(payload, dict):
+        return False
+    payload_type = str(payload.get("type") or "").strip()
+    if record_type == "response_item" and payload_type == "message":
+        if str(payload.get("role") or "").strip() != "user":
+            return False
+        return _codex_text_matches_expected(
+            _codex_content_text(payload.get("content")),
+            expected_text,
+        )
+    if record_type == "event_msg" and payload_type == "user_message":
+        return _codex_text_matches_expected(
+            _codex_content_text(
+                payload.get("message") or payload.get("content") or payload.get("text")
+            ),
+            expected_text,
+        )
+    return False
 
 
 @dataclass
@@ -1642,6 +1720,23 @@ class SessionManager:
                         candidates=(candidate,),
                         reason="explicit_thread_id_fast_path",
                     )
+            if state.registered_at <= 0 and not state.thread_id:
+                same_cwd_live_peers = [
+                    wid
+                    for wid, peer in self.window_states.items()
+                    if wid != window_id
+                    and peer.runtime_kind == state.runtime_kind
+                    and peer.cwd == state.cwd
+                    and not peer.thread_id
+                    and peer.registered_at <= 0
+                ]
+                if same_cwd_live_peers:
+                    return CodexThreadResolution(
+                        status="ambiguous",
+                        selected=None,
+                        candidates=(),
+                        reason="parallel_live_window_same_cwd",
+                    )
             if state.registered_at > 0:
                 recent_resolution = self.codex_thread_catalog.resolve_recent_for_registration(
                     cwd=state.cwd,
@@ -2249,10 +2344,15 @@ class SessionManager:
         pending_slots = self.surface_pending_slots.get(user_id)
         if not pending_slots:
             return None
-        pending = self._normalize_pending_slot_record(pending_slots.pop(resolved_surface_key))
+        pending = self._normalize_pending_slot_record(
+            pending_slots.pop(resolved_surface_key, None)
+        )
+        if pending is None:
+            self._prune_empty_surface_entry(self.surface_pending_slots, user_id)
+            return None
         self._prune_empty_surface_entry(self.surface_pending_slots, user_id)
         self._save_state()
-        return dict(pending) if pending is not None else None
+        return dict(pending)
 
     def consume_surface_pending_slot(
         self,
@@ -2518,6 +2618,105 @@ class SessionManager:
 
     # --- Tmux helpers ---
 
+    async def _codex_rollout_has_submit_ack(
+        self,
+        *,
+        file_path: Path,
+        start_byte: int,
+        expected_text: str,
+    ) -> bool:
+        """Check appended Codex JSONL for a persisted event proving submit."""
+        if not file_path.exists():
+            return False
+        try:
+            with file_path.open("rb") as f:
+                f.seek(start_byte)
+                for raw_line in f:
+                    if not raw_line.strip():
+                        continue
+                    try:
+                        record = json.loads(raw_line.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        continue
+                    if isinstance(record, dict) and _codex_record_confirms_submit(
+                        record,
+                        expected_text,
+                    ):
+                        return True
+        except OSError as exc:
+            logger.warning("codex_submit_ack: failed to read %s: %s", file_path, exc)
+        return False
+
+    async def _submit_codex_multiline_with_rollout_ack(
+        self,
+        *,
+        window_id: str,
+        file_path: Path,
+        start_byte: int,
+        text: str,
+    ) -> tuple[bool, str]:
+        """Submit a pasted Codex multiline turn and wait for JSONL ACK."""
+        await asyncio.sleep(CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS)
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + CODEX_MULTILINE_ACK_TIMEOUT_SECONDS
+        attempts = 0
+
+        while attempts < CODEX_MULTILINE_ACK_MAX_ATTEMPTS and loop.time() < deadline:
+            attempts += 1
+            success, message = await runtime_input_driver.send_multiline_submit_key(
+                window_id,
+                runtime_kind="codex",
+            )
+            if not success:
+                return False, message
+            logger.info(
+                "codex_submit_ack: sent multiline submit attempt %d/%d to %s; "
+                "rollout=%s offset=%d",
+                attempts,
+                CODEX_MULTILINE_ACK_MAX_ATTEMPTS,
+                window_id,
+                file_path,
+                start_byte,
+            )
+
+            retry_deadline = min(
+                deadline,
+                loop.time() + CODEX_MULTILINE_ACK_RETRY_SECONDS,
+            )
+            while loop.time() < retry_deadline:
+                if await self._codex_rollout_has_submit_ack(
+                    file_path=file_path,
+                    start_byte=start_byte,
+                    expected_text=text,
+                ):
+                    logger.info(
+                        "codex_submit_ack: confirmed multiline submit to %s "
+                        "after %d attempt(s)",
+                        window_id,
+                        attempts,
+                    )
+                    return True, f"Sent text to {window_id}"
+                await asyncio.sleep(CODEX_MULTILINE_ACK_POLL_SECONDS)
+
+        if await self._codex_rollout_has_submit_ack(
+            file_path=file_path,
+            start_byte=start_byte,
+            expected_text=text,
+        ):
+            return True, f"Sent text to {window_id}"
+        logger.warning(
+            "codex_submit_ack: no JSONL ACK for multiline submit to %s "
+            "within %.1fs after %d attempt(s)",
+            window_id,
+            CODEX_MULTILINE_ACK_TIMEOUT_SECONDS,
+            attempts,
+        )
+        return (
+            False,
+            "Codex did not persist a new turn after multiline submit; "
+            "the draft may still be waiting in the terminal composer",
+        )
+
     async def send_to_window(self, window_id: str, text: str) -> tuple[bool, str]:
         """Send text to a tmux window by ID."""
         if self.is_external_binding_window_id(window_id):
@@ -2540,8 +2739,8 @@ class SessionManager:
         )
         capability = self.get_runtime_capability(runtime_kind)
         pane_text = await tmux_manager.capture_pane(window.window_id)
+        surface = classify_input_surface(pane_text) if pane_text else None
         if pane_text:
-            surface = classify_input_surface(pane_text)
             if (
                 capability.blocked_input_policy == "fail_closed_on_visible_prompt"
                 and surface.kind == "blocked_prompt"
@@ -2555,6 +2754,34 @@ class SessionManager:
                 text,
                 runtime_kind=runtime_kind,
             )
+        elif runtime_kind == "codex" and "\n" in text:
+            if surface and surface.kind == "busy":
+                return (
+                    False,
+                    "Codex is still working; multiline Telegram input requires an "
+                    "idle/input-ready pane so ccbot can verify the JSONL turn ACK",
+                )
+            session = await self.resolve_thread_for_window(window_id)
+            if not session or not session.file_path:
+                return (
+                    False,
+                    "Cannot verify Codex multiline submit: missing persisted rollout evidence",
+                )
+            rollout_file = Path(session.file_path)
+            start_byte = _codex_rollout_file_size(rollout_file)
+            success, message = await runtime_input_driver.send_text(
+                window.window_id,
+                text,
+                runtime_kind=runtime_kind,
+                submit=False,
+            )
+            if success:
+                success, message = await self._submit_codex_multiline_with_rollout_ack(
+                    window_id=window.window_id,
+                    file_path=rollout_file,
+                    start_byte=start_byte,
+                    text=text,
+                )
         else:
             success, message = await runtime_input_driver.send_text(
                 window.window_id,

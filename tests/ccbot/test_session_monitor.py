@@ -206,7 +206,10 @@ class TestCheckForUpdatesCodexRollout:
         second = await monitor.check_for_updates({thread_id})
 
         assert first
-        assert {event.event_kind for event in first} >= {"tool_call", "tool_output", "lifecycle"}
+        assert {event.event_kind for event in first} >= {
+            "command_execution",
+            "lifecycle",
+        }
         assert second == []
 
     @pytest.mark.asyncio
@@ -248,8 +251,7 @@ class TestCheckForUpdatesCodexRollout:
 
         assert events
         assert {event.event_kind for event in events} >= {
-            "tool_call",
-            "tool_output",
+            "command_execution",
             "lifecycle",
         }
 

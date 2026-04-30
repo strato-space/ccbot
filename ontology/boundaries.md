@@ -38,7 +38,9 @@ submit failure must surface as explicit delivery failure rather than as a
 successful queued message. For multiline Codex payloads, field evidence shows
 that tmux `C-m` can leave the pasted payload in the composer; the post-paste
 turn opener is therefore the bare `Enter` key path, while single-line typed
-input may keep the normal submit-key path.
+input may keep the normal submit-key path. The Codex multiline boundary also
+includes a post-paste readiness gap: the bot must not treat "paste accepted by
+tmux" and "Codex composer is ready for submit" as the same event.
 
 ## Replay Evidence Write Ownership
 

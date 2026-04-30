@@ -243,6 +243,12 @@ T1 ──┬── T2 ──┬── T3 ──┬── T4 ──┬── T6 �
     same-day live recurrence showed Codex may ignore post-paste `C-m`; the
     implementation now uses bare `Enter` for multiline post-paste turn opening
     and keeps `C-m` for single-line typed submits.
+  - 2026-04-30 `str` repair: a 255-character multiline Telegram payload was
+    pasted successfully but remained in the Codex composer until a later manual
+    Enter. The first repair added a conservative delay; the follow-up replaced
+    that heuristic with a 0.1s readiness gap plus bounded bare-Enter retries,
+    and reports success only after the bound Codex rollout JSONL appends a
+    turn-acceptance record.
   - 2026-04-26 `server-z2p` repair: Codex `update_plan` function calls now
     normalize to `plan_update` and render as a dedicated mutable Telegram plan
     artifact, updated only by newer plan events.

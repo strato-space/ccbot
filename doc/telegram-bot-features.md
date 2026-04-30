@@ -136,6 +136,7 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | **editMessageText** | ✅ | Status-to-content conversion in compact mode, plus verbose/fallback `tool_result` editing into `tool_use` messages |
 | **Compact delivery policy** | ✅ | Default production surface keeps ordinary user echo, orchestration milestones, and final assistant text as durable bubbles; the latest commentary stays visible as a dedicated artifact while technical execution classes collapse into mutable status, and visibility wins when silence would make runtime state ambiguous |
 | **Queued follow-up preview** | ✅ | Pending queued user messages may surface as a separate mutable artifact modeled after the Codex pending-input preview rather than being mixed into commentary or status; it closes on queue-empty, binding-stale, or explicit clear rather than on assistant-final alone |
+| **OMX interactive question artifacts** | ✅ | Durable `omx.question/v1` records are rendered as a separate mutable Telegram artifact with inline option buttons; answers update the state record, bridge back to the recorded tmux return pane, and close the temporary question pane |
 | **Pre-final terminal surface barrier** | ✅ | `commentary`, orchestration milestones, any surfaced preview bubble, and the mutable technical status artifact may appear before `assistant_final`, but never below it for the same turn |
 | **Codex-style command/tool previews** | ✅ | When command/tool/file previews are surfaced, they prefer extracted shell payloads, fenced `sh` / `json` blocks, truncation footers outside the code block body, and non-redundant outcome footers |
 | **Codex-style orchestration milestones** | ✅ | Subagent spawn/wait/finished-waiting/completion is rendered as human-facing milestones instead of raw `spawn_agent` / `wait_agent` / `<subagent_notification>` payloads; each `wait_agent` invocation keeps its own waiting/finished lifecycle even when targets overlap |
@@ -257,6 +258,11 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
   - truncation footer lives outside the fenced block
   - outcome footer is separate and should not redundantly say
     `completed · output 1 line(s)` when the preview already conveys the result
+  - shell commands are one mutable command artifact: `exec_command` output edits
+    the command bubble and drops Codex/developer transport metadata before
+    showing the real output preview
+  - Codex parsed read/list/search commands can surface as `• Explored` so
+    operators see which files/searches were inspected without raw shell noise
 
 ### Topic Control Policy
 
@@ -269,14 +275,19 @@ The ontology files remain the master source for these nouns:
 - `topic_policy` remains the legacy topic-shaped compatibility view.
 - Full persisted control-surface identity is `(user_id, surface_key)`; a
   `surface_key` alone is a local product key.
+- In shared group topics, allowed users are peers for the same chat/topic
+  binding. Identical numeric `thread_id` values in different groups are different control surfaces and must not share a binding.
 - A no-topics group chat may expose one shared main-chat mode described by the
   ontology as `thread_id is None`; this is not a claim that `chat == topic`.
 
 Named-topic behavior:
 
 - In **private chats with topics enabled**, a fresh topic may still start with implicit bind from the first plain message.
-- In **group/supergroup topics**, an ordinary non-addressed message in an unbound topic must stay silent; it does not open bind flow.
-- In **group/supergroup topics**, explicit `/bind`, explicit `/resume`, and bot-addressed `@mention` remain valid explicit entry paths.
+- In **group/supergroup topics**, ordinary messages and bot-addressed `@mention` messages in an unbound topic must stay silent; they do not open bind flow.
+- In **group/supergroup topics**, explicit `/bind` and explicit `/resume` remain valid explicit entry paths.
+- Explicit command entry paths store Telegram group routing metadata, including
+  the group `chat_id`, so later topic title sync and delivery use the group
+  transport coordinates rather than a user chat id.
 - After explicit `/unbind` or picker cancel, the topic moves to `manual_bind_required`.
 - In `manual_bind_required`, plain messages do not re-trigger bind implicitly.
 - In Codex lane, `/bind <thread-name|id>` may attach an external persisted

@@ -142,6 +142,7 @@ from .handlers.message_sender import (
     safe_send,
     send_with_fallback,
 )
+from .handlers.omx_questions import handle_omx_question_callback
 from .markdown_v2 import convert_markdown
 from .handlers.response_builder import (
     build_commentary_parts,
@@ -324,7 +325,7 @@ def _build_unbound_input_message(
     subject = "chat" if surface.kind == "group_main_chat" else "topic"
     return (
         f"❌ No live tmux window is bound to this {subject}. "
-        "Send an addressed mention or use /bind to start the bind flow."
+        "Use /bind to start the bind flow."
     )
 
 
@@ -344,6 +345,17 @@ def _clear_same_thread_picker_state(
     _set_pending_surface(user_data, None)
     user_data.pop("_pending_thread_text", None)
     user_data.pop("_selected_path", None)
+
+
+def _clear_shared_group_peer_flow_state(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    surface: ControlSurface,
+) -> None:
+    """Drop stale per-user bind-flow residue after resolving a shared binding."""
+    _clear_pending_slot(context, user_id, surface)
+    if _get_surface_binding_state(user_id, surface) == BINDING_STATE_BIND_FLOW:
+        _set_surface_binding_state(user_id, surface, BINDING_STATE_NONE)
 
 
 def _callback_matches_pending_surface(
@@ -473,6 +485,13 @@ def control_surface_classifier(update: Update) -> ControlSurface:
 def surface_key_adapter(surface: ControlSurface) -> int | None:
     """Return the legacy numeric scope id used by pre-surface session APIs."""
     return surface.legacy_scope_id
+
+
+def _remember_group_chat_id_for_surface(user_id: int, update: Update) -> None:
+    """Persist Telegram group routing metadata for command-only entry paths."""
+    chat = update.effective_chat
+    if chat and chat.type in ("group", "supergroup"):
+        session_manager.set_group_chat_id(user_id, _get_thread_id(update), chat.id)
 
 
 def _surface_to_state(surface: ControlSurface) -> dict[str, object]:
@@ -667,22 +686,102 @@ def _get_session_window_for_surface(
     return session_manager.get_window_for_thread(user_id, legacy_scope_id)
 
 
+def _get_shared_group_binding_for_surface(
+    user_id: int, surface: ControlSurface
+) -> tuple[int, str] | None:
+    """Resolve an existing group surface binding owned by another user."""
+    if not surface.is_shared_group or not surface.surface_key:
+        return None
+    bindings_by_user = getattr(session_manager, "surface_bindings", None)
+    if not isinstance(bindings_by_user, dict):
+        return None
+
+    for owner_id, bindings in bindings_by_user.items():
+        if owner_id == user_id or not isinstance(bindings, dict):
+            continue
+        window_id = bindings.get(surface.surface_key)
+        if isinstance(window_id, str) and window_id:
+            try:
+                binding_owner_id = int(owner_id)
+            except (TypeError, ValueError):
+                continue
+            if not _shared_group_binding_matches_surface(
+                binding_owner_id,
+                surface,
+            ):
+                continue
+            return binding_owner_id, window_id
+    return None
+
+
+def _shared_group_binding_matches_surface(
+    owner_id: int,
+    surface: ControlSurface,
+) -> bool:
+    """Reject same-thread-id bindings that belong to another Telegram chat."""
+    if surface.kind == "group_main_chat":
+        return True
+    if surface.kind != "group_topic":
+        return False
+    if surface.chat_id is None or surface.message_thread_id is None:
+        return False
+    resolve_chat_id = getattr(session_manager, "resolve_chat_id", None)
+    if not callable(resolve_chat_id):
+        return False
+    return resolve_chat_id(owner_id, surface.message_thread_id) == surface.chat_id
+
+
+def _get_shared_group_window_for_surface(
+    user_id: int, surface: ControlSurface
+) -> str | None:
+    binding = _get_shared_group_binding_for_surface(user_id, surface)
+    if binding is None:
+        return None
+    owner_id, window_id = binding
+    logger.info(
+        "Resolved shared group surface %s via owner=%s window=%s for user=%d",
+        surface.surface_key,
+        owner_id,
+        window_id,
+        user_id,
+    )
+    return window_id
+
+
+def _get_writable_window_for_surface(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    surface: ControlSurface,
+) -> tuple[str | None, bool]:
+    """Return the user's own binding or a shared group peer binding."""
+    wid = _get_session_window_for_surface(user_id, surface)
+    if wid is not None:
+        return wid, False
+    wid = _get_shared_group_window_for_surface(user_id, surface)
+    if wid is not None:
+        _clear_shared_group_peer_flow_state(context, user_id, surface)
+        return wid, True
+    return None, False
+
+
 def _resolve_session_window_for_surface(
     user_id: int, surface: ControlSurface
 ) -> str | None:
     if surface.surface_key and _session_has_method("resolve_window_for_surface"):
-        return session_manager.resolve_window_for_surface(
+        wid = session_manager.resolve_window_for_surface(
             user_id,
             surface_key=surface.surface_key,
         )
+        return wid or _get_shared_group_window_for_surface(user_id, surface)
     legacy_scope_id = surface_key_adapter(surface)
     if legacy_scope_id is None:
         return None
-    return session_manager.resolve_window_for_thread(
+    wid = session_manager.resolve_window_for_thread(
         user_id,
         legacy_scope_id,
         chat_id=surface.chat_id,
     )
+    return wid or _get_shared_group_window_for_surface(user_id, surface)
 
 
 def _get_surface_policy(user_id: int, surface: ControlSurface) -> str:
@@ -822,7 +921,7 @@ def parse_addressed_event(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> AddressedEvent:
-    """Parse @bot mentions using Telegram entities instead of raw text heuristics."""
+    """Parse @bot mentions for non-shared surfaces without raw text heuristics."""
     message = update.message
     if message is None or not message.text:
         return AddressedEvent(is_addressed=False)
@@ -888,6 +987,37 @@ def _get_window_runtime_kind(window_id: str) -> str | None:
     if isinstance(runtime_kind, str) and runtime_kind:
         return runtime_kind
     return None
+
+
+def _is_non_bindable_codex_helper_window(window_id: str) -> bool:
+    """Return True for Codex helper/subagent windows that users must not bind."""
+    window_states = getattr(session_manager, "window_states", None)
+    if not isinstance(window_states, dict):
+        return False
+
+    state = window_states.get(window_id)
+    if state is None:
+        return False
+    if getattr(state, "runtime_kind", "") != "codex":
+        return False
+
+    thread_id = str(getattr(state, "thread_id", "") or "").strip()
+    if not thread_id:
+        return False
+
+    catalog = getattr(session_manager, "codex_thread_catalog", None)
+    if catalog is None or not hasattr(catalog, "is_helper_thread_fast"):
+        return False
+    try:
+        return bool(catalog.is_helper_thread_fast(thread_id))
+    except Exception as exc:
+        logger.debug(
+            "Unable to classify Codex helper window %s (%s): %s",
+            window_id,
+            thread_id,
+            exc,
+        )
+        return False
 
 
 def _infer_known_runtime_kind_from_pane_command(command: str) -> str | None:
@@ -1100,18 +1230,23 @@ async def _start_bind_flow(
 
     all_windows = await tmux_manager.list_windows()
     bound_ids = {wid for _, _, wid in session_manager.iter_thread_bindings()}
-    unbound = [
-        (w.window_id, w.window_name, w.cwd)
-        for w in all_windows
-        if w.window_id not in bound_ids
-    ]
+    unbound: list[tuple[str, str, str]] = []
+    hidden_helper_windows: list[str] = []
+    for w in all_windows:
+        if w.window_id in bound_ids:
+            continue
+        if _is_non_bindable_codex_helper_window(w.window_id):
+            hidden_helper_windows.append(w.window_name)
+            continue
+        unbound.append((w.window_id, w.window_name, w.cwd))
 
     logger.debug(
-        "Bind flow start (explicit=%s): all=%s, bound=%s, unbound=%s",
+        "Bind flow start (explicit=%s): all=%s, bound=%s, unbound=%s, hidden_helpers=%s",
         explicit,
         [w.window_name for w in all_windows],
         bound_ids,
         [name for _, name, _ in unbound],
+        hidden_helper_windows,
     )
 
     if unbound:
@@ -1222,11 +1357,12 @@ async def bind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     surface = control_surface_classifier(update)
+    _remember_group_chat_id_for_surface(user.id, update)
     if not surface.supports_bind_flow:
         await safe_reply(update.message, _unsupported_surface_message(surface))
         return
 
-    wid = _get_session_window_for_surface(user.id, surface)
+    wid, _ = _get_writable_window_for_surface(context, user.id, surface)
     if wid is not None:
         display = session_manager.get_display_name(wid)
         await safe_reply(
@@ -1319,8 +1455,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "🤖 *tmux runtime control*\n\n"
             "Each bound topic or supported group main chat controls one live tmux window.\n"
             f"This bot launches the configured runtime lane in tmux: {capability.display_name}.\n"
-            "Shared group topics and no-topics main chats stay silent until you address the bot "
-            "or use /bind or /resume. After /unbind or Cancel, plain messages stop rebinding "
+            "Shared group topics and no-topics main chats stay silent until you use "
+            "/bind or /resume. After /unbind or Cancel, plain messages stop rebinding "
             "until you explicitly re-open control.\n"
             "Telegram text enters the equal message layer in queue mode by default. "
             "steer changes routing semantics for explicit runtime controls; raw "
@@ -1347,6 +1483,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     surface = control_surface_classifier(update)
+    _remember_group_chat_id_for_surface(user.id, update)
     if not surface.supports_bind_flow:
         await safe_reply(update.message, _unsupported_surface_message(surface))
         return
@@ -1369,6 +1506,7 @@ async def screenshot_command(
         return
 
     surface = control_surface_classifier(update)
+    _remember_group_chat_id_for_surface(user.id, update)
     if not surface.supports_bind_flow:
         await safe_reply(update.message, _unsupported_surface_message(surface))
         return
@@ -1406,12 +1544,18 @@ async def unbind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     surface = control_surface_classifier(update)
+    _remember_group_chat_id_for_surface(user.id, update)
     if not surface.supports_bind_flow:
         await safe_reply(update.message, _unsupported_surface_message(surface))
         return
 
     runtime_kind = _default_launch_runtime_kind()
     wid = _get_session_window_for_surface(user.id, surface)
+    binding_owner_id = user.id
+    if not wid:
+        shared_binding = _get_shared_group_binding_for_surface(user.id, surface)
+        if shared_binding is not None:
+            binding_owner_id, wid = shared_binding
     if not wid:
         _require_manual_bind(user.id, surface)
         await clear_topic_state(
@@ -1429,16 +1573,25 @@ async def unbind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     display = session_manager.get_display_name(wid)
     session_manager.unbind_surface(
-        user.id,
+        binding_owner_id,
         surface_key=surface.surface_key,
     )
     _require_manual_bind(user.id, surface)
+    if binding_owner_id != user.id:
+        _require_manual_bind(binding_owner_id, surface)
     await clear_topic_state(
         user.id,
         surface.legacy_scope_id,
         context.bot,
         context.user_data,
     )
+    if binding_owner_id != user.id:
+        await clear_topic_state(
+            binding_owner_id,
+            surface.legacy_scope_id,
+            context.bot,
+            None,
+        )
 
     await safe_reply(
         update.message,
@@ -1457,11 +1610,12 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     surface = control_surface_classifier(update)
+    _remember_group_chat_id_for_surface(user.id, update)
     if not surface.supports_bind_flow:
         await safe_reply(update.message, _unsupported_surface_message(surface))
         return
 
-    wid = _get_session_window_for_surface(user.id, surface)
+    wid, _ = _get_writable_window_for_surface(context, user.id, surface)
     if wid is not None:
         display = session_manager.get_display_name(wid)
         await safe_reply(
@@ -1553,12 +1707,13 @@ async def rename_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not update.message:
         return
 
-    thread_id = _get_thread_id(update)
-    if thread_id is None:
+    surface = control_surface_classifier(update)
+    _remember_group_chat_id_for_surface(user.id, update)
+    if surface.message_thread_id is None:
         await safe_reply(update.message, "❌ This command only works in a topic.")
         return
 
-    wid = session_manager.resolve_window_for_thread(user.id, thread_id)
+    wid = _resolve_session_window_for_surface(user.id, surface)
     if not wid:
         await safe_reply(update.message, UNBOUND_TOPIC_MESSAGE)
         return
@@ -1585,7 +1740,12 @@ async def rename_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     session_manager.update_display_name(wid, final_name)
-    topic_synced = await _sync_topic_title(context.bot, user.id, thread_id, final_name)
+    topic_synced = await _sync_topic_title(
+        context.bot,
+        user.id,
+        surface.message_thread_id,
+        final_name,
+    )
 
     runtime_kind = _get_window_runtime_kind(wid)
     capability = session_manager.get_runtime_capability(runtime_kind)
@@ -1633,6 +1793,7 @@ async def esc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     surface = control_surface_classifier(update)
+    _remember_group_chat_id_for_surface(user.id, update)
     if not surface.supports_bind_flow:
         await safe_reply(update.message, _unsupported_surface_message(surface))
         return
@@ -1665,6 +1826,7 @@ async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     surface = control_surface_classifier(update)
+    _remember_group_chat_id_for_surface(user.id, update)
     if not surface.supports_bind_flow:
         await safe_reply(update.message, _unsupported_surface_message(surface))
         return
@@ -1761,28 +1923,38 @@ async def topic_closed_handler(
     if thread_id is None:
         return
 
+    surface = control_surface_classifier(update)
     wid = session_manager.get_window_for_thread(user.id, thread_id)
+    binding_owner_id = user.id
+    if not wid:
+        shared_binding = _get_shared_group_binding_for_surface(user.id, surface)
+        if shared_binding is not None:
+            binding_owner_id, wid = shared_binding
     if wid:
         display = session_manager.get_display_name(wid)
         w = await tmux_manager.find_window_by_id(wid)
         if w:
             await tmux_manager.kill_window(w.window_id)
             logger.info(
-                "Topic closed: killed window %s (user=%d, thread=%d)",
+                "Topic closed: killed window %s (user=%d, owner=%d, thread=%d)",
                 display,
                 user.id,
+                binding_owner_id,
                 thread_id,
             )
         else:
             logger.info(
-                "Topic closed: window %s already gone (user=%d, thread=%d)",
+                "Topic closed: window %s already gone (user=%d, owner=%d, thread=%d)",
                 display,
                 user.id,
+                binding_owner_id,
                 thread_id,
             )
-        session_manager.unbind_thread(user.id, thread_id)
+        session_manager.unbind_thread(binding_owner_id, thread_id)
         # Clean up all memory state for this topic
         await clear_topic_state(user.id, thread_id, context.bot, context.user_data)
+        if binding_owner_id != user.id:
+            await clear_topic_state(binding_owner_id, thread_id, context.bot, None)
     else:
         logger.debug(
             "Topic closed: no binding (user=%d, thread=%d)", user.id, thread_id
@@ -1810,7 +1982,8 @@ async def topic_edited_handler(
     if thread_id is None:
         return
 
-    wid = session_manager.get_window_for_thread(user.id, thread_id)
+    surface = control_surface_classifier(update)
+    wid, _ = _get_writable_window_for_surface(context, user.id, surface)
     if not wid:
         logger.debug(
             "Topic edited: no binding (user=%d, thread=%d)", user.id, thread_id
@@ -1988,7 +2161,11 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
-    wid = session_manager.get_window_for_thread(user.id, thread_id)
+    wid, using_shared_group_binding = _get_writable_window_for_surface(
+        context,
+        user.id,
+        control_surface,
+    )
     if wid is None:
         await safe_reply(
             update.message,
@@ -1999,12 +2176,19 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     w = await tmux_manager.find_window_by_id(wid)
     if not w:
         display = session_manager.get_display_name(wid)
-        session_manager.unbind_thread(user.id, thread_id)
-        await safe_reply(
-            update.message,
-            f"❌ Window '{display}' no longer exists. Binding removed.\n"
-            "Send a message to start a new session.",
-        )
+        if not using_shared_group_binding:
+            session_manager.unbind_thread(user.id, thread_id)
+            await safe_reply(
+                update.message,
+                f"❌ Window '{display}' no longer exists. Binding removed.\n"
+                "Send a message to start a new session.",
+            )
+        else:
+            await safe_reply(
+                update.message,
+                f"❌ Shared window '{display}' no longer exists. Use /unbind, "
+                "then start a new session.",
+            )
         return
 
     # Download the highest-resolution photo
@@ -2076,7 +2260,11 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
-    wid = session_manager.get_window_for_thread(user.id, thread_id)
+    wid, using_shared_group_binding = _get_writable_window_for_surface(
+        context,
+        user.id,
+        control_surface,
+    )
     if wid is None:
         await safe_reply(
             update.message,
@@ -2087,12 +2275,19 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     w = await tmux_manager.find_window_by_id(wid)
     if not w:
         display = session_manager.get_display_name(wid)
-        session_manager.unbind_thread(user.id, thread_id)
-        await safe_reply(
-            update.message,
-            f"❌ Window '{display}' no longer exists. Binding removed.\n"
-            "Send a message to start a new session.",
-        )
+        if not using_shared_group_binding:
+            session_manager.unbind_thread(user.id, thread_id)
+            await safe_reply(
+                update.message,
+                f"❌ Window '{display}' no longer exists. Binding removed.\n"
+                "Send a message to start a new session.",
+            )
+        else:
+            await safe_reply(
+                update.message,
+                f"❌ Shared window '{display}' no longer exists. Use /unbind, "
+                "then start a new session.",
+            )
         return
 
     # Download voice as in-memory bytes
@@ -2376,11 +2571,19 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    wid = _get_session_window_for_surface(user.id, surface)
+    wid, using_shared_group_binding = _get_writable_window_for_surface(
+        context,
+        user.id,
+        surface,
+    )
     if wid is None:
         binding_state = _get_surface_binding_state(user.id, surface)
         topic_policy = _get_surface_policy(user.id, surface)
-        addressed_event = parse_addressed_event(update, context)
+        addressed_event = (
+            AddressedEvent(is_addressed=False)
+            if surface.is_shared_group
+            else parse_addressed_event(update, context)
+        )
 
         if binding_state == BINDING_STATE_BIND_FLOW:
             await safe_reply(update.message, BIND_FLOW_ACTIVE_MESSAGE)
@@ -2396,29 +2599,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             _set_surface_binding_state(user.id, surface, BINDING_STATE_NONE)
             binding_state = BINDING_STATE_NONE
 
-        if surface.is_shared_group and not addressed_event.is_addressed:
+        if surface.is_shared_group:
             return
 
         if topic_policy == TOPIC_POLICY_MANUAL_BIND_REQUIRED:
-            if surface.is_shared_group and addressed_event.is_addressed:
-                if addressed_event.is_bare:
-                    _clear_pending_slot(context, user.id, surface)
-                elif addressed_event.payload_text:
-                    _put_pending_slot(
-                        context,
-                        user.id,
-                        surface,
-                        addressed_event.payload_text,
-                    )
-                await _start_bind_flow(
-                    update,
-                    context,
-                    user,
-                    surface,
-                    explicit=True,
-                    pending_text=addressed_event.payload_text,
-                )
-                return
             await safe_reply(
                 update.message,
                 _build_manual_bind_required_message(_default_launch_runtime_kind()),
@@ -2470,20 +2654,29 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not w:
         display = session_manager.get_display_name(wid)
         logger.info(
-            "Stale binding: window %s gone, unbinding (user=%d, thread=%d)",
+            "Stale binding: window %s gone, unbinding (user=%d, thread=%d, shared=%s)",
             display,
             user.id,
             surface.legacy_scope_id,
+            using_shared_group_binding,
         )
-        session_manager.unbind_surface(
-            user.id,
-            surface_key=surface.surface_key,
-        )
-        await safe_reply(
-            update.message,
-            f"❌ Window '{display}' no longer exists. Binding removed.\n"
-            "Send a message to start a new session.",
-        )
+        if not using_shared_group_binding:
+            session_manager.unbind_surface(
+                user.id,
+                surface_key=surface.surface_key,
+            )
+        if using_shared_group_binding:
+            await safe_reply(
+                update.message,
+                f"❌ Shared window '{display}' no longer exists. Use /unbind, "
+                "then start a new session.",
+            )
+        else:
+            await safe_reply(
+                update.message,
+                f"❌ Window '{display}' no longer exists. Binding removed.\n"
+                "Send a message to start a new session.",
+            )
         return
 
     await update.message.chat.send_action(ChatAction.TYPING)
@@ -2707,6 +2900,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     chat = update.effective_chat
     if chat and chat.type in ("group", "supergroup"):
         session_manager.set_group_chat_id(user.id, cb_thread_id, chat.id)
+    if await handle_omx_question_callback(update, context):
+        return
     current_surface = control_surface_classifier(update)
 
     # History: older/newer pagination
@@ -3120,6 +3315,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if not w:
             display = session_manager.get_display_name(selected_wid)
             await query.answer(f"Window '{display}' no longer exists", show_alert=True)
+            return
+
+        if _is_non_bindable_codex_helper_window(selected_wid):
+            await query.answer(
+                "This Codex subagent/helper window belongs to its parent session "
+                "and cannot be bound directly.",
+                show_alert=True,
+            )
             return
 
         if pending_surface is None:

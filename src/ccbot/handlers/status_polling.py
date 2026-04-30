@@ -46,6 +46,7 @@ from .interactive_ui import (
     get_interactive_window,
     handle_interactive_ui,
 )
+from .omx_questions import handle_omx_question_ui
 from .cleanup import clear_topic_state
 from .message_sender import send_photo, send_with_fallback
 from .message_queue import (
@@ -517,7 +518,7 @@ async def update_status_message(
                 None,
                 thread_id=thread_id,
                 turn_generation=turn_generation,
-            )
+        )
         return
 
     pane_text = await tmux_manager.capture_pane(w.window_id)
@@ -560,6 +561,9 @@ async def update_status_message(
         pane_command=getattr(w, "pane_current_command", ""),
         pane_text=pane_text,
     )
+
+    if await handle_omx_question_ui(bot, user_id, window_id, thread_id):
+        return
 
     interactive_window = get_interactive_window(user_id, thread_id)
     should_check_new_ui = True

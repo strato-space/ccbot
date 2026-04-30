@@ -262,7 +262,8 @@ class TestCommandSurface:
         assert "Codex" in text
         assert "queue mode" in text
         assert "steer" in text
-        assert "or use /bind or /resume" in text
+        assert "until you use /bind or /resume" in text
+        assert "address the bot" not in text
         assert "Shared group topics and no-topics main chats stay silent" in text
         assert "raw tmux terminal control" in text
         assert "explicit `/resume <thread-name|id>`" in text
@@ -406,6 +407,7 @@ class TestCommandSurface:
             await bot_mod.bind_command(update, context)
 
         mock_clear.assert_awaited_once_with(1, 42, context.bot, context.user_data)
+        mock_sm.set_group_chat_id.assert_called_once_with(1, 42, 100)
         mock_sm.allow_implicit_bind.assert_called_once_with(1, 42)
         mock_sm.bind_external_surface.assert_called_once_with(
             1,
@@ -531,7 +533,7 @@ class TestCommandSurface:
         mock_reply.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_text_handler_group_unbound_at_mention_opens_bind_flow_without_runtime_send(
+    async def test_text_handler_group_unbound_at_mention_is_silent(
         self,
     ):
         update = _make_topic_update(text="@ccbot hello")
@@ -554,15 +556,67 @@ class TestCommandSurface:
 
             await bot_mod.text_handler(update, context)
 
-        mock_start_bind.assert_awaited_once()
-        assert mock_start_bind.await_args.kwargs["explicit"] is True
-        assert mock_start_bind.await_args.kwargs["pending_text"] == "hello"
-        assert (
-            context.user_data[bot_mod.PENDING_SURFACE_SLOTS_KEY]["t:42"]["text"]
-            == "hello"
-        )
+        mock_start_bind.assert_not_awaited()
+        assert bot_mod.PENDING_SURFACE_SLOTS_KEY not in context.user_data
         mock_sm.send_to_window.assert_not_called()
         mock_reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_text_handler_group_topic_reuses_existing_surface_binding_for_peer_user(
+        self,
+    ):
+        update = _make_topic_update(user_id=2, text="hello")
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
+            patch(
+                "ccbot.bot._start_bind_flow", new_callable=AsyncMock
+            ) as mock_start_bind,
+            patch(
+                "ccbot.bot._clear_shared_group_peer_flow_state"
+            ) as mock_clear_peer_state,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+            mock_sm.surface_bindings = {1: {"t:42": "@7"}}
+            mock_sm.resolve_chat_id.return_value = 100
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(window_id="@7")
+            )
+            mock_tmux.capture_pane = AsyncMock(return_value="")
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.text_handler(update, context)
+
+        mock_start_bind.assert_not_awaited()
+        mock_clear_peer_state.assert_called_once()
+        assert mock_clear_peer_state.call_args.args[1] == 2
+        mock_sm.send_to_window.assert_awaited_once_with("@7", "hello")
+        mock_reply.assert_not_awaited()
+
+    def test_shared_group_binding_does_not_cross_telegram_chats(self):
+        surface = bot_mod.ControlSurface(
+            kind="group_topic",
+            chat_id=100,
+            thread_id=42,
+            legacy_scope_id=42,
+            surface_key="t:42",
+            label="topic",
+            is_shared_group=True,
+            supports_bind_flow=True,
+        )
+
+        with patch("ccbot.bot.session_manager") as mock_sm:
+            mock_sm.surface_bindings = {1: {"t:42": "@7"}}
+            mock_sm.resolve_chat_id.return_value = 200
+
+            binding = bot_mod._get_shared_group_binding_for_surface(2, surface)
+
+        assert binding is None
 
     @pytest.mark.asyncio
     async def test_text_handler_no_topics_main_chat_unbound_ordinary_text_is_silent(
@@ -588,6 +642,30 @@ class TestCommandSurface:
         mock_start_bind.assert_not_awaited()
         mock_reply.assert_not_awaited()
         mock_sm.send_to_window.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_bind_command_group_topic_reports_existing_peer_surface_binding(self):
+        update = _make_topic_update(user_id=2, text="/bind")
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch(
+                "ccbot.bot._start_bind_flow", new_callable=AsyncMock
+            ) as mock_start_bind,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+            mock_sm.surface_bindings = {1: {"t:42": "@7"}}
+            mock_sm.resolve_chat_id.return_value = 100
+            mock_sm.get_display_name.return_value = "project"
+
+            await bot_mod.bind_command(update, context)
+
+        mock_start_bind.assert_not_awaited()
+        mock_reply.assert_awaited_once()
+        assert "already bound to 'project'" in mock_reply.await_args.args[1]
 
     @pytest.mark.asyncio
     async def test_bind_command_no_topics_main_chat_starts_bind_flow(self):
@@ -817,6 +895,34 @@ class TestCommandSurface:
         assert "/resume <thread-name|id>" in mock_reply.await_args.args[1]
 
     @pytest.mark.asyncio
+    async def test_unbind_command_peer_user_removes_shared_surface_binding(self):
+        update = _make_topic_update(user_id=2)
+        context = _make_context()
+
+        with (
+            patch.object(bot_mod.config, "claude_command", "codex"),
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.clear_topic_state", new_callable=AsyncMock) as mock_clear,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+            mock_sm.surface_bindings = {1: {"t:42": "@7"}}
+            mock_sm.resolve_chat_id.return_value = 100
+            mock_sm.get_display_name.return_value = "project"
+
+            await bot_mod.unbind_command(update, context)
+
+        mock_sm.unbind_surface.assert_called_once_with(1, surface_key="t:42")
+        mock_sm.require_manual_bind.assert_any_call(2, 42)
+        mock_sm.require_manual_bind.assert_any_call(1, 42)
+        assert mock_sm.require_manual_bind.call_count == 2
+        mock_clear.assert_any_await(2, 42, context.bot, context.user_data)
+        mock_clear.assert_any_await(1, 42, context.bot, None)
+        mock_reply.assert_awaited_once()
+        assert "unbound from window 'project'" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
     async def test_unbind_command_without_binding_keeps_manual_bind_required(self):
         update = _make_topic_update()
         context = _make_context()
@@ -912,6 +1018,7 @@ class TestCommandSurface:
             resume_session_id="thread-1",
             sync_topic_title=True,
         )
+        mock_sm.set_group_chat_id.assert_called_once_with(1, 42, 100)
         mock_sm.allow_implicit_bind.assert_called_once_with(1, 42)
         reply_text = mock_reply.await_args.args[1]
         assert "Reused Codex window for 'Planning thread'" in reply_text
@@ -1078,6 +1185,69 @@ class TestCommandSurface:
         mock_sm.require_manual_bind.assert_called_once_with(1, 42)
 
     @pytest.mark.asyncio
+    async def test_bind_flow_hides_codex_subagent_windows_from_picker(self):
+        update = _make_topic_update()
+        context = _make_context()
+        surface = bot_mod.ControlSurface(
+            kind="group_topic",
+            chat_id=100,
+            thread_id=42,
+            legacy_scope_id=42,
+            surface_key="t:42",
+            label="topic",
+            is_shared_group=True,
+            supports_bind_flow=True,
+        )
+        helper_window = SimpleNamespace(
+            window_id="@45",
+            window_name="comfy-agent-spec",
+            cwd="/home/tools/server/comfy",
+        )
+        normal_window = SimpleNamespace(
+            window_id="@0",
+            window_name="comfy-agent",
+            cwd="/home/tools/server/comfy",
+        )
+
+        with (
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_tmux.list_windows = AsyncMock(
+                return_value=[helper_window, normal_window]
+            )
+            mock_sm.iter_thread_bindings.return_value = []
+            mock_sm.get_topic_bind_flow_credentials.return_value = (2, "nonce123")
+            mock_sm.window_states = {
+                "@45": SimpleNamespace(
+                    runtime_kind="codex",
+                    thread_id="019dddf6-7efa-7d13-9a64-08c9dc9ac1d2",
+                ),
+                "@0": SimpleNamespace(
+                    runtime_kind="codex",
+                    thread_id="019dbd8b-c0eb-7ee2-bf5b-aa8befdc30bf",
+                ),
+            }
+            mock_sm.codex_thread_catalog.is_helper_thread_fast.side_effect = (
+                lambda thread_id: thread_id
+                == "019dddf6-7efa-7d13-9a64-08c9dc9ac1d2"
+            )
+
+            await bot_mod._start_bind_flow(
+                update,
+                context,
+                update.effective_user,
+                surface,
+                explicit=True,
+            )
+
+        assert context.user_data[bot_mod.UNBOUND_WINDOWS_KEY] == ["@0"]
+        reply_text = mock_reply.await_args.args[1]
+        assert "comfy-agent" in reply_text
+        assert "comfy-agent-spec" not in reply_text
+
+    @pytest.mark.asyncio
     async def test_stale_bind_flow_callback_is_rejected(self):
         update = MagicMock()
         update.effective_user = MagicMock(id=1)
@@ -1221,6 +1391,57 @@ class TestCommandSurface:
             sync_topic_title=True,
         )
         mock_sm.bind_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_window_picker_rejects_stale_codex_subagent_selection(self):
+        update = MagicMock()
+        update.effective_user = MagicMock(id=1)
+        update.effective_chat = MagicMock(type="supergroup", id=100)
+        update.callback_query = MagicMock()
+        update.callback_query.data = append_bind_flow_token(
+            f"{bot_mod.CB_WIN_BIND}0",
+            version=2,
+            nonce="nonce123",
+        )
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.message = MagicMock(
+            message_thread_id=42,
+            chat=update.effective_chat,
+        )
+        context = _make_context()
+        context.user_data = {
+            "_pending_thread_id": 42,
+            bot_mod.STATE_KEY: bot_mod.STATE_SELECTING_WINDOW,
+            bot_mod.UNBOUND_WINDOWS_KEY: ["@45"],
+        }
+        window = SimpleNamespace(
+            window_id="@45",
+            window_name="comfy-agent-spec",
+            cwd="/tmp/project",
+            pane_current_command="node",
+        )
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch(
+                "ccbot.bot._is_non_bindable_codex_helper_window",
+                return_value=True,
+            ),
+            patch(
+                "ccbot.bot._register_bound_window", new_callable=AsyncMock
+            ) as mock_register,
+        ):
+            mock_sm.validate_topic_bind_flow_callback.return_value = True
+            mock_tmux.find_window_by_id = AsyncMock(return_value=window)
+
+            await bot_mod.callback_handler(update, context)
+
+        mock_register.assert_not_awaited()
+        update.callback_query.answer.assert_awaited_once()
+        assert "subagent/helper" in update.callback_query.answer.await_args.args[0]
 
     @pytest.mark.asyncio
     async def test_window_picker_bind_existing_window_without_cwd_fails_closed(self):
@@ -2235,6 +2456,10 @@ class TestTelegramDelivery:
             await bot_mod.handle_new_message(msg, bot)
 
         mock_status.assert_awaited_once()
+        status_text = mock_status.await_args.args[3]
+        assert status_text.startswith("⌘ Command")
+        assert "rg -n foo" in status_text
+        assert "output 37 line(s)" in status_text
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio

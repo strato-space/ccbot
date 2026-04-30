@@ -76,6 +76,29 @@ def test_can_merge_tasks_rejects_different_topics_for_same_window():
     assert _can_merge_tasks(base, candidate) is False
 
 
+def test_can_merge_tasks_rejects_command_execution_identity_collapse():
+    base = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["⌘ Command\n```sh\necho one\n```"],
+        content_type="command_execution",
+        semantic_kind="command_execution",
+        tool_use_id="call_one",
+    )
+    candidate = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["⌘ Command\n```sh\necho two\n```"],
+        content_type="command_execution",
+        semantic_kind="command_execution",
+        tool_use_id="call_two",
+    )
+
+    assert _can_merge_tasks(base, candidate) is False
+
+
 @pytest.mark.asyncio
 async def test_is_task_binding_active_accepts_external_binding_without_tmux_probe() -> (
     None
@@ -223,6 +246,62 @@ async def test_process_commentary_task_sends_multi_part_commentary_losslessly() 
 
     assert mock_send.await_count == 2
     bot.edit_message_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_content_task_edits_command_execution_by_tool_use_id() -> None:
+    first = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["⌘ Command\n```sh\necho hi\n```"],
+        content_type="command_execution",
+        semantic_kind="command_execution",
+        tool_use_id="call_exec",
+    )
+    second = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["⌘ Command\n```sh\necho hi\n```\n```sh\nhi\n```"],
+        content_type="command_execution",
+        semantic_kind="command_execution",
+        tool_use_id="call_exec",
+    )
+
+    bot = AsyncMock()
+    sent_first = AsyncMock()
+    sent_first.message_id = 301
+
+    mq._tool_msg_ids.clear()
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                side_effect=[sent_first],
+            ) as mock_send,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=type("Window", (), {"window_id": "@7"})()
+            )
+            mock_tmux.capture_pane = AsyncMock(return_value="")
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+
+            await _process_content_task(bot, 1, first)
+            await _process_content_task(bot, 1, second)
+
+        mock_send.assert_awaited_once()
+        bot.edit_message_text.assert_awaited_once()
+        kwargs = bot.edit_message_text.await_args.kwargs
+        assert kwargs["message_id"] == 301
+        assert "hi" in kwargs["text"]
+    finally:
+        mq._tool_msg_ids.clear()
 
 
 @pytest.mark.asyncio
@@ -1625,14 +1704,14 @@ async def test_status_edit_not_modified_does_not_create_duplicate_bubble(
     mq._status_msg_info[(1, 42)] = (
         501,
         "@7",
-        "🛠 Tool\nwrite_stdin(session 82770, poll) ",
+        "Working (1m 00s) ",
     )
 
     task = MessageTask(
         task_type="status_update",
         window_id="@7",
         thread_id=42,
-        text="🛠 Tool\nwrite_stdin(session 82770, poll)",
+        text="Working (1m 00s)",
         turn_generation=0,
     )
     bot = AsyncMock()
@@ -1669,7 +1748,7 @@ async def test_status_edit_not_modified_does_not_create_duplicate_bubble(
 
 
 @pytest.mark.asyncio
-async def test_poll_only_write_stdin_updates_existing_status_bubble(
+async def test_poll_only_write_stdin_does_not_replace_existing_status_bubble(
     monkeypatch, tmp_path
 ) -> None:
     audit_path = tmp_path / "telegram_delivery_audit.jsonl"
@@ -1701,13 +1780,133 @@ async def test_poll_only_write_stdin_updates_existing_status_bubble(
         await _process_status_update_task(bot, 1, task)
 
     bot.send_message.assert_not_awaited()
-    bot.edit_message_text.assert_awaited_once()
+    bot.edit_message_text.assert_not_awaited()
+    rows = [
+        json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[-1]["action"] == "suppress"
+    assert rows[-1]["reason"] == "poll_does_not_replace_existing_status"
+    assert rows[-1]["content_type"] == "status"
+    assert rows[-1]["semantic_kind"] == "technical_status"
+    assert mq._status_msg_info[(1, 42)] == (
+        501,
+        "@7",
+        "🛠 Tool\nwrite_stdin(session 1, poll)",
+    )
+
+    mq._status_msg_info.clear()
+
+
+@pytest.mark.asyncio
+async def test_status_tool_output_wrapper_is_cleaned_for_humans(
+    monkeypatch, tmp_path
+) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(
+        delivery_audit.config, "telegram_delivery_audit_file", audit_path
+    )
+    mq._status_msg_info.clear()
+    mq._status_msg_info[(1, 42)] = (501, "@7", "Working (1m 00s)")
+
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text=(
+            "↳ Tool Output\n"
+            "```text\n"
+            "Chunk ID: e5c144\n"
+            "Wall time: 7.9130 seconds\n"
+            "Process exited with code 0\n"
+            "Original token count: 180\n"
+            "Output:\n"
+            "✓ 22 [desktop-chromium] › tests/platform-routes.spec.ts:146:1\n"
+            "✓ 23 [iphone-xr] › tests/platform-routes.spec.ts:116:1\n"
+            "```\n"
+            "preview 10/11 lines"
+        ),
+        turn_generation=0,
+    )
+    bot = AsyncMock()
+
+    with (
+        patch(
+            "ccbot.handlers.message_queue._is_task_binding_active",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("ccbot.handlers.message_queue.current_turn_generation", return_value=0),
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+    ):
+        mock_sm.resolve_chat_id.return_value = 100
+        await _process_status_update_task(bot, 1, task)
+
+    sent_text = bot.edit_message_text.await_args.kwargs["text"]
+    assert sent_text.startswith("⌘ Command output")
+    assert "```text" in sent_text
+    assert "desktop" in sent_text
+    assert "preview 10/11 lines" in sent_text
+    assert "Chunk ID" not in sent_text
+    assert "Wall time" not in sent_text
+    assert "Process exited" not in sent_text
+    assert "Original token count" not in sent_text
     rows = [
         json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
     ]
     assert rows[-1]["action"] == "edit"
-    assert rows[-1]["content_type"] == "status"
-    assert rows[-1]["semantic_kind"] == "technical_status"
+    assert rows[-1]["preview"].startswith("⌘ Command output")
+
+    mq._status_msg_info.clear()
+
+
+@pytest.mark.asyncio
+async def test_status_running_tool_output_wrapper_strips_process_metadata(
+    monkeypatch, tmp_path
+) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(
+        delivery_audit.config, "telegram_delivery_audit_file", audit_path
+    )
+    mq._status_msg_info.clear()
+    mq._status_msg_info[(1, 42)] = (501, "@7", "Working (1m 00s)")
+
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text=(
+            "↳ Tool Output\n"
+            "```text\n"
+            "Chunk ID: e5c144\n"
+            "Wall time: 0.0000 seconds\n"
+            "Process running with session ID 67516\n"
+            "Original token count: 0\n"
+            "Output:\n"
+            "```\n"
+            "preview 0/0 lines"
+        ),
+        turn_generation=0,
+    )
+    bot = AsyncMock()
+
+    with (
+        patch(
+            "ccbot.handlers.message_queue._is_task_binding_active",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("ccbot.handlers.message_queue.current_turn_generation", return_value=0),
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+    ):
+        mock_sm.resolve_chat_id.return_value = 100
+        await _process_status_update_task(bot, 1, task)
+
+    bot.edit_message_text.assert_not_awaited()
+    rows = [
+        json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[-1]["action"] == "suppress"
+    assert rows[-1]["reason"] == "empty_after_status_normalization"
 
     mq._status_msg_info.clear()
 

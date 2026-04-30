@@ -36,6 +36,22 @@ control surface at a time.
   - this artifact is not part of the current turn's visible output ordering
     contract and is not itself a user turn opener
 
+- **Interactive question artifact**
+  - mutable Telegram projection of a runtime-owned blocking question
+  - current source:
+    - OMX durable `omx.question/v1` records under
+      `.omx/state/sessions/*/questions/`
+  - not a technical status artifact and not an assistant-final artifact
+  - belongs to the control surface whose live tmux window/cwd/return pane
+    produced the record
+  - uses Telegram inline buttons for predefined options and updates in place
+    until answered or no longer active
+  - answering writes the durable question record to terminal state
+    `answered`, then best-effort bridges the answer back to the recorded tmux
+    return pane and closes the temporary question pane
+  - unsupported free-text `Other` answers remain available in the tmux UI until
+    a Telegram free-text answer lane is explicitly designed
+
 - **Warning artifact**
   - durable system notice
   - not a user turn opener
@@ -92,6 +108,8 @@ In addition:
 - latest Codex plan update stays visible as a separate mutable artifact and is
   updated only by newer `plan_update` events
 - latest pending input preview may stay visible as a separate mutable artifact
+- active runtime-owned questions stay visible as separate interactive question
+  artifacts rather than being collapsed into the technical status artifact
 - technical execution classes stay out of permanent bubbles by default
 - warning artifacts use latest-warning dedup semantics rather than technical
   status churn semantics; distinct runtime-discontinuity warnings may opt into
@@ -106,6 +124,12 @@ Technical execution classes include:
 - tool lifecycle
 - command execution
 - file-change churn
+
+Command-like tool output belongs to command execution even when the output
+record arrives without its paired tool-call record in the current poll slice.
+Developer transport metadata such as `Chunk ID`, wall time, token count, and
+`Output:` is not user-facing content. Genuine non-command tool results remain
+tool results rather than being forced into command execution.
 
 ## Ordering Invariants
 
@@ -139,6 +163,9 @@ Technical execution classes include:
 - pending input preview closes on queue-owned lifecycle transitions such as
   queue-empty, binding-stale, or explicit clear, not on terminal assistant
   closure alone
+- interactive question artifacts close when their durable record reaches a
+  terminal status, when the binding disappears, or when the prompt is answered
+  through Telegram; they are not closed merely by technical-status churn
 
 ## Preview Contract
 
@@ -151,6 +178,17 @@ When command/tool/file previews are surfaced:
 - structured payloads that are genuinely JSON prefer `json`
 - the UI should not add a redundant footer like `completed · output 1 line(s)`
   when the preview already makes the outcome obvious
+- `exec_command` / `functions.exec_command` is a shell-command artifact, not a
+  generic tool artifact: its call and completion share the same `tool_use_id`,
+  so completion should update the command surface instead of opening a separate
+  `Tool Output` bubble
+- developer/runtime wrapper metadata such as `Chunk ID`, `Wall time`,
+  `Process exited with code`, `Original token count`, and the `Output:` marker
+  is transport evidence and must be stripped before rendering; only the real
+  stdout/stderr body belongs inside the command output preview
+- Codex read/list/search summaries are valid human exploration artifacts; when
+  the runtime emits parsed read/search/list command metadata, Telegram may
+  render the Codex-style `• Explored` surface rather than a raw shell command
 
 ## Human Surface Audit And Operator Prompt Repair
 
@@ -189,10 +227,13 @@ Preview refinements:
   summaries when a small real preview is available
 - `write_stdin` with empty chars is a poll, not meaningful user content; it
   should summarize as a poll against a session rather than a raw JSON blob
-- poll-only `write_stdin` updates are allowed to edit an already-visible mutable
-  technical status artifact, but must not create a new Telegram bubble by
-  themselves; if no status artifact exists, suppress the poll and record the
-  suppression in the delivery audit
+- poll-only `write_stdin` updates must not create a new Telegram bubble and
+  must not overwrite a more useful already-visible technical status artifact;
+  suppress the poll and record whether it had no existing status or was kept
+  from replacing an existing status
+- status-polled `Tool Output` wrapper text is not a human artifact; strip
+  transport metadata (`Chunk ID`, `Wall time`, process status, token counts,
+  and the `Output:` marker) and render only the real command output preview
 - Telegram `message is not modified` responses for mutable technical status
   edits are idempotent success, not send failures; they update local tracking
   and audit as `edit_noop` instead of creating a replacement bubble

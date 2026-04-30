@@ -60,6 +60,7 @@ class TmuxWindow:
     window_name: str
     cwd: str  # Current working directory
     pane_current_command: str = ""  # Process running in active pane
+    pane_id: str = ""  # Active pane id (e.g. "%0")
 
 
 class TmuxManager:
@@ -145,9 +146,11 @@ class TmuxManager:
                     if pane:
                         cwd = pane.pane_current_path or ""
                         pane_cmd = pane.pane_current_command or ""
+                        pane_id = pane.pane_id or ""
                     else:
                         cwd = ""
                         pane_cmd = ""
+                        pane_id = ""
 
                     windows.append(
                         TmuxWindow(
@@ -155,6 +158,7 @@ class TmuxManager:
                             window_name=name,
                             cwd=cwd,
                             pane_current_command=pane_cmd,
+                            pane_id=pane_id,
                         )
                     )
                 except Exception as e:

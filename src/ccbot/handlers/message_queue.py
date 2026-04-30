@@ -18,6 +18,7 @@ Key components:
 """
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -227,12 +228,14 @@ def _can_merge_tasks(base: MessageTask, candidate: MessageTask) -> bool:
         return False
     if base.content_type != candidate.content_type:
         return False
-    # tool_use/tool_result break merge chain
+    # tool_use/tool_result/command_execution break merge chain
     # - tool_use: will be edited later by tool_result
     # - tool_result: edits previous message, merging would cause order issues
-    if base.content_type in ("tool_use", "tool_result"):
+    # - command_execution: command starts and completions are paired by tool_use_id
+    #   and merging would collapse distinct command identities into one message
+    if base.content_type in ("tool_use", "tool_result", "command_execution"):
         return False
-    if candidate.content_type in ("tool_use", "tool_result"):
+    if candidate.content_type in ("tool_use", "tool_result", "command_execution"):
         return False
     if base.semantic_kind == WARNING_SEMANTIC_KIND:
         return False
@@ -573,6 +576,93 @@ def _is_poll_only_status_text(text: str) -> bool:
     )
 
 
+_TOOL_OUTPUT_METADATA_RE = re.compile(
+    r"^(?:(?:Chunk ID|Wall time|Original token count):\s*|Process (?:exited|running)\b)"
+)
+_PREVIEW_FOOTER_RE = re.compile(r"^preview\s+\d+/\d+\s+lines?$", re.IGNORECASE)
+
+
+def _looks_like_json_payload(text: str) -> bool:
+    body = text.strip()
+    if not body or body[0] not in "[{":
+        return False
+    try:
+        json.loads(body)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return True
+
+
+def _strip_outer_code_fence(text: str) -> str:
+    lines = text.strip().splitlines()
+    if not lines:
+        return ""
+    if lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _render_clean_tool_output_status(text: str) -> str | None:
+    """Render raw Tool Output pane status as a compact command-output status."""
+    body = re.sub(r"^\s*↳\s*Tool Output\s*", "", text.strip()).strip()
+    body = _strip_outer_code_fence(body)
+
+    command: str | None = None
+    preview_footer: str | None = None
+    output_lines: list[str] = []
+    in_output = False
+
+    for raw_line in body.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            if output_lines:
+                output_lines.append("")
+            continue
+        if stripped.startswith("```"):
+            continue
+        if _PREVIEW_FOOTER_RE.match(stripped):
+            preview_footer = stripped
+            continue
+        if stripped.startswith("Command:"):
+            command = stripped.removeprefix("Command:").strip()
+            continue
+        if _TOOL_OUTPUT_METADATA_RE.match(stripped):
+            continue
+        if stripped == "Output:":
+            in_output = True
+            continue
+        # If there was no explicit Output: marker, preserve non-metadata lines
+        # anyway; status polling may capture only the already-rendered output
+        # portion from the Codex TUI.
+        if in_output or command is None or stripped:
+            output_lines.append(line)
+
+    output = "\n".join(output_lines).strip()
+    if not output and not command:
+        return None
+
+    code_payload = output or "completed · no output"
+    lang = "json" if _looks_like_json_payload(code_payload) else "text"
+    if command:
+        rendered = f"⌘ Command\n```sh\n{command}\n```\n↳ Output\n```{lang}\n{code_payload}\n```"
+    else:
+        rendered = f"⌘ Command output\n```{lang}\n{code_payload}\n```"
+    if preview_footer:
+        rendered = f"{rendered}\n{preview_footer}"
+    return rendered
+
+
+def _normalize_technical_status_text(text: str) -> str:
+    """Normalize pane-polled technical status into the human-facing ontology."""
+    raw = (text or "").strip()
+    if raw.startswith("↳ Tool Output"):
+        return _render_clean_tool_output_status(raw) or ""
+    return text
+
+
 async def _send_task_images(bot: Bot, chat_id: int, task: MessageTask) -> None:
     """Send images attached to a task, if any."""
     if not task.image_data:
@@ -699,8 +789,8 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         return
     chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
 
-    # 1. Handle tool_result editing (merged parts are edited together)
-    if task.content_type == "tool_result" and task.tool_use_id:
+    # 1. Handle tool/command result editing (merged parts are edited together)
+    if task.content_type in {"tool_result", "command_execution"} and task.tool_use_id:
         _tkey = (task.tool_use_id, user_id, tid)
         edit_msg_id = _tool_msg_ids.pop(_tkey, None)
         if edit_msg_id is not None:
@@ -840,8 +930,12 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             last_msg_id = sent.message_id
             delivered_parts += 1
 
-    # 3. Record tool_use message ID for later editing
-    if last_msg_id and task.tool_use_id and task.content_type == "tool_use":
+    # 3. Record tool/command start message ID for later editing
+    if (
+        last_msg_id
+        and task.tool_use_id
+        and task.content_type in {"tool_use", "command_execution"}
+    ):
         _tool_msg_ids[(task.tool_use_id, user_id, tid)] = last_msg_id
 
     # 4. Send images if present (from tool_result with base64 image blocks)
@@ -1146,7 +1240,7 @@ async def _process_status_update_task(
 
     current_info = _status_msg_info.get(skey)
 
-    if current_info is None and _is_poll_only_status_text(status_text):
+    if _is_poll_only_status_text(status_text):
         _audit_task_delivery(
             action="suppress",
             user_id=user_id,
@@ -1155,7 +1249,25 @@ async def _process_status_update_task(
             text=status_text,
             content_type="status",
             semantic_kind="technical_status",
-            reason="poll_without_existing_status",
+            reason=(
+                "poll_without_existing_status"
+                if current_info is None
+                else "poll_does_not_replace_existing_status"
+            ),
+        )
+        return
+
+    status_text = _normalize_technical_status_text(status_text)
+    if not status_text:
+        _audit_task_delivery(
+            action="suppress",
+            user_id=user_id,
+            chat_id=chat_id,
+            task=task,
+            text=task.text or "",
+            content_type="status",
+            semantic_kind="technical_status",
+            reason="empty_after_status_normalization",
         )
         return
 
@@ -1258,6 +1370,11 @@ async def _do_send_status_message(
     text: str,
 ) -> None:
     """Send a new status message and track it (internal, called from worker)."""
+    if _is_poll_only_status_text(text):
+        return
+    text = _normalize_technical_status_text(text)
+    if not text:
+        return
     skey = (user_id, thread_id_or_0)
     thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
     chat_id = session_manager.resolve_chat_id(user_id, thread_id)

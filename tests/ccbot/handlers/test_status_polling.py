@@ -122,6 +122,49 @@ class TestStatusPollerSettingsDetection:
             assert mock_status.await_args.kwargs["turn_generation"] == 7
 
     @pytest.mark.asyncio
+    async def test_omx_question_does_not_skip_terminal_safety_checks(
+        self, mock_bot: AsyncMock
+    ):
+        window_id = "@5"
+        mock_window = MagicMock()
+        mock_window.window_id = window_id
+        mock_window.pane_current_command = "node"
+        pane_text = "Working\n────────────────\ngpt-5.5 high"
+
+        with (
+            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+            patch(
+                "ccbot.handlers.status_polling.enqueue_pending_input_update",
+                new_callable=AsyncMock,
+            ) as mock_pending,
+            patch(
+                "ccbot.handlers.status_polling._maybe_enqueue_runtime_exit_warning",
+                new_callable=AsyncMock,
+            ) as mock_runtime_warning,
+            patch(
+                "ccbot.handlers.status_polling.handle_omx_question_ui",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_omx_question,
+            patch(
+                "ccbot.handlers.status_polling.enqueue_status_update",
+                new_callable=AsyncMock,
+            ) as mock_status,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
+            mock_tmux.capture_pane = AsyncMock(return_value=pane_text)
+
+            await update_status_message(
+                mock_bot, user_id=1, window_id=window_id, thread_id=42
+            )
+
+        mock_tmux.capture_pane.assert_awaited_once_with(window_id)
+        mock_pending.assert_awaited_once()
+        mock_runtime_warning.assert_awaited_once()
+        mock_omx_question.assert_awaited_once_with(mock_bot, 1, window_id, 42)
+        mock_status.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_settings_ui_end_to_end_sends_read_only_prompt_snapshot(
         self, mock_bot: AsyncMock, sample_pane_settings: str
     ):

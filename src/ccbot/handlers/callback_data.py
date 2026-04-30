@@ -42,6 +42,12 @@ CB_ASK_SPACE = "aq:spc:"  # aq:spc:<window>
 CB_ASK_TAB = "aq:tab:"  # aq:tab:<window>
 CB_ASK_REFRESH = "aq:ref:"  # aq:ref:<window>
 
+# OMX durable question records
+CB_OMX_QUESTION_SELECT = "oq:sel"  # oq:sel:<index>:<question-suffix>:<window>
+CB_OMX_QUESTION_TOGGLE = "oq:tog"  # oq:tog:<index>:<question-suffix>:<window>
+CB_OMX_QUESTION_SUBMIT = "oq:sub"  # oq:sub:<question-suffix>:<window>
+CB_OMX_QUESTION_REFRESH = "oq:ref"  # oq:ref:<question-suffix>:<window>
+
 # Thread picker (resume existing persisted thread)
 CB_THREAD_SELECT = "rs:sel:"  # rs:sel:<index>
 CB_THREAD_NEW = "rs:new"  # start a fresh thread

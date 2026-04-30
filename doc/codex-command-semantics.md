@@ -36,6 +36,18 @@ and the Telegram topic title is normalized to that suffix-applied name.
 - The bot may reuse an exact tmux window when the window name and directory
   match the requested target and the live runtime kind is compatible.
 
+## Persisted Thread Picker
+
+- The picker lists human-resumable interactive Codex sessions for the selected
+  cwd, not every rollout file under `~/.codex/sessions`.
+- Non-interactive helper sessions such as `originator=codex_exec` or
+  `source=exec` are hidden from manual resume candidates.
+- Candidate labels use persisted thread names first. If a session has no
+  persisted name, the picker uses the first human user message from the rollout
+  as a preview, skipping injected service context such as `AGENTS.md`.
+- A raw thread id is only a last-resort label when neither a name nor a safe
+  human preview exists.
+
 ## `/rename <new-name>`
 
 - `/rename` always renames the tmux window.
@@ -51,6 +63,18 @@ and the Telegram topic title is normalized to that suffix-applied name.
   - persisted identity rename: unsupported / unsupported_degraded
 - For fast-agent, `/rename` updates the tmux title and also updates the
   persisted session title metadata, but not the persisted session id.
+
+## Multiline Submit ACK
+
+Codex multiline input is a two-step tmux operation: bracketed paste first, then
+bare `Enter`. The initial post-paste delay is deliberately tiny; it is only a
+readiness gap, not proof of delivery. ccbot reports success for multiline
+Codex input only after the bound Codex rollout JSONL appends a turn-acceptance
+record such as `turn_context` or a matching user message. If the visible Codex
+surface is still busy, ccbot does not paste multiline Telegram input; it fails
+closed because immediate JSONL ACK cannot be proven. If no persisted ACK appears
+within the bounded retry window on an input-ready pane, the send path fails
+closed and warns that the draft may still be waiting in the terminal composer.
 
 ## Fail-Closed Rules
 

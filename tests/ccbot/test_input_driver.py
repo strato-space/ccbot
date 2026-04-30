@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import ccbot.input_driver as input_driver_module
 from ccbot.input_driver import RuntimeInputDriver
 
 
@@ -12,6 +13,17 @@ def test_runtime_input_driver_exposes_registry_helpers() -> None:
     assert driver.supports_message_routing_mode("fast-agent", "steer")
     assert driver.supports_interactive_control("codex")
     assert driver.blocked_input_policy("fast-agent") == "fail_closed_on_visible_prompt"
+
+
+def test_codex_multiline_submit_delay_has_readiness_debounce() -> None:
+    driver = RuntimeInputDriver(submit_delay=0)
+
+    assert (
+        driver._submit_delay_seconds(runtime_kind="codex", multiline=True)  # noqa: SLF001
+        == 0.1
+    )
+    assert driver._submit_delay_seconds(runtime_kind="codex", multiline=False) == 0  # noqa: SLF001
+    assert driver._submit_delay_seconds(runtime_kind="claude", multiline=True) == 0  # noqa: SLF001
 
 
 class _FakeTmux:
@@ -57,6 +69,33 @@ async def test_multiline_codex_text_uses_bracketed_paste_and_submit_key() -> Non
 
 
 @pytest.mark.asyncio
+async def test_multiline_codex_send_path_waits_for_composer_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(input_driver_module.asyncio, "sleep", fake_sleep)
+    fake_tmux = _FakeTmux()
+    driver = RuntimeInputDriver(fake_tmux, submit_delay=0)
+
+    success, _ = await driver.send_text(
+        "@1",
+        "line one\nline two",
+        runtime_kind="codex",
+    )
+
+    assert success is True
+    assert sleeps == [0.1]
+    assert fake_tmux.calls == [
+        ("paste", "@1", "line one\nline two"),
+        ("enter", "@1", None),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_single_line_codex_text_still_uses_literal_path() -> None:
     fake_tmux = _FakeTmux()
     driver = RuntimeInputDriver(fake_tmux, submit_delay=0)
@@ -88,6 +127,18 @@ async def test_multiline_paste_failure_fails_before_submit() -> None:
     assert fake_tmux.calls == [
         ("paste", "@1", "line one\nline two"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_public_multiline_submit_key_uses_codex_enter_path() -> None:
+    fake_tmux = _FakeTmux()
+    driver = RuntimeInputDriver(fake_tmux, submit_delay=0)
+
+    success, message = await driver.send_multiline_submit_key("@1", runtime_kind="codex")
+
+    assert success is True
+    assert message == "Submitted text to @1"
+    assert fake_tmux.calls == [("enter", "@1", None)]
 
 
 @pytest.mark.asyncio

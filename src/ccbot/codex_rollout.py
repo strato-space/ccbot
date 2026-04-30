@@ -259,6 +259,8 @@ class CodexRolloutState:
     recent_user_event_messages: dict[
         tuple[str, str, str | None, str], list[float]
     ] = field(default_factory=dict)
+    tool_names_by_call_id: dict[str, str] = field(default_factory=dict)
+    exec_commands_by_call_id: dict[str, tuple[str, str]] = field(default_factory=dict)
     turn_generation: int = 0
     current_turn_key: str = ""
     active_turn_user_opened: bool = False
@@ -340,6 +342,126 @@ def _structured_json(value: Any) -> Any:
         except (TypeError, ValueError, json.JSONDecodeError):
             return value
     return value
+
+
+def _exec_invocation(arguments: Any) -> tuple[str, str]:
+    parsed = _structured_json(arguments)
+    if not isinstance(parsed, dict):
+        return "", ""
+    cmd = _as_text(parsed.get("cmd") or parsed.get("command")).strip()
+    workdir = _as_text(parsed.get("workdir") or parsed.get("cwd")).strip()
+    return cmd, workdir
+
+
+_EXEC_OUTPUT_WRAPPER_PREFIXES = (
+    "Command:",
+    "Chunk ID:",
+    "Wall time:",
+    "Process exited with code",
+    "Process running with session ID",
+    "Original token count:",
+)
+_EXEC_EXIT_STATUS_RE = re.compile(r"^Process exited with code\s+(-?\d+)\b")
+_EXEC_RUNNING_STATUS_RE = re.compile(r"^Process running with session ID\s+(.+)$")
+
+
+def _exec_output_wrapper_seen(text: str) -> bool:
+    lines = text.strip().splitlines()
+    return any(
+        line.strip().startswith(_EXEC_OUTPUT_WRAPPER_PREFIXES)
+        for line in lines[:10]
+    )
+
+
+def _exec_command_from_wrapper(text: str) -> str:
+    for line in text.strip().splitlines()[:10]:
+        clean = line.strip()
+        if clean.startswith("Command:"):
+            return clean.removeprefix("Command:").strip()
+    return ""
+
+
+def _exec_output_from_wrapper(text: str) -> tuple[str, str]:
+    """Return human output plus status extracted from exec transport metadata."""
+    stripped = text.strip()
+    if not stripped:
+        return "", ""
+
+    lines = stripped.splitlines()
+    wrapper_seen = _exec_output_wrapper_seen(text)
+    status = ""
+    for line in lines[:14]:
+        clean = line.strip()
+        exit_match = _EXEC_EXIT_STATUS_RE.match(clean)
+        if exit_match:
+            exit_code = exit_match.group(1)
+            status = "completed" if exit_code == "0" else f"failed · exit {exit_code}"
+            continue
+        if _EXEC_RUNNING_STATUS_RE.match(clean):
+            status = "running"
+    output_index = next(
+        (
+            index
+            for index, line in enumerate(lines[:14])
+            if line.strip() == "Output:"
+        ),
+        None,
+    )
+    if wrapper_seen and output_index is not None:
+        return "\n".join(lines[output_index + 1 :]).strip(), status
+    if not wrapper_seen:
+        return stripped, ""
+    filtered = [
+        line
+        for line in lines
+        if not line.strip().startswith(_EXEC_OUTPUT_WRAPPER_PREFIXES)
+        and line.strip() != "Output:"
+    ]
+    return "\n".join(filtered).strip(), status
+
+
+def _strip_exec_output_wrapper(text: str) -> str:
+    """Remove Codex/developer-tool transport metadata from exec output text."""
+    output, _status = _exec_output_from_wrapper(text)
+    return output
+
+
+def _tool_output_indicates_failure(payload: dict[str, Any]) -> bool:
+    """Detect tool outputs that should stay visible even for normally quiet tools."""
+    status = _as_text(
+        payload.get("status")
+        or payload.get("outcome")
+        or payload.get("state")
+        or payload.get("result_status")
+    ).strip().lower()
+    if status in {"failed", "failure", "error", "errored", "cancelled", "timeout"}:
+        return True
+    if payload.get("error") not in (None, "", {}, []):
+        return True
+
+    raw = (
+        payload.get("output")
+        if payload.get("output") is not None
+        else payload.get("content")
+        if payload.get("content") is not None
+        else payload.get("result")
+    )
+    parsed = _structured_json(raw)
+    if isinstance(parsed, dict):
+        if parsed.get("ok") is False or parsed.get("success") is False:
+            return True
+        if parsed.get("error") not in (None, "", {}, []):
+            return True
+        nested_status = _as_text(
+            parsed.get("status")
+            or parsed.get("outcome")
+            or parsed.get("result_status")
+        ).strip().lower()
+        if nested_status in {"failed", "failure", "error", "errored", "cancelled", "timeout"}:
+            return True
+
+    text = _text_from_content(raw).strip().lower()
+    return text.startswith(("error:", "failed:", "traceback "))
 
 
 def _tool_text_code_block(
@@ -1069,10 +1191,83 @@ def _command_execution_summary(
             else:
                 parts.append(f"output {len(lines)} line(s)")
     elif status:
-        parts.append(status)
+        parts.append("completed · no output" if status.lower() == "completed" else status)
     elif cwd and len(parts) < 3:
         parts.append(_compact_inline(cwd, max_chars=120))
     return "\n".join(part for part in parts if part) or "[command_execution]"
+
+
+def _parsed_exploration_text(parsed_cmd: Any) -> str:
+    if not isinstance(parsed_cmd, list) or not parsed_cmd:
+        return ""
+
+    lines: list[str] = []
+    read_names: list[str] = []
+    seen_reads: set[str] = set()
+    for item in parsed_cmd:
+        if not isinstance(item, dict):
+            return ""
+        item_type = _as_text(item.get("type")).strip().lower()
+        if item_type == "read":
+            name = _as_text(item.get("name") or item.get("path") or item.get("cmd")).strip()
+            if name and name not in seen_reads:
+                read_names.append(name)
+                seen_reads.add(name)
+            continue
+        if read_names:
+            lines.append("Read " + ", ".join(read_names))
+            read_names = []
+        if item_type in {"list_files", "list"}:
+            target = _as_text(item.get("path") or item.get("cmd")).strip()
+            if not target:
+                return ""
+            lines.append("List " + target)
+            continue
+        if item_type == "search":
+            query = _as_text(item.get("query")).strip()
+            path = _as_text(item.get("path")).strip()
+            if query and path:
+                lines.append(f"Search {query} in {path}")
+            elif query:
+                lines.append(f"Search {query}")
+            else:
+                cmd = _as_text(item.get("cmd")).strip()
+                if not cmd:
+                    return ""
+                lines.append(f"Search {cmd}")
+            continue
+        return ""
+    if read_names:
+        lines.append("Read " + ", ".join(read_names))
+    if not lines:
+        return ""
+    first, *rest = lines[:8]
+    rendered = ["• Explored", f"  └ {first}"]
+    rendered.extend(f"    {line}" for line in rest)
+    footer = _preview_footer(len(lines), min(len(lines), 8))
+    if footer:
+        rendered.append(f"    {footer}")
+    return "\n".join(rendered)
+
+
+def _exploration_event(
+    *,
+    thread_id: str,
+    text: str,
+    timestamp: str | None,
+    runtime_kind: str = "codex",
+) -> NormalizedEvent:
+    return NormalizedEvent(
+        thread_id=thread_id,
+        text=text,
+        is_complete=True,
+        content_type="orchestration",
+        role="assistant",
+        timestamp=timestamp,
+        runtime_kind=runtime_kind,
+        event_kind="orchestration",
+        tool_name="explored",
+    )
 
 
 def _is_warning_text(text: str, *, phase: str) -> bool:
@@ -1472,6 +1667,25 @@ def _tool_call_event(
     arguments = payload.get("arguments")
     if arguments is None:
         arguments = payload.get("input")
+    if _tool_name_is(name, "exec_command"):
+        command, cwd = _exec_invocation(arguments)
+        return NormalizedEvent(
+            thread_id=thread_id,
+            text=_command_execution_summary(
+                command=command,
+                cwd=cwd,
+                status="",
+                output="",
+            ),
+            is_complete=True,
+            content_type="command_execution",
+            role="assistant",
+            timestamp=timestamp,
+            runtime_kind=runtime_kind,
+            event_kind="command_execution",
+            tool_name=name,
+            tool_use_id=_as_text(payload.get("call_id") or payload.get("id")) or None,
+        )
     text = _tool_call_summary(name, arguments)
     return NormalizedEvent(
         thread_id=thread_id,
@@ -1493,6 +1707,8 @@ def _tool_output_event(
     payload: dict[str, Any],
     timestamp: str | None,
     runtime_kind: str = "codex",
+    command: str = "",
+    cwd: str = "",
 ) -> NormalizedEvent:
     call_id = _as_text(payload.get("call_id") or payload.get("id") or "").strip()
     tool_name = _as_text(payload.get("name") or payload.get("tool")).strip() or None
@@ -1503,6 +1719,31 @@ def _tool_output_event(
         or payload.get("data")
     )
     raw_text = _text_from_content(content)
+    wrapper_command = _exec_command_from_wrapper(raw_text)
+    is_command_like_output = _tool_name_is(
+        tool_name,
+        "exec_command",
+    ) or (tool_name is None and _exec_output_wrapper_seen(raw_text))
+    if is_command_like_output:
+        output, wrapper_status = _exec_output_from_wrapper(raw_text)
+        status = _as_text(payload.get("status")).strip() or wrapper_status
+        return NormalizedEvent(
+            thread_id=thread_id,
+            text=_command_execution_summary(
+                command=command or wrapper_command,
+                cwd=cwd,
+                status=status,
+                output=output,
+            ),
+            is_complete=True,
+            content_type="command_execution",
+            role="assistant",
+            timestamp=timestamp,
+            runtime_kind=runtime_kind,
+            event_kind="command_execution",
+            tool_name=tool_name or "exec_command",
+            tool_use_id=call_id or None,
+        )
     text = _tool_output_summary(tool_name, raw_text)
     return NormalizedEvent(
         thread_id=thread_id,
@@ -1756,6 +1997,16 @@ def _normalize_event_msg_payload(
                     runtime_kind=runtime_kind,
                 )
             ]
+        explored_text = _parsed_exploration_text(payload.get("parsed_cmd"))
+        if explored_text:
+            return [
+                _exploration_event(
+                    thread_id=thread_id,
+                    text=explored_text,
+                    timestamp=timestamp,
+                    runtime_kind=runtime_kind,
+                )
+            ]
         return [
             _command_execution_event(
                 thread_id=thread_id,
@@ -1900,6 +2151,11 @@ class CodexRolloutNormalizer:
                     tool_name = _as_text(payload.get("name")).strip()
                     call_id = _as_text(payload.get("call_id")).strip()
                     arguments = _structured_json(payload.get("arguments") or payload.get("input"))
+                    if call_id and tool_name:
+                        state.tool_names_by_call_id[call_id] = tool_name
+                    if call_id and _tool_name_is(tool_name, "exec_command"):
+                        command, cwd = _exec_invocation(arguments)
+                        state.exec_commands_by_call_id[call_id] = (command, cwd)
                     if tool_name == "update_plan":
                         events = [
                             _plan_update_event(
@@ -1947,6 +2203,30 @@ class CodexRolloutNormalizer:
                                 events = [_suppress_history_delivery(event) for event in events]
                 elif response_type == "function_call_output":
                     call_id = _as_text(payload.get("call_id")).strip()
+                    remembered_tool_name = state.tool_names_by_call_id.pop(call_id, "")
+                    command, cwd = state.exec_commands_by_call_id.pop(call_id, ("", ""))
+                    if _tool_name_is(
+                        remembered_tool_name, "update_plan"
+                    ) and not _tool_output_indicates_failure(payload):
+                        events = [
+                            _suppress_history_delivery(
+                                _tool_output_event(
+                                    thread_id=current_thread_id,
+                                    payload={**payload, "name": remembered_tool_name},
+                                    timestamp=timestamp,
+                                )
+                            )
+                        ]
+                    elif remembered_tool_name:
+                        events = [
+                            _tool_output_event(
+                                thread_id=current_thread_id,
+                                payload={**payload, "name": remembered_tool_name},
+                                timestamp=timestamp,
+                                command=command,
+                                cwd=cwd,
+                            )
+                        ]
                     raw_output = payload.get("output")
                     parsed_output = _structured_json(raw_output)
                     spawn_request = state.pending_spawns.pop(call_id, None)

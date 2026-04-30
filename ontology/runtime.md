@@ -35,6 +35,14 @@ This note defines the core runtime nouns for `ccbot`.
   - this prevents `t:<thread_id>` values from being treated as globally unique
     outside their persisted user scope
 
+- **Telegram group routing coordinates**
+  - physical Telegram `chat_id` coordinates needed for outbound delivery and
+    topic title sync in group control surfaces
+  - these are stored separately from the product control-surface identity
+  - command-only entry paths such as `/bind` and `/resume` must capture these
+    coordinates themselves instead of relying on a previous mention or text
+    update
+
 - **Topic transport identifier**
   - Telegram transport token such as `message_thread_id`
   - identifies a topic at the API/storage boundary
@@ -68,6 +76,9 @@ This note defines the core runtime nouns for `ccbot`.
 - **Runtime conversation identity**
   - the persisted conversation object that can later be resumed
   - examples: Codex thread, Claude Code session, fast-agent `session_id`
+  - manual resume candidates are interactive human sessions; non-interactive
+    helper rollouts such as `codex_exec` are replay evidence, not picker
+    targets
 
 - **Semantic emitter / supervisor**
   - the runtime-side or wrapper-side layer that emits machine-readable semantic
@@ -103,6 +114,13 @@ This note defines the core runtime nouns for `ccbot`.
   - available only when the control surface is bound to a live tmux scope
   - external-thread binding may stay read-only when no live injection plane is
     attached
+
+- **Input acknowledgement**
+  - persisted proof that an injected message became a runtime turn
+  - for Codex this proof is a new appended JSONL replay-evidence record such
+    as `turn_context` or a matching user-message record
+  - pane reaction is diagnostic only; it is not authoritative success
+
 
 ## Canonical Model
 
@@ -168,6 +186,8 @@ Raw operator control is different:
   mirrors
 - surface-scoped policy/binding-state maps are canonical; topic-scoped maps are
   compatibility mirrors
+- group routing coordinates are transport data for Telegram delivery, not a
+  substitute for the product control-surface identity
 - external-thread bind may deliver replay events without exposing a live input
   injection plane
 - when a tmux window disappears but replay evidence remains readable, the

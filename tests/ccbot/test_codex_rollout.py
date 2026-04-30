@@ -44,6 +44,30 @@ def test_codex_rollout_preserves_event_taxonomy() -> None:
             },
         }
     )
+    entries.extend(
+        [
+            {
+                "timestamp": "2026-04-02T14:05:01.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "browser_snapshot",
+                    "call_id": "call_browser",
+                    "arguments": "{}",
+                },
+            },
+            {
+                "timestamp": "2026-04-02T14:05:02.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "name": "browser_snapshot",
+                    "call_id": "call_browser",
+                    "output": '{"status":"ok"}',
+                },
+            },
+        ]
+    )
 
     events = TranscriptParser.parse_codex_rollout_entries(entries)
     kinds = {event.event_kind for event in events}
@@ -113,6 +137,82 @@ def test_codex_update_plan_function_call_emits_plan_update_event() -> None:
     assert "☑ Уточнить текущий diff" in events[0].text
     assert "▶ Внедрить watchdog памяти" in events[0].text
     assert "☐ Прогнать проверки" in events[0].text
+
+
+def test_codex_update_plan_function_output_is_not_delivered() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-30T01:10:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "update_plan",
+                "call_id": "call_plan",
+                "arguments": json.dumps(
+                    {"plan": [{"step": "Проверить", "status": "in_progress"}]},
+                    ensure_ascii=False,
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-04-30T01:10:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_plan",
+                "output": "ok",
+            },
+        },
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert events[0].content_type == "plan_update"
+    assert events[0].dispatch_to_telegram is True
+    assert events[1].content_type == "tool_result"
+    assert events[1].tool_name == "update_plan"
+    assert events[1].dispatch_to_telegram is False
+    assert events[1].include_in_history is False
+
+
+def test_codex_update_plan_failure_output_stays_visible() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-30T01:11:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "update_plan",
+                "call_id": "call_plan",
+                "arguments": json.dumps(
+                    {"plan": [{"step": "Проверить", "status": "in_progress"}]},
+                    ensure_ascii=False,
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-04-30T01:11:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_plan",
+                "status": "error",
+                "output": json.dumps(
+                    {"ok": False, "error": "invalid plan status"},
+                    ensure_ascii=False,
+                ),
+            },
+        },
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert events[0].content_type == "plan_update"
+    assert events[1].content_type == "tool_result"
+    assert events[1].tool_name == "update_plan"
+    assert events[1].dispatch_to_telegram is True
+    assert "invalid plan status" in events[1].text
+
 
 def test_codex_rollout_handles_command_and_file_change_turns() -> None:
     records = [
@@ -274,8 +374,8 @@ def test_codex_rollout_tool_use_exec_command_extracts_shell_payload_into_code_bl
     events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
 
     assert len(events) == 1
-    assert events[0].content_type == "tool_use"
-    assert events[0].text.startswith("exec_command\n```sh\n")
+    assert events[0].content_type == "command_execution"
+    assert events[0].text.startswith("```sh\n")
     assert "/bin/bash" not in events[0].text
     assert "jq '.history.prompt[0:3]' /tmp/hard_b.json | sed -n '1,220p'" in events[0].text
     assert "/home/tools/server/comfy" in events[0].text
@@ -526,7 +626,7 @@ def test_codex_rollout_tool_output_exec_command_uses_preview_block() -> None:
     events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
 
     assert len(events) == 1
-    assert events[0].content_type == "tool_result"
+    assert events[0].content_type == "command_execution"
     assert events[0].text.startswith("```sh\n")
     assert "line1" in events[0].text
     assert "line3" in events[0].text
@@ -549,7 +649,7 @@ def test_codex_rollout_tool_output_preserves_existing_fenced_preview_without_dou
     events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
 
     assert len(events) == 1
-    assert events[0].content_type == "tool_result"
+    assert events[0].content_type == "command_execution"
     assert events[0].text.count("```sh") == 1
     assert events[0].text.endswith("preview 2/4 lines")
 
@@ -571,9 +671,232 @@ def test_codex_rollout_tool_output_strips_redundant_output_footer_when_preview_e
     events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
 
     assert len(events) == 1
-    assert events[0].content_type == "tool_result"
+    assert events[0].content_type == "command_execution"
     assert "preview 2/4 lines" in events[0].text
     assert "output 4 line(s)" not in events[0].text
+
+
+def test_codex_rollout_exec_command_output_updates_command_without_tool_metadata() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-30T01:00:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "call_exec",
+                "name": "functions.exec_command",
+                "arguments": json.dumps(
+                    {
+                        "cmd": "/bin/bash -lc 'cat tsconfig.json'",
+                        "workdir": "/home/tools/mediagen-comfy",
+                    }
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-04-30T01:00:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_exec",
+                "output": (
+                    "Chunk ID: 69a758\n"
+                    "Wall time: 0.0000 seconds\n"
+                    "Process exited with code 0\n"
+                    "Original token count: 1248\n"
+                    "Output:\n"
+                    '{"compilerOptions":{"target":"ES2022","lib":["dom"]}}'
+                ),
+            },
+        },
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert [event.content_type for event in events] == [
+        "command_execution",
+        "command_execution",
+    ]
+    assert events[0].tool_use_id == events[1].tool_use_id == "call_exec"
+    assert "cat tsconfig.json" in events[0].text
+    assert "cat tsconfig.json" in events[1].text
+    assert "Chunk ID" not in events[1].text
+    assert "Wall time" not in events[1].text
+    assert "Original token count" not in events[1].text
+    assert "```json" in events[1].text
+    assert '"target": "ES2022"' in events[1].text
+    assert "completed · no output" not in events[1].text
+
+
+def test_codex_rollout_orphan_exec_wrapper_still_renders_as_command_execution() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-30T04:00:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "orphan_exec",
+                "output": (
+                    "Command: /bin/bash -lc 'pytest -q'\n"
+                    "Chunk ID: 073dbe\n"
+                    "Wall time: 0.0000 seconds\n"
+                    "Process exited with code 0\n"
+                    "Original token count: 17\n"
+                    "Output:\n"
+                    ".. [100%]\n"
+                    "36 passed in 12.55s"
+                ),
+            },
+        },
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].content_type == "command_execution"
+    assert events[0].event_kind == "command_execution"
+    assert events[0].tool_use_id == "orphan_exec"
+    assert "pytest -q" in events[0].text
+    assert "36 passed in 12.55s" in events[0].text
+    assert "Chunk ID" not in events[0].text
+    assert "Wall time" not in events[0].text
+    assert "Original token count" not in events[0].text
+    assert "completed · no output" not in events[0].text
+
+
+def test_codex_rollout_orphan_non_command_tool_output_stays_tool_result() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-30T04:00:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "orphan_api",
+                "output": '{"ok": true}',
+            },
+        },
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].content_type == "tool_result"
+
+
+def test_codex_rollout_exec_command_empty_output_preserves_completion_status() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-30T01:02:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "call_exec",
+                "name": "functions.exec_command",
+                "arguments": json.dumps({"cmd": "/bin/bash -lc 'true'"}),
+            },
+        },
+        {
+            "timestamp": "2026-04-30T01:02:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_exec",
+                "output": (
+                    "Chunk ID: abc123\n"
+                    "Wall time: 0.0100 seconds\n"
+                    "Process exited with code 0\n"
+                    "Original token count: 0\n"
+                    "Output:\n"
+                ),
+            },
+        },
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert [event.content_type for event in events] == [
+        "command_execution",
+        "command_execution",
+    ]
+    assert "true" in events[1].text
+    assert "completed · no output" in events[1].text
+    assert "Process exited with code" not in events[1].text
+    assert "Chunk ID" not in events[1].text
+
+
+def test_codex_rollout_exec_command_nonzero_exit_preserves_failure_status() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-30T01:03:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "call_exec",
+                "name": "functions.exec_command",
+                "arguments": json.dumps({"cmd": "/bin/bash -lc 'false'"}),
+            },
+        },
+        {
+            "timestamp": "2026-04-30T01:03:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_exec",
+                "output": (
+                    "Chunk ID: abc124\n"
+                    "Wall time: 0.0100 seconds\n"
+                    "Process exited with code 1\n"
+                    "Original token count: 0\n"
+                    "Output:\n"
+                ),
+            },
+        },
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert "false" in events[1].text
+    assert "failed · exit 1" in events[1].text
+    assert "Process exited with code" not in events[1].text
+
+
+def test_codex_rollout_exec_command_end_read_surface_renders_explored() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-30T01:05:00.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "exec_command_end",
+                "call_id": "call_read",
+                "command": ["/bin/bash", "-lc", "sed -n '1,40p' tsconfig.json"],
+                "cwd": "/home/tools/mediagen-comfy",
+                "parsed_cmd": [
+                    {
+                        "type": "read",
+                        "cmd": "sed -n '1,40p' tsconfig.json",
+                        "name": "tsconfig.json",
+                        "path": "tsconfig.json",
+                    },
+                    {
+                        "type": "read",
+                        "cmd": "sed -n '1,80p' app/page.tsx",
+                        "name": "page.tsx",
+                        "path": "app/page.tsx",
+                    },
+                ],
+                "aggregated_output": "{}",
+                "exit_code": 0,
+                "status": "completed",
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].content_type == "orchestration"
+    assert events[0].event_kind == "orchestration"
+    assert events[0].text == "• Explored\n  └ Read tsconfig.json, page.tsx"
 
 
 def test_codex_rollout_synthesizes_spawn_and_wait_orchestration_events() -> None:
@@ -1699,6 +2022,7 @@ def test_codex_rollout_formats_namespaced_exec_command_as_shell_preview() -> Non
 
     assert len(events) == 1
     assert events[0].tool_name == "functions.exec_command"
+    assert events[0].content_type == "command_execution"
     assert "```sh" in events[0].text
     assert "echo one && echo two" in events[0].text
     assert '"cmd"' not in events[0].text

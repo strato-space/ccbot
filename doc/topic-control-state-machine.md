@@ -26,7 +26,22 @@ Canonical persisted control-state maps are surface-scoped:
 - `surface_policies[user_id][surface_key]`
 - `surface_binding_states[user_id][surface_key]`
 - `surface_bindings[user_id][surface_key] -> window_id`
-- `surface_pending_slots[user_id][surface_key] -> deferred addressed input`
+- `surface_pending_slots[user_id][surface_key] -> deferred explicit pre-bind input`
+- `group_chat_ids[user_id:thread_id_or_0] -> Telegram group chat_id`
+
+In shared group topics and no-topics group main chats, a persisted binding under
+one allowed user is the effective binding for the whole chat/topic control
+surface. Other allowed participants resolve that same `surface_key` to the same
+tmux window instead of opening a parallel per-user window.
+
+For named topics, shared lookup must still verify the Telegram `chat_id`.
+Identical numeric `thread_id` values in different groups are different control
+surfaces and must not share a binding.
+
+The `group_chat_ids` map stores Telegram transport routing coordinates for
+outbound delivery and topic title sync. It is not the control-surface identity.
+Command-only entry must refresh it directly because shared group mentions are
+not bind-flow openers.
 
 Compatibility topic mirrors still exist for topic-shaped callers:
 
@@ -71,17 +86,21 @@ Compatibility topic mirrors still exist for topic-shaped callers:
 
 ### Shared group topics
 
+- If the topic already has a live binding created by another allowed
+  participant in the same Telegram group, text and explicit controls resolve to
+  that shared binding.
 - Ordinary non-addressed plain message in `none`
   - stays silent
   - does not open bind flow
+- Bot-addressed `@mention` in `none`
+  - stays silent
+  - does not open bind flow
 - Explicit `/bind`
+  - first captures Telegram group routing metadata for this surface
   - may enter `bind_flow`
 - Explicit `/resume <thread>`
+  - first captures Telegram group routing metadata for this surface
   - remains an allowed explicit entry path where the runtime lane supports it
-- Bot-addressed `@mention`
-  - may open bind/help flow
-  - may populate one surface-scoped pending slot
-  - does not itself execute runtime work until writable activation succeeds
 
 ### No-topics main-chat control surface
 
@@ -118,6 +137,14 @@ Compatibility topic mirrors still exist for topic-shaped callers:
 - `surface_policy != binding_state` remains a hard distinction.
 - In shared group topics, ordinary non-addressed user text is not itself a
   bind-flow opener.
+- Bot-addressed `@mention` is also not a bind-flow opener in shared group
+  surfaces.
+- In shared group surfaces, allowed users are peers for one chat/topic binding;
+  the user who created the binding does not own a separate runtime lane.
+- Same-numbered topics in different Telegram groups are not peers and must not
+  resolve to each other's binding.
+- Command-only entry must not rely on a previous non-command text, mention, or
+  callback update to resolve Telegram group chat routing.
 - Read-only external binding must fail closed for new Telegram input instead of
   pretending to provide writable tmux control.
 - Pending-slot state belongs to the control surface and must not execute early.

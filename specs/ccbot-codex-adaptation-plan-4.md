@@ -1472,9 +1472,106 @@ Reason:
   technical status edit is semantically identical after Markdown conversion.
   The previous fallback path treated that no-op as an edit failure, cleared
   status tracking, and sent a fresh `🛠 Tool write_stdin(..., poll)` bubble.
-- **decision**: Treat `message is not modified` as idempotent success for the
-  mutable technical status artifact. Record `edit_noop` in delivery audit, keep
-  the tracked message id, and never create a replacement bubble for a poll-only
-  `write_stdin` update.
-- **validation**: Queue tests cover poll-only suppression, in-place poll edits,
-  and the no-op edit path that must not call `send_with_fallback`.
+- **decision**: Treat `message is not modified` as idempotent success for
+  meaningful mutable technical status edits. Empty `write_stdin(..., poll)`
+  updates are lifecycle checks: they must not create a replacement bubble and
+  must not overwrite a richer existing status artifact.
+- **validation**: Queue tests cover poll-only suppression with and without an
+  existing status artifact, plus the no-op edit path for meaningful status that
+  must not call `send_with_fallback`.
+
+### T77: OMX Durable Question Delivery
+
+- **status**: completed
+- **problem**: OMX 0.15.x can open a temporary tmux split pane for blocking
+  option questions. That pane is ephemeral and may not be visible to a Telegram
+  user when status polling captures the bound window, so relying on pane
+  scraping alone loses the question surface.
+- **decision**: Treat the durable `omx.question/v1` JSON record under
+  `.omx/state/sessions/*/questions/` as the semantic source of truth. Telegram
+  renders it as a separate interactive question artifact with inline option
+  buttons, edits the same artifact while active, and answers by writing the
+  durable record to `answered`. If the record carries a tmux return bridge, the
+  bot also sends the normal `[omx question answered] ...` continuation line to
+  the return pane and closes the temporary question pane.
+- **files edited**:
+  - [omx_questions.py](/home/tools/ccbot/src/ccbot/handlers/omx_questions.py)
+  - [status_polling.py](/home/tools/ccbot/src/ccbot/handlers/status_polling.py)
+  - [bot.py](/home/tools/ccbot/src/ccbot/bot.py)
+  - [tmux_manager.py](/home/tools/ccbot/src/ccbot/tmux_manager.py)
+  - [delivery-surface.md](/home/tools/ccbot/ontology/delivery-surface.md)
+  - [telegram-delivery-pipeline.md](/home/tools/ccbot/doc/telegram-delivery-pipeline.md)
+  - [telegram-bot-features.md](/home/tools/ccbot/doc/telegram-bot-features.md)
+  - [README.md](/home/tools/ccbot/README.md)
+- **acceptance criteria**:
+  - active durable question records produce a Telegram interactive artifact
+    even if the tmux split pane is no longer the visible captured surface
+  - repeated polling reuses the existing Telegram question artifact instead of
+    creating notification churn
+  - selecting predefined options writes a terminal answered record and bridges
+    back to the recorded tmux return pane
+  - free-text `Other` remains explicitly delegated to the live tmux UI until a
+    dedicated Telegram free-text input lane is designed
+- **validation**:
+  - focused handler tests cover record discovery, single-answer state update,
+    bridge/kill behavior, duplicate-poll reuse, and callback answering
+  - docs contract tests pin the new interactive question artifact terminology
+
+### T78: Command/Plan Delivery Hardening Follow-up
+
+- **status**: completed
+- **problem**: Recent compact delivery fixes still had three sharp edges:
+  empty `exec_command` completions could lose their completion/failure status,
+  `update_plan` function outputs could still appear as useless tool-output
+  bubbles, and compact command execution needed an explicit regression that the
+  status lane receives the Codex-style command summary.
+- **decision**: Preserve exit/running status while stripping developer-tool
+  wrapper metadata, suppress `update_plan` function-output delivery after the
+  actual plan artifact has rendered, and pin compact command routing in bot
+  contract tests.
+- **validation**:
+  - rollout tests cover empty-output success, nonzero failure, and
+    `update_plan` output suppression
+  - bot contract tests assert compact command execution updates the status
+    artifact with command and output summary
+
+### T79: Codex Multiline ACK And Orphan Command Output Repair
+
+- **status**: completed
+- **problem**: A fixed post-paste delay could still claim success without proof
+  that Codex opened a turn, and command-like tool output could surface as an
+  orphan `Tool Output` bubble when the paired command call was not present in
+  the current poll slice.
+- **decision**: Treat Codex JSONL replay evidence as the authoritative input ACK:
+  paste multiline text only when the pane is input-ready, wait only a minimal
+  readiness gap, retry bare `Enter` in a bounded loop, and fail closed if no
+  `turn_context` or matching user-message record appears. Also classify
+  developer-tool execution wrappers as `command_execution` even without a
+  remembered tool name, while preserving genuine non-command tool outputs as
+  tool results and preventing command-identity collapse during queue batching.
+- **validation**:
+  - input-driver tests cover the 0.1s Codex multiline readiness gap and public
+    multiline submit primitive
+  - session tests cover JSONL ACK success, fail-closed missing rollout
+    evidence, and fail-closed busy panes where queued-turn ACK cannot be proven
+  - rollout tests cover orphan command wrapper normalization and genuine
+    non-command tool-result preservation
+  - queue tests cover that command-execution identities do not merge
+
+### T80: Status-Polling Output And Helper-Window Bind Guards
+
+- **status**: completed
+- **problem**: Some Codex TUI output surfaces reach Telegram through status
+  polling rather than replay-event normalization. That let raw `Tool Output`
+  wrapper metadata and empty `write_stdin(..., poll)` checks overwrite the
+  mutable status artifact. Separately, Codex native subagent tmux windows could
+  appear as ordinary unbound windows and be bound to unrelated Telegram topics.
+- **decision**: Normalize technical status text at the queue boundary: suppress
+  poll-only `write_stdin`, strip command-output wrapper metadata, and render the
+  real stdout/stderr preview. Treat Codex `source.subagent.thread_spawn`
+  sessions as non-resumable helper threads and hide/reject them in ordinary
+  bind flows.
+- **validation**:
+  - queue tests cover poll suppression and wrapper stripping in status updates
+  - Codex catalog tests cover native subagent source detection
+  - bot contract tests cover bind-picker hiding and stale callback rejection

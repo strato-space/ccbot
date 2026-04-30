@@ -75,6 +75,9 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
 ## Features
 
 - **Topic-based control** — Each Telegram topic binds to one delivery source at a time: either a live tmux window, or an external persisted Codex thread in read-only replay mode
+- **Helper-window isolation** — Codex native subagent/helper tmux windows remain
+  parent-owned evidence surfaces and are hidden from ordinary `/bind` pickers;
+  stale callbacks that target them fail closed
 - **Compact Telegram delivery** — In the default production surface, user echo,
   orchestration milestones, and final assistant answers remain ordinary content
   bubbles, the latest human-facing commentary stays visible as a dedicated
@@ -105,6 +108,13 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   status. That artifact belongs to future input, so the terminal assistant
   answer does not clear it by itself; it closes only when the queue is empty,
   the binding goes stale, or an explicit clear path runs.
+- **OMX interactive questions** — Runtime-owned `omx.question/v1` records under
+  `.omx/state/sessions/*/questions/` are rendered as a separate mutable
+  Telegram artifact with inline option buttons. Choosing an option writes the
+  durable record as `answered`, best-effort bridges the normal
+  `[omx question answered] ...` continuation line to the recorded tmux return
+  pane, and closes the temporary question pane; free-text `Other` answers stay
+  on the live tmux UI for now.
 - **Heads-up warnings stay visible without breaking turn closure** — Operator
   warning notices remain visible in Telegram while assistant-final semantics
   and post-final artifact closure remain intact. Repeated identical warning
@@ -243,6 +253,15 @@ The canonical runtime ontology is control-surface centric:
 
 `Telegram control surface -> binding -> tmux window -> runtime process -> runtime conversation identity -> replay evidence`
 
+In a shared group topic or no-topics group main chat, the binding belongs to the
+control surface, not to the person who created it. Any allowed group member who
+writes in the same bound surface uses the same tmux window; `/bind`, `/resume`,
+and `/unbind` operate on that shared surface binding.
+
+For forum topics, "same surface" means the same Telegram group plus the same
+topic/thread id. A topic with the same numeric thread id in another group is a
+different control surface.
+
 For shared groups without topics, the current product surface may expose one
 explicit main-chat mode:
 
@@ -263,18 +282,25 @@ The concrete runtime lane depends on `CLAUDE_COMMAND`.
 1. Create a new topic in the Telegram group, or use the main chat in a group where topics are disabled
 2. Enter via a valid opener for that surface
    - private chats with topics enabled: a first plain text message may still open bind flow
-   - shared group topics: ordinary non-addressed text stays silent; use `@bot`, `/bind`, or `/resume`
-   - no-topics group main chat: ordinary non-addressed text stays silent; use `@bot`, `/bind`, or `/resume`
+   - shared group topics: ordinary text and `@bot` mentions stay silent until a command is used; use `/bind` or `/resume`
+   - no-topics group main chat: ordinary text and `@bot` mentions stay silent until a command is used; use `/bind` or `/resume`
 3. A directory browser appears — select the project directory
 4. If the directory has existing Codex identities, an identity picker appears — choose one to resume or start fresh
-5. A tmux window is created, the configured runtime starts there (with resume wiring if resuming), and any pending addressed text is auto-sent exactly once after writable activation succeeds
+5. A tmux window is created, the configured runtime starts there (with resume wiring if resuming), and Telegram input starts routing only after the surface is bound
+
+Command entry paths also capture the Telegram group `chat_id` needed for later
+topic delivery and title sync. Bot-addressed `@mention` is not used as a
+routing warm-up in shared group surfaces.
 
 **Explicit bind, explicit resume, and manual unbind:**
 
 - In **private chats with topics enabled**, the first plain text message in a fresh topic may still trigger the bind flow automatically.
-- In **group/supergroup topics**, ordinary non-addressed text in an unbound topic stays silent.
-- In **no-topics group main chat mode**, ordinary non-addressed text stays silent.
-- Explicit `@mention`, `/bind`, and `/resume` remain the valid explicit re-entry paths in shared group surfaces.
+- In **group/supergroup topics**, ordinary text and bot-addressed `@mention` in an unbound topic stay silent.
+- In **no-topics group main chat mode**, ordinary text and bot-addressed `@mention` stay silent.
+- Explicit `/bind` and `/resume` remain the valid explicit re-entry paths in shared group surfaces.
+- Command handlers persist group routing metadata before binding, resuming,
+  unbinding, renaming, history lookup, screenshot capture, interrupt, or usage
+  actions that address the shared surface.
 - After an explicit `/unbind` or a picker cancel, the topic enters `manual_bind_required`.
 - In `manual_bind_required`, plain messages do not restart binding implicitly.
 - Use `/bind` to choose a live window or workspace again.
@@ -288,8 +314,8 @@ The concrete runtime lane depends on `CLAUDE_COMMAND`.
 **Sending messages:**
 
 Once a topic is bound to a live tmux window, plain text and voice messages are
-forwarded to the active runtime. Voice is transcribed first, then routed like
-plain text.
+forwarded to the active runtime for every allowed participant in that bound
+surface. Voice is transcribed first, then routed like plain text.
 
 If the topic is bound to an external persisted thread without live tmux, input
 injection fails closed with an explicit read-only warning and a reattach hint.
@@ -302,7 +328,10 @@ Routing note:
   bracketed-paste-aware payload and then submitted with a separate runtime
   submit key; paste-only success is not considered successful message delivery.
   For Codex multiline paste, the submit primitive is bare `Enter` rather than
-  `C-m`, matching the observed TUI path that actually opens the turn.
+  `C-m`: ccbot waits only a minimal post-paste readiness gap, then retries
+  `Enter` until Codex writes a persisted JSONL turn event. Telegram reports
+  success only after that replay-evidence ACK; otherwise it fails closed with a
+  composer-draft warning instead of claiming the message was sent.
 - Pending-input previews preserve queued message text literally (except explicit
   Codex checkbox marker glyph stripping), so command-like user text does not
   get normalized away.
@@ -359,6 +388,10 @@ Technical execution classes stay out of permanent bubbles by default:
 - **Tool lifecycle** — Summarized into the mutable status artifact
 - **Command execution / local command** — Summarized into the mutable status
   artifact with compact command text rather than raw shell dumps
+- **Status-polled command output** — Raw wrapper metadata such as `Chunk ID`,
+  `Wall time`, process status, token counts, and the literal `Output:` marker
+  is stripped before Telegram rendering; poll-only `write_stdin` checks do not
+  overwrite richer visible status
 - **File-change summaries** — Routed through the mutable status artifact
 
 Verbose/debug paths may expose more raw execution surface, but that is not the

@@ -65,6 +65,11 @@ The default Telegram surface is `compact`, not `verbose`.
 - when a surfaced technical preview already conveys the outcome clearly, the
   visible bubble should not add a redundant footer like
   `completed · output 1 line(s)` just for symmetry
+- command-like tool outputs that carry developer transport wrappers such as
+  `Chunk ID`, `Wall time`, `Process exited`, `Original token count`, and
+  `Output:` are normalized into `command_execution` even if the paired tool-call
+  record is not in the current polling slice; genuine non-command tool JSON is
+  left as a tool result
 - when compactness conflicts with semantic clarity, the delivery surface
   prefers visibility-first mutable updates over ambiguous suppression
 
@@ -81,6 +86,8 @@ The delivery pipeline keeps:
   current assistant turn; opening a new user turn drops the old tracking pointer
   so a new plan appears at the chat tail rather than editing history up-thread
 - one mutable pending-input artifact per `(user_id, control surface)`
+- one mutable interactive question artifact per `(user_id, control surface)`
+  when the runtime exposes a durable blocking question record
 - one ordered content queue per user
 - one current turn generation per `(user_id, control surface)`
 - one terminal turn artifact: `assistant_final`
@@ -136,6 +143,18 @@ The pending-input artifact is outside that turn-output barrier. It previews
 future queued user input rather than current-turn assistant output, so it may
 remain visible while the current turn is still running without being treated as
 either status churn or pre-final visible content.
+
+Interactive question artifacts are a separate control lane. They are created
+from runtime-owned durable question records, not from pane scraping alone. For
+OMX, the source record is `kind=omx.question/v1` under
+`.omx/state/sessions/*/questions/`. Telegram renders the question body and
+predefined options with inline buttons, edits the same message while the
+question remains active, and answers by writing the durable record to terminal
+status `answered`. When the OMX record provides a tmux return bridge, the bot
+best-effort sends the normal `[omx question answered] ...` continuation line
+back to the return pane and closes the temporary question pane. This artifact
+is not a technical status artifact, not a user turn opener, and not a terminal
+assistant answer.
 
 This preserves the upstream Claude shape:
 
@@ -347,6 +366,17 @@ one formatting contract:
   separate footer line, not part of the code block body
 - if the visible preview already conveys the outcome clearly, the footer should
   not add a redundant `completed · output 1 line(s)` line merely for symmetry
+- shell execution is one artifact: `exec_command` starts as a command preview
+  and the matching completion edits that command with the real output body
+  instead of creating a separate generic `Tool Output` bubble
+- command-execution artifacts with command identity are not merged with adjacent
+  content tasks; the `tool_use_id` pairing is stronger than bubble batching
+- command completions strip transport-only wrapper lines (`Chunk ID`, wall time,
+  exit/token metadata, `Output:` marker) before selecting `sh` or `json` for the
+  actual output preview
+- parsed Codex read/list/search command metadata may render as `• Explored`
+  with `Read`, `List`, and `Search` rows, matching the Codex CLI history cell
+  semantics instead of exposing low-value shell plumbing
 
 ## Teardown And Stale-Delivery Rules
 
@@ -396,9 +426,12 @@ Multiline text is injected through tmux's paste-buffer path so alternate-screen
 TUIs such as Codex can treat it as one paste event. A paste-only success is not
 a turn opener. For Codex, the post-paste turn opener uses bare `Enter` rather
 than `C-m`, because live `server-np4` evidence showed `C-m` can leave
-multiline Telegram text in the composer. If payload delivery or submit-key
-delivery fails, the bot must return an explicit delivery failure instead of
-reporting the message as sent.
+multiline Telegram text in the composer. Live `str` evidence on 2026-04-30
+also showed that submitting too soon after paste can leave the same draft
+visible until a later manual Enter, so Codex multiline submit includes a short
+post-paste readiness delay before sending `Enter`. If payload delivery or
+submit-key delivery fails, the bot must return an explicit delivery failure
+instead of reporting the message as sent.
 
 External-thread bind follows the same split:
 
@@ -425,8 +458,13 @@ Compact rendering uses these projections:
   preview and keep truncation metadata outside the fence.
 - `tool_result`: show JSON only when the result is genuine JSON; otherwise show
   a compact text/code preview. Empty or metadata-only output may be summarized.
-- `write_stdin`: show `write_stdin(session X, poll)` for empty polls and only
-  show a code block when real characters are injected.
+- `write_stdin`: empty polls are lifecycle checks, not useful Telegram
+  content. They are suppressed from the status lane rather than replacing a
+  richer visible status; only real injected characters deserve a compact code
+  preview.
+- status-polled command output: if the terminal surface exposes a raw
+  `Tool Output` wrapper, strip wrapper metadata and render the real stdout/stderr
+  as command output instead of showing `Chunk ID` / `Wall time` / token counts.
 - `omx_state.state_write`: show the state transition (`mode`, `phase`,
   `active`, `iteration`, task summary, snapshot) rather than the raw JSON.
 - `<hook_prompt>`: deliver as an operator warning artifact, never as user echo.

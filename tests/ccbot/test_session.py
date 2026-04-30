@@ -9,7 +9,7 @@ import pytest
 
 from ccbot.codex_threads import CodexThreadCatalog
 from ccbot.session import SessionManager
-from ccbot.runtime_types import LiveProcessDescriptor
+from ccbot.runtime_types import LiveProcessDescriptor, ThreadLocator
 from ccbot.state_schema import (
     BINDING_STATE_BIND_FLOW,
     BINDING_STATE_BOUND,
@@ -186,6 +186,16 @@ class TestSurfaceKeyedBindings:
         assert cleared is not None
         assert cleared["text"] == "queued"
         assert mgr.peek_surface_pending_slot(100, surface_key="c:-100123") is None
+
+    def test_clear_surface_pending_slot_missing_key_is_noop(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.set_surface_pending_slot(100, "queued", surface_key="t:41")
+
+        cleared = mgr.clear_surface_pending_slot(100, surface_key="t:42")
+
+        assert cleared is None
+        assert mgr.peek_surface_pending_slot(100, surface_key="t:41") is not None
 
 
 class TestGroupChatId:
@@ -590,6 +600,139 @@ class TestRuntimeInputDriverIntegration:
             runtime_kind="codex",
         )
         mock_driver.send_raw_slash_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_send_to_window_codex_multiline_waits_for_rollout_ack(
+        self,
+        mgr: SessionManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        rollout = tmp_path / "thread-1.jsonl"
+        rollout.write_text("", encoding="utf-8")
+        text = "line one\nline two\n$ralph"
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+        mgr.resolve_thread_for_window = AsyncMock(
+            return_value=ThreadLocator(
+                thread_id="thread-1",
+                summary="Thread One",
+                message_count=1,
+                file_path=str(rollout),
+                runtime_kind="codex",
+                cwd="/tmp/project",
+            )
+        )
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_RETRY_SECONDS", 0.01)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_POLL_SECONDS", 0.001)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_TIMEOUT_SECONDS", 0.05)
+
+        async def submit_and_append_ack(*args, **kwargs):
+            with rollout.open("a", encoding="utf-8") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "type": "turn_context",
+                            "payload": {"cwd": "/tmp/project"},
+                        }
+                    )
+                    + "\n"
+                )
+            return True, "Submitted text to @1"
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(window_id="@1")
+            )
+            mock_tmux.capture_pane = AsyncMock(return_value="")
+            mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
+            mock_driver.send_multiline_submit_key = AsyncMock(
+                side_effect=submit_and_append_ack
+            )
+            mock_driver.send_raw_slash_command = AsyncMock()
+
+            success, message = await mgr.send_to_window("@1", text)
+
+        assert success is True
+        assert message == "Sent to @1"
+        mock_driver.send_text.assert_awaited_once_with(
+            "@1",
+            text,
+            runtime_kind="codex",
+            submit=False,
+        )
+        mock_driver.send_multiline_submit_key.assert_awaited_once_with(
+            "@1",
+            runtime_kind="codex",
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_to_window_codex_multiline_fails_without_rollout_evidence(
+        self,
+        mgr: SessionManager,
+    ):
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+        mgr.resolve_thread_for_window = AsyncMock(return_value=None)
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(window_id="@1")
+            )
+            mock_tmux.capture_pane = AsyncMock(return_value="")
+            mock_driver.send_text = AsyncMock()
+
+            success, message = await mgr.send_to_window("@1", "line one\nline two")
+
+        assert success is False
+        assert "missing persisted rollout evidence" in message
+        mock_driver.send_text.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_to_window_codex_multiline_fails_closed_when_busy(
+        self,
+        mgr: SessionManager,
+    ):
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(window_id="@1")
+            )
+            mock_tmux.capture_pane = AsyncMock(
+                return_value=(
+                    "previous output\n"
+                    "· Working (3m 09s • esc to interrupt)\n"
+                    "────────────────────────────────────────\n"
+                )
+            )
+            mock_driver.send_text = AsyncMock()
+
+            success, message = await mgr.send_to_window("@1", "line one\nline two")
+
+        assert success is False
+        assert "requires an idle/input-ready pane" in message
+        mock_driver.send_text.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_send_to_window_allows_shell_fallback_in_surviving_tmux_window(

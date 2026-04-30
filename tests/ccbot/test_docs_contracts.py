@@ -36,12 +36,16 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "manual_bind_required" in readme
     assert "control surface" in readme
     assert "no-topics group main chat" in readme
-    assert "ordinary non-addressed text stays silent" in readme
+    assert "ordinary text and `@bot` mentions stay silent until a command is used" in readme
+    assert "Command entry paths also capture the Telegram group `chat_id`" in readme
+    assert "Command handlers persist group routing metadata" in readme
     assert "shared group topics" in readme
     assert "queue" in readme
     assert "steer" in readme
     assert "`queue` mode" in readme
     assert "Raw terminal control" in readme
+    assert "persisted JSONL turn event" in readme
+    assert "replay-evidence ACK" in readme
     assert "Compact Telegram delivery" in readme
     assert "User echo" in readme
     assert "Commentary" in readme
@@ -50,6 +54,8 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "fresh last message" in readme
     assert "Technical execution classes stay out of permanent bubbles by default" in readme
     assert "Queued follow-up preview" in readme
+    assert "OMX interactive questions" in readme
+    assert "omx.question/v1" in readme
     assert "visibility-first" in readme
     assert "Ordinary user echo remains visible" in readme
     assert "queue is empty" in readme
@@ -113,6 +119,8 @@ def test_runtime_ontology_note_uses_runtime_neutral_terms() -> None:
     assert "persisted replay evidence" in ontology
     assert "binding_scope=external" in ontology
     assert "Input injection plane" in ontology
+    assert "Input acknowledgement" in ontology
+    assert "pane reaction is diagnostic only" in ontology
     assert "read-only rather than pretending to send into tmux" in ontology
     assert "control surface" in ontology
     assert "surface_key=t:<thread_id>" in ontology
@@ -145,18 +153,28 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "Surface key" in runtime
     assert "Control-surface identity" in runtime
     assert "(user_id, surface_key)" in runtime
+    assert "Telegram group routing coordinates" in runtime
+    assert "command-only entry paths such as `/bind` and `/resume`" in runtime
     assert "Control-surface policy" in runtime
     assert "surface-scoped maps are canonical" in runtime
     assert "Topic And Surface Control Ontology" in topic_control
     assert "Surface key" in topic_control
     assert "full persisted identity" in topic_control
+    assert "equal `thread_id` values in different groups are not the same control surface" in topic_control
+    assert "Telegram group routing coordinates" in topic_control
+    assert "group_chat_ids[user_id:thread_id] -> Telegram group chat_id" in topic_control
+    assert "command-only entry must not depend on prior text, mention, or callback input" in topic_control
     assert "pending slot" in topic_control
     assert "no-topics main-chat control surface" in topic_control
     assert "legacy `topic_*` maps are compatibility mirrors" in topic_control
     assert "terminal turn artifact" in delivery
     assert "pre-final visible artifact" in delivery
     assert "technical status artifact" in delivery
+    assert "Command-like tool output belongs to command execution" in delivery
+    assert "Genuine non-command tool results remain" in delivery
     assert "Pending input artifact" in delivery
+    assert "Interactive question artifact" in delivery
+    assert "omx.question/v1" in delivery
     assert "Warning artifact" in delivery
     assert "control surface" in delivery
     assert "usage-limit / quota-exhaustion notices" in delivery
@@ -192,6 +210,8 @@ def test_spec_corpus_is_subordinate_to_ontology_vocabulary() -> None:
     assert "Telegram topic -> binding -> tmux window" not in plan2
     assert "per-control-surface turn generations" in plan4
     assert "warning on the same control surface" in plan4
+    assert "T77: OMX Durable Question Delivery" in plan4
+    assert "omx.question/v1" in plan4
 
 
 def test_runtime_capability_registry_doc_describes_supported_profiles() -> None:
@@ -217,7 +237,11 @@ def test_codex_command_semantics_doc_captures_resume_and_rename_contract() -> No
     assert "fast-agent" in doc
     assert "unsupported_degraded" in doc
     assert "duplicate thread names" in doc
+    assert "Non-interactive helper sessions such as `originator=codex_exec`" in doc
+    assert "raw thread id is only a last-resort label" in doc
     assert "tmux is the authoritative operator intervention surface" in doc
+    assert "Multiline Submit ACK" in doc
+    assert "turn-acceptance" in doc
 
 
 def test_russian_readme_matches_codex_fork_positioning() -> None:
@@ -379,10 +403,14 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
     assert "surface_policy" in doc
     assert "(user_id, surface_key)" in doc
     assert "no-topics group chat" in doc or "no-topics group" in doc
-    assert "ordinary non-addressed message in an unbound topic must stay silent" in doc
-    assert "bot-addressed `@mention` remain valid explicit entry paths" in doc
+    assert "bot-addressed `@mention` messages in an unbound topic must stay silent" in doc
+    assert "Identical numeric `thread_id` values in different groups are different control surfaces" in doc
+    assert "explicit `/bind` and explicit `/resume` remain valid explicit entry paths" in doc
+    assert "group routing metadata" in doc
+    assert "the group `chat_id`" in doc
     assert "**Pre-final terminal surface barrier**" in doc
     assert "Codex-style command/tool previews" in doc
+    assert "OMX interactive question artifacts" in doc
     assert "whole pre-final visible surface is" in doc
     assert "mutable technical status artifact are both closed" in doc
     assert "In external read-only bind mode" in doc

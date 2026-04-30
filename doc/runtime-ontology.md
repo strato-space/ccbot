@@ -32,6 +32,7 @@ The runtime layer must keep these kinds distinct:
 - `semantic emitter / supervisor`
 - `live semantic stream`
 - `persisted replay evidence`
+- `input acknowledgement`
 
 The controlling relation is:
 
@@ -79,6 +80,9 @@ product surface, but this is still not the same claim as `chat == topic`.
 ## Capability And Control Notes
 
 - `Input injection plane` exists only for live `tmux` bindings.
+- `Input acknowledgement` is persisted proof that an injected message became a
+  runtime turn. For Codex, the proof is an appended rollout JSONL event such as
+  `turn_context` or a matching user-message record; pane reaction is diagnostic only.
 - `binding_scope=external` may preserve replay delivery while staying
   read-only rather than pretending to send into tmux.
 - `queue` and `steer` remain message-plane routing modes.

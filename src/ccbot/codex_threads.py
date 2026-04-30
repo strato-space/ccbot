@@ -102,6 +102,72 @@ def _load_jsonl_or_json(path: Path) -> list[dict[str, Any]]:
     return []
 
 
+def _source_label(source: Any) -> str:
+    if isinstance(source, str):
+        return source.strip()
+    if isinstance(source, dict):
+        # Codex native subagents are represented as a nested source object, e.g.
+        # {"subagent": {"thread_spawn": {"parent_thread_id": "...", ...}}}.
+        # They are helper threads owned by the parent session, not standalone
+        # human-resumable control surfaces.
+        if isinstance(source.get("subagent"), dict):
+            return "subagent"
+        if isinstance(source.get("thread_spawn"), dict):
+            return "subagent"
+        for key in ("type", "kind", "name"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _is_resumable_session(originator: str, source: str) -> bool:
+    """Exclude non-interactive helper sessions from human resume pickers."""
+    originator_key = originator.strip().casefold()
+    source_key = source.strip().casefold()
+    return originator_key != "codex_exec" and source_key not in {
+        "exec",
+        "subagent",
+        "thread_spawn",
+    }
+
+
+def _extract_codex_user_text(data: dict[str, Any]) -> str:
+    if data.get("type") != "response_item":
+        return ""
+    payload = data.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    if payload.get("type") != "message" or payload.get("role") != "user":
+        return ""
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "input_text":
+            continue
+        text = str(item.get("text") or "").strip()
+        if text:
+            parts.append(text)
+    return "\n".join(parts).strip()
+
+
+def _is_picker_preview_text(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("# AGENTS.md instructions"):
+        return False
+    if "AUTONOMY DIRECTIVE" in stripped or "<INSTRUCTIONS>" in stripped:
+        return False
+    if stripped.startswith("You are OMX Explore"):
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class CodexThreadIndexEntry:
     """A persisted session index entry."""
@@ -128,6 +194,8 @@ class CodexThreadCandidate:
     updated_at: str = ""
     mtime: float = 0.0
     preview: str = ""
+    originator: str = ""
+    source: str = ""
 
     @property
     def normalized_cwd(self) -> str:
@@ -181,8 +249,11 @@ class CodexThreadLookup:
     file_path: Path
     cwd: str
     message_count: int
+    updated_at: str = ""
     mtime: float = 0.0
     preview: str = ""
+    originator: str = ""
+    source: str = ""
 
     @property
     def normalized_cwd(self) -> str:
@@ -195,9 +266,11 @@ class CodexThreadLookup:
             cwd=self.cwd,
             rollout_file=self.file_path,
             message_count=self.message_count,
-            updated_at=entry.updated_at if entry else "",
+            updated_at=entry.updated_at if entry else self.updated_at,
             mtime=self.mtime,
             preview=self.preview,
+            originator=self.originator,
+            source=self.source,
         )
 
 
@@ -219,6 +292,7 @@ class CodexThreadCatalog:
         for key in (
             "index_entries",
             "rollout_lookup",
+            "hidden_helper_thread_ids",
             "candidates",
             "index_only_entries",
         ):
@@ -280,6 +354,9 @@ class CodexThreadCatalog:
                 message_count = 0
                 thread_id = ""
                 cwd = ""
+                originator = ""
+                source = ""
+                updated_at = ""
                 preview = ""
                 for line in stream:
                     if not line.strip():
@@ -290,6 +367,10 @@ class CodexThreadCatalog:
                         continue
                     if data.get("type") == "session_meta":
                         payload = data.get("payload") or {}
+                        if not updated_at:
+                            updated_at = str(
+                                data.get("timestamp") or payload.get("timestamp") or ""
+                            ).strip()
                         if not thread_id:
                             thread_id = str(
                                 payload.get("id")
@@ -299,10 +380,20 @@ class CodexThreadCatalog:
                             ).strip()
                         if not cwd:
                             cwd = str(payload.get("cwd") or "").strip()
+                        if not originator:
+                            originator = str(payload.get("originator") or "").strip()
+                        if not source:
+                            source = _source_label(payload.get("source"))
+                        if not _is_resumable_session(originator, source):
+                            return None
                     elif not preview and TranscriptParser.is_user_message(data):
                         parsed = TranscriptParser.parse_message(data)
                         if parsed and parsed.text.strip():
                             preview = parsed.text.strip()
+                    elif not preview:
+                        text = _extract_codex_user_text(data)
+                        if text and _is_picker_preview_text(text):
+                            preview = text
                     if thread_id and cwd:
                         # Keep counting to maintain a stable message_count.
                         continue
@@ -317,18 +408,29 @@ class CodexThreadCatalog:
                     file_path=path,
                     cwd=cwd,
                     message_count=message_count,
+                    updated_at=updated_at,
                     mtime=path.stat().st_mtime,
                     preview=preview,
+                    originator=originator,
+                    source=source,
                 )
         except OSError:
             return None
 
-    def _load_rollout_identity(self, path: Path) -> CodexThreadLookup | None:
+    def _load_rollout_identity(
+        self,
+        path: Path,
+        *,
+        include_non_resumable: bool = False,
+    ) -> CodexThreadLookup | None:
         """Load only the identifying session metadata from a rollout file."""
         try:
             with path.open("r", encoding="utf-8", errors="replace") as stream:
                 thread_id = ""
                 cwd = ""
+                originator = ""
+                source = ""
+                updated_at = ""
                 for line in stream:
                     if not line.strip():
                         continue
@@ -338,6 +440,9 @@ class CodexThreadCatalog:
                     if data.get("type") != "session_meta":
                         continue
                     payload = data.get("payload") or {}
+                    updated_at = str(
+                        data.get("timestamp") or payload.get("timestamp") or ""
+                    ).strip()
                     thread_id = str(
                         payload.get("id")
                         or payload.get("session_id")
@@ -345,6 +450,8 @@ class CodexThreadCatalog:
                         or ""
                     ).strip()
                     cwd = str(payload.get("cwd") or "").strip()
+                    originator = str(payload.get("originator") or "").strip()
+                    source = _source_label(payload.get("source"))
                     break
                 if not thread_id:
                     thread_id = _extract_thread_id_from_filename(path)
@@ -352,13 +459,21 @@ class CodexThreadCatalog:
                     return None
                 if not cwd:
                     cwd = read_cwd_from_jsonl(path)
+                if (
+                    not include_non_resumable
+                    and not _is_resumable_session(originator, source)
+                ):
+                    return None
                 return CodexThreadLookup(
                     thread_id=thread_id,
                     file_path=path,
                     cwd=cwd,
                     message_count=0,
+                    updated_at=updated_at,
                     mtime=path.stat().st_mtime,
                     preview="",
+                    originator=originator,
+                    source=source,
                 )
         except OSError:
             return None
@@ -368,24 +483,34 @@ class CodexThreadCatalog:
         return self._read_rollout_lookup()
 
     @cached_property
+    def hidden_helper_thread_ids(self) -> frozenset[str]:
+        """Thread ids that have rollouts but are helper/non-resumable sessions."""
+        hidden: set[str] = set()
+        if not self.sessions_root.exists():
+            return frozenset()
+        for path in sorted(
+            (
+                path
+                for path in self.sessions_root.rglob("*")
+                if path.is_file() and path.suffix in {".jsonl", ".json"}
+            ),
+            key=lambda path: str(path),
+        ):
+            lookup = self._load_rollout_identity(path, include_non_resumable=True)
+            if lookup is None:
+                continue
+            if not _is_resumable_session(lookup.originator, lookup.source):
+                hidden.add(lookup.thread_id)
+        return frozenset(hidden)
+
+    @cached_property
     def candidates(self) -> tuple[CodexThreadCandidate, ...]:
         """Return available thread candidates with known rollout files."""
         index_by_id = {entry.thread_id: entry for entry in self.index_entries}
         candidates: list[CodexThreadCandidate] = []
         for thread_id, lookup in self.rollout_lookup.items():
             entry = index_by_id.get(thread_id)
-            candidates.append(
-                CodexThreadCandidate(
-                    thread_id=thread_id,
-                    thread_name=entry.normalized_thread_name if entry else "",
-                    cwd=lookup.cwd,
-                    rollout_file=lookup.file_path,
-                    message_count=lookup.message_count,
-                    updated_at=entry.updated_at if entry else "",
-                    mtime=lookup.mtime,
-                    preview=lookup.preview,
-                )
-            )
+            candidates.append(lookup.to_candidate(entry))
         candidates.sort(
             key=lambda candidate: (
                 0 if candidate.updated_at else 1,
@@ -402,8 +527,9 @@ class CodexThreadCatalog:
     def index_only_entries(self) -> tuple[CodexThreadIndexEntry, ...]:
         """Persisted session index rows that do not have a readable rollout file."""
         available_ids = {candidate.thread_id for candidate in self.candidates}
+        excluded_ids = available_ids | set(self.hidden_helper_thread_ids)
         return tuple(
-            entry for entry in self.index_entries if entry.thread_id not in available_ids
+            entry for entry in self.index_entries if entry.thread_id not in excluded_ids
         )
 
     def list_candidates_for_cwd(self, cwd: str) -> list[CodexThreadCandidate]:
@@ -455,6 +581,31 @@ class CodexThreadCatalog:
                 continue
             return full_lookup.to_candidate(index_by_id.get(thread_id))
         return None
+
+    def get_identity_fast(self, thread_id: str) -> CodexThreadLookup | None:
+        """Resolve rollout identity by thread id, including helper sessions."""
+        if not thread_id:
+            return None
+        for path in sorted(
+            self.sessions_root.rglob(f"*{thread_id}*.jsonl"),
+            key=lambda candidate: candidate.stat().st_mtime,
+            reverse=True,
+        ):
+            lookup = self._load_rollout_identity(
+                path,
+                include_non_resumable=True,
+            )
+            if lookup is None or lookup.thread_id != thread_id:
+                continue
+            return lookup
+        return None
+
+    def is_helper_thread_fast(self, thread_id: str) -> bool:
+        """Return True when a Codex thread is a helper/subagent session."""
+        lookup = self.get_identity_fast(thread_id)
+        if lookup is None:
+            return False
+        return not _is_resumable_session(lookup.originator, lookup.source)
 
     def _resolve_explicit_token(
         self,
