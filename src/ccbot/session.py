@@ -1668,7 +1668,6 @@ class SessionManager:
     async def _get_session_direct(
         self, session_id: str, cwd: str
     ) -> ClaudeSession | None:
-        """Backward-compatible wrapper for Claude-shaped call sites."""
         return await self._get_thread_locator_direct(session_id, cwd)
 
     # --- Directory session listing ---
@@ -1736,7 +1735,6 @@ class SessionManager:
         return sessions
 
     async def list_sessions_for_directory(self, cwd: str) -> list[ClaudeSession]:
-        """Backward-compatible wrapper for legacy callers."""
         return await self.list_threads_for_directory(cwd)
 
     # --- Window -> thread resolution ---
@@ -1981,7 +1979,6 @@ class SessionManager:
         return None
 
     async def resolve_session_for_window(self, window_id: str) -> ClaudeSession | None:
-        """Backward-compatible wrapper for legacy callers."""
         return await self.resolve_thread_for_window(window_id)
 
     # --- User window offset management ---
@@ -2584,24 +2581,24 @@ class SessionManager:
         self._save_state()
         return consumed.to_dict()
 
+    # Legacy topic wrappers preserve older thread_id call sites while the
+    # surface-keyed API remains the authoritative implementation. Keep these
+    # wrappers thin and avoid per-method docstrings that only restate forwarding.
+
     def _rotate_topic_bind_flow_credentials(
         self, user_id: int, thread_id: int
     ) -> tuple[int, str]:
-        """Issue fresh bind-flow credentials for a legacy topic wrapper."""
         return self._rotate_surface_bind_flow_credentials(user_id, thread_id=thread_id)
 
     def get_topic_bind_flow_version(self, user_id: int, thread_id: int) -> int:
-        """Return the current bind-flow version for a legacy topic wrapper."""
         return self.get_surface_bind_flow_version(user_id, thread_id=thread_id)
 
     def get_topic_bind_flow_nonce(self, user_id: int, thread_id: int) -> str:
-        """Return the current bind-flow nonce for a legacy topic wrapper."""
         return self.get_surface_bind_flow_nonce(user_id, thread_id=thread_id)
 
     def get_topic_bind_flow_credentials(
         self, user_id: int, thread_id: int
     ) -> tuple[int, str]:
-        """Return the current bind-flow version and nonce for a legacy topic wrapper."""
         return self.get_surface_bind_flow_credentials(user_id, thread_id=thread_id)
 
     def validate_topic_bind_flow_callback(
@@ -2611,7 +2608,6 @@ class SessionManager:
         version: int,
         nonce: str,
     ) -> bool:
-        """Check whether a callback matches the current bind-flow credentials."""
         return self.validate_surface_bind_flow_callback(
             user_id,
             version,
@@ -2622,7 +2618,6 @@ class SessionManager:
     def bind_thread(
         self, user_id: int, thread_id: int, window_id: str, window_name: str = ""
     ) -> None:
-        """Legacy topic wrapper around bind_surface()."""
         self.bind_surface(
             user_id,
             window_id,
@@ -2642,7 +2637,6 @@ class SessionManager:
         file_path: str = "",
         read_only: bool = True,
     ) -> str:
-        """Legacy topic wrapper around bind_external_surface()."""
         return self.bind_external_surface(
             user_id,
             runtime_kind=runtime_kind,
@@ -2655,11 +2649,9 @@ class SessionManager:
         )
 
     def unbind_thread(self, user_id: int, thread_id: int) -> str | None:
-        """Legacy topic wrapper around unbind_surface()."""
         return self.unbind_surface(user_id, thread_id=thread_id)
 
     def get_window_for_thread(self, user_id: int, thread_id: int) -> str | None:
-        """Look up the window_id bound to a topic thread."""
         return self.get_window_for_surface(user_id, thread_id=thread_id)
 
     def get_external_topic_binding(
@@ -2667,37 +2659,29 @@ class SessionManager:
         user_id: int,
         thread_id: int,
     ) -> dict[str, Any] | None:
-        """Return external bind metadata for a topic, if present."""
         return self.get_external_surface_binding(user_id, thread_id=thread_id)
 
     def get_topic_policy(self, user_id: int, thread_id: int) -> str:
-        """Return the persisted topic policy for a legacy topic wrapper."""
         return self.get_surface_policy(user_id, thread_id=thread_id)
 
     def set_topic_policy(self, user_id: int, thread_id: int, policy: str) -> None:
-        """Persist the topic policy without changing the binding itself."""
         self.set_surface_policy(user_id, policy, thread_id=thread_id)
 
     def get_topic_binding_state(self, user_id: int, thread_id: int) -> str:
-        """Return the persisted binding state for a legacy topic wrapper."""
         return self.get_surface_binding_state(user_id, thread_id=thread_id)
 
     def set_topic_binding_state(
         self, user_id: int, thread_id: int, binding_state: str
     ) -> None:
-        """Persist the binding state without changing the topic policy."""
         self.set_surface_binding_state(user_id, binding_state, thread_id=thread_id)
 
     def start_topic_bind_flow(self, user_id: int, thread_id: int) -> None:
-        """Mark a topic as being in an active bind flow."""
         self.start_surface_bind_flow(user_id, thread_id=thread_id)
 
     def require_manual_bind(self, user_id: int, thread_id: int) -> None:
-        """Force a topic into manual-bind mode without changing its binding."""
         self.require_manual_bind_for_surface(user_id, thread_id=thread_id)
 
     def allow_implicit_bind(self, user_id: int, thread_id: int) -> None:
-        """Allow implicit binding again for a topic."""
         self.allow_implicit_bind_for_surface(user_id, thread_id=thread_id)
 
     def resolve_window_for_thread(

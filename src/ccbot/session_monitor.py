@@ -79,6 +79,47 @@ class SessionMonitor:
     ) -> None:
         self._message_callback = callback
 
+    @staticmethod
+    def _normalized_event_from_parsed_entry(
+        thread_id: str, entry: NormalizedEvent
+    ) -> NormalizedEvent | None:
+        """Convert a parsed replay entry into a dispatchable monitor event."""
+        if (
+            not entry.text
+            and not entry.image_data
+            and not entry.document_data
+            and entry.delivery_class != "lifecycle"
+        ):
+            return None
+
+        dispatch_to_telegram = entry.dispatch_to_telegram
+        if (
+            entry.role == "user"
+            and not config.show_user_messages
+            and dispatch_to_telegram
+        ):
+            dispatch_to_telegram = False
+
+        return NormalizedEvent(
+            thread_id=thread_id,
+            text=entry.text,
+            is_complete=entry.is_complete,
+            content_type=entry.content_type,
+            tool_use_id=entry.tool_use_id,
+            role=entry.role,
+            tool_name=entry.tool_name,
+            image_data=entry.image_data,
+            document_data=entry.document_data,
+            timestamp=entry.timestamp,
+            runtime_kind=entry.runtime_kind,
+            event_kind=entry.event_kind,
+            semantic_kind=entry.semantic_kind,
+            delivery_class=entry.delivery_class,
+            include_in_history=entry.include_in_history,
+            dispatch_to_telegram=dispatch_to_telegram,
+            status_message_eligible=entry.status_message_eligible,
+        )
+
     async def _get_active_cwds(self) -> set[str]:
         """Get normalized cwds of all active tmux windows."""
         cwds = set()
@@ -429,40 +470,11 @@ class SessionMonitor:
                                 state=codex_state,
                             )
                             for entry in parsed_entries:
-                                if (
-                                    not entry.text
-                                    and not entry.image_data
-                                    and not entry.document_data
-                                    and entry.delivery_class != "lifecycle"
-                                ):
-                                    continue
-                                if (
-                                    entry.role == "user"
-                                    and not config.show_user_messages
-                                    and entry.dispatch_to_telegram
-                                ):
-                                    entry.dispatch_to_telegram = False
-                                new_messages.append(
-                                    NormalizedEvent(
-                                        thread_id=rollout_source.thread_id,
-                                        text=entry.text,
-                                        is_complete=entry.is_complete,
-                                        content_type=entry.content_type,
-                                        tool_use_id=entry.tool_use_id,
-                                        role=entry.role,
-                                        tool_name=entry.tool_name,
-                                        image_data=entry.image_data,
-                                        document_data=entry.document_data,
-                                        timestamp=entry.timestamp,
-                                        runtime_kind=entry.runtime_kind,
-                                        event_kind=entry.event_kind,
-                                        semantic_kind=entry.semantic_kind,
-                                        delivery_class=entry.delivery_class,
-                                        include_in_history=entry.include_in_history,
-                                        dispatch_to_telegram=entry.dispatch_to_telegram,
-                                        status_message_eligible=entry.status_message_eligible,
-                                    )
+                                event = self._normalized_event_from_parsed_entry(
+                                    rollout_source.thread_id, entry
                                 )
+                                if event is not None:
+                                    new_messages.append(event)
                     # File hasn't changed, skip reading
                     continue
 
@@ -507,40 +519,11 @@ class SessionMonitor:
                         self._pending_tools.pop(rollout_source.thread_id, None)
 
                 for entry in parsed_entries:
-                    if (
-                        not entry.text
-                        and not entry.image_data
-                        and not entry.document_data
-                        and entry.delivery_class != "lifecycle"
-                    ):
-                        continue
-                    if (
-                        entry.role == "user"
-                        and not config.show_user_messages
-                        and entry.dispatch_to_telegram
-                    ):
-                        entry.dispatch_to_telegram = False
-                    new_messages.append(
-                        NormalizedEvent(
-                            thread_id=rollout_source.thread_id,
-                            text=entry.text,
-                            is_complete=entry.is_complete,
-                            content_type=entry.content_type,
-                            tool_use_id=entry.tool_use_id,
-                            role=entry.role,
-                            tool_name=entry.tool_name,
-                            image_data=entry.image_data,
-                            document_data=entry.document_data,
-                            timestamp=entry.timestamp,
-                            runtime_kind=entry.runtime_kind,
-                            event_kind=entry.event_kind,
-                            semantic_kind=entry.semantic_kind,
-                            delivery_class=entry.delivery_class,
-                            include_in_history=entry.include_in_history,
-                            dispatch_to_telegram=entry.dispatch_to_telegram,
-                            status_message_eligible=entry.status_message_eligible,
-                        )
+                    event = self._normalized_event_from_parsed_entry(
+                        rollout_source.thread_id, entry
                     )
+                    if event is not None:
+                        new_messages.append(event)
 
                 self.state.update_tracked_source(tracked)
 

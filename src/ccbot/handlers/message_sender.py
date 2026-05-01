@@ -9,8 +9,8 @@ Functions:
   - send_with_fallback: Send with formatting → plain text fallback
   - send_photo: Photo sending (single or media group)
   - safe_reply: Reply with formatting, fallback to plain text
-  - safe_edit: Edit message with formatting, fallback to plain text
-  - safe_send: Send message with formatting, fallback to plain text
+  - safe_edit: Edit message with formatting → plain text fallback
+  - safe_send: Send message with formatting → plain text fallback
 
 Rate limiting is handled globally by AIORateLimiter on the Application.
 RetryAfter exceptions are re-raised so callers (queue worker) can handle them.
@@ -204,11 +204,11 @@ async def safe_reply(message: Message, text: str, **kwargs: Any) -> Message:
             raise
 
 
-async def safe_edit(target: Any, text: str, **kwargs: Any) -> None:
-    """Edit message with formatting, falling back to plain text on failure."""
+async def safe_edit(target: Any, text: str, **kwargs: Any) -> Message | None:
+    """Edit message with formatting, returning None only after final failure."""
     kwargs.setdefault("link_preview_options", NO_LINK_PREVIEW)
     try:
-        await target.edit_message_text(
+        return await target.edit_message_text(
             _ensure_formatted(text),
             parse_mode=PARSE_MODE,
             **kwargs,
@@ -217,11 +217,12 @@ async def safe_edit(target: Any, text: str, **kwargs: Any) -> None:
         raise
     except Exception:
         try:
-            await target.edit_message_text(strip_sentinels(text), **kwargs)
+            return await target.edit_message_text(strip_sentinels(text), **kwargs)
         except RetryAfter:
             raise
         except Exception as e:
             logger.error("Failed to edit message: %s", e)
+            return None
 
 
 async def safe_send(
@@ -230,13 +231,13 @@ async def safe_send(
     text: str,
     message_thread_id: int | None = None,
     **kwargs: Any,
-) -> None:
-    """Send message with formatting, falling back to plain text on failure."""
+) -> Message | None:
+    """Send message with formatting, returning None only after final failure."""
     kwargs.setdefault("link_preview_options", NO_LINK_PREVIEW)
     if message_thread_id is not None:
         kwargs.setdefault("message_thread_id", message_thread_id)
     try:
-        await bot.send_message(
+        return await bot.send_message(
             chat_id=chat_id,
             text=_ensure_formatted(text),
             parse_mode=PARSE_MODE,
@@ -246,10 +247,11 @@ async def safe_send(
         raise
     except Exception:
         try:
-            await bot.send_message(
+            return await bot.send_message(
                 chat_id=chat_id, text=strip_sentinels(text), **kwargs
             )
         except RetryAfter:
             raise
         except Exception as e:
             logger.error(f"Failed to send message to {chat_id}: {e}")
+            return None
