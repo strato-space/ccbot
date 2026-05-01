@@ -294,6 +294,21 @@ class TestClassifyInputSurface:
         assert surface.has_visible_prompt is True
         assert surface.prompt_name == "VisiblePromptError"
 
+    def test_conversation_interrupted_prompt_is_input_ready(self):
+        pane = (
+            "previous output\n"
+            "■ Conversation interrupted - tell the model what to do differently. "
+            "Something went wrong? Hit `/feedback` to report the issue.\n"
+            "› Find and fix a bug in @filename\n"
+            "  gpt-5.5 high · main · Context 29% left\n"
+        )
+
+        surface = classify_input_surface(pane)
+
+        assert surface.kind == "input_ready"
+        assert surface.has_visible_prompt is True
+        assert surface.prompt_name == "CodexConversationInterrupted"
+
     def test_detects_blocked_prompt_from_real_codex_fixture(self):
         fixture = Path(__file__).resolve().parents[1] / "fixtures" / "codex" / "panes" / "tmux_session_0_resume_prompt.json"
         payload = json.loads(fixture.read_text(encoding="utf-8"))

@@ -210,6 +210,9 @@ _PENDING_ITEM_PREFIX_RE = re.compile(
 )
 _PENDING_TERMINAL_PROMPT_RE = re.compile(r"^\s*(?:❯|>)\s*$")
 _PENDING_STATUS_LINE_RE = re.compile(r"^\s*[·✻✽✶✳✢]\s+")
+_CODEX_CONVERSATION_INTERRUPTED_RE = re.compile(
+    r"^\s*■\s*Conversation interrupted\b", re.IGNORECASE
+)
 
 
 def _pending_header_kind(line: str) -> str:
@@ -316,6 +319,14 @@ def classify_input_surface(pane_text: str) -> InputSurface:
         return InputSurface(kind="busy", status_line=status_line)
 
     lines = [line.strip() for line in pane_text.splitlines()[-8:] if line.strip()]
+    if any(line.startswith(("›", "❯")) for line in lines) and any(
+        _CODEX_CONVERSATION_INTERRUPTED_RE.match(line) for line in lines
+    ):
+        return InputSurface(
+            kind="input_ready",
+            has_visible_prompt=True,
+            prompt_name="CodexConversationInterrupted",
+        )
     if any(line.startswith("■") for line in lines) and any(
         line.startswith(("›", "❯")) for line in lines
     ):

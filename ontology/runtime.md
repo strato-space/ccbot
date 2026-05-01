@@ -199,5 +199,7 @@ Raw operator control is different:
 - a Codex-bound tmux window that has fallen back to a shell prompt is not a live
   input injection plane, even if replay evidence for the previous identity is
   still readable
+- a Codex "Conversation interrupted" surface is still a live input prompt for
+  the next user instruction, not a read-only decision prompt
 - if no live input injection plane exists, Telegram text/keys must fail closed
   as read-only rather than pretending to send into tmux

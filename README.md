@@ -340,6 +340,8 @@ Routing note:
 - A Codex-bound tmux window that has fallen back to a shell prompt is read as a
   dead input plane; Telegram input fails closed instead of being pasted into
   `bash`.
+- Codex `Conversation interrupted` surfaces stay writable: they are normal
+  next-instruction prompts, not read-only approval prompts.
 - Pending-input previews preserve queued message text literally (except explicit
   Codex checkbox marker glyph stripping), so command-like user text does not
   get normalized away.

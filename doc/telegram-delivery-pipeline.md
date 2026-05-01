@@ -438,6 +438,10 @@ input plane. If the window has fallen back to a shell prompt, Telegram input
 must fail closed instead of pasting text into `bash`, even when the previous
 rollout file remains readable.
 
+Codex "Conversation interrupted" panes are still input-ready surfaces: they ask
+for the next user instruction and must not be treated as read-only approval
+prompts just because the visible line starts with `■`.
+
 External-thread bind follows the same split:
 
 - replay/event delivery may remain active without tmux
