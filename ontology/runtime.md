@@ -196,5 +196,8 @@ Raw operator control is different:
 - live-runtime presence is semantic rather than banner-bound: a visible active
   Codex footer/status surface or input prompt still counts as a live runtime
   surface even after the initial startup banner has scrolled out of the pane
+- a Codex-bound tmux window that has fallen back to a shell prompt is not a live
+  input injection plane, even if replay evidence for the previous identity is
+  still readable
 - if no live input injection plane exists, Telegram text/keys must fail closed
   as read-only rather than pretending to send into tmux

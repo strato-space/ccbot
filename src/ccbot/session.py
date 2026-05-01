@@ -16,6 +16,7 @@ import json
 import logging
 import re
 import secrets
+import shlex
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -72,6 +73,10 @@ from .utils import atomic_write_json
 logger = logging.getLogger(__name__)
 
 BLOCKED_PROMPT_SEND_MESSAGE = "Input blocked by a visible prompt in the terminal"
+CODEX_RUNTIME_NOT_ACTIVE_MESSAGE = (
+    "Codex live process is not active in this tmux window; use /resume or /bind "
+    "to attach a live Codex window before sending input."
+)
 
 WindowState = LiveProcessDescriptor
 ClaudeSession = ThreadLocator
@@ -87,6 +92,7 @@ CODEX_MULTILINE_ACK_TIMEOUT_SECONDS = 6.5
 CODEX_MULTILINE_ACK_POLL_SECONDS = 0.1
 CODEX_MULTILINE_ACK_RETRY_SECONDS = 2.0
 CODEX_MULTILINE_ACK_MAX_ATTEMPTS = 3
+_SHELL_COMMAND_NAMES = {"bash", "dash", "fish", "sh", "zsh"}
 
 SURFACE_BINDINGS_KEY = "surface_bindings"
 EXTERNAL_SURFACE_BINDINGS_KEY = "external_surface_bindings"
@@ -162,6 +168,39 @@ def _codex_rollout_file_size(file_path: Path) -> int:
         return file_path.stat().st_size
     except OSError:
         return 0
+
+
+def _command_basename(command: str) -> str:
+    try:
+        tokens = shlex.split(command or "")
+    except ValueError:
+        tokens = (command or "").split()
+    if not tokens:
+        return ""
+    return Path(tokens[0]).name.casefold()
+
+
+def _codex_has_live_input_plane(
+    *,
+    pane_command: str,
+    pane_text: str | None,
+) -> bool:
+    """Return True when a Codex-bound tmux pane still has a live input plane."""
+    surface = classify_input_surface(pane_text or "")
+    if surface.kind in {"busy", "input_ready", "blocked_prompt"}:
+        return True
+
+    if runtime_capability_registry.known_runtime_kind_from_command(pane_command) == "codex":
+        return True
+
+    command_name = _command_basename(pane_command)
+    if command_name in _SHELL_COMMAND_NAMES:
+        return False
+
+    # Codex TUI commonly appears as a node process in tmux. Unknown non-shell
+    # commands are treated as live so we fail closed on shell fallbacks without
+    # rejecting legitimate Codex panes whose footer scrolled out of view.
+    return bool(command_name)
 
 
 def _codex_content_text(content: Any) -> str:
@@ -2912,13 +2951,17 @@ class SessionManager:
         )
         capability = self.get_runtime_capability(runtime_kind)
         pane_text = await tmux_manager.capture_pane(window.window_id)
-        surface = classify_input_surface(pane_text) if pane_text else None
-        if pane_text:
-            if (
-                capability.blocked_input_policy == "fail_closed_on_visible_prompt"
-                and surface.kind == "blocked_prompt"
-            ):
-                return False, BLOCKED_PROMPT_SEND_MESSAGE
+        surface = classify_input_surface(pane_text or "")
+        if runtime_kind == "codex" and not _codex_has_live_input_plane(
+            pane_command=getattr(window, "pane_current_command", ""),
+            pane_text=pane_text,
+        ):
+            return False, CODEX_RUNTIME_NOT_ACTIVE_MESSAGE
+        if (
+            capability.blocked_input_policy == "fail_closed_on_visible_prompt"
+            and surface.kind == "blocked_prompt"
+        ):
+            return False, BLOCKED_PROMPT_SEND_MESSAGE
 
         trimmed = text.lstrip()
         if trimmed.startswith("/"):
@@ -2928,7 +2971,7 @@ class SessionManager:
                 runtime_kind=runtime_kind,
             )
         elif runtime_kind == "codex" and "\n" in text:
-            if surface and surface.kind == "busy":
+            if surface.kind == "busy":
                 return (
                     False,
                     "Codex is still working; multiline Telegram input requires an "

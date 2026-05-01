@@ -337,6 +337,9 @@ Routing note:
   `Enter` until Codex writes a persisted JSONL turn event. Telegram reports
   success only after that replay-evidence ACK; otherwise it fails closed with a
   composer-draft warning instead of claiming the message was sent.
+- A Codex-bound tmux window that has fallen back to a shell prompt is read as a
+  dead input plane; Telegram input fails closed instead of being pasted into
+  `bash`.
 - Pending-input previews preserve queued message text literally (except explicit
   Codex checkbox marker glyph stripping), so command-like user text does not
   get normalized away.

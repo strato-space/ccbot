@@ -433,6 +433,11 @@ post-paste readiness delay before sending `Enter`. If payload delivery or
 submit-key delivery fails, the bot must return an explicit delivery failure
 instead of reporting the message as sent.
 
+A Codex-bound tmux window is writable only while it still exposes a live Codex
+input plane. If the window has fallen back to a shell prompt, Telegram input
+must fail closed instead of pasting text into `bash`, even when the previous
+rollout file remains readable.
+
 External-thread bind follows the same split:
 
 - replay/event delivery may remain active without tmux

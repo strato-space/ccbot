@@ -662,7 +662,7 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1")
+                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
             )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
@@ -696,7 +696,7 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1")
+                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
             )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
@@ -761,7 +761,7 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1")
+                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
             )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
@@ -802,7 +802,7 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1")
+                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
             )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_driver.send_text = AsyncMock()
@@ -829,7 +829,7 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1")
+                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
             )
             mock_tmux.capture_pane = AsyncMock(
                 return_value=(
@@ -847,7 +847,7 @@ class TestRuntimeInputDriverIntegration:
         mock_driver.send_text.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_send_to_window_allows_shell_fallback_in_surviving_tmux_window(
+    async def test_send_to_window_fails_closed_when_codex_window_falls_back_to_shell(
         self, mgr: SessionManager
     ):
         mgr.window_states["@1"] = LiveProcessDescriptor(
@@ -861,7 +861,7 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1")
+                return_value=SimpleNamespace(window_id="@1", pane_current_command="bash")
             )
             mock_tmux.capture_pane = AsyncMock(return_value="user@host:/tmp/project$ ")
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
@@ -869,13 +869,9 @@ class TestRuntimeInputDriverIntegration:
 
             success, message = await mgr.send_to_window("@1", "ls")
 
-        assert success is True
-        assert message == "Sent to @1"
-        mock_driver.send_text.assert_awaited_once_with(
-            "@1",
-            "ls",
-            runtime_kind="codex",
-        )
+        assert success is False
+        assert "Codex live process is not active" in message
+        mock_driver.send_text.assert_not_awaited()
         mock_driver.send_raw_slash_command.assert_not_awaited()
 
     @pytest.mark.asyncio
