@@ -19,6 +19,7 @@ Key components:
 import asyncio
 import logging
 import re
+import shlex
 import time
 from pathlib import Path
 
@@ -75,6 +76,7 @@ _USAGE_LIMIT_NOTICE_RE = re.compile(
     re.IGNORECASE,
 )
 _SHELL_PROMPT_RE = re.compile(r"^[^\n]*[#$>]\s*$")
+_SHELL_COMMAND_NAMES = {"bash", "dash", "fish", "sh", "zsh"}
 
 
 def _clip_pending_input_line(text: str, *, max_chars: int = 96) -> str:
@@ -171,27 +173,41 @@ def _last_nonempty_pane_line(pane_text: str) -> str:
     return ""
 
 
-def _codex_surface_looks_active(pane_text: str) -> bool:
+def _command_basename(command: str) -> str:
+    try:
+        tokens = shlex.split(command or "")
+    except ValueError:
+        tokens = (command or "").split()
+    if not tokens:
+        return ""
+    return Path(tokens[0]).name.casefold()
+
+
+def _codex_surface_looks_active(pane_text: str, *, pane_command: str = "") -> bool:
     """Best-effort live Codex detection from pane text.
 
     Production Codex panes often scroll the initial ``OpenAI Codex`` banner out
     of view while still showing the active footer/status surface (for example
-    ``gpt-5.4 high · 22% left`` or ``tab to queue message``). Treat any
-    recognized Codex input surface as active, and fall back to shell-prompt
-    detection only when the parser cannot classify the visible footer.
+    ``gpt-5.4 high · 22% left`` or ``tab to queue message``). A bare ``❯``
+    can also be a normal shell prompt, so shell commands are treated as a dead
+    Codex input plane regardless of stale Codex-looking scrollback.
     """
     text = pane_text or ""
     if not text.strip():
         return False
+    if is_codex_termination_summary_text(text):
+        return False
 
     surface = classify_input_surface(text)
+    command_name = _command_basename(pane_command)
+    if command_name in _SHELL_COMMAND_NAMES:
+        return False
+
     if surface.kind in {"busy", "input_ready", "blocked_prompt"}:
         return True
 
     last_line = _last_nonempty_pane_line(text)
     if not last_line:
-        return False
-    if is_codex_termination_summary_text(text):
         return False
     if _SHELL_PROMPT_RE.match(last_line):
         return False
@@ -269,7 +285,8 @@ async def _maybe_enqueue_runtime_exit_warning(
         pane_command_text
     )
     runtime_active = expected_runtime == "codex" and (
-        current_runtime == expected_runtime or _codex_surface_looks_active(pane_text)
+        current_runtime == expected_runtime
+        or _codex_surface_looks_active(pane_text, pane_command=pane_command_text)
     )
 
     if runtime_active:

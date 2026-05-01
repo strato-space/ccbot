@@ -187,8 +187,6 @@ def _codex_has_live_input_plane(
 ) -> bool:
     """Return True when a Codex-bound tmux pane still has a live input plane."""
     surface = classify_input_surface(pane_text or "")
-    if surface.kind in {"busy", "input_ready", "blocked_prompt"}:
-        return True
 
     if runtime_capability_registry.known_runtime_kind_from_command(pane_command) == "codex":
         return True
@@ -196,6 +194,9 @@ def _codex_has_live_input_plane(
     command_name = _command_basename(pane_command)
     if command_name in _SHELL_COMMAND_NAMES:
         return False
+
+    if surface.kind in {"busy", "input_ready", "blocked_prompt"}:
+        return True
 
     # Codex TUI commonly appears as a node process in tmux. Unknown non-shell
     # commands are treated as live so we fail closed on shell fallbacks without

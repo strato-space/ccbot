@@ -875,6 +875,72 @@ class TestRuntimeInputDriverIntegration:
         mock_driver.send_raw_slash_command.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_send_to_window_fails_closed_when_shell_uses_generic_prompt_glyph(
+        self, mgr: SessionManager
+    ):
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(window_id="@1", pane_current_command="zsh")
+            )
+            mock_tmux.capture_pane = AsyncMock(return_value="❯ ")
+            mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
+            mock_driver.send_raw_slash_command = AsyncMock()
+
+            success, message = await mgr.send_to_window("@1", "hello")
+
+        assert success is False
+        assert "Codex live process is not active" in message
+        mock_driver.send_text.assert_not_awaited()
+        mock_driver.send_raw_slash_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_send_to_window_keeps_codex_conversation_interrupted_writable_on_node_command(
+        self, mgr: SessionManager
+    ):
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+        pane_text = (
+            "previous output\n"
+            "■ Conversation interrupted - tell the model what to do differently.\n"
+            "› Find and fix a bug in @filename\n"
+            "  gpt-5.5 high · main · Context 29% left\n"
+        )
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+            )
+            mock_tmux.capture_pane = AsyncMock(return_value=pane_text)
+            mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
+            mock_driver.send_raw_slash_command = AsyncMock()
+
+            success, message = await mgr.send_to_window("@1", "try again")
+
+        assert success is True
+        assert message == "Sent to @1"
+        mock_driver.send_text.assert_awaited_once_with(
+            "@1",
+            "try again",
+            runtime_kind="codex",
+        )
+        mock_driver.send_raw_slash_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_send_to_window_fails_closed_on_blocked_prompt(
         self, mgr: SessionManager
     ):

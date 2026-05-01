@@ -405,6 +405,51 @@ async def test_update_status_message_detects_runtime_exit_even_when_pane_command
 
 
 @pytest.mark.asyncio
+async def test_update_status_message_emits_runtime_exit_warning_for_shell_generic_prompt_glyph(
+    mock_bot: AsyncMock,
+):
+    status_polling_mod._runtime_presence[(1, "@5")] = True
+    mock_window = MagicMock()
+    mock_window.window_id = "@5"
+    mock_window.pane_current_command = "zsh"
+
+    with (
+        patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+        patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.status_polling.enqueue_content_message",
+            new_callable=AsyncMock,
+        ) as mock_content,
+        patch(
+            "ccbot.handlers.status_polling.enqueue_pending_input_update",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "ccbot.handlers.status_polling.enqueue_status_update",
+            new_callable=AsyncMock,
+        ) as mock_status,
+        patch(
+            "ccbot.handlers.status_polling.build_discontinuity_image_data",
+            new_callable=AsyncMock,
+            return_value=[("discontinuity-screenshot.png", b"png-bytes")],
+        ),
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
+        mock_tmux.capture_pane = AsyncMock(return_value="❯ ")
+        mock_sm.get_process_descriptor.return_value = SimpleNamespace(runtime_kind="codex")
+        mock_sm.resolve_thread_for_window = AsyncMock(return_value=None)
+
+        await update_status_message(mock_bot, user_id=1, window_id="@5", thread_id=42)
+
+    mock_content.assert_awaited_once()
+    kwargs = mock_content.await_args.kwargs
+    assert kwargs["semantic_kind"] == "warning"
+    assert kwargs["warning_key"] == "runtime-discontinuity:exit:@5"
+    assert kwargs["image_data"] == [("discontinuity-screenshot.png", b"png-bytes")]
+    mock_status.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_update_status_message_does_not_emit_exit_warning_for_active_codex_footer_without_banner(
     mock_bot: AsyncMock,
 ):
