@@ -144,6 +144,180 @@ For bot restarts without touching the host, use:
 /home/tools/ccbot/scripts/restart.sh
 ```
 
+## Telegram MCP Recovery
+
+This section covers the local Telegram MCP sidecars used by operator tooling,
+not the production `ccbot.service` / `imm_arena_bot.service` Telegram bots.
+
+The two MCP contours are:
+
+- `tg-ro`: read-only Telegram MCP, proxy on `127.0.0.1:203`, repo
+  `/home/tools/telegram-mcp-ro`
+- `tg`: read/write Telegram MCP, proxy on `127.0.0.1:206`, repo
+  `/home/tools/telegram-mcp`
+
+### Symptoms
+
+Treat these as MCP sidecar/cache symptoms:
+
+- `mcp__tg_ro__.list_chats` or `mcp__tg__.list_chats` returns
+  `CHAT-ERR-*`
+- topic/user helpers return generic `GEN-ERR-*` after a previously working
+  session
+- contact helpers return `CONTACT-ERR-*`
+- Codex tool transport reports an HTML `502 Bad Gateway` from nginx instead of
+  JSON/tool output
+- `list_topics` / `resolve_username` fails until the Telethon entity cache is
+  warmed
+
+Do not diagnose this from a bare `curl http://127.0.0.1:203/` or `:206/`
+alone. The proxy may return `503` to a plain GET even when the real MCP stream
+path is usable. The proof of recovery is a successful MCP `list_chats` call.
+
+### First recovery attempt: warm both entity caches
+
+Run both list calls before restarting anything:
+
+```text
+mcp__tg_ro__.list_chats({"limit": 5})
+mcp__tg__.list_chats({"limit": 5})
+```
+
+Expected result: both return chat lists. This warms the Telethon entity cache
+and often fixes follow-up `get_entity(...)` failures for group/topic helpers.
+
+### Restart both Telegram MCP sidecars
+
+Use this only if both `list_chats` calls still fail.
+
+1. Inspect current processes and ports:
+
+```bash
+ps -eo pid,ppid,stat,cmd --sort=pid \
+  | grep -E 'telegram-mcp-ro|telegram-mcp run main.py|mcp-proxy --host=127\.0\.0\.1 --port=20[36]' \
+  | grep -v grep || true
+
+ss -ltnp | grep -E ':20(3|6)\b' || true
+```
+
+2. Stop stale processes by explicit PID, or use a script that avoids killing
+   its own shell. Avoid broad `pkill -f ...` one-liners from an interactive
+   recovery shell; they can match the recovery command itself and abort the
+   restart halfway.
+
+```bash
+python3 - <<'PY'
+import os
+import signal
+import time
+
+patterns = [
+    'node /usr/bin/mcp-proxy --host=127.0.0.1 --port=203 ',
+    'node /usr/bin/mcp-proxy --host=127.0.0.1 --port=206 ',
+    '/bin/sh -c uv --directory /home/tools/telegram-mcp-ro run main.py',
+    '/bin/sh -c uv --directory /home/tools/telegram-mcp run main.py',
+    'uv --directory /home/tools/telegram-mcp-ro run main.py',
+    'uv --directory /home/tools/telegram-mcp run main.py',
+    '/home/tools/telegram-mcp-ro/.venv/bin/python3 main.py',
+    '/home/tools/telegram-mcp/.venv/bin/python3 main.py',
+]
+self_pid = os.getpid()
+targets = []
+
+for name in os.listdir('/proc'):
+    if not name.isdigit():
+        continue
+    pid = int(name)
+    if pid == self_pid:
+        continue
+    try:
+        cmdline = (
+            open(f'/proc/{pid}/cmdline', 'rb')
+            .read()
+            .replace(b'\0', b' ')
+            .decode('utf-8', 'ignore')
+            .strip()
+        )
+    except OSError:
+        continue
+    if any(pattern in cmdline for pattern in patterns):
+        targets.append(pid)
+
+for pid in targets:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+time.sleep(1)
+
+for pid in targets:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        continue
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+PY
+```
+
+3. Restart detached from the recovery shell with `setsid`; otherwise the proxy
+   can die when the shell/tool session exits and the client will keep seeing
+   `502 Bad Gateway`.
+
+```bash
+mkdir -p /tmp/mcp-restart-logs
+
+setsid -f sh -c 'exec /usr/bin/mcp-proxy \
+  --host=127.0.0.1 --port=203 \
+  --server=stream --streamEndpoint=/ --stateless \
+  --shell "uv --directory /home/tools/telegram-mcp-ro run main.py" \
+  >/tmp/mcp-restart-logs/telegram-mcp-ro.log 2>&1'
+
+setsid -f sh -c 'exec /usr/bin/mcp-proxy \
+  --host=127.0.0.1 --port=206 \
+  --server=stream --streamEndpoint=/ --stateless \
+  --shell "uv --directory /home/tools/telegram-mcp run main.py" \
+  >/tmp/mcp-restart-logs/telegram-mcp.log 2>&1'
+```
+
+Important: keep the `--shell` value as one quoted command string. Passing
+`--shell uv --directory ... run main.py` as split shell arguments can fail with
+`Failed to spawn: main.py`.
+
+4. Verify process and port state:
+
+```bash
+ps -eo pid,ppid,stat,cmd --sort=pid \
+  | grep -E 'telegram-mcp-ro|telegram-mcp run main.py|mcp-proxy --host=127\.0\.0\.1 --port=20[36]' \
+  | grep -v grep || true
+
+ss -ltnp | grep -E ':20(3|6)\b' || true
+
+tail -80 /tmp/mcp-restart-logs/telegram-mcp-ro.log
+tail -80 /tmp/mcp-restart-logs/telegram-mcp.log
+```
+
+Expected logs include a Telethon connection and:
+
+```text
+starting server on port 203
+starting server on port 206
+```
+
+5. Final proof:
+
+```text
+mcp__tg_ro__.list_chats({"limit": 5})
+mcp__tg__.list_chats({"limit": 5})
+```
+
+Both must return chat lists. If either still returns `502`, re-check that the
+proxy process is still parented to PID 1 or another long-lived supervisor, not
+to the recovery shell that just exited.
+
 ## Rollback
 
 Use rollback only if Codex cutover is broken enough that the bot cannot safely serve Telegram topics.
