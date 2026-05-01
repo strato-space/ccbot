@@ -188,135 +188,81 @@ and often fixes follow-up `get_entity(...)` failures for group/topic helpers.
 
 ### Restart both Telegram MCP sidecars
 
-Use this only if both `list_chats` calls still fail.
-
-1. Inspect current processes and ports:
+Use this only if both `list_chats` calls still fail. Normal recovery is a
+scoped systemd restart of the existing MCP proxy units:
 
 ```bash
-ps -eo pid,ppid,stat,cmd --sort=pid \
-  | grep -E 'telegram-mcp-ro|telegram-mcp run main.py|mcp-proxy --host=127\.0\.0\.1 --port=20[36]' \
-  | grep -v grep || true
+systemctl status mcp@tg-ro.service mcp@tg.service --no-pager -l
+journalctl -u mcp@tg-ro.service -u mcp@tg.service -n 120 --no-pager
 
+systemctl restart mcp@tg-ro.service mcp@tg.service
+sleep 5
+systemctl status mcp@tg-ro.service mcp@tg.service --no-pager -l
 ss -ltnp | grep -E ':20(3|6)\b' || true
 ```
 
-2. Stop stale processes by explicit PID, or use a script that avoids killing
-   its own shell. Avoid broad `pkill -f ...` one-liners from an interactive
-   recovery shell; they can match the recovery command itself and abort the
-   restart halfway.
+Expected state:
 
-```bash
-python3 - <<'PY'
-import os
-import signal
-import time
+- `mcp@tg-ro.service` is `active (running)` with
+  `/usr/bin/mcp-proxy --host=127.0.0.1 --port=203`
+- `mcp@tg.service` is `active (running)` with
+  `/usr/bin/mcp-proxy --host=127.0.0.1 --port=206`
+- `ss` shows listeners on `127.0.0.1:203` and `127.0.0.1:206`
+- journal output includes Telethon connection messages and
+  `starting server on port 203` / `starting server on port 206`
 
-patterns = [
-    'node /usr/bin/mcp-proxy --host=127.0.0.1 --port=203 ',
-    'node /usr/bin/mcp-proxy --host=127.0.0.1 --port=206 ',
-    '/bin/sh -c uv --directory /home/tools/telegram-mcp-ro run main.py',
-    '/bin/sh -c uv --directory /home/tools/telegram-mcp run main.py',
-    'uv --directory /home/tools/telegram-mcp-ro run main.py',
-    'uv --directory /home/tools/telegram-mcp run main.py',
-    '/home/tools/telegram-mcp-ro/.venv/bin/python3 main.py',
-    '/home/tools/telegram-mcp/.venv/bin/python3 main.py',
-]
-self_pid = os.getpid()
-targets = []
+The proxy command is configured by `/etc/systemd/system/mcp@.service` and the
+per-contour env files under `/home/tools/server/mcp/`:
 
-for name in os.listdir('/proc'):
-    if not name.isdigit():
-        continue
-    pid = int(name)
-    if pid == self_pid:
-        continue
-    try:
-        cmdline = (
-            open(f'/proc/{pid}/cmdline', 'rb')
-            .read()
-            .replace(b'\0', b' ')
-            .decode('utf-8', 'ignore')
-            .strip()
-        )
-    except OSError:
-        continue
-    if any(pattern in cmdline for pattern in patterns):
-        targets.append(pid)
+```ini
+# /home/tools/server/mcp/tg-ro.env
+PORT=203
+SHELL_CMD=uv --directory /home/tools/telegram-mcp-ro run main.py
 
-for pid in targets:
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-
-time.sleep(1)
-
-for pid in targets:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        continue
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-PY
+# /home/tools/server/mcp/tg.env
+PORT=206
+SHELL_CMD=uv --directory /home/tools/telegram-mcp run main.py
 ```
 
-3. Restart detached from the recovery shell with `setsid`; otherwise the proxy
-   can die when the shell/tool session exits and the client will keep seeing
-   `502 Bad Gateway`.
-
-```bash
-mkdir -p /tmp/mcp-restart-logs
-
-setsid -f sh -c 'exec /usr/bin/mcp-proxy \
-  --host=127.0.0.1 --port=203 \
-  --server=stream --streamEndpoint=/ --stateless \
-  --shell "uv --directory /home/tools/telegram-mcp-ro run main.py" \
-  >/tmp/mcp-restart-logs/telegram-mcp-ro.log 2>&1'
-
-setsid -f sh -c 'exec /usr/bin/mcp-proxy \
-  --host=127.0.0.1 --port=206 \
-  --server=stream --streamEndpoint=/ --stateless \
-  --shell "uv --directory /home/tools/telegram-mcp run main.py" \
-  >/tmp/mcp-restart-logs/telegram-mcp.log 2>&1'
-```
-
-Important: keep the `--shell` value as one quoted command string. Passing
-`--shell uv --directory ... run main.py` as split shell arguments can fail with
+Important: keep `SHELL_CMD` as one command string. Passing `--shell uv
+--directory ... run main.py` as split shell arguments can fail with
 `Failed to spawn: main.py`.
 
-4. Verify process and port state:
+### Final proof after recovery
 
-```bash
-ps -eo pid,ppid,stat,cmd --sort=pid \
-  | grep -E 'telegram-mcp-ro|telegram-mcp run main.py|mcp-proxy --host=127\.0\.0\.1 --port=20[36]' \
-  | grep -v grep || true
-
-ss -ltnp | grep -E ':20(3|6)\b' || true
-
-tail -80 /tmp/mcp-restart-logs/telegram-mcp-ro.log
-tail -80 /tmp/mcp-restart-logs/telegram-mcp.log
-```
-
-Expected logs include a Telethon connection and:
-
-```text
-starting server on port 203
-starting server on port 206
-```
-
-5. Final proof:
+After the restart, prove the actual MCP tool path, not just process liveness:
 
 ```text
 mcp__tg_ro__.list_chats({"limit": 5})
 mcp__tg__.list_chats({"limit": 5})
 ```
 
-Both must return chat lists. If either still returns `502`, re-check that the
-proxy process is still parented to PID 1 or another long-lived supervisor, not
-to the recovery shell that just exited.
+Both must return chat lists. If either still returns `502` or `CHAT-ERR-*`, read
+the systemd logs first:
+
+```bash
+journalctl -u mcp@tg-ro.service -u mcp@tg.service -n 200 --no-pager
+```
+
+### Emergency fallback only: clean up unsupervised manual proxies
+
+Use this only when a previous manual recovery left unsupervised `setsid`/shell
+processes occupying ports `203` or `206` and blocking the systemd units. Stop
+only the explicit stale process tree, then restart via `systemctl` again. Avoid
+broad `pkill -f ...` one-liners from an interactive recovery shell; they can
+match the recovery command itself and abort the restart halfway.
+
+```bash
+ps -eo pid,ppid,stat,cmd --sort=pid \
+  | grep -E 'telegram-mcp-ro|telegram-mcp run main.py|mcp-proxy --host=127\.0\.0\.1 --port=20[36]' \
+  | grep -v grep || true
+
+ss -ltnp | grep -E ':20(3|6)\b' || true
+
+# Kill only confirmed stale manual roots, then let systemd own the restart.
+kill <stale-mcp-proxy-pid>
+systemctl restart mcp@tg-ro.service mcp@tg.service
+```
 
 ## Rollback
 
