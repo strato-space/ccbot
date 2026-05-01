@@ -1,5 +1,7 @@
 """Tests for ccbot.transcript_parser — pure logic, no I/O."""
 
+import base64
+
 import pytest
 
 from ccbot.transcript_parser import (
@@ -147,6 +149,80 @@ class TestExtractToolResultText:
     )
     def test_extract_tool_result_text(self, content: str | list | None, expected: str):
         assert TranscriptParser.extract_tool_result_text(content) == expected
+
+
+class TestExtractToolResultDocuments:
+    def test_extracts_base64_document_block(self):
+        payload = base64.b64encode(b"tar-gz-bytes").decode()
+        content = [
+            {
+                "type": "document",
+                "filename": "archive.tar.gz",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/gzip",
+                    "data": payload,
+                },
+            }
+        ]
+
+        assert TranscriptParser.extract_tool_result_documents(content) == [
+            ("archive.tar.gz", "application/gzip", b"tar-gz-bytes")
+        ]
+
+    def test_extracts_file_data_url_and_sanitizes_filename(self):
+        payload = base64.b64encode(b"file-bytes").decode()
+        content = [
+            {
+                "type": "file",
+                "file": {
+                    "filename": "../report.txt",
+                    "file_data": f"data:text/plain;base64,{payload}",
+                },
+            }
+        ]
+
+        assert TranscriptParser.extract_tool_result_documents(content) == [
+            ("report.txt", "text/plain", b"file-bytes")
+        ]
+
+    def test_parse_entries_preserves_document_data_on_tool_result(
+        self,
+        make_jsonl_entry,
+        make_tool_result_block,
+    ):
+        payload = base64.b64encode(b"archive").decode()
+        entries = [
+            make_jsonl_entry(
+                "user",
+                [
+                    make_tool_result_block(
+                        "tool_1",
+                        [
+                            {
+                                "type": "document",
+                                "filename": "archive.tar.gz",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "application/gzip",
+                                    "data": payload,
+                                },
+                            }
+                        ],
+                    )
+                ],
+            )
+        ]
+
+        parsed, remaining = TranscriptParser.parse_entries(entries)
+
+        assert remaining == {}
+        assert len(parsed) == 1
+        assert parsed[0].content_type == "tool_result"
+        assert parsed[0].document_data == [
+            ("archive.tar.gz", "application/gzip", b"archive")
+        ]
+        assert parsed[0].image_data is None
 
 
 # ── parse_message ────────────────────────────────────────────────────────

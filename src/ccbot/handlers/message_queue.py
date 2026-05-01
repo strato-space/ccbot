@@ -44,6 +44,7 @@ from ..tmux_manager import tmux_manager
 from .message_sender import (
     NO_LINK_PREVIEW,
     PARSE_MODE,
+    send_document,
     send_photo,
     send_with_fallback,
     strip_sentinels,
@@ -98,6 +99,7 @@ class MessageTask:
     warning_key: str | None = None
     thread_id: int | None = None  # Telegram topic thread_id for targeted send
     image_data: list[tuple[str, bytes]] | None = None  # From tool_result images
+    document_data: list[tuple[str, str, bytes]] | None = None
     turn_generation: int = 0
 
 
@@ -244,6 +246,8 @@ def _can_merge_tasks(base: MessageTask, candidate: MessageTask) -> bool:
     if base.warning_key != candidate.warning_key:
         return False
     if base.image_data or candidate.image_data:
+        return False
+    if base.document_data or candidate.document_data:
         return False
     return True
 
@@ -680,6 +684,23 @@ async def _send_task_images(bot: Bot, chat_id: int, task: MessageTask) -> None:
     )
 
 
+async def _send_task_documents(bot: Bot, chat_id: int, task: MessageTask) -> None:
+    """Send documents attached to a task, if any."""
+    if not task.document_data:
+        return
+    logger.info(
+        "Sending %d document(s) in thread %s",
+        len(task.document_data),
+        task.thread_id,
+    )
+    await send_document(
+        bot,
+        chat_id,
+        task.document_data,
+        **_send_kwargs(task.thread_id),  # type: ignore[arg-type]
+    )
+
+
 async def _is_task_binding_active(
     user_id: int,
     window_id: str,
@@ -815,6 +836,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                     message_id=edit_msg_id,
                 )
                 await _send_task_images(bot, chat_id, task)
+                await _send_task_documents(bot, chat_id, task)
                 await _check_and_send_status(
                     bot,
                     user_id,
@@ -836,6 +858,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                         link_preview_options=NO_LINK_PREVIEW,
                     )
                     await _send_task_images(bot, chat_id, task)
+                    await _send_task_documents(bot, chat_id, task)
                     await _check_and_send_status(
                         bot,
                         user_id,
@@ -973,6 +996,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         )
         return
     await _send_task_images(bot, chat_id, task)
+    await _send_task_documents(bot, chat_id, task)
 
     if delivered_parts > 0 and is_pre_final_visible_semantic_kind(task.semantic_kind):
         _latest_pre_final_visible_kind[(user_id, tid)] = task.semantic_kind
@@ -1083,7 +1107,7 @@ async def _process_warning_content_task(
 ) -> None:
     """Deduplicate repeated warning bubbles and add a counter for N>2."""
     text = (task.text or "\n\n".join(task.parts)).strip()
-    if not text and not task.image_data:
+    if not text and not task.image_data and not task.document_data:
         return
 
     thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
@@ -1102,6 +1126,14 @@ async def _process_warning_content_task(
             raise
         except Exception as exc:
             logger.warning("Failed to send warning screenshot(s): %s", exc)
+
+    if task.document_data and not same_warning:
+        try:
+            await _send_task_documents(bot, chat_id, task)
+        except RetryAfter:
+            raise
+        except Exception as exc:
+            logger.warning("Failed to send warning document(s): %s", exc)
 
     if current is not None and text:
         msg_id, stored_wid, last_text, repeat_count = current
@@ -2039,6 +2071,7 @@ async def enqueue_content_message(
     text: str | None = None,
     thread_id: int | None = None,
     image_data: list[tuple[str, bytes]] | None = None,
+    document_data: list[tuple[str, str, bytes]] | None = None,
     turn_generation: int = 0,
     warning_key: str | None = None,
 ) -> None:
@@ -2062,6 +2095,7 @@ async def enqueue_content_message(
         warning_key=warning_key,
         thread_id=thread_id,
         image_data=image_data,
+        document_data=document_data,
         turn_generation=turn_generation,
     )
     queue.put_nowait(task)

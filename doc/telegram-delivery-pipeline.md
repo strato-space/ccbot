@@ -136,7 +136,7 @@ Ordering guarantees:
 17. this ordering contract applies to the whole `pre-final visible artifact`
     class, not only to commentary
 18. if an already-started multipart content send becomes stale mid-flight, the
-    remaining parts and trailing image/status sends must abort rather than
+    remaining parts and trailing image/document/status sends must abort rather than
     surfacing below a newer turn or below the terminal turn artifact
 
 The pending-input artifact is outside that turn-output barrier. It previews

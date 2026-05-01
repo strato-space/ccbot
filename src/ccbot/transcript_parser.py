@@ -15,6 +15,7 @@ import base64
 import difflib
 import json
 import logging
+import mimetypes
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -267,6 +268,116 @@ class TranscriptParser:
             except Exception:
                 logger.debug("Failed to decode base64 image in tool_result")
         return images if images else None
+
+    @staticmethod
+    def _decode_base64_attachment(
+        data_str: str,
+    ) -> tuple[bytes, str | None] | tuple[None, None]:
+        """Decode a raw base64 or data-URL attachment payload."""
+        if not data_str:
+            return None, None
+        media_type: str | None = None
+        payload = data_str
+        if data_str.startswith("data:") and ";base64," in data_str:
+            header, payload = data_str.split(",", 1)
+            media_type = header.removeprefix("data:").split(";", 1)[0] or None
+        try:
+            return base64.b64decode(payload), media_type
+        except Exception:
+            logger.debug("Failed to decode base64 document in tool_result")
+            return None, None
+
+    @staticmethod
+    def _safe_document_filename(filename: str | None, index: int) -> str:
+        """Return a Telegram-safe attachment filename without path components."""
+        candidate = (filename or "").replace("\x00", "").strip()
+        if candidate:
+            candidate = candidate.replace("\\", "/").rsplit("/", 1)[-1].strip()
+        if not candidate or candidate in {".", ".."}:
+            return f"attachment-{index}.bin"
+        safe = re.sub(r"[^A-Za-z0-9._ -]+", "_", candidate).strip(" .")
+        if not safe or safe in {".", ".."}:
+            return f"attachment-{index}.bin"
+        if len(safe) > 180:
+            stem, dot, suffix = safe.rpartition(".")
+            if dot and stem:
+                safe = f"{stem[: max(1, 179 - len(suffix))]}.{suffix}"
+            else:
+                safe = safe[:180]
+        return safe
+
+    @classmethod
+    def extract_tool_result_documents(
+        cls,
+        content: list | Any,
+    ) -> list[tuple[str, str, bytes]] | None:
+        """Extract base64-encoded documents/files from a tool_result block.
+
+        Supported block shapes intentionally mirror the existing image source
+        shape while accepting common file/document aliases:
+
+        - {"type": "document", "filename": "...", "source": {"type": "base64", ...}}
+        - {"type": "file", "name": "...", "source": {"type": "base64", ...}}
+        - {"type": "file", "file": {"filename": "...", "file_data": "data:..."}}
+
+        Returns list of (filename, media_type, raw_bytes) tuples.
+        """
+        if not isinstance(content, list):
+            return None
+
+        documents: list[tuple[str, str, bytes]] = []
+        for item in content:
+            if not isinstance(item, dict) or item.get("type") not in {
+                "document",
+                "file",
+            }:
+                continue
+
+            filename = item.get("filename") or item.get("name")
+            media_type = item.get("media_type") or item.get("mime_type")
+            data_str = item.get("data") or item.get("file_data")
+
+            source = item.get("source")
+            if isinstance(source, dict):
+                if source.get("type") == "base64":
+                    data_str = data_str or source.get("data") or source.get("base64")
+                filename = filename or source.get("filename") or source.get("name")
+                media_type = (
+                    media_type or source.get("media_type") or source.get("mime_type")
+                )
+
+            file_obj = item.get("file") or item.get("document")
+            if isinstance(file_obj, dict):
+                data_str = (
+                    data_str
+                    or file_obj.get("file_data")
+                    or file_obj.get("data")
+                    or file_obj.get("base64")
+                )
+                filename = filename or file_obj.get("filename") or file_obj.get("name")
+                media_type = (
+                    media_type
+                    or file_obj.get("media_type")
+                    or file_obj.get("mime_type")
+                )
+
+            if not isinstance(data_str, str) or not data_str:
+                continue
+
+            raw_bytes, data_url_media_type = cls._decode_base64_attachment(data_str)
+            if raw_bytes is None:
+                continue
+
+            filename = cls._safe_document_filename(filename, len(documents) + 1)
+            media_type = (
+                media_type
+                or data_url_media_type
+                or mimetypes.guess_type(filename)[0]
+                or "application/octet-stream"
+            )
+            documents.append((filename, media_type, raw_bytes))
+
+        return documents if documents else None
 
     @classmethod
     def parse_message(cls, data: dict) -> ParsedMessage | None:
@@ -599,6 +710,9 @@ class TranscriptParser:
                         result_content = block.get("content", "")
                         result_text = cls.extract_tool_result_text(result_content)
                         result_images = cls.extract_tool_result_images(result_content)
+                        result_documents = cls.extract_tool_result_documents(
+                            result_content
+                        )
                         is_error = block.get("is_error", False)
                         is_interrupted = result_text == cls._INTERRUPTED_TEXT
                         tool_info = pending_tools.pop(tool_use_id, None)
@@ -660,6 +774,7 @@ class TranscriptParser:
                                     tool_use_id=_tuid,
                                     timestamp=entry_timestamp,
                                     image_data=result_images,
+                                    document_data=result_documents,
                                 )
                             )
                         elif tool_summary:
@@ -707,9 +822,10 @@ class TranscriptParser:
                                     tool_use_id=_tuid,
                                     timestamp=entry_timestamp,
                                     image_data=result_images,
+                                    document_data=result_documents,
                                 )
                             )
-                        elif result_text or result_images:
+                        elif result_text or result_images or result_documents:
                             result.append(
                                 ParsedEntry(
                                     role="assistant",
@@ -723,6 +839,7 @@ class TranscriptParser:
                                     tool_use_id=_tuid,
                                     timestamp=entry_timestamp,
                                     image_data=result_images,
+                                    document_data=result_documents,
                                 )
                             )
 

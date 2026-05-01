@@ -20,7 +20,13 @@ import io
 import logging
 from typing import Any
 
-from telegram import Bot, InputMediaPhoto, LinkPreviewOptions, Message
+from telegram import (
+    Bot,
+    InputMediaDocument,
+    InputMediaPhoto,
+    LinkPreviewOptions,
+    Message,
+)
 from telegram.error import RetryAfter
 
 from ..markdown_v2 import convert_markdown
@@ -124,6 +130,57 @@ async def send_photo(
         raise
     except Exception as e:
         logger.error("Failed to send photo to %d: %s", chat_id, e)
+
+
+def _named_bytes_io(raw_bytes: bytes, filename: str) -> io.BytesIO:
+    """Create a BytesIO with a name so Telegram preserves filenames."""
+    bio = io.BytesIO(raw_bytes)
+    bio.name = filename
+    return bio
+
+
+async def send_document(
+    bot: Bot,
+    chat_id: int,
+    document_data: list[tuple[str, str, bytes]],
+    **kwargs: Any,
+) -> None:
+    """Send document(s) to chat.
+
+    Args:
+        bot: Telegram Bot instance
+        chat_id: Target chat ID
+        document_data: List of (filename, media_type, raw_bytes) tuples
+        **kwargs: Extra kwargs passed to send_document/send_media_group
+    """
+    if not document_data:
+        return
+    try:
+        if len(document_data) == 1:
+            filename, _media_type, raw_bytes = document_data[0]
+            await bot.send_document(
+                chat_id=chat_id,
+                document=_named_bytes_io(raw_bytes, filename),
+                filename=filename,
+                **kwargs,
+            )
+        else:
+            media = [
+                InputMediaDocument(
+                    media=_named_bytes_io(raw_bytes, filename),
+                    filename=filename,
+                )
+                for filename, _media_type, raw_bytes in document_data
+            ]
+            await bot.send_media_group(
+                chat_id=chat_id,
+                media=media,
+                **kwargs,
+            )
+    except RetryAfter:
+        raise
+    except Exception as e:
+        logger.error("Failed to send document to %d: %s", chat_id, e)
 
 
 async def safe_reply(message: Message, text: str, **kwargs: Any) -> Message:

@@ -432,6 +432,7 @@ class SessionMonitor:
                                 if (
                                     not entry.text
                                     and not entry.image_data
+                                    and not entry.document_data
                                     and entry.delivery_class != "lifecycle"
                                 ):
                                     continue
@@ -451,6 +452,7 @@ class SessionMonitor:
                                         role=entry.role,
                                         tool_name=entry.tool_name,
                                         image_data=entry.image_data,
+                                        document_data=entry.document_data,
                                         timestamp=entry.timestamp,
                                         runtime_kind=entry.runtime_kind,
                                         event_kind=entry.event_kind,
@@ -508,6 +510,7 @@ class SessionMonitor:
                     if (
                         not entry.text
                         and not entry.image_data
+                        and not entry.document_data
                         and entry.delivery_class != "lifecycle"
                     ):
                         continue
@@ -527,6 +530,7 @@ class SessionMonitor:
                             role=entry.role,
                             tool_name=entry.tool_name,
                             image_data=entry.image_data,
+                            document_data=entry.document_data,
                             timestamp=entry.timestamp,
                             runtime_kind=entry.runtime_kind,
                             event_kind=entry.event_kind,

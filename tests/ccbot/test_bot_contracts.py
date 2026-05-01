@@ -1,9 +1,9 @@
 """Contract tests for preserved out-of-scope bot surfaces.
 
 These tests freeze the compatibility boundary while Codex-specific work lands.
-They cover voice handling, photo forwarding, topic close/rename cleanup, and
-raw slash-command passthrough so refactors cannot silently change behavior in
-shared modules.
+They cover voice handling, photo/document forwarding, topic close/rename
+cleanup, and raw slash-command passthrough so refactors cannot silently change
+behavior in shared modules.
 """
 
 from types import SimpleNamespace
@@ -114,6 +114,7 @@ class TestBotRegistration:
 
         assert "forward_command_handler" in callbacks
         assert "photo_handler" in callbacks
+        assert "document_handler" in callbacks
         assert "voice_handler" in callbacks
         assert "topic_closed_handler" in callbacks
         assert "topic_edited_handler" in callbacks
@@ -1792,6 +1793,59 @@ class TestMediaForwarding:
                 "@7",
                 f"look at this\n\n(image attached: {expected_path})",
             )
+
+    @pytest.mark.asyncio
+    async def test_document_forwarding_downloads_and_sends_attachment_path(
+        self, tmp_path
+    ):
+        update = _make_topic_update()
+        context = _make_context()
+        update.message.caption = "use this archive"
+
+        document = MagicMock(file_unique_id="doc-unique", file_name="../archive.tar.gz")
+        document.get_file = AsyncMock()
+        document_file = MagicMock()
+        document_file.download_to_drive = AsyncMock()
+        document.get_file.return_value = document_file
+        update.message.document = document
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._DOCUMENTS_DIR", tmp_path),
+            patch("ccbot.bot.time.time", return_value=1700000000),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.document_handler(update, context)
+
+            expected_path = tmp_path / "1700000000_doc-unique_archive.tar.gz"
+            document_file.download_to_drive.assert_called_once_with(expected_path)
+            mock_sm.send_to_window.assert_called_once_with(
+                "@7",
+                f"use this archive\n\n(document attached: {expected_path})",
+            )
+
+    @pytest.mark.asyncio
+    async def test_unsupported_content_message_mentions_documents(self):
+        update = _make_topic_update()
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            await bot_mod.unsupported_content_handler(update, context)
+
+        mock_reply.assert_called_once()
+        assert "document" in mock_reply.await_args.args[1]
 
     @pytest.mark.asyncio
     async def test_voice_handler_requires_api_key(self):

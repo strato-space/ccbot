@@ -533,6 +533,119 @@ async def test_process_warning_task_sends_images_before_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_process_content_task_sends_documents_after_text() -> None:
+    task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["Created archive"],
+        content_type="tool_result",
+        semantic_kind="tool_result",
+        text="Created archive",
+        document_data=[("archive.tar.gz", "application/gzip", b"tgz-bytes")],
+    )
+    bot = AsyncMock()
+    sent = AsyncMock()
+    sent.message_id = 701
+    call_order: list[str] = []
+
+    async def _send_text(*args, **kwargs):
+        call_order.append("text")
+        return sent
+
+    async def _send_documents(*args, **kwargs):
+        call_order.append("document")
+
+    with (
+        patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.message_queue.send_with_fallback",
+            new_callable=AsyncMock,
+            side_effect=_send_text,
+        ) as mock_send,
+        patch(
+            "ccbot.handlers.message_queue.send_document",
+            new_callable=AsyncMock,
+            side_effect=_send_documents,
+        ) as mock_document,
+        patch(
+            "ccbot.handlers.message_queue._check_and_send_status",
+            new_callable=AsyncMock,
+        ) as mock_status,
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+        mock_sm.get_window_for_thread.return_value = "@7"
+        mock_sm.get_topic_binding_state.return_value = "bound"
+        mock_sm.resolve_chat_id.return_value = 100
+
+        await _process_content_task(bot, 1, task)
+
+    mock_send.assert_awaited_once()
+    mock_document.assert_awaited_once()
+    assert mock_document.await_args.args[2] == [
+        ("archive.tar.gz", "application/gzip", b"tgz-bytes")
+    ]
+    mock_status.assert_awaited_once()
+    assert call_order == ["text", "document"]
+
+
+@pytest.mark.asyncio
+async def test_process_warning_task_sends_documents_before_text() -> None:
+    task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["archive evidence"],
+        content_type="warning",
+        semantic_kind=WARNING_SEMANTIC_KIND,
+        text="archive evidence",
+        document_data=[("archive.tar.gz", "application/gzip", b"tgz-bytes")],
+        warning_key="runtime-discontinuity:archive",
+    )
+    bot = AsyncMock()
+    sent = AsyncMock()
+    sent.message_id = 702
+    call_order: list[str] = []
+
+    async def _send_text(*args, **kwargs):
+        call_order.append("text")
+        return sent
+
+    async def _send_documents(*args, **kwargs):
+        call_order.append("document")
+
+    _warning_msg_info.clear()
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                side_effect=_send_text,
+            ) as mock_send,
+            patch(
+                "ccbot.handlers.message_queue.send_document",
+                new_callable=AsyncMock,
+                side_effect=_send_documents,
+            ) as mock_document,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+
+            await _process_content_task(bot, 1, task)
+
+        assert mock_document.await_count == 1
+        assert mock_send.await_count == 1
+        assert call_order == ["document", "text"]
+    finally:
+        _warning_msg_info.clear()
+
+
+@pytest.mark.asyncio
 async def test_process_warning_task_fallbacks_to_plain_edit_after_markdown_failure() -> (
     None
 ):

@@ -9,7 +9,7 @@ The current Codex adaptation only advertises the supported Telegram core lane:
 - control surface -> live tmux or external replay binding in the master
   ontology
 - directory / thread picker
-- text / voice / photo forwarding
+- text / voice / photo / document forwarding
 - history and screenshot inspection
 - a small supported Codex slash-command menu
 
@@ -143,7 +143,7 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | **editMessageMedia** | ✅ | Screenshot refresh replaces image in-place |
 | **deleteMessage** | ✅ | Status message cleanup, interactive UI cleanup |
 | **BotCommand + set_my_commands** | ✅ | Bot menu is limited to the supported Codex core lane plus a small passthrough subset |
-| **sendDocument** | ✅ | Screenshots sent as PNG documents |
+| **sendDocument** | ✅ | Screenshots and runtime document/file attachments sent as Telegram documents |
 | **ReplyKeyboardRemove** | ✅ | Used when switching away from reply keyboard |
 | **Codex command forwarding** | ✅ | Raw `/command` input is forwarded to tmux; the documented menu only exposes the supported Codex subset |
 | **Message rate limiting** | ✅ | 1.1s minimum interval per user to avoid flood control |

@@ -219,6 +219,7 @@ class NormalizedEvent:
     role: str = "assistant"
     tool_name: str | None = None
     image_data: list[tuple[str, bytes]] | None = None
+    document_data: list[tuple[str, str, bytes]] | None = None
     timestamp: str | None = None
     runtime_kind: str = "claude"
     event_kind: str = "message"

@@ -28,6 +28,17 @@ control surface at a time.
     - command execution progress
     - file-change churn
 
+- **Content attachment payload**
+  - file payload attached to a content task rather than a standalone control
+    artifact
+  - current examples:
+    - image data decoded from runtime `tool_result` blocks and delivered with
+      `sendPhoto`
+    - document/file data decoded from runtime `tool_result` blocks and delivered
+      with `sendDocument`
+  - follows the same stale-turn, stale-binding, and pre-final closure guards as
+    its owning content task
+
 - **Pending input artifact**
   - mutable preview of future input already queued behind the current turn
   - examples:
@@ -157,7 +168,8 @@ tool results rather than being forced into command execution.
   may act as a lane-reopen fallback when hidden opener scaffolding already
   started a real turn and the pre-final/status lanes remained closed
 - if an already-started multipart send becomes stale mid-flight, the remaining
-  parts must abort rather than leaking below the new boundary
+  parts and trailing attachment payloads must abort rather than leaking below
+  the new boundary
 - pending input preview remains outside this terminal ordering barrier; it
   describes future queued input rather than current-turn output
 - pending input preview closes on queue-owned lifecycle transitions such as
