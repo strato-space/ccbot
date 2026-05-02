@@ -20,7 +20,8 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] in {"send_bot_message", "send"}:
         from .send_bot_message import send_bot_message_main
 
-        raise SystemExit(send_bot_message_main(sys.argv[2:]))
+        command_name = sys.argv[1]
+        raise SystemExit(send_bot_message_main(sys.argv[2:], prog=f"ccbot {command_name}"))
 
     logging.basicConfig(
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",

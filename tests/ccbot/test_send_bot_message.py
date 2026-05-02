@@ -279,3 +279,16 @@ def test_send_bot_message_missing_token_returns_error_dict(monkeypatch):
 
 def test_telegram_token_env_is_scrubbed_from_runtime_children():
     assert "TELEGRAM_TOKEN" in config_mod.SENSITIVE_ENV_VARS
+
+
+def test_send_alias_help_uses_short_command_name():
+    help_text = sender._build_parser(prog="ccbot send").format_help()
+
+    assert "usage: ccbot send " in help_text
+    assert "usage: ccbot send_bot_message" not in help_text
+
+
+def test_legacy_send_bot_message_help_keeps_legacy_command_name():
+    help_text = sender._build_parser().format_help()
+
+    assert "usage: ccbot send_bot_message " in help_text

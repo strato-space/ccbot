@@ -808,9 +808,9 @@ def _env_default(*names: str) -> str | None:
     return None
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def _build_parser(prog: str = "ccbot send_bot_message") -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="ccbot send_bot_message",
+        prog=prog,
         description=(
             "Send text and/or a file to this ccbot instance's Telegram chat. "
             "Defaults to the persisted CCBOT_DIR state; explicit chat/thread "
@@ -851,8 +851,12 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def send_bot_message_main(argv: list[str] | None = None) -> int:
-    parser = _build_parser()
+def send_bot_message_main(
+    argv: list[str] | None = None,
+    *,
+    prog: str = "ccbot send_bot_message",
+) -> int:
+    parser = _build_parser(prog=prog)
     args = parser.parse_args(argv)
     try:
         message = _read_message_from_args(args)
