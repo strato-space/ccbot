@@ -17,6 +17,20 @@ from ccbot.session import SessionManager
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "codex"
 
 
+def test_codex_catalog_defaults_to_codex_home_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "runtime-codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    catalog = CodexThreadCatalog()
+
+    assert catalog.codex_home == codex_home
+    assert catalog.session_index_path == codex_home / "session_index.jsonl"
+    assert catalog.sessions_root == codex_home / "sessions"
+
+
 def _build_fixture_codex_home(tmp_path: Path) -> Path:
     codex_home = tmp_path / ".codex"
     sessions_root = codex_home / "sessions" / "2026" / "04" / "02"

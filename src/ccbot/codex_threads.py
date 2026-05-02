@@ -14,6 +14,7 @@ The adapter keeps three concepts separate:
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from functools import cached_property
@@ -31,6 +32,19 @@ _UUID_RE = re.compile(
     r"[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{12}"
 )
+
+
+def _default_codex_home() -> Path:
+    """Return the Codex home used by the running runtime.
+
+    Codex supports ``CODEX_HOME`` for per-project/runtime session stores. ccbot
+    must follow that value instead of the service user's ``~/.codex`` or it can
+    keep tailing stale rollout files after a bot/runtime restart.
+    """
+    configured_home = os.getenv("CODEX_HOME", "").strip()
+    if configured_home:
+        return Path(configured_home).expanduser()
+    return Path.home() / ".codex"
 
 
 def normalize_cwd(cwd: str) -> str:
@@ -283,7 +297,7 @@ class CodexThreadCatalog:
         session_index_path: Path | None = None,
         sessions_root: Path | None = None,
     ) -> None:
-        self.codex_home = codex_home or Path.home() / ".codex"
+        self.codex_home = codex_home or _default_codex_home()
         self.session_index_path = session_index_path or (self.codex_home / "session_index.jsonl")
         self.sessions_root = sessions_root or (self.codex_home / "sessions")
 
