@@ -20,7 +20,12 @@ from .state_schema import DEFAULT_RUNTIME_KIND, SCHEMA_VERSION, LEGACY_BACKUP_SU
 logger = logging.getLogger(__name__)
 
 # Env vars that must not leak to child processes (e.g. Claude Code via tmux)
-SENSITIVE_ENV_VARS = {"TELEGRAM_BOT_TOKEN", "ALLOWED_USERS", "OPENAI_API_KEY"}
+SENSITIVE_ENV_VARS = {
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_TOKEN",
+    "ALLOWED_USERS",
+    "OPENAI_API_KEY",
+}
 
 
 class Config:

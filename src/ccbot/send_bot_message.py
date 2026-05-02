@@ -78,8 +78,24 @@ def _get_config() -> Any:
     return config
 
 
+def _get_default_state_file() -> Path:
+    try:
+        return _get_config().state_file
+    except ValueError as exc:
+        raise DeliveryTargetError(
+            f"Cannot load ccbot config to resolve default state file: {exc}"
+        ) from exc
+
+
+def _get_default_bot_token() -> str:
+    try:
+        return str(_get_config().telegram_bot_token or "")
+    except ValueError:
+        return ""
+
+
 def _read_state(state_path: str | Path | None = None) -> dict[str, Any]:
-    path = Path(state_path) if state_path is not None else _get_config().state_file
+    path = Path(state_path) if state_path is not None else _get_default_state_file()
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -176,7 +192,14 @@ def _target_from_surface(
         )
 
     thread_id = numeric_id
-    chat_id = group_chat_ids.get(f"{user_id}:{thread_id}", user_id)
+    route_key = f"{user_id}:{thread_id}"
+    chat_id = group_chat_ids.get(route_key)
+    if chat_id is None:
+        raise DeliveryTargetError(
+            "Cannot resolve Telegram group chat_id for topic surface "
+            f"{surface_key!r}; missing group_chat_ids[{route_key!r}]. "
+            "Pass --chat-id explicitly."
+        )
     return DeliveryTarget(
         chat_id=normalize_chat_id(chat_id),
         message_thread_id=thread_id,
@@ -211,7 +234,9 @@ def _surface_candidates(state: dict[str, Any]) -> list[DeliveryTarget]:
                     group_chat_ids=group_ids,
                     reason="state_surface_binding",
                 )
-            except (DeliveryTargetError, ValueError):
+            except ValueError as exc:
+                if isinstance(exc, DeliveryTargetError):
+                    raise
                 continue
             dedupe_key = (target.chat_id, target.message_thread_id)
             if dedupe_key in seen:
@@ -346,6 +371,12 @@ def resolve_delivery_target(
                 else f"c:{routed_chat_id}",
                 reason="state_group_chat_id",
             )
+        if explicit_thread_id is not None:
+            raise DeliveryTargetError(
+                "Cannot resolve Telegram group chat_id for --user-id/--thread-id; "
+                f"missing group_chat_ids['{explicit_user_id}:{explicit_thread_id}']. "
+                "Pass --chat-id explicitly."
+            )
         return DeliveryTarget(
             chat_id=normalize_chat_id(explicit_user_id),
             message_thread_id=explicit_thread_id,
@@ -358,17 +389,8 @@ def resolve_delivery_target(
     if not candidates:
         candidates = _routing_coordinate_candidates(state)
 
-    chat_surface_candidates = [
-        candidate
-        for candidate in candidates
-        if candidate.surface_key and candidate.surface_key.startswith("c:")
-    ]
-    if len(chat_surface_candidates) == 1:
-        return chat_surface_candidates[0]
     if len(candidates) == 1:
         return candidates[0]
-    if len(chat_surface_candidates) > 1:
-        candidates = chat_surface_candidates
 
     raise DeliveryTargetError(
         "Cannot resolve a unique ccbot delivery target from state; pass "
@@ -557,7 +579,7 @@ async def send_bot_message(
     state_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Send text and optional file payload to a resolved ccbot Telegram target."""
-    bot_token = token or os.getenv("TELEGRAM_TOKEN") or _get_config().telegram_bot_token
+    bot_token = token or os.getenv("TELEGRAM_TOKEN") or _get_default_bot_token()
     if not bot_token:
         return {"status": "error", "message": "Missing TELEGRAM_BOT_TOKEN"}
 

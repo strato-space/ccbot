@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 from ccbot import send_bot_message as sender
+from ccbot import config as config_mod
 
 
 class _FakeBot:
@@ -56,18 +57,12 @@ def _write_state(path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_resolve_delivery_target_prefers_no_topics_main_chat(tmp_path):
+def test_resolve_delivery_target_single_main_chat_surface(tmp_path):
     state_path = tmp_path / "state.json"
     _write_state(
         state_path,
         {
-            "surface_bindings": {
-                "12345": {
-                    "t:42": "@7",
-                    "c:-100200300": "@8",
-                }
-            },
-            "group_chat_ids": {"12345:42": -100200300},
+            "surface_bindings": {"12345": {"c:-100200300": "@8"}},
         },
     )
 
@@ -114,6 +109,52 @@ def test_resolve_delivery_target_ambiguous_requires_explicit_target(tmp_path):
         assert "Cannot resolve a unique ccbot delivery target" in str(exc)
     else:
         raise AssertionError("ambiguous target should fail closed")
+
+
+def test_resolve_delivery_target_topic_without_group_chat_id_fails_closed(tmp_path):
+    state_path = tmp_path / "state.json"
+    _write_state(
+        state_path,
+        {"surface_bindings": {"12345": {"t:42": "@7"}}},
+    )
+
+    try:
+        sender.resolve_delivery_target(state_path=state_path)
+    except sender.DeliveryTargetError as exc:
+        assert "Cannot resolve Telegram group chat_id" in str(exc)
+    else:
+        raise AssertionError("topic without group chat_id must fail closed")
+
+
+def test_resolve_delivery_target_user_thread_without_group_chat_id_fails_closed(tmp_path):
+    state_path = tmp_path / "state.json"
+    _write_state(state_path, {"group_chat_ids": {}})
+
+    try:
+        sender.resolve_delivery_target(
+            user_id="12345",
+            message_thread_id="42",
+            state_path=state_path,
+        )
+    except sender.DeliveryTargetError as exc:
+        assert "Cannot resolve Telegram group chat_id" in str(exc)
+    else:
+        raise AssertionError("--user-id/--thread-id without group chat_id must fail closed")
+
+
+def test_resolve_delivery_target_explicit_chat_id_allows_thread_without_state(tmp_path):
+    state_path = tmp_path / "state.json"
+    _write_state(state_path, {})
+
+    target = sender.resolve_delivery_target(
+        chat_id="-100200300",
+        message_thread_id="42",
+        state_path=state_path,
+    )
+
+    assert target.chat_id == -100200300
+    assert target.message_thread_id == 42
+    assert target.reason == "explicit_chat_id"
 
 
 def test_send_bot_message_document_from_default_state(monkeypatch, tmp_path):
@@ -186,3 +227,55 @@ def test_send_bot_message_file_base64_photo(monkeypatch, tmp_path):
     assert captured["attachment_kind"] == "photo"
     assert captured["attachment_filename"] == "attachment.png"
     assert captured["attachment_bytes"] == b"\x89PNG"
+
+
+def test_send_bot_message_explicit_token_and_chat_id_does_not_need_config(
+    monkeypatch,
+    tmp_path,
+):
+    captured: dict = {}
+
+    def _bot_factory(token: str):
+        assert token == "token-explicit"
+        return _FakeBot(token, captured)
+
+    def _broken_config():
+        raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required")
+
+    monkeypatch.setattr(sender, "Bot", _bot_factory)
+    monkeypatch.setattr(sender, "_get_config", _broken_config)
+
+    result = asyncio.run(
+        sender.send_bot_message(
+            message="hello",
+            token="token-explicit",
+            chat_id="-100200300",
+            message_thread_id="42",
+            state_path=tmp_path / "missing-state.json",
+        )
+    )
+
+    assert result["status"] == "success"
+    assert captured["chat_id"] == -100200300
+    assert captured["message_thread_id"] == 42
+
+
+def test_send_bot_message_missing_token_returns_error_dict(monkeypatch):
+    def _broken_config():
+        raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required")
+
+    monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
+    monkeypatch.setattr(sender, "_get_config", _broken_config)
+
+    result = asyncio.run(
+        sender.send_bot_message(
+            message="hello",
+            chat_id="-100200300",
+        )
+    )
+
+    assert result == {"status": "error", "message": "Missing TELEGRAM_BOT_TOKEN"}
+
+
+def test_telegram_token_env_is_scrubbed_from_runtime_children():
+    assert "TELEGRAM_TOKEN" in config_mod.SENSITIVE_ENV_VARS
