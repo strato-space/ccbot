@@ -72,6 +72,12 @@ def _make_context(*, bot_username: str = "ccbot", bot_id: int = 999) -> MagicMoc
     return context
 
 
+def _write_test_webp(path) -> None:
+    from PIL import Image
+
+    Image.new("RGBA", (2, 2), (255, 0, 0, 255)).save(path, format="WEBP")
+
+
 class TestBotRegistration:
     def test_create_bot_keeps_voice_photo_and_passthrough_handlers(self, monkeypatch):
         """Freeze the public routing surface exposed by create_bot()."""
@@ -115,6 +121,7 @@ class TestBotRegistration:
         assert "forward_command_handler" in callbacks
         assert "photo_handler" in callbacks
         assert "document_handler" in callbacks
+        assert "sticker_handler" in callbacks
         assert "voice_handler" in callbacks
         assert "topic_closed_handler" in callbacks
         assert "topic_edited_handler" in callbacks
@@ -1845,7 +1852,194 @@ class TestMediaForwarding:
             )
 
     @pytest.mark.asyncio
-    async def test_unsupported_content_message_mentions_documents(self):
+    async def test_static_sticker_forwarding_normalizes_to_image_attachment(
+        self, tmp_path
+    ):
+        update = _make_topic_update()
+        context = _make_context()
+
+        sticker = MagicMock(
+            file_unique_id="sticker-static",
+            is_animated=False,
+            is_video=False,
+            emoji="🙂",
+        )
+        sticker.get_file = AsyncMock()
+        sticker_file = MagicMock()
+        sticker_file.download_to_drive = AsyncMock(
+            side_effect=lambda path: _write_test_webp(path)
+        )
+        sticker.get_file.return_value = sticker_file
+        update.message.sticker = sticker
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._IMAGES_DIR", tmp_path),
+            patch("ccbot.bot.time.time", return_value=1700000000),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.sticker_handler(update, context)
+
+            expected_source = tmp_path / "1700000000_sticker-static.webp"
+            expected_path = tmp_path / "1700000000_sticker-static.png"
+            sticker_file.download_to_drive.assert_called_once_with(expected_source)
+            assert expected_path.exists()
+            mock_sm.send_to_window.assert_called_once_with(
+                "@7",
+                f"Sticker emoji: 🙂\n\n(image attached: {expected_path})",
+            )
+
+    @pytest.mark.asyncio
+    async def test_animated_sticker_forwarding_uses_thumbnail_image(
+        self, tmp_path
+    ):
+        update = _make_topic_update()
+        context = _make_context()
+
+        thumbnail = MagicMock(file_unique_id="thumb-static")
+        thumbnail.get_file = AsyncMock()
+        thumbnail_file = MagicMock()
+        thumbnail_file.download_to_drive = AsyncMock(
+            side_effect=lambda path: _write_test_webp(path)
+        )
+        thumbnail.get_file.return_value = thumbnail_file
+        sticker = MagicMock(
+            file_unique_id="sticker-animated",
+            is_animated=True,
+            is_video=False,
+            emoji=None,
+            thumbnail=thumbnail,
+        )
+        sticker.get_file = AsyncMock()
+        update.message.sticker = sticker
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._IMAGES_DIR", tmp_path),
+            patch("ccbot.bot.time.time", return_value=1700000000),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.sticker_handler(update, context)
+
+            expected_source = (
+                tmp_path / "1700000000_sticker-animated_thumb-static_thumbnail.webp"
+            )
+            expected_path = (
+                tmp_path / "1700000000_sticker-animated_thumb-static_thumbnail.png"
+            )
+            thumbnail_file.download_to_drive.assert_called_once_with(expected_source)
+            sticker.get_file.assert_not_called()
+            assert expected_path.exists()
+            mock_sm.send_to_window.assert_called_once_with(
+                "@7",
+                f"(image attached: {expected_path})",
+            )
+
+    @pytest.mark.asyncio
+    async def test_animated_sticker_without_thumbnail_fails_closed(self, tmp_path):
+        update = _make_topic_update()
+        context = _make_context()
+        sticker = MagicMock(
+            file_unique_id="sticker-animated",
+            is_animated=True,
+            is_video=False,
+            thumbnail=None,
+        )
+        sticker.get_file = AsyncMock()
+        update.message.sticker = sticker
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._IMAGES_DIR", tmp_path),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.sticker_handler(update, context)
+
+        sticker.get_file.assert_not_called()
+        mock_sm.send_to_window.assert_not_called()
+        mock_reply.assert_called_once()
+        await_args = mock_reply.await_args
+        assert await_args is not None
+        assert "no thumbnail" in await_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_sticker_forwarding_surfaces_blocked_prompt(self, tmp_path):
+        update = _make_topic_update()
+        context = _make_context()
+        sticker = MagicMock(
+            file_unique_id="sticker-static",
+            is_animated=False,
+            is_video=False,
+            emoji=None,
+        )
+        sticker.get_file = AsyncMock()
+        sticker_file = MagicMock()
+        sticker_file.download_to_drive = AsyncMock(
+            side_effect=lambda path: _write_test_webp(path)
+        )
+        sticker.get_file.return_value = sticker_file
+        update.message.sticker = sticker
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._IMAGES_DIR", tmp_path),
+            patch("ccbot.bot.time.time", return_value=1700000000),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+            patch(
+                "ccbot.bot._surface_blocked_prompt_state",
+                new_callable=AsyncMock,
+            ) as mock_blocked,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+            mock_sm.send_to_window = AsyncMock(
+                return_value=(False, bot_mod.BLOCKED_PROMPT_SEND_MESSAGE)
+            )
+
+            await bot_mod.sticker_handler(update, context)
+
+        mock_blocked.assert_awaited_once_with(
+            context.bot,
+            1,
+            "@7",
+            42,
+            reply_message=update.message,
+        )
+
+    @pytest.mark.asyncio
+    async def test_unsupported_content_message_mentions_documents_and_stickers(self):
         update = _make_topic_update()
         context = _make_context()
 
@@ -1856,7 +2050,12 @@ class TestMediaForwarding:
             await bot_mod.unsupported_content_handler(update, context)
 
         mock_reply.assert_called_once()
-        assert "document" in mock_reply.await_args.args[1]
+        await_args = mock_reply.await_args
+        assert await_args is not None
+        message = await_args.args[1]
+        assert "document" in message
+        assert "sticker" in message
+        assert "Stickers, video" not in message
 
     @pytest.mark.asyncio
     async def test_voice_handler_requires_api_key(self):

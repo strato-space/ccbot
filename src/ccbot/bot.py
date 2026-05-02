@@ -15,13 +15,14 @@ Core responsibilities:
     Unbound topics trigger the directory browser to create or resume a thread.
     The current handler path requires a resolved topic id; a future no-topics
     mode would need an explicit `thread_id is None` main-chat path.
-  - Photo/document handling: photos and documents sent by user are downloaded
-    and forwarded to Codex as file paths (photo_handler, document_handler).
+  - Photo/document/sticker handling: photos, documents, and stickers sent by
+    user are downloaded and forwarded to Codex as file paths
+    (photo_handler, document_handler, sticker_handler).
   - Voice handling: voice messages are transcribed via OpenAI API and
     forwarded as text (voice_handler).
   - Automatic cleanup: closing a topic kills the associated window
-    (topic_closed_handler). Unsupported content (stickers, etc.)
-    is rejected with a warning (unsupported_content_handler).
+    (topic_closed_handler). Unsupported content (video, etc.) is rejected with
+    a warning (unsupported_content_handler).
   - Bot lifecycle management: post_init, post_shutdown, create_bot.
 
 Handler modules (in handlers/):
@@ -44,6 +45,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from telegram import (
     Bot,
@@ -241,6 +243,13 @@ class ControlSurface:
     @property
     def message_thread_id(self) -> int | None:
         return self.thread_id
+
+
+@dataclass(frozen=True)
+class _AttachmentInputTarget:
+    user_id: int
+    thread_id: int
+    window_id: str
 
 
 @dataclass(frozen=True)
@@ -2171,7 +2180,7 @@ async def unsupported_content_handler(
     update: Update,
     _context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Reply to non-text messages (stickers, video, etc.)."""
+    """Reply to unsupported non-text messages (video, etc.)."""
     if not update.message:
         return
     user = update.effective_user
@@ -2180,11 +2189,11 @@ async def unsupported_content_handler(
     logger.debug("Unsupported content from user %d", user.id)
     await safe_reply(
         update.message,
-        "⚠ Only text, photo, document, and voice messages are supported. Stickers, video, and other media cannot be forwarded to Codex.",
+        "⚠ Only text, photo, document, sticker, and voice messages are supported. Video and other media cannot be forwarded to Codex.",
     )
 
 
-# --- Image directory for incoming photos ---
+# --- Attachment directories for incoming media ---
 _IMAGES_DIR = ccbot_dir() / "images"
 _IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 _DOCUMENTS_DIR = ccbot_dir() / "documents"
@@ -2210,16 +2219,19 @@ def _sanitize_attachment_filename(filename: str | None, fallback: str) -> str:
     return safe
 
 
-async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle photos sent by the user: download and forward path to Codex."""
+async def _resolve_attachment_input_target(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> _AttachmentInputTarget | None:
+    """Resolve a media attachment to the bound live runtime input target."""
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
         if update.message:
             await safe_reply(update.message, "You are not authorized to use this bot.")
-        return
+        return None
 
-    if not update.message or not update.message.photo:
-        return
+    if not update.message:
+        return None
 
     chat = update.message.chat
     control_surface = control_surface_classifier(update)
@@ -2227,13 +2239,13 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if chat.type in ("group", "supergroup") and thread_id is not None:
         session_manager.set_group_chat_id(user.id, thread_id, chat.id)
 
-    # Current handler path requires a resolved Telegram topic.
+    # Current attachment path requires a resolved Telegram topic.
     if thread_id is None:
         await safe_reply(
             update.message,
             "❌ This build currently requires a Telegram topic. Create a named topic to start a session.",
         )
-        return
+        return None
 
     wid, using_shared_group_binding = _get_writable_window_for_surface(
         context,
@@ -2245,7 +2257,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             update.message,
             _build_unbound_input_message(user.id, control_surface),
         )
-        return
+        return None
 
     w = await tmux_manager.find_window_by_id(wid)
     if not w:
@@ -2263,7 +2275,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 f"❌ Shared window '{display}' no longer exists. Use /unbind, "
                 "then start a new session.",
             )
-        return
+        return None
 
     if await _surface_omx_question_state(
         context.bot,
@@ -2273,6 +2285,22 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         reply_message=update.message,
         window=w,
     ):
+        return None
+
+    return _AttachmentInputTarget(
+        user_id=user.id,
+        thread_id=thread_id,
+        window_id=wid,
+    )
+
+
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle photos sent by the user: download and forward path to Codex."""
+    if not update.message or not update.message.photo:
+        return
+
+    target = await _resolve_attachment_input_target(update, context)
+    if target is None:
         return
 
     # Download the highest-resolution photo
@@ -2292,16 +2320,19 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         text_to_send = f"(image attached: {file_path})"
 
     await update.message.chat.send_action(ChatAction.TYPING)
-    clear_status_msg_info(user.id, thread_id)
+    clear_status_msg_info(target.user_id, target.thread_id)
 
-    success, message = await session_manager.send_to_window(wid, text_to_send)
+    success, message = await session_manager.send_to_window(
+        target.window_id,
+        text_to_send,
+    )
     if not success:
         if message == BLOCKED_PROMPT_SEND_MESSAGE:
             await _surface_blocked_prompt_state(
                 context.bot,
-                user.id,
-                wid,
-                thread_id,
+                target.user_id,
+                target.window_id,
+                target.thread_id,
                 reply_message=update.message,
             )
             return
@@ -2314,67 +2345,11 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle Telegram documents: download and forward path to Codex."""
-    user = update.effective_user
-    if not user or not is_user_allowed(user.id):
-        if update.message:
-            await safe_reply(update.message, "You are not authorized to use this bot.")
-        return
-
     if not update.message or not update.message.document:
         return
 
-    chat = update.message.chat
-    control_surface = control_surface_classifier(update)
-    thread_id = _get_thread_id(update)
-    if chat.type in ("group", "supergroup") and thread_id is not None:
-        session_manager.set_group_chat_id(user.id, thread_id, chat.id)
-
-    # Current handler path requires a resolved Telegram topic.
-    if thread_id is None:
-        await safe_reply(
-            update.message,
-            "❌ This build currently requires a Telegram topic. Create a named topic to start a session.",
-        )
-        return
-
-    wid, using_shared_group_binding = _get_writable_window_for_surface(
-        context,
-        user.id,
-        control_surface,
-    )
-    if wid is None:
-        await safe_reply(
-            update.message,
-            _build_unbound_input_message(user.id, control_surface),
-        )
-        return
-
-    w = await tmux_manager.find_window_by_id(wid)
-    if not w:
-        display = session_manager.get_display_name(wid)
-        if not using_shared_group_binding:
-            session_manager.unbind_thread(user.id, thread_id)
-            await safe_reply(
-                update.message,
-                f"❌ Window '{display}' no longer exists. Binding removed.\n"
-                "Send a message to start a new session.",
-            )
-        else:
-            await safe_reply(
-                update.message,
-                f"❌ Shared window '{display}' no longer exists. Use /unbind, "
-                "then start a new session.",
-            )
-        return
-
-    if await _surface_omx_question_state(
-        context.bot,
-        user.id,
-        wid,
-        control_surface.message_thread_id,
-        reply_message=update.message,
-        window=w,
-    ):
+    target = await _resolve_attachment_input_target(update, context)
+    if target is None:
         return
 
     document = update.message.document
@@ -2399,16 +2374,19 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         text_to_send = f"(document attached: {file_path})"
 
     await update.message.chat.send_action(ChatAction.TYPING)
-    clear_status_msg_info(user.id, thread_id)
+    clear_status_msg_info(target.user_id, target.thread_id)
 
-    success, message = await session_manager.send_to_window(wid, text_to_send)
+    success, message = await session_manager.send_to_window(
+        target.window_id,
+        text_to_send,
+    )
     if not success:
         if message == BLOCKED_PROMPT_SEND_MESSAGE:
             await _surface_blocked_prompt_state(
                 context.bot,
-                user.id,
-                wid,
-                thread_id,
+                target.user_id,
+                target.window_id,
+                target.thread_id,
                 reply_message=update.message,
             )
             return
@@ -2417,6 +2395,116 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # Confirm to user
     await safe_reply(update.message, "📎 Document sent to Codex.")
+
+
+def _convert_attachment_image_to_png(source_path: Path, png_path: Path) -> None:
+    """Convert a downloaded Telegram raster attachment to PNG."""
+    from PIL import Image
+
+    with Image.open(source_path) as image:
+        image.convert("RGBA").save(png_path, format="PNG")
+
+
+async def _download_attachment_image_as_png(
+    file_source: Any,
+    filename_stem: str,
+) -> Path:
+    """Download a Telegram image-like file and normalize it to PNG."""
+    source_path = _IMAGES_DIR / f"{filename_stem}.webp"
+    png_path = _IMAGES_DIR / f"{filename_stem}.png"
+    tg_file = await file_source.get_file()
+    await tg_file.download_to_drive(source_path)
+    await asyncio.to_thread(
+        _convert_attachment_image_to_png,
+        source_path,
+        png_path,
+    )
+    return png_path
+
+
+async def _sticker_image_path(sticker: Any) -> tuple[Path | None, str | None]:
+    """Persist a Telegram sticker as the image-equivalent artifact for runtime input."""
+    unique_id = _sanitize_attachment_filename(
+        getattr(sticker, "file_unique_id", None),
+        "sticker",
+    )
+    timestamp = int(time.time())
+    is_animated = bool(getattr(sticker, "is_animated", False))
+    is_video = bool(getattr(sticker, "is_video", False))
+
+    if is_animated or is_video:
+        thumbnail = getattr(sticker, "thumbnail", None)
+        if thumbnail is None:
+            return (
+                None,
+                "⚠ Animated/video sticker has no thumbnail; cannot forward it as an image yet.",
+            )
+        thumbnail_id = _sanitize_attachment_filename(
+            getattr(thumbnail, "file_unique_id", None),
+            "thumbnail",
+        )
+        file_source = thumbnail
+        filename_stem = f"{timestamp}_{unique_id}_{thumbnail_id}_thumbnail"
+    else:
+        file_source = sticker
+        filename_stem = f"{timestamp}_{unique_id}"
+
+    try:
+        return await _download_attachment_image_as_png(file_source, filename_stem), None
+    except Exception as exc:
+        logger.warning("Failed to normalize Telegram sticker as image: %s", exc)
+        return None, "⚠ Could not convert sticker to an image for Codex."
+
+
+def _build_sticker_runtime_text(sticker: Any, image_path: Path) -> str:
+    """Build the runtime message while preserving the image attachment contract."""
+    emoji = getattr(sticker, "emoji", None)
+    if isinstance(emoji, str) and emoji.strip():
+        return f"Sticker emoji: {emoji.strip()}\n\n(image attached: {image_path})"
+    return f"(image attached: {image_path})"
+
+
+async def sticker_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle Telegram stickers as image-equivalent runtime attachments."""
+    if not update.message or not update.message.sticker:
+        return
+
+    target = await _resolve_attachment_input_target(update, context)
+    if target is None:
+        return
+
+    sticker = update.message.sticker
+    image_path, warning = await _sticker_image_path(sticker)
+    if image_path is None:
+        await safe_reply(
+            update.message,
+            warning or "⚠ Could not forward sticker as an image.",
+        )
+        return
+
+    text_to_send = _build_sticker_runtime_text(sticker, image_path)
+
+    await update.message.chat.send_action(ChatAction.TYPING)
+    clear_status_msg_info(target.user_id, target.thread_id)
+
+    success, message = await session_manager.send_to_window(
+        target.window_id,
+        text_to_send,
+    )
+    if not success:
+        if message == BLOCKED_PROMPT_SEND_MESSAGE:
+            await _surface_blocked_prompt_state(
+                context.bot,
+                target.user_id,
+                target.window_id,
+                target.thread_id,
+                reply_message=update.message,
+            )
+            return
+        await safe_reply(update.message, f"❌ {message}")
+        return
+
+    await safe_reply(update.message, "🏷 Sticker sent to Codex as image.")
 
 
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4213,9 +4301,11 @@ def create_bot() -> Application:
     application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     # Documents/files: download and forward file path to Codex
     application.add_handler(MessageHandler(filters.Document.ALL, document_handler))
+    # Stickers: normalize static stickers/thumbnails to image attachments
+    application.add_handler(MessageHandler(filters.Sticker.ALL, sticker_handler))
     # Voice: transcribe via OpenAI and forward text to Codex
     application.add_handler(MessageHandler(filters.VOICE, voice_handler))
-    # Catch-all: non-text content (stickers, video, etc.)
+    # Catch-all: unsupported non-text content (video, etc.)
     application.add_handler(
         MessageHandler(
             ~filters.COMMAND & ~filters.TEXT & ~filters.StatusUpdate.ALL,

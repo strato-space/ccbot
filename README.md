@@ -133,6 +133,7 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
 - **Prompt-safe control lane** — Detect `input ready`, `busy`, and `blocked prompt` terminal states before sending input
 - **Voice messages** — Voice messages are transcribed via OpenAI and forwarded as text
 - **Document messages** — Telegram documents/files such as `tar.gz` archives are downloaded and forwarded to the runtime as local file paths
+- **Sticker messages** — Telegram stickers are normalized to image attachments for the runtime; animated/video stickers use their Telegram thumbnail when available
 - **Send messages** — Forward text to Codex via tmux keystrokes
 - **Codex command forwarding** — Forward raw Codex slash commands, with a small supported menu surface for `/clear`, `/compact`, `/diff`, `/exit`, `/init`, `/review`, and `/status`
 - **Create new conversations** — Start Codex conversations from Telegram via directory browser
@@ -360,17 +361,19 @@ routing warm-up in shared group surfaces.
 
 **Sending messages:**
 
-Once a topic is bound to a live tmux window, plain text, voice, photo, and
-document messages are forwarded to the active runtime for every allowed
-participant in that bound surface. Voice is transcribed first, while photos and
-documents are downloaded under `$CCBOT_DIR/images` or `$CCBOT_DIR/documents`
-and routed as local file paths.
+Once a topic is bound to a live tmux window, plain text, voice, photo,
+document, and sticker messages are forwarded to the active runtime for every
+allowed participant in that bound surface. Voice is transcribed first, while
+photos and stickers are downloaded under `$CCBOT_DIR/images`; documents are
+downloaded under `$CCBOT_DIR/documents`. Static stickers are normalized to PNG
+image attachments. Animated/video stickers use their Telegram thumbnail when
+available and fail closed when no thumbnail exists.
 
 If the topic is bound to an external persisted thread without live tmux, input
 injection fails closed with an explicit read-only warning and a reattach hint.
 
 Routing note:
-- Telegram text, voice, photo, and document inputs enter the equal message layer in `queue` mode by default.
+- Telegram text, voice, photo, document, and sticker inputs enter the equal message layer in `queue` mode by default.
 - `steer` is a routing semantic for runtime-aware control flows; it is not the same thing as raw terminal takeover.
 - Raw terminal control in tmux remains a separate operator layer and is never modeled as an ordinary queued message.
 - Multiline text sent to a writable live tmux runtime is pasted as one

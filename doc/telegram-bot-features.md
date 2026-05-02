@@ -9,7 +9,7 @@ The current Codex adaptation only advertises the supported Telegram core lane:
 - control surface -> live tmux or external replay binding in the master
   ontology
 - directory / thread picker
-- text / voice / photo / document forwarding
+- text / voice / photo / document / sticker forwarding
 - history and screenshot inspection
 - a small supported Codex slash-command menu
 
@@ -47,7 +47,7 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | **sendPhoto / sendDocument / sendAnimation** | Send images, files, GIFs with optional caption |
 | **sendVideo / sendAudio / sendVoice / sendVideoNote** | Video, audio, voice messages, video notes (circles) |
 | **sendMediaGroup** | Album-mode batch send (2-10 items). Supports photos, videos, documents, audio |
-| **sendSticker** | Send static/animated/video stickers |
+| **sendSticker** | Send static/animated/video stickers as outbound Telegram delivery |
 | **sendPaidMedia** | Send media behind Telegram Star paywall (Bot API 7.6+) |
 | **InputMediaPhoto / InputMediaDocument** | Edit media of sent messages via `editMessageMedia` |
 | **sendDice** | Send animated emoji dice (🎲🎯🏀⚽🎳🎰) |
@@ -144,6 +144,7 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | **deleteMessage** | ✅ | Status message cleanup, interactive UI cleanup |
 | **BotCommand + set_my_commands** | ✅ | Bot menu is limited to the supported Codex core lane plus a small passthrough subset |
 | **sendDocument** | ✅ | Screenshots and runtime document/file attachments sent as Telegram documents |
+| **Sticker ingress** | ✅ | Inbound Telegram stickers are normalized to runtime image attachments; animated/video stickers use Telegram thumbnails when available |
 | **ReplyKeyboardRemove** | ✅ | Used when switching away from reply keyboard |
 | **Codex command forwarding** | ✅ | Raw `/command` input is forwarded to tmux; the documented menu only exposes the supported Codex subset |
 | **Message rate limiting** | ✅ | 1.1s minimum interval per user to avoid flood control |
