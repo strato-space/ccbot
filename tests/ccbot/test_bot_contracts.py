@@ -92,11 +92,21 @@ class TestBotRegistration:
         class _StubBuilder:
             def __init__(self) -> None:
                 self._app = _StubApplication()
+                self.proxy_url = None
+                self.get_updates_proxy_url = None
 
             def token(self, _token):
                 return self
 
             def rate_limiter(self, _rate_limiter):
+                return self
+
+            def proxy(self, proxy_url):
+                self.proxy_url = proxy_url
+                return self
+
+            def get_updates_proxy(self, proxy_url):
+                self.get_updates_proxy_url = proxy_url
                 return self
 
             def post_init(self, _callback):
@@ -125,6 +135,55 @@ class TestBotRegistration:
         assert "voice_handler" in callbacks
         assert "topic_closed_handler" in callbacks
         assert "topic_edited_handler" in callbacks
+
+    def test_create_bot_applies_telegram_proxy_from_env(self, monkeypatch):
+        """Freeze explicit proxy wiring for PTB/HTTPX bootstrap."""
+
+        class _StubApplication:
+            def __init__(self) -> None:
+                self.handlers = []
+
+            def add_handler(self, handler) -> None:
+                self.handlers.append(handler)
+
+        class _StubBuilder:
+            def __init__(self) -> None:
+                self._app = _StubApplication()
+                self.proxy_url = None
+                self.get_updates_proxy_url = None
+
+            def token(self, _token):
+                return self
+
+            def rate_limiter(self, _rate_limiter):
+                return self
+
+            def proxy(self, proxy_url):
+                self.proxy_url = proxy_url
+                return self
+
+            def get_updates_proxy(self, proxy_url):
+                self.get_updates_proxy_url = proxy_url
+                return self
+
+            def post_init(self, _callback):
+                return self
+
+            def post_shutdown(self, _callback):
+                return self
+
+            def build(self):
+                return self._app
+
+        builder = _StubBuilder()
+        monkeypatch.setattr(bot_mod.config, "telegram_bot_token", "test-token")
+        monkeypatch.setattr(bot_mod.Application, "builder", lambda: builder)
+        monkeypatch.setenv("CCBOT_TELEGRAM_PROXY", "socks5h://127.0.0.1:10810")
+
+        bot_mod.create_bot()
+
+        assert builder.proxy_url == "socks5h://127.0.0.1:10810"
+        assert builder.get_updates_proxy_url == "socks5h://127.0.0.1:10810"
 
     def test_build_bot_commands_advertises_only_codex_core_lane(self):
         with patch.object(bot_mod.config, "claude_command", "codex"):

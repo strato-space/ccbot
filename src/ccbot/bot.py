@@ -41,6 +41,7 @@ Key functions: create_bot(), handle_new_message().
 import asyncio
 import io
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -262,6 +263,20 @@ class AddressedEvent:
 PENDING_SURFACE_STATE_KEY = "_pending_surface"
 PENDING_SURFACE_KEY = "_pending_surface_key"
 PENDING_SURFACE_SLOTS_KEY = "_pending_surface_slots"
+
+_TELEGRAM_PROXY_ENV_KEYS = (
+    "CCBOT_TELEGRAM_PROXY",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "WSS_PROXY",
+    "wss_proxy",
+    "WS_PROXY",
+    "ws_proxy",
+)
 
 
 def _default_launch_runtime_kind() -> str:
@@ -1076,6 +1091,15 @@ def build_bot_commands() -> list[BotCommand]:
         for cmd_name, desc in CODEX_MENU_COMMANDS.items():
             commands.append(BotCommand(cmd_name, desc))
     return commands
+
+
+def _telegram_proxy_from_env() -> str | None:
+    """Return the first configured Telegram HTTP proxy URL from the environment."""
+    for key in _TELEGRAM_PROXY_ENV_KEYS:
+        value = os.environ.get(key)
+        if value:
+            return value
+    return None
 
 
 async def _surface_blocked_prompt_state(
@@ -4258,14 +4282,14 @@ async def post_shutdown(application: Application) -> None:
 
 
 def create_bot() -> Application:
-    application = (
-        Application.builder()
-        .token(config.telegram_bot_token)
-        .rate_limiter(AIORateLimiter(max_retries=5))
-        .post_init(post_init)
-        .post_shutdown(post_shutdown)
-        .build()
+    builder = Application.builder().token(config.telegram_bot_token).rate_limiter(
+        AIORateLimiter(max_retries=5)
     )
+    telegram_proxy = _telegram_proxy_from_env()
+    if telegram_proxy:
+        builder = builder.proxy(telegram_proxy).get_updates_proxy(telegram_proxy)
+
+    application = builder.post_init(post_init).post_shutdown(post_shutdown).build()
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
