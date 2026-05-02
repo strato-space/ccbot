@@ -39,6 +39,19 @@ class TmuxWindow:
     cwd: str  # Current working directory
     pane_current_command: str = ""  # Process running in active pane
     pane_id: str = ""  # Active pane id (e.g. "%0")
+    pane_ids: tuple[str, ...] = ()  # All pane ids in this window
+
+
+@dataclass(frozen=True)
+class TmuxPane:
+    """Information about one pane inside a tmux window."""
+
+    window_id: str
+    pane_id: str
+    cwd: str
+    pane_current_command: str = ""
+    pane_active: bool = False
+    pane_title: str = ""
 
 
 class TmuxManager:
@@ -119,7 +132,13 @@ class TmuxManager:
                     continue
 
                 try:
-                    # Get the active pane's current path and command
+                    # Get all panes, plus active-pane convenience fields.
+                    all_panes = tuple(window.panes or ())
+                    pane_ids = tuple(
+                        str(getattr(candidate, "pane_id", "") or "")
+                        for candidate in all_panes
+                        if getattr(candidate, "pane_id", None)
+                    )
                     pane = window.active_pane
                     if pane:
                         cwd = pane.pane_current_path or ""
@@ -137,6 +156,7 @@ class TmuxManager:
                             cwd=cwd,
                             pane_current_command=pane_cmd,
                             pane_id=pane_id,
+                            pane_ids=pane_ids,
                         )
                     )
                 except Exception as e:
@@ -145,6 +165,50 @@ class TmuxManager:
             return windows
 
         return await asyncio.to_thread(_sync_list_windows)
+
+    async def list_panes(self, window_id: str) -> list[TmuxPane]:
+        """List panes for a tmux window.
+
+        This is a read-only topology view. It lets control-plane features map a
+        temporary tmux split pane back to the parent bound window without making
+        that pane an independently bindable delivery source.
+        """
+
+        def _sync_list_panes() -> list[TmuxPane]:
+            session = self.get_session()
+            if not session:
+                return []
+            try:
+                window = session.windows.get(window_id=window_id)
+                if not window:
+                    return []
+                panes: list[TmuxPane] = []
+                active_id = getattr(window.active_pane, "pane_id", "") or ""
+                for pane in window.panes or ():
+                    pane_id = getattr(pane, "pane_id", "") or ""
+                    if not pane_id:
+                        continue
+                    panes.append(
+                        TmuxPane(
+                            window_id=window.window_id or window_id,
+                            pane_id=pane_id,
+                            cwd=getattr(pane, "pane_current_path", "") or "",
+                            pane_current_command=getattr(
+                                pane,
+                                "pane_current_command",
+                                "",
+                            )
+                            or "",
+                            pane_active=pane_id == active_id,
+                            pane_title=getattr(pane, "pane_title", "") or "",
+                        )
+                    )
+                return panes
+            except Exception as e:
+                logger.debug("Error listing panes for %s: %s", window_id, e)
+                return []
+
+        return await asyncio.to_thread(_sync_list_panes)
 
     async def _resolve_unique_window_name(
         self,

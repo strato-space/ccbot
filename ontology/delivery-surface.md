@@ -51,15 +51,20 @@ control surface at a time.
   - mutable Telegram projection of a runtime-owned blocking question
   - current source:
     - OMX durable `omx.question/v1` records under
-      `.omx/state/sessions/*/questions/`
+      `.omx/state/questions/` or `.omx/state/sessions/*/questions/`
   - not a technical status artifact and not an assistant-final artifact
-  - belongs to the control surface whose live tmux window/cwd/return pane
-    produced the record
+  - belongs to the control surface whose live tmux window/cwd/renderer return
+    or target pane produced the record
+  - a temporary question renderer pane is an implementation detail inside the
+    parent tmux window; it is not a bindable control surface, not a delivery
+    source, and not a separate turn source
   - uses Telegram inline buttons for predefined options and updates in place
     until answered or no longer active
   - answering writes the durable question record to terminal state
     `answered`, then best-effort bridges the answer back to the recorded tmux
     return pane and closes the temporary question pane
+  - while the durable record is active, ordinary Telegram input to the same
+    bound tmux window fails closed and must not bypass the question artifact
   - unsupported free-text `Other` answers remain available in the tmux UI until
     a Telegram free-text answer lane is explicitly designed
 

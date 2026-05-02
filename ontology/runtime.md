@@ -69,6 +69,19 @@ This note defines the core runtime nouns for `ccbot`.
 - **tmux window**
   - the live terminal container managed by the bot
 
+- **tmux pane**
+  - a subdivision inside a tmux window
+  - pane ids such as `%123` can identify where a prompt is rendered or where an
+    answer should be returned
+  - panes are topology inside a window, not Telegram control surfaces
+
+- **Question renderer pane**
+  - temporary operator-layer pane used by a runtime wrapper to present a
+    blocking question, such as an OMX `omx.question/v1` prompt
+  - inherits the parent bound tmux window and control surface
+  - not a tmux window, not a runtime conversation identity, not a delivery
+    source, and not independently bindable
+
 - **Runtime process**
   - the live interactive CLI process inside the tmux window
   - examples: `codex`, `claude`, `fast-agent`
@@ -130,6 +143,8 @@ This note defines the core runtime nouns for `ccbot`.
 
 `binding_scope=tmux -> tmux window -> runtime process`
 
+`tmux window -> tmux pane(s), including any temporary question renderer pane`
+
 `binding_scope=external -> runtime conversation identity -> persisted replay evidence`
 
 `runtime process -> binds to runtime conversation identity`
@@ -175,6 +190,8 @@ Raw operator control is different:
 - a chat without forum topics may expose one shared no-topics main-chat mode
   for the control plane
 - a tmux window may host at most one active runtime process at a time
+- tmux panes inherit their parent tmux window's binding; temporary renderer
+  panes must not be promoted to separate bindings or delivery sources
 - a live process may be associated with at most one primary runtime
   conversation identity at a time
 - a runtime conversation identity may have multiple historical replay artifacts

@@ -362,9 +362,15 @@ class TestCommandSurface:
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot._get_thread_id", return_value=42),
             patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
+            window = MagicMock()
+            window.window_id = "@7"
+            window.cwd = "/tmp"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=window)
             mock_sm.resolve_window_for_thread.return_value = "@7"
+            mock_sm.get_window_for_thread.return_value = "@7"
             mock_sm.get_window_state.return_value = SimpleNamespace(
                 runtime_kind="codex"
             )
@@ -384,8 +390,13 @@ class TestCommandSurface:
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot._get_thread_id", return_value=42),
             patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
+            window = MagicMock()
+            window.window_id = "@7"
+            window.cwd = "/tmp"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=window)
             mock_sm.resolve_window_for_thread.return_value = "@7"
             mock_sm.window_states = {}
 
@@ -1958,6 +1969,47 @@ class TestRuntimeInputRouting:
         )
 
     @pytest.mark.asyncio
+    async def test_text_handler_fails_closed_when_omx_question_active(self):
+        update = _make_topic_update()
+        update.message.text = "continue"
+        context = _make_context()
+        active_record = object()
+        window = MagicMock()
+        window.window_id = "@7"
+        window.cwd = "/tmp/project"
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
+            patch("ccbot.bot.find_active_omx_question", return_value=active_record),
+            patch(
+                "ccbot.bot.handle_omx_question_ui",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_omx_question,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=window)
+            mock_tmux.capture_pane = AsyncMock(return_value="OpenAI Codex\n› ready\n")
+
+            await bot_mod.text_handler(update, context)
+
+        mock_omx_question.assert_awaited_once_with(
+            context.bot,
+            1,
+            "@7",
+            42,
+            record=active_record,
+        )
+        mock_sm.send_to_window.assert_not_called()
+        mock_reply.assert_awaited_once()
+        assert "OMX question is waiting for an answer" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
     async def test_usage_command_is_runtime_gated_for_codex(self):
         update = _make_topic_update()
         context = _make_context()
@@ -1966,8 +2018,14 @@ class TestRuntimeInputRouting:
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot._get_thread_id", return_value=42),
             patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
+            window = MagicMock()
+            window.window_id = "@7"
+            window.cwd = "/tmp"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=window)
+            mock_sm.resolve_window_for_surface.return_value = "@7"
             mock_sm.resolve_window_for_thread.return_value = "@7"
             mock_sm.get_window_state.return_value = SimpleNamespace(
                 runtime_kind="codex"
@@ -1989,8 +2047,14 @@ class TestRuntimeInputRouting:
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot._get_thread_id", return_value=42),
             patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
+            window = MagicMock()
+            window.window_id = "@7"
+            window.cwd = "/tmp"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=window)
+            mock_sm.resolve_window_for_surface.return_value = "@7"
             mock_sm.resolve_window_for_thread.return_value = "@7"
             mock_sm.get_window_state.return_value = SimpleNamespace(
                 runtime_kind="claude"

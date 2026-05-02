@@ -142,7 +142,11 @@ from .handlers.message_sender import (
     safe_send,
     send_with_fallback,
 )
-from .handlers.omx_questions import handle_omx_question_callback
+from .handlers.omx_questions import (
+    find_active_omx_question,
+    handle_omx_question_callback,
+    handle_omx_question_ui,
+)
 from .markdown_v2 import convert_markdown
 from .handlers.response_builder import (
     build_commentary_parts,
@@ -1092,6 +1096,60 @@ async def _surface_blocked_prompt_state(
         )
 
 
+async def _surface_omx_question_state(
+    bot: Bot,
+    user_id: int,
+    window_id: str,
+    thread_id: int | None,
+    *,
+    reply_message: object | None = None,
+    chat_id: int | None = None,
+    window: object | None = None,
+) -> bool:
+    """Show an active OMX question and fail closed for ordinary remote input."""
+    w = (
+        window
+        if window is not None
+        else await tmux_manager.find_window_by_id(window_id)
+    )
+    if not w:
+        return False
+    if not isinstance(getattr(w, "cwd", ""), str) or not getattr(w, "cwd", ""):
+        return False
+    record = find_active_omx_question(w)
+    if record is None:
+        return False
+    shown = await handle_omx_question_ui(
+        bot,
+        user_id,
+        window_id,
+        thread_id,
+        record=record,
+    )
+    if not shown:
+        logger.warning(
+            "Active OMX question detected but Telegram artifact was not delivered "
+            "(user=%d, window=%s, thread=%s)",
+            user_id,
+            window_id,
+            thread_id,
+        )
+    notice = (
+        "⚠️ OMX question is waiting for an answer. "
+        "Use the Telegram question buttons (or answer in tmux) before sending normal input."
+    )
+    if reply_message is not None:
+        await safe_reply(reply_message, notice)
+    elif chat_id is not None:
+        await safe_send(
+            bot,
+            chat_id,
+            notice,
+            message_thread_id=thread_id,
+        )
+    return True
+
+
 async def _sync_topic_title(
     bot: Bot,
     user_id: int,
@@ -1805,6 +1863,21 @@ async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await safe_reply(update.message, _build_unbound_input_message(user.id, surface))
         return
 
+    w = await tmux_manager.find_window_by_id(wid)
+    if not w:
+        display = session_manager.get_display_name(wid)
+        await safe_reply(update.message, f"❌ Window '{display}' no longer exists.")
+        return
+    if await _surface_omx_question_state(
+        context.bot,
+        user.id,
+        wid,
+        surface.message_thread_id,
+        reply_message=update.message,
+        window=w,
+    ):
+        return
+
     if _get_window_runtime_kind(wid) != "claude":
         await safe_reply(
             update.message,
@@ -2044,6 +2117,16 @@ async def forward_command_handler(
         await safe_reply(update.message, f"❌ Window '{display}' no longer exists.")
         return
 
+    if await _surface_omx_question_state(
+        context.bot,
+        user.id,
+        wid,
+        surface.message_thread_id,
+        reply_message=update.message,
+        window=w,
+    ):
+        return
+
     display = session_manager.get_display_name(wid)
     runtime_kind = _get_window_runtime_kind(wid)
     command_name = cc_slash[1:].split(None, 1)[0].lower()
@@ -2182,6 +2265,16 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
         return
 
+    if await _surface_omx_question_state(
+        context.bot,
+        user.id,
+        wid,
+        control_surface.message_thread_id,
+        reply_message=update.message,
+        window=w,
+    ):
+        return
+
     # Download the highest-resolution photo
     photo = update.message.photo[-1]
     tg_file = await photo.get_file()
@@ -2272,6 +2365,16 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 f"❌ Shared window '{display}' no longer exists. Use /unbind, "
                 "then start a new session.",
             )
+        return
+
+    if await _surface_omx_question_state(
+        context.bot,
+        user.id,
+        wid,
+        control_surface.message_thread_id,
+        reply_message=update.message,
+        window=w,
+    ):
         return
 
     document = update.message.document
@@ -2376,6 +2479,16 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 f"❌ Shared window '{display}' no longer exists. Use /unbind, "
                 "then start a new session.",
             )
+        return
+
+    if await _surface_omx_question_state(
+        context.bot,
+        user.id,
+        wid,
+        control_surface.message_thread_id,
+        reply_message=update.message,
+        window=w,
+    ):
         return
 
     # Download voice as in-memory bytes
@@ -2796,6 +2909,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             surface.message_thread_id,
             reply_message=update.message,
         )
+        return
+
+    if await _surface_omx_question_state(
+        context.bot,
+        user.id,
+        wid,
+        surface.message_thread_id,
+        reply_message=update.message,
+        window=w,
+    ):
         return
 
     success, message = await session_manager.send_to_window(wid, text)

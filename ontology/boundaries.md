@@ -70,6 +70,9 @@ These equalities are false:
 - `chat == topic`
 - `topic == thread`
 - `topic == window`
+- `pane == window`
+- `question renderer pane == control surface`
+- `question renderer pane == delivery source`
 - `surface key == Telegram transport identifier`
 - `surface key == full control-surface identity`
 - `literal ACP-protocol-over-stdio == acceptable primary control plane`
@@ -92,3 +95,6 @@ More precise statements:
 - a Telegram topic is governed by policy and binding, not directly by a
   persisted log file
 - a status artifact is not the same kind of thing as final content
+- a temporary question renderer pane is tmux topology inside a parent window;
+  it may render a blocking control question but must not be treated as a
+  bindable Telegram surface or as the source of runtime delivery

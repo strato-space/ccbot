@@ -147,14 +147,18 @@ either status churn or pre-final visible content.
 Interactive question artifacts are a separate control lane. They are created
 from runtime-owned durable question records, not from pane scraping alone. For
 OMX, the source record is `kind=omx.question/v1` under
-`.omx/state/sessions/*/questions/`. Telegram renders the question body and
-predefined options with inline buttons, edits the same message while the
-question remains active, and answers by writing the durable record to terminal
-status `answered`. When the OMX record provides a tmux return bridge, the bot
-best-effort sends the normal `[omx question answered] ...` continuation line
-back to the return pane and closes the temporary question pane. This artifact
-is not a technical status artifact, not a user turn opener, and not a terminal
-assistant answer.
+`.omx/state/questions/` or `.omx/state/sessions/*/questions/`. Telegram
+renders the question body and predefined options with inline buttons, edits the
+same message while the question remains active, and answers by writing the
+durable record to terminal status `answered`. The OMX renderer may be a
+temporary tmux split pane, but that pane inherits the parent bound tmux window;
+it is never promoted to a Telegram control surface or delivery source. When
+the OMX record provides a tmux return bridge, the bot best-effort sends the
+normal `[omx question answered] ...` continuation line back to the return pane
+and closes the temporary question pane. While the record is active, ordinary
+Telegram text/media input to the same bound window fails closed so it cannot
+bypass the blocking control question. This artifact is not a technical status
+artifact, not a user turn opener, and not a terminal assistant answer.
 
 This preserves the upstream Claude shape:
 

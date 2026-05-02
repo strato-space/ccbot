@@ -111,12 +111,16 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   answer does not clear it by itself; it closes only when the queue is empty,
   the binding goes stale, or an explicit clear path runs.
 - **OMX interactive questions** — Runtime-owned `omx.question/v1` records under
-  `.omx/state/sessions/*/questions/` are rendered as a separate mutable
-  Telegram artifact with inline option buttons. Choosing an option writes the
-  durable record as `answered`, best-effort bridges the normal
+  `.omx/state/questions/` or `.omx/state/sessions/*/questions/` are rendered
+  as a separate mutable Telegram artifact with inline option buttons. The
+  temporary renderer pane belongs to the bound tmux window; it is not promoted
+  to a bindable control surface or delivery source. Choosing an option writes
+  the durable record as `answered`, best-effort bridges the normal
   `[omx question answered] ...` continuation line to the recorded tmux return
   pane, and closes the temporary question pane; free-text `Other` answers stay
-  on the live tmux UI for now.
+  on the live tmux UI for now. While a question is active, ordinary Telegram
+  input to that window fails closed and points the operator back to the
+  question artifact.
 - **Heads-up warnings stay visible without breaking turn closure** — Operator
   warning notices remain visible in Telegram while assistant-final semantics
   and post-final artifact closure remain intact. Repeated identical warning
