@@ -1,8 +1,10 @@
 """Application entry point — CLI dispatcher and bot bootstrap.
 
-Handles two execution modes:
+Handles four execution modes:
   1. `ccbot hook` — delegates to hook.hook_main() for Claude Code hook processing.
-  2. Default — configures logging, initializes tmux session, and starts the
+  2. `ccbot send` / `ccbot send_bot_message` — sends results to Telegram.
+  3. `ccbot inject` — sends supervisor-owned input to a tmux-hosted runtime.
+  4. Default — configures logging, initializes tmux session, and starts the
      Telegram bot polling loop via bot.create_bot().
 """
 
@@ -22,6 +24,10 @@ def main() -> None:
 
         command_name = sys.argv[1]
         raise SystemExit(send_bot_message_main(sys.argv[2:], prog=f"ccbot {command_name}"))
+    if len(sys.argv) > 1 and sys.argv[1] == "inject":
+        from .inject_cli import inject_main
+
+        raise SystemExit(inject_main(sys.argv[2:]))
 
     logging.basicConfig(
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",

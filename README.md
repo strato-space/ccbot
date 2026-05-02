@@ -225,6 +225,34 @@ uv run ccbot
 
 ### Commands
 
+**Supervisor runtime input CLI:**
+
+`ccbot inject` is the supported shell-facing input path for external supervisors.
+It uses the same runtime input layer as Telegram delivery instead of duplicating
+tmux paste/submit details in supervisor scripts.
+
+```bash
+# Send to a tracked ccbot window id
+ccbot inject --window @0 --text "hello"
+
+# Read a multiline payload from stdin
+printf 'multi\nline' | ccbot inject --window @0 --stdin
+
+# Send to an arbitrary tmux target owned by an external supervisor
+printf '%s' "$prompt" | ccbot inject \
+  --target imm_arena_bot:imm \
+  --runtime codex \
+  --stdin \
+  --require-idle
+```
+
+For tracked ccbot windows, Codex multiline input follows the normal
+replay-evidence ACK path and fails closed if the persisted turn cannot be
+confirmed. For arbitrary tmux targets, `ccbot inject` still uses bracketed paste
+and the Codex bare `Enter` multiline submit path, but it cannot verify a
+rollout ACK unless the target is a tracked ccbot window; supervisor logs should
+treat the warning as a cue to monitor or repair if no turn starts.
+
 **Bot commands:**
 
 | Command       | Description                     |

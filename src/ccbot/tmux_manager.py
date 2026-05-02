@@ -324,6 +324,66 @@ class TmuxManager:
 
         return await asyncio.to_thread(_sync_capture)
 
+    async def _run_tmux_cli(
+        self,
+        *args: str,
+        stdin: bytes | None = None,
+    ) -> tuple[bool, str, str]:
+        """Run a tmux CLI command for target forms libtmux cannot address."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "tmux",
+                *args,
+                stdin=asyncio.subprocess.PIPE if stdin is not None else None,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate(stdin)
+        except Exception as e:
+            logger.error("Failed to run tmux %s: %s", " ".join(args), e)
+            return False, "", str(e)
+        return (
+            proc.returncode == 0,
+            stdout.decode("utf-8", errors="replace"),
+            stderr.decode("utf-8", errors="replace"),
+        )
+
+    async def describe_target(self, target: str) -> TmuxWindow | None:
+        """Resolve an arbitrary tmux target such as ``session:window.1``."""
+        ok, stdout, stderr = await self._run_tmux_cli(
+            "display-message",
+            "-p",
+            "-t",
+            target,
+            "#{window_name}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_id}",
+        )
+        if not ok:
+            logger.debug("Failed to describe tmux target %s: %s", target, stderr.strip())
+            return None
+        window_name, cwd, pane_command, pane_id = (stdout.rstrip("\n").split("\t") + [""] * 4)[
+            :4
+        ]
+        return TmuxWindow(
+            window_id=target,
+            window_name=window_name or target,
+            cwd=cwd,
+            pane_current_command=pane_command,
+            pane_id=pane_id,
+            pane_ids=(pane_id,) if pane_id else (),
+        )
+
+    async def capture_target(self, target: str, with_ansi: bool = False) -> str | None:
+        """Capture visible text from an arbitrary tmux target."""
+        args = ["capture-pane"]
+        if with_ansi:
+            args.append("-e")
+        args.extend(["-p", "-t", target])
+        ok, stdout, stderr = await self._run_tmux_cli(*args)
+        if ok:
+            return stdout
+        logger.debug("Failed to capture tmux target %s: %s", target, stderr.strip())
+        return None
+
     async def _send_keys(
         self, window_id: str, text: str, enter: bool = True, literal: bool = True
     ) -> bool:
@@ -365,6 +425,20 @@ class TmuxManager:
         """Send literal text to a pane without submitting it."""
         return await self._send_keys(window_id, text, enter=False, literal=True)
 
+    async def send_literal_text_to_target(self, target: str, text: str) -> bool:
+        """Send literal text to an arbitrary tmux target without submitting it."""
+        ok, _, stderr = await self._run_tmux_cli(
+            "send-keys",
+            "-t",
+            target,
+            "-l",
+            "--",
+            text,
+        )
+        if not ok:
+            logger.error("Failed to send literal text to %s: %s", target, stderr.strip())
+        return ok
+
     async def send_pasted_text(self, window_id: str, text: str) -> bool:
         """Paste text through tmux's bracketed-paste aware buffer path.
 
@@ -378,30 +452,7 @@ class TmuxManager:
 
         buffer_name = f"ccbot-{uuid.uuid4().hex}"
 
-        async def _run_tmux(*args: str, stdin: bytes | None = None) -> bool:
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    "tmux",
-                    *args,
-                    stdin=asyncio.subprocess.PIPE if stdin is not None else None,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                _, stderr = await proc.communicate(stdin)
-                if proc.returncode == 0:
-                    return True
-                logger.error(
-                    "tmux %s failed for window %s: %s",
-                    " ".join(args[:1]),
-                    window_id,
-                    stderr.decode("utf-8", errors="replace").strip(),
-                )
-                return False
-            except Exception as e:
-                logger.error("Failed to run tmux for pasted text to %s: %s", window_id, e)
-                return False
-
-        loaded = await _run_tmux(
+        loaded, _, stderr = await self._run_tmux_cli(
             "load-buffer",
             "-b",
             buffer_name,
@@ -409,9 +460,10 @@ class TmuxManager:
             stdin=text.encode("utf-8"),
         )
         if not loaded:
+            logger.error("tmux load-buffer failed for %s: %s", window_id, stderr.strip())
             return False
 
-        pasted = await _run_tmux(
+        pasted, _, stderr = await self._run_tmux_cli(
             "paste-buffer",
             "-p",
             "-d",
@@ -421,21 +473,47 @@ class TmuxManager:
             window_id,
         )
         if not pasted:
-            await _run_tmux("delete-buffer", "-b", buffer_name)
+            logger.error("tmux paste-buffer failed for %s: %s", window_id, stderr.strip())
+            await self._run_tmux_cli("delete-buffer", "-b", buffer_name)
             return False
         return True
+
+    async def send_pasted_text_to_target(self, target: str, text: str) -> bool:
+        """Paste text through tmux bracketed paste to an arbitrary target."""
+        return await self.send_pasted_text(target, text)
 
     async def send_submit_key(self, window_id: str) -> bool:
         """Send the canonical carriage-return submit key for text input."""
         return await self._send_keys(window_id, "C-m", enter=False, literal=False)
 
+    async def send_submit_key_to_target(self, target: str) -> bool:
+        """Send the canonical carriage-return submit key to an arbitrary target."""
+        ok, _, stderr = await self._run_tmux_cli("send-keys", "-t", target, "C-m")
+        if not ok:
+            logger.error("Failed to send submit key to %s: %s", target, stderr.strip())
+        return ok
+
     async def send_key(self, window_id: str, key: str) -> bool:
         """Send a named tmux key such as Escape, Up, Tab, or C-c."""
         return await self._send_keys(window_id, key, enter=False, literal=False)
 
+    async def send_key_to_target(self, target: str, key: str) -> bool:
+        """Send a named tmux key to an arbitrary target."""
+        ok, _, stderr = await self._run_tmux_cli("send-keys", "-t", target, key)
+        if not ok:
+            logger.error("Failed to send %s to %s: %s", key, target, stderr.strip())
+        return ok
+
     async def send_enter(self, window_id: str) -> bool:
         """Send a bare Enter key to the active pane."""
         return await self._send_keys(window_id, "", enter=True, literal=False)
+
+    async def send_enter_to_target(self, target: str) -> bool:
+        """Send a bare Enter key to an arbitrary target."""
+        ok, _, stderr = await self._run_tmux_cli("send-keys", "-t", target, "Enter")
+        if not ok:
+            logger.error("Failed to send Enter to %s: %s", target, stderr.strip())
+        return ok
 
     async def rename_window(self, window_id: str, new_name: str) -> bool:
         """Rename a tmux window by its ID."""
