@@ -31,6 +31,29 @@ def test_codex_catalog_defaults_to_codex_home_env(
     assert catalog.sessions_root == codex_home / "sessions"
 
 
+def test_codex_catalog_keeps_home_fallback_with_codex_home_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    service_home = tmp_path / "service-home"
+    runtime_home = tmp_path / "runtime-codex-home"
+    fallback_codex_home = service_home / ".codex"
+    monkeypatch.setenv("HOME", str(service_home))
+    monkeypatch.setenv("CODEX_HOME", str(runtime_home))
+    _write_codex_thread(
+        fallback_codex_home,
+        thread_id="019d4e63-f279-79b1-8dfd-be785dc4a419",
+        cwd="/workspace/app",
+        thread_name="Fallback thread",
+        updated_at="2026-04-02T14:30:00Z",
+    )
+
+    catalog = CodexThreadCatalog()
+
+    assert catalog.codex_home == runtime_home
+    assert catalog.get_candidate("019d4e63-f279-79b1-8dfd-be785dc4a419") is not None
+
+
 def _build_fixture_codex_home(tmp_path: Path) -> Path:
     codex_home = tmp_path / ".codex"
     sessions_root = codex_home / "sessions" / "2026" / "04" / "02"

@@ -34,17 +34,29 @@ _UUID_RE = re.compile(
 )
 
 
-def _default_codex_home() -> Path:
-    """Return the Codex home used by the running runtime.
+def _default_codex_homes() -> tuple[Path, ...]:
+    """Return Codex homes that may contain live runtime sessions.
 
-    Codex supports ``CODEX_HOME`` for per-project/runtime session stores. ccbot
-    must follow that value instead of the service user's ``~/.codex`` or it can
-    keep tailing stale rollout files after a bot/runtime restart.
+    Codex supports ``CODEX_HOME`` for per-project/runtime session stores, but
+    long-lived tmux panes can predate a service env change and still append to
+    the service user's ``~/.codex``. Prefer the runtime CODEX_HOME while keeping
+    the HOME fallback readable so mixed live panes do not go dark.
     """
+    homes: list[Path] = []
     configured_home = os.getenv("CODEX_HOME", "").strip()
     if configured_home:
-        return Path(configured_home).expanduser()
-    return Path.home() / ".codex"
+        homes.append(Path(configured_home).expanduser())
+    homes.append(Path.home() / ".codex")
+
+    unique_homes: list[Path] = []
+    seen: set[str] = set()
+    for home in homes:
+        key = str(home)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_homes.append(home)
+    return tuple(unique_homes)
 
 
 def normalize_cwd(cwd: str) -> str:
@@ -297,9 +309,28 @@ class CodexThreadCatalog:
         session_index_path: Path | None = None,
         sessions_root: Path | None = None,
     ) -> None:
-        self.codex_home = codex_home or _default_codex_home()
-        self.session_index_path = session_index_path or (self.codex_home / "session_index.jsonl")
-        self.sessions_root = sessions_root or (self.codex_home / "sessions")
+        if (
+            codex_home is not None
+            or session_index_path is not None
+            or sessions_root is not None
+        ):
+            self.codex_homes = (codex_home or Path.home() / ".codex",)
+            self.session_index_paths = (
+                session_index_path or (self.codex_homes[0] / "session_index.jsonl"),
+            )
+            self.sessions_roots = (
+                sessions_root or (self.codex_homes[0] / "sessions"),
+            )
+        else:
+            self.codex_homes = _default_codex_homes()
+            self.session_index_paths = tuple(
+                home / "session_index.jsonl" for home in self.codex_homes
+            )
+            self.sessions_roots = tuple(home / "sessions" for home in self.codex_homes)
+
+        self.codex_home = self.codex_homes[0]
+        self.session_index_path = self.session_index_paths[0]
+        self.sessions_root = self.sessions_roots[0]
 
     def refresh(self) -> None:
         """Invalidate cached directory scans so delayed writes become visible."""
@@ -315,50 +346,52 @@ class CodexThreadCatalog:
     @cached_property
     def index_entries(self) -> tuple[CodexThreadIndexEntry, ...]:
         """Load session_index entries in file order with last-wins deduping."""
-        if not self.session_index_path.exists():
-            return ()
-
         entries: dict[str, CodexThreadIndexEntry] = {}
-        for row in _load_jsonl_or_json(self.session_index_path):
-            thread_id = str(row.get("id") or row.get("session_id") or "").strip()
-            if not thread_id:
+        for session_index_path in self.session_index_paths:
+            if not session_index_path.exists():
                 continue
-            thread_name = str(row.get("thread_name") or row.get("name") or "").strip()
-            entries[thread_id] = CodexThreadIndexEntry(
-                thread_id=thread_id,
-                thread_name=thread_name,
-                updated_at=str(row.get("updated_at") or row.get("updatedAt") or ""),
-                raw=row,
-            )
+            for row in _load_jsonl_or_json(session_index_path):
+                thread_id = str(row.get("id") or row.get("session_id") or "").strip()
+                if not thread_id:
+                    continue
+                thread_name = str(
+                    row.get("thread_name") or row.get("name") or ""
+                ).strip()
+                entries[thread_id] = CodexThreadIndexEntry(
+                    thread_id=thread_id,
+                    thread_name=thread_name,
+                    updated_at=str(row.get("updated_at") or row.get("updatedAt") or ""),
+                    raw=row,
+                )
         return tuple(entries.values())
 
     def _read_rollout_lookup(self) -> dict[str, CodexThreadLookup]:
         """Index rollout files by thread id, returning deterministic candidates."""
-        if not self.sessions_root.exists():
-            return {}
-
         lookups: dict[str, CodexThreadLookup] = {}
-        rollout_paths = sorted(
-            (
-                path
-                for path in self.sessions_root.rglob("*")
-                if path.is_file() and path.suffix in {".jsonl", ".json"}
-            ),
-            key=lambda path: str(path),
-        )
-        for path in rollout_paths:
-            lookup = self._load_rollout_lookup(path)
-            if lookup is None:
+        for sessions_root in self.sessions_roots:
+            if not sessions_root.exists():
                 continue
-            existing = lookups.get(lookup.thread_id)
-            if existing is None:
-                lookups[lookup.thread_id] = lookup
-                continue
-            # Deterministic tie-breaker: prefer the newer file, then lexicographic path.
-            current_key = (existing.mtime, str(existing.file_path))
-            new_key = (lookup.mtime, str(lookup.file_path))
-            if new_key >= current_key:
-                lookups[lookup.thread_id] = lookup
+            rollout_paths = sorted(
+                (
+                    path
+                    for path in sessions_root.rglob("*")
+                    if path.is_file() and path.suffix in {".jsonl", ".json"}
+                ),
+                key=lambda path: str(path),
+            )
+            for path in rollout_paths:
+                lookup = self._load_rollout_lookup(path)
+                if lookup is None:
+                    continue
+                existing = lookups.get(lookup.thread_id)
+                if existing is None:
+                    lookups[lookup.thread_id] = lookup
+                    continue
+                # Deterministic tie-breaker: prefer the newer file, then lexicographic path.
+                current_key = (existing.mtime, str(existing.file_path))
+                new_key = (lookup.mtime, str(lookup.file_path))
+                if new_key >= current_key:
+                    lookups[lookup.thread_id] = lookup
         return lookups
 
     def _load_rollout_lookup(self, path: Path) -> CodexThreadLookup | None:
@@ -600,18 +633,19 @@ class CodexThreadCatalog:
         """Resolve rollout identity by thread id, including helper sessions."""
         if not thread_id:
             return None
+        candidate_paths: list[Path] = []
+        for sessions_root in self.sessions_roots:
+            if not sessions_root.exists():
+                continue
+            candidate_paths.extend(sessions_root.rglob(f"*{thread_id}*.jsonl"))
         for path in sorted(
-            self.sessions_root.rglob(f"*{thread_id}*.jsonl"),
+            (path for path in candidate_paths if path.is_file()),
             key=lambda candidate: candidate.stat().st_mtime,
             reverse=True,
         ):
-            lookup = self._load_rollout_identity(
-                path,
-                include_non_resumable=True,
-            )
-            if lookup is None or lookup.thread_id != thread_id:
-                continue
-            return lookup
+            lookup = self._load_rollout_identity(path, include_non_resumable=True)
+            if lookup is not None and lookup.thread_id == thread_id:
+                return lookup
         return None
 
     def is_helper_thread_fast(self, thread_id: str) -> bool:
@@ -725,8 +759,11 @@ class CodexThreadCatalog:
         recent_paths = sorted(
             (
                 path
-                for path in self.sessions_root.rglob("rollout-*.jsonl")
-                if path.is_file() and path.stat().st_mtime >= max(0.0, registered_at - 5.0)
+                for sessions_root in self.sessions_roots
+                if sessions_root.exists()
+                for path in sessions_root.rglob("rollout-*.jsonl")
+                if path.is_file()
+                and path.stat().st_mtime >= max(0.0, registered_at - 5.0)
             ),
             key=lambda path: path.stat().st_mtime,
             reverse=True,

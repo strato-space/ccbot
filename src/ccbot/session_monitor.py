@@ -434,6 +434,7 @@ class SessionMonitor:
                         session_id=rollout_source.thread_id,
                         file_path=str(rollout_source.file_path),
                         last_byte_offset=file_size,
+                        runtime_kind=rollout_source.runtime_kind,
                     )
                     self.state.update_tracked_source(tracked)
                     self._file_mtimes[rollout_source.thread_id] = current_mtime
