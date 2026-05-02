@@ -252,6 +252,27 @@ uv run ccbot
 
 Other raw `/command` inputs are still forwarded best-effort to the active tmux-hosted runtime, but they are not part of the supported Telegram command surface unless documented above. This is intentional: commands that depend on prompt selection or other unsupported remote controls are not advertised in the menu even if a runtime can handle them locally. Claude-only commands such as `/cost`, `/help`, `/memory`, and `/usage` are not part of the supported Codex lane, and `/quit` is explicitly rejected in favor of `/exit`.
 
+**Local CLI result delivery:**
+
+Services running in the same bot instance context can send results back to the
+instance's Telegram chat without injecting anything into tmux:
+
+```bash
+# Defaults to the target resolved from $CCBOT_DIR/state.json
+ccbot send_bot_message "Job finished" --file-path ./result.tar.gz
+
+# Explicit override when state has multiple possible surfaces
+ccbot send_bot_message "Job finished" \
+  --chat-id -1001234567890 \
+  --thread-id 42 \
+  --file-path ./result.tar.gz
+```
+
+Targeting is hybrid: explicit `--chat-id` / `--thread-id` wins; otherwise the
+CLI resolves the persisted Telegram control-surface routing coordinates from
+`$CCBOT_DIR/state.json`. Ambiguous state fails closed and requires an explicit
+target.
+
 ### Topic Workflow
 
 **1 control surface = 1 binding at a time.**

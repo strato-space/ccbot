@@ -39,6 +39,17 @@ control surface at a time.
   - follows the same stale-turn, stale-binding, and pre-final closure guards as
     its owning content task
 
+- **External CLI result artifact**
+  - operator/service-originated result delivery sent by the local
+    `ccbot send_bot_message` CLI
+  - scoped to a resolved Telegram control surface via stored Telegram group
+    routing coordinates, or to explicit `chat_id` / `thread_id` overrides
+  - may include document/file payloads such as result archives
+  - is not runtime input, not replay evidence, not a user turn opener, and not
+    an assistant-final artifact
+  - must not create or mutate a tmux binding; it is a direct outbound Telegram
+    delivery path for adjacent services built on top of a ccbot instance
+
 - **Pending input artifact**
   - mutable preview of future input already queued behind the current turn
   - examples:

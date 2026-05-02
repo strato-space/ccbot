@@ -76,6 +76,26 @@ The default Telegram surface is `compact`, not `verbose`.
 `verbose` is a debug policy for operators. It may expose more raw execution
 surface, but it is not the default product-facing mode.
 
+## Out-of-band CLI Result Delivery
+
+`ccbot send_bot_message` is an outbound result-delivery helper for adjacent
+services that run inside the same bot instance context, for example
+`imm_arena_bot` jobs that need to return a generated archive or report to the
+main Telegram chat.
+
+This path is deliberately not modeled as Telegram user input:
+
+- it does not write to tmux stdin
+- it does not create runtime replay evidence
+- it does not open a user turn
+- it does not create or change bindings
+
+Target resolution is hybrid. Explicit `--chat-id` / `--thread-id` arguments win.
+Without explicit coordinates, the CLI reads `$CCBOT_DIR/state.json` and resolves
+the stored Telegram group routing coordinates for the bound control surface. If
+the state has multiple plausible targets, the helper fails closed and asks for
+an explicit target instead of guessing between surfaces.
+
 ## Ordering Rules
 
 The delivery pipeline keeps:
