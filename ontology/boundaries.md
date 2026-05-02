@@ -42,6 +42,12 @@ input may keep the normal submit-key path. The Codex multiline boundary also
 includes a post-paste readiness gap: the bot must not treat "paste accepted by
 tmux" and "Codex composer is ready for submit" as the same event.
 
+Local automation must not duplicate this with ad-hoc tmux commands. The
+automation boundary is `ccbot runtime-input`, which resolves the same
+control-surface/window state and calls the same runtime input driver as
+Telegram text. `ccbot send` is the opposite direction: outbound Telegram
+delivery for service results, not a runtime/TUI injection command.
+
 ## Replay Evidence Write Ownership
 
 Replay evidence is written by:

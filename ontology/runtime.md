@@ -127,6 +127,11 @@ This note defines the core runtime nouns for `ccbot`.
   - available only when the control surface is bound to a live tmux scope
   - external-thread binding may stay read-only when no live injection plane is
     attached
+  - Telegram-originated text and local automation must converge on the same
+    runtime input driver semantics; the local CLI name for this is
+    `ccbot runtime-input`
+  - outbound Telegram result delivery (`ccbot send`) is not an input injection
+    plane and must not mutate or bypass runtime control-surface bindings
 
 - **Input acknowledgement**
   - persisted proof that an injected message became a runtime turn

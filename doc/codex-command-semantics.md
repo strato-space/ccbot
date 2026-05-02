@@ -76,6 +76,11 @@ closed because immediate JSONL ACK cannot be proven. If no persisted ACK appears
 within the bounded retry window on an input-ready pane, the send path fails
 closed and warns that the draft may still be waiting in the terminal composer.
 
+Local service automation that needs to submit Codex input must enter through
+`ccbot runtime-input`, not through `ccbot send` and not through copied tmux
+paste/send-key snippets. This keeps the local automation path on the same
+live-input-plane checks and multiline ACK contract as Telegram-originated text.
+
 ## Fail-Closed Rules
 
 The following situations must produce an explicit error or picker instead of a

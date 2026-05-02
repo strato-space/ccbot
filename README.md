@@ -259,10 +259,10 @@ instance's Telegram chat without injecting anything into tmux:
 
 ```bash
 # Defaults to the target resolved from $CCBOT_DIR/state.json
-ccbot send_bot_message "Job finished" --file-path ./result.tar.gz
+ccbot send "Job finished" --file-path ./result.tar.gz
 
 # Explicit override when state has multiple possible surfaces
-ccbot send_bot_message "Job finished" \
+ccbot send "Job finished" \
   --chat-id -1001234567890 \
   --thread-id 42 \
   --file-path ./result.tar.gz
@@ -272,6 +272,25 @@ Targeting is hybrid: explicit `--chat-id` / `--thread-id` wins; otherwise the
 CLI resolves the persisted Telegram control-surface routing coordinates from
 `$CCBOT_DIR/state.json`. Ambiguous state fails closed and requires an explicit
 target.
+
+**Local CLI runtime input injection:**
+
+Services that need to submit text to the live tmux-hosted runtime must use the
+runtime input plane, not `ccbot send` and not ad-hoc `tmux paste-buffer` logic:
+
+```bash
+# Resolve through persisted control-surface state
+ccbot runtime-input --user-id 12345 --thread-id 42 "continue"
+
+# Or target an operator-known live tmux window explicitly
+ccbot runtime-input --window-id @7 "continue"
+```
+
+`ccbot runtime-input` uses the same `SessionManager` / `RuntimeInputDriver`
+path as Telegram text: external replay-only bindings are read-only, inactive
+or helper windows fail closed, blocked prompts are not bypassed, and Codex
+multiline input uses bracketed paste plus the bare-`Enter` replay-evidence ACK
+path. `ccbot send` remains Telegram delivery only.
 
 ### Topic Workflow
 

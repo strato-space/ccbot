@@ -22,6 +22,11 @@ def main() -> None:
 
         command_name = sys.argv[1]
         raise SystemExit(send_bot_message_main(sys.argv[2:], prog=f"ccbot {command_name}"))
+    if len(sys.argv) > 1 and sys.argv[1] in {"runtime-input", "inject"}:
+        from .runtime_input_cli import runtime_input_main
+
+        command_name = sys.argv[1]
+        raise SystemExit(runtime_input_main(sys.argv[2:], prog=f"ccbot {command_name}"))
 
     logging.basicConfig(
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
