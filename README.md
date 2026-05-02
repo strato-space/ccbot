@@ -366,8 +366,12 @@ document, and sticker messages are forwarded to the active runtime for every
 allowed participant in that bound surface. Voice is transcribed first, while
 photos and stickers are downloaded under `$CCBOT_DIR/images`; documents are
 downloaded under `$CCBOT_DIR/documents`. Static stickers are normalized to PNG
-image attachments. Animated/video stickers use their Telegram thumbnail when
-available and fail closed when no thumbnail exists.
+image attachments. Animated/video stickers use their Telegram thumbnail as the
+runtime visual input when available, also preserving the original animation
+artifact path for direct result delivery. Video stickers may get a GIF sibling
+when `ffmpeg` is available; `.tgs` stickers keep the original `.tgs` artifact
+without pretending it is an image/GIF. Stickers fail closed when no thumbnail
+exists and no useful visual fallback is available.
 
 If the topic is bound to an external persisted thread without live tmux, input
 injection fails closed with an explicit read-only warning and a reattach hint.
@@ -392,6 +396,30 @@ Routing note:
 - Pending-input previews preserve queued message text literally (except explicit
   Codex checkbox marker glyph stripping), so command-like user text does not
   get normalized away.
+
+**Returning generated files to Telegram:**
+
+Use `ccbot send` for fast outbound delivery of generated artifacts. This is the
+Telegram delivery alias and is separate from runtime/TUI input (`ccbot
+runtime-input` / `ccbot inject`). For IMM on `str`, use the IMM bot state dir:
+
+```bash
+CCBOT_DIR=/data/iqdoctor/.ccbot-imm_arena_bot \
+  /tools/ccbot/.venv/bin/ccbot send \
+  --thread-id 3 \
+  --file-path /path/thumb.png \
+  --file-type photo \
+  --message "thumbnail"
+
+CCBOT_DIR=/data/iqdoctor/.ccbot-imm_arena_bot \
+  /tools/ccbot/.venv/bin/ccbot send \
+  --thread-id 3 \
+  --file-path /path/anim.gif \
+  --file-type animation \
+  --message "animation"
+```
+
+`--file-type gif` is accepted as an alias for `animation`.
 
 **Killing a session:**
 

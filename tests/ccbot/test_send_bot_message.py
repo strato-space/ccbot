@@ -229,6 +229,38 @@ def test_send_bot_message_file_base64_photo(monkeypatch, tmp_path):
     assert captured["attachment_bytes"] == b"\x89PNG"
 
 
+def test_send_bot_message_gif_file_type_uses_animation_alias(monkeypatch, tmp_path):
+    state_path = tmp_path / "state.json"
+    gif_path = tmp_path / "result.gif"
+    gif_path.write_bytes(b"GIF89a")
+    _write_state(
+        state_path,
+        {"surface_bindings": {"12345": {"c:-100200300": "@7"}}},
+    )
+    captured: dict = {}
+
+    def _bot_factory(token: str):
+        assert token == "token-456"
+        return _FakeBot(token, captured)
+
+    monkeypatch.setattr(sender, "Bot", _bot_factory)
+
+    result = asyncio.run(
+        sender.send_bot_message(
+            message="animation result",
+            token="token-456",
+            file_path=str(gif_path),
+            file_type="gif",
+            state_path=state_path,
+        )
+    )
+
+    assert result["status"] == "success"
+    assert captured["attachment_kind"] == "animation"
+    assert captured["attachment_filename"] == "result.gif"
+    assert captured["caption"] == "animation result"
+
+
 def test_send_bot_message_explicit_token_and_chat_id_does_not_need_config(
     monkeypatch,
     tmp_path,

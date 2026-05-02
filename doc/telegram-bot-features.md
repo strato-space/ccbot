@@ -144,7 +144,8 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | **deleteMessage** | ✅ | Status message cleanup, interactive UI cleanup |
 | **BotCommand + set_my_commands** | ✅ | Bot menu is limited to the supported Codex core lane plus a small passthrough subset |
 | **sendDocument** | ✅ | Screenshots and runtime document/file attachments sent as Telegram documents |
-| **Sticker ingress** | ✅ | Inbound Telegram stickers are normalized to runtime image attachments; animated/video stickers use Telegram thumbnails when available |
+| **Sticker ingress** | ✅ | Inbound Telegram stickers are normalized to runtime image attachments; animated/video stickers use Telegram thumbnails as visual input and preserve original animation artifacts for direct result delivery |
+| **ccbot send file delivery** | ✅ | Local `ccbot send --file-path --file-type photo\|animation` returns generated artifacts to the Telegram surface without using runtime-input/TUI injection |
 | **ReplyKeyboardRemove** | ✅ | Used when switching away from reply keyboard |
 | **Codex command forwarding** | ✅ | Raw `/command` input is forwarded to tmux; the documented menu only exposes the supported Codex subset |
 | **Message rate limiting** | ✅ | 1.1s minimum interval per user to avoid flood control |

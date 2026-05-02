@@ -43,6 +43,8 @@ import io
 import logging
 import os
 import re
+import shutil
+import subprocess  # nosec B404 - ffmpeg is invoked with fixed argv and no shell
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -254,6 +256,15 @@ class _AttachmentInputTarget:
 
 
 @dataclass(frozen=True)
+class _StickerArtifacts:
+    image_path: Path
+    image_label: str
+    original_path: Path | None = None
+    gif_path: Path | None = None
+    status_lines: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class AddressedEvent:
     is_addressed: bool
     is_bare: bool = False
@@ -277,6 +288,7 @@ _TELEGRAM_PROXY_ENV_KEYS = (
     "WS_PROXY",
     "ws_proxy",
 )
+_STICKER_GIF_FFMPEG_TIMEOUT_SECONDS = 30
 
 
 def _default_launch_runtime_kind() -> str:
@@ -2446,8 +2458,73 @@ async def _download_attachment_image_as_png(
     return png_path
 
 
-async def _sticker_image_path(sticker: Any) -> tuple[Path | None, str | None]:
-    """Persist a Telegram sticker as the image-equivalent artifact for runtime input."""
+def _telegram_file_suffix(tg_file: Any, fallback: str) -> str:
+    """Infer a safe suffix from a Telegram File path."""
+    file_path = getattr(tg_file, "file_path", None)
+    suffix = Path(str(file_path or "")).suffix.lower()
+    if re.fullmatch(r"\.[a-z0-9]{1,10}", suffix):
+        return suffix
+    return fallback
+
+
+async def _download_sticker_original(
+    sticker: Any,
+    filename_stem: str,
+    fallback_suffix: str,
+) -> Path:
+    """Download the original animated/video sticker artifact."""
+    tg_file = await sticker.get_file()
+    suffix = _telegram_file_suffix(tg_file, fallback_suffix)
+    artifact_path = _IMAGES_DIR / f"{filename_stem}{suffix}"
+    await tg_file.download_to_drive(artifact_path)
+    return artifact_path
+
+
+def _convert_video_sticker_to_gif(source_path: Path, gif_path: Path) -> str | None:
+    """Best-effort video sticker GIF conversion; returns a status on failure."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return "ffmpeg not found"
+
+    try:
+        subprocess.run(  # nosec B603 - fixed argv, no shell, local sanitized paths
+            [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(source_path),
+                "-vf",
+                "fps=15,scale=512:-1:flags=lanczos",
+                str(gif_path),
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=_STICKER_GIF_FFMPEG_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"ffmpeg failed: {exc.__class__.__name__}"
+
+    if not gif_path.exists() or gif_path.stat().st_size == 0:
+        return "ffmpeg produced no GIF"
+    return None
+
+
+async def _maybe_video_sticker_gif(source_path: Path) -> tuple[Path | None, str | None]:
+    """Create a GIF sibling for a video sticker when ffmpeg is available."""
+    gif_path = source_path.with_suffix(".gif")
+    failure = await asyncio.to_thread(
+        _convert_video_sticker_to_gif,
+        source_path,
+        gif_path,
+    )
+    if failure:
+        return None, failure
+    return gif_path, None
+
+
+async def _sticker_artifacts(sticker: Any) -> tuple[_StickerArtifacts | None, str | None]:
+    """Persist a Telegram sticker without collapsing animation into image semantics."""
     unique_id = _sanitize_attachment_filename(
         getattr(sticker, "file_unique_id", None),
         "sticker",
@@ -2467,25 +2544,75 @@ async def _sticker_image_path(sticker: Any) -> tuple[Path | None, str | None]:
             getattr(thumbnail, "file_unique_id", None),
             "thumbnail",
         )
-        file_source = thumbnail
-        filename_stem = f"{timestamp}_{unique_id}_{thumbnail_id}_thumbnail"
-    else:
-        file_source = sticker
-        filename_stem = f"{timestamp}_{unique_id}"
+        try:
+            image_path = await _download_attachment_image_as_png(
+                thumbnail,
+                f"{timestamp}_{unique_id}_{thumbnail_id}_thumbnail",
+            )
+        except Exception as exc:
+            logger.warning("Failed to normalize Telegram sticker thumbnail: %s", exc)
+            return None, "⚠ Could not convert sticker thumbnail to an image for Codex."
 
+        status_lines: list[str] = []
+        original_path: Path | None = None
+        gif_path: Path | None = None
+        fallback_suffix = ".webm" if is_video else ".tgs"
+        try:
+            original_path = await _download_sticker_original(
+                sticker,
+                f"{timestamp}_{unique_id}_original",
+                fallback_suffix,
+            )
+        except Exception as exc:
+            logger.warning("Failed to download Telegram sticker animation artifact: %s", exc)
+            status_lines.append(
+                f"Sticker animation artifact: unavailable ({exc.__class__.__name__})"
+            )
+
+        if is_video and original_path is not None:
+            gif_path, gif_failure = await _maybe_video_sticker_gif(original_path)
+            if gif_failure:
+                status_lines.append(f"Sticker animation GIF: unavailable ({gif_failure})")
+        elif is_animated and original_path is not None:
+            status_lines.append(
+                "Sticker animation GIF: not generated for .tgs stickers"
+            )
+
+        return (
+            _StickerArtifacts(
+                image_path=image_path,
+                image_label="thumbnail",
+                original_path=original_path,
+                gif_path=gif_path,
+                status_lines=tuple(status_lines),
+            ),
+            None,
+        )
+
+    filename_stem = f"{timestamp}_{unique_id}"
     try:
-        return await _download_attachment_image_as_png(file_source, filename_stem), None
+        image_path = await _download_attachment_image_as_png(sticker, filename_stem)
+        return _StickerArtifacts(image_path=image_path, image_label="image"), None
     except Exception as exc:
         logger.warning("Failed to normalize Telegram sticker as image: %s", exc)
         return None, "⚠ Could not convert sticker to an image for Codex."
 
 
-def _build_sticker_runtime_text(sticker: Any, image_path: Path) -> str:
+def _build_sticker_runtime_text(sticker: Any, artifacts: _StickerArtifacts) -> str:
     """Build the runtime message while preserving the image attachment contract."""
+    lines: list[str] = []
     emoji = getattr(sticker, "emoji", None)
     if isinstance(emoji, str) and emoji.strip():
-        return f"Sticker emoji: {emoji.strip()}\n\n(image attached: {image_path})"
-    return f"(image attached: {image_path})"
+        lines.append(f"Sticker emoji: {emoji.strip()}")
+    lines.append(
+        f"Sticker {artifacts.image_label}: (image attached: {artifacts.image_path})"
+    )
+    if artifacts.original_path is not None:
+        lines.append(f"Sticker animation artifact: {artifacts.original_path}")
+    if artifacts.gif_path is not None:
+        lines.append(f"Sticker animation GIF: {artifacts.gif_path}")
+    lines.extend(artifacts.status_lines)
+    return "\n".join(lines)
 
 
 async def sticker_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2498,15 +2625,15 @@ async def sticker_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     sticker = update.message.sticker
-    image_path, warning = await _sticker_image_path(sticker)
-    if image_path is None:
+    artifacts, warning = await _sticker_artifacts(sticker)
+    if artifacts is None:
         await safe_reply(
             update.message,
             warning or "⚠ Could not forward sticker as an image.",
         )
         return
 
-    text_to_send = _build_sticker_runtime_text(sticker, image_path)
+    text_to_send = _build_sticker_runtime_text(sticker, artifacts)
 
     await update.message.chat.send_action(ChatAction.TYPING)
     clear_status_msg_info(target.user_id, target.thread_id)

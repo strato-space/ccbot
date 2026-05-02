@@ -6,6 +6,7 @@ cleanup, and raw slash-command passthrough so refactors cannot silently change
 behavior in shared modules.
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1954,11 +1955,11 @@ class TestMediaForwarding:
             assert expected_path.exists()
             mock_sm.send_to_window.assert_called_once_with(
                 "@7",
-                f"Sticker emoji: 🙂\n\n(image attached: {expected_path})",
+                f"Sticker emoji: 🙂\nSticker image: (image attached: {expected_path})",
             )
 
     @pytest.mark.asyncio
-    async def test_animated_sticker_forwarding_uses_thumbnail_image(
+    async def test_animated_tgs_sticker_forwards_thumbnail_and_original_artifact(
         self, tmp_path
     ):
         update = _make_topic_update()
@@ -1971,6 +1972,10 @@ class TestMediaForwarding:
             side_effect=lambda path: _write_test_webp(path)
         )
         thumbnail.get_file.return_value = thumbnail_file
+        original_file = MagicMock(file_path="stickers/monkey.tgs")
+        original_file.download_to_drive = AsyncMock(
+            side_effect=lambda path: path.write_bytes(b"tgs")
+        )
         sticker = MagicMock(
             file_unique_id="sticker-animated",
             is_animated=True,
@@ -1979,6 +1984,7 @@ class TestMediaForwarding:
             thumbnail=thumbnail,
         )
         sticker.get_file = AsyncMock()
+        sticker.get_file.return_value = original_file
         update.message.sticker = sticker
 
         with (
@@ -2005,12 +2011,192 @@ class TestMediaForwarding:
                 tmp_path / "1700000000_sticker-animated_thumb-static_thumbnail.png"
             )
             thumbnail_file.download_to_drive.assert_called_once_with(expected_source)
-            sticker.get_file.assert_not_called()
+            expected_original = tmp_path / "1700000000_sticker-animated_original.tgs"
+            original_file.download_to_drive.assert_called_once_with(expected_original)
             assert expected_path.exists()
             mock_sm.send_to_window.assert_called_once_with(
                 "@7",
-                f"(image attached: {expected_path})",
+                "\n".join(
+                    [
+                        f"Sticker thumbnail: (image attached: {expected_path})",
+                        f"Sticker animation artifact: {expected_original}",
+                        "Sticker animation GIF: not generated for .tgs stickers",
+                    ]
+                ),
             )
+
+    @pytest.mark.asyncio
+    async def test_video_sticker_forwards_thumbnail_and_original_without_ffmpeg(
+        self, tmp_path
+    ):
+        update = _make_topic_update()
+        context = _make_context()
+
+        thumbnail = MagicMock(file_unique_id="thumb-static")
+        thumbnail.get_file = AsyncMock()
+        thumbnail_file = MagicMock()
+        thumbnail_file.download_to_drive = AsyncMock(
+            side_effect=lambda path: _write_test_webp(path)
+        )
+        thumbnail.get_file.return_value = thumbnail_file
+        original_file = MagicMock(file_path="stickers/monkey.webm")
+        original_file.download_to_drive = AsyncMock(
+            side_effect=lambda path: path.write_bytes(b"webm")
+        )
+        sticker = MagicMock(
+            file_unique_id="sticker-video",
+            is_animated=False,
+            is_video=True,
+            emoji="🐵",
+            thumbnail=thumbnail,
+        )
+        sticker.get_file = AsyncMock(return_value=original_file)
+        update.message.sticker = sticker
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._IMAGES_DIR", tmp_path),
+            patch("ccbot.bot.time.time", return_value=1700000000),
+            patch("ccbot.bot.shutil.which", return_value=None),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.sticker_handler(update, context)
+
+            expected_thumbnail = (
+                tmp_path / "1700000000_sticker-video_thumb-static_thumbnail.png"
+            )
+            expected_original = tmp_path / "1700000000_sticker-video_original.webm"
+            original_file.download_to_drive.assert_called_once_with(expected_original)
+            mock_sm.send_to_window.assert_called_once_with(
+                "@7",
+                "\n".join(
+                    [
+                        "Sticker emoji: 🐵",
+                        f"Sticker thumbnail: (image attached: {expected_thumbnail})",
+                        f"Sticker animation artifact: {expected_original}",
+                        "Sticker animation GIF: unavailable (ffmpeg not found)",
+                    ]
+                ),
+            )
+
+    @pytest.mark.asyncio
+    async def test_video_sticker_gif_conversion_failure_is_non_fatal(
+        self, tmp_path
+    ):
+        update = _make_topic_update()
+        context = _make_context()
+
+        thumbnail = MagicMock(file_unique_id="thumb-static")
+        thumbnail.get_file = AsyncMock()
+        thumbnail_file = MagicMock()
+        thumbnail_file.download_to_drive = AsyncMock(
+            side_effect=lambda path: _write_test_webp(path)
+        )
+        thumbnail.get_file.return_value = thumbnail_file
+        original_file = MagicMock(file_path="stickers/monkey.webm")
+        original_file.download_to_drive = AsyncMock(
+            side_effect=lambda path: path.write_bytes(b"webm")
+        )
+        sticker = MagicMock(
+            file_unique_id="sticker-video",
+            is_animated=False,
+            is_video=True,
+            emoji=None,
+            thumbnail=thumbnail,
+        )
+        sticker.get_file = AsyncMock(return_value=original_file)
+        update.message.sticker = sticker
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._IMAGES_DIR", tmp_path),
+            patch("ccbot.bot.time.time", return_value=1700000000),
+            patch("ccbot.bot.shutil.which", return_value="/usr/bin/ffmpeg"),
+            patch(
+                "ccbot.bot.subprocess.run",
+                side_effect=bot_mod.subprocess.CalledProcessError(1, "ffmpeg"),
+            ),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.sticker_handler(update, context)
+
+            text_to_send = mock_sm.send_to_window.await_args.args[1]
+            assert "Sticker thumbnail: (image attached:" in text_to_send
+            assert "Sticker animation artifact:" in text_to_send
+            assert "Sticker animation GIF: unavailable (ffmpeg failed:" in text_to_send
+
+    @pytest.mark.asyncio
+    async def test_video_sticker_gif_conversion_success_is_reported(
+        self, tmp_path
+    ):
+        update = _make_topic_update()
+        context = _make_context()
+
+        thumbnail = MagicMock(file_unique_id="thumb-static")
+        thumbnail.get_file = AsyncMock()
+        thumbnail_file = MagicMock()
+        thumbnail_file.download_to_drive = AsyncMock(
+            side_effect=lambda path: _write_test_webp(path)
+        )
+        thumbnail.get_file.return_value = thumbnail_file
+        original_file = MagicMock(file_path="stickers/monkey.webm")
+        original_file.download_to_drive = AsyncMock(
+            side_effect=lambda path: path.write_bytes(b"webm")
+        )
+        sticker = MagicMock(
+            file_unique_id="sticker-video",
+            is_animated=False,
+            is_video=True,
+            emoji=None,
+            thumbnail=thumbnail,
+        )
+        sticker.get_file = AsyncMock(return_value=original_file)
+        update.message.sticker = sticker
+
+        def _write_gif(args, **_kwargs):
+            Path(args[-1]).write_bytes(b"GIF89a")
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._IMAGES_DIR", tmp_path),
+            patch("ccbot.bot.time.time", return_value=1700000000),
+            patch("ccbot.bot.shutil.which", return_value="/usr/bin/ffmpeg"),
+            patch("ccbot.bot.subprocess.run", side_effect=_write_gif),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.sticker_handler(update, context)
+
+            expected_gif = tmp_path / "1700000000_sticker-video_original.gif"
+            text_to_send = mock_sm.send_to_window.await_args.args[1]
+            assert f"Sticker animation GIF: {expected_gif}" in text_to_send
+            assert "unavailable" not in text_to_send
 
     @pytest.mark.asyncio
     async def test_animated_sticker_without_thumbnail_fails_closed(self, tmp_path):
