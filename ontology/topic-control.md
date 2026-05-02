@@ -90,6 +90,9 @@ If this note conflicts with any explanatory note in `doc/`, this note wins.
     - `/resume <thread-name|id>` where the runtime lane allows it
   - bot-addressed `@mention` is not an addressed entry for shared group
     surfaces
+  - photo/sticker ingress is not an addressed entry either; if the surface is
+    not actively bound to a writable runtime, image-equivalent media is ignored
+    without downloading, replying, or mutating bind state
 
 - **Runtime helper window**
   - a live tmux window whose persisted runtime conversation identity belongs to

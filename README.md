@@ -134,6 +134,9 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
 - **Voice messages** — Voice messages are transcribed via OpenAI and forwarded as text
 - **Document messages** — Telegram documents/files such as `tar.gz` archives are downloaded and forwarded to the runtime as local file paths
 - **Sticker messages** — Telegram stickers are normalized to image attachments for the runtime; animated/video stickers use their Telegram thumbnail when available
+- **Generated-image result text** — successful image-generation tool output that
+  reports a saved local file is delivered as terminal Telegram text in compact
+  mode; the bot does not automatically attach that generated image
 - **Send messages** — Forward text to Codex via tmux keystrokes
 - **Codex command forwarding** — Forward raw Codex slash commands, with a small supported menu surface for `/clear`, `/compact`, `/diff`, `/exit`, `/init`, `/review`, and `/status`
 - **Create new conversations** — Start Codex conversations from Telegram via directory browser
@@ -344,6 +347,9 @@ routing warm-up in shared group surfaces.
 
 - In **private chats with topics enabled**, the first plain text message in a fresh topic may still trigger the bind flow automatically.
 - In **group/supergroup topics**, ordinary text and bot-addressed `@mention` in an unbound topic stay silent.
+- In **group/supergroup topics**, unbound photo and sticker ingress also stays
+  silent: the bot does not download the media, reply with bind guidance, or
+  mutate bind state.
 - In **no-topics group main chat mode**, ordinary text and bot-addressed `@mention` stay silent.
 - Explicit `/bind` and `/resume` remain the valid explicit re-entry paths in shared group surfaces.
 - Command handlers persist group routing metadata before binding, resuming,
@@ -372,6 +378,10 @@ artifact path for direct result delivery. Video stickers may get a GIF sibling
 when `ffmpeg` is available; `.tgs` stickers keep the original `.tgs` artifact
 without pretending it is an image/GIF. Stickers fail closed when no thumbnail
 exists and no useful visual fallback is available.
+
+If a photo or sticker arrives before the topic has an active writable runtime
+binding, it is ignored silently. Use `/bind` or `/resume` first; media ingress
+does not open or repair bind flow by itself.
 
 If the topic is bound to an external persisted thread without live tmux, input
 injection fails closed with an explicit read-only warning and a reattach hint.

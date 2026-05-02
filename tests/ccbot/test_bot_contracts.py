@@ -1873,6 +1873,31 @@ class TestMediaForwarding:
             )
 
     @pytest.mark.asyncio
+    async def test_unbound_photo_ingress_is_silent(self):
+        update = _make_topic_update()
+        context = _make_context()
+        photo = MagicMock(file_unique_id="photo-hires")
+        photo.get_file = AsyncMock()
+        update.message.photo = [photo]
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+
+            await bot_mod.photo_handler(update, context)
+
+        photo.get_file.assert_not_called()
+        mock_sm.set_group_chat_id.assert_not_called()
+        mock_sm.send_to_window.assert_not_called()
+        mock_tmux.find_window_by_id.assert_not_called()
+        mock_reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_document_forwarding_downloads_and_sends_attachment_path(
         self, tmp_path
     ):
@@ -1957,6 +1982,41 @@ class TestMediaForwarding:
                 "@7",
                 f"Sticker emoji: 🙂\nSticker image: (image attached: {expected_path})",
             )
+
+    @pytest.mark.asyncio
+    async def test_unbound_sticker_ingress_is_silent(self):
+        update = _make_topic_update()
+        context = _make_context()
+        sticker = MagicMock(
+            file_unique_id="sticker-static",
+            is_animated=False,
+            is_video=False,
+            emoji="🙂",
+        )
+        sticker.get_file = AsyncMock()
+        update.message.sticker = sticker
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+            patch(
+                "ccbot.bot._sticker_artifacts",
+                new_callable=AsyncMock,
+            ) as mock_artifacts,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+
+            await bot_mod.sticker_handler(update, context)
+
+        sticker.get_file.assert_not_called()
+        mock_artifacts.assert_not_awaited()
+        mock_sm.set_group_chat_id.assert_not_called()
+        mock_sm.send_to_window.assert_not_called()
+        mock_tmux.find_window_by_id.assert_not_called()
+        mock_reply.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_animated_tgs_sticker_forwards_thumbnail_and_original_artifact(
@@ -3297,6 +3357,52 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_handle_new_message_delivers_generated_image_success_as_final_text(
+        self,
+    ):
+        bot = AsyncMock()
+        generated_text = (
+            "Generated Image:\n"
+            "  └ Create an improved sticker-style monkey thumbnail.\n"
+            "  └ Saved to: file:///home/tools/imm/.codex/generated_images/run/ig.png"
+        )
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text=generated_text,
+            is_complete=True,
+            content_type="tool_result",
+            tool_use_id="toolu_image",
+            role="assistant",
+            event_kind="tool_output",
+            runtime_kind="codex",
+            tool_name="image_gen.imagegen",
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
+            patch("ccbot.bot.get_interactive_msg_id", return_value=None),
+            patch("ccbot.bot.get_message_queue", return_value=None),
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_status.assert_not_awaited()
+        mock_content.assert_awaited_once()
+        kwargs = mock_content.await_args.kwargs
+        assert kwargs["content_type"] == "text"
+        assert kwargs["semantic_kind"] == "assistant_final"
+        assert kwargs["text"] == generated_text
+
+    @pytest.mark.asyncio
     async def test_handle_new_message_compact_mode_routes_orchestration_to_latest_visible_artifact(
         self,
     ):
@@ -3797,6 +3903,31 @@ class TestTelegramDelivery:
         assert projected.status_message_eligible is True
         assert len(projected.text) <= 560
         assert projected.text.count("```") in {0, 2}
+
+    def test_compact_policy_promotes_generated_image_success_to_final_text(self):
+        event = NormalizedEvent(
+            thread_id="thread-1",
+            text=(
+                "```text\n"
+                "Generated Image:\n"
+                "  └ Create an improved sticker-style monkey thumbnail.\n"
+                "  └ Saved to: file:///home/tools/imm/.codex/generated_images/run/ig.png\n"
+                "```"
+            ),
+            is_complete=True,
+            content_type="tool_result",
+            role="assistant",
+            event_kind="tool_output",
+            tool_name="imagegen",
+        )
+
+        projected = apply_telegram_delivery_policy(event, mode="compact")
+
+        assert projected.content_type == "text"
+        assert projected.semantic_kind == "assistant_final"
+        assert projected.delivery_class == "history"
+        assert projected.dispatch_to_telegram is True
+        assert projected.status_message_eligible is False
 
     def test_compact_policy_forces_dispatch_for_ordinary_user_echo(self):
         event = NormalizedEvent(

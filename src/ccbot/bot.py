@@ -2258,6 +2258,8 @@ def _sanitize_attachment_filename(filename: str | None, fallback: str) -> str:
 async def _resolve_attachment_input_target(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
+    *,
+    silent_unbound: bool = False,
 ) -> _AttachmentInputTarget | None:
     """Resolve a media attachment to the bound live runtime input target."""
     user = update.effective_user
@@ -2272,11 +2274,17 @@ async def _resolve_attachment_input_target(
     chat = update.message.chat
     control_surface = control_surface_classifier(update)
     thread_id = _get_thread_id(update)
-    if chat.type in ("group", "supergroup") and thread_id is not None:
+    if (
+        not silent_unbound
+        and chat.type in ("group", "supergroup")
+        and thread_id is not None
+    ):
         session_manager.set_group_chat_id(user.id, thread_id, chat.id)
 
     # Current attachment path requires a resolved Telegram topic.
     if thread_id is None:
+        if silent_unbound:
+            return None
         await safe_reply(
             update.message,
             "❌ This build currently requires a Telegram topic. Create a named topic to start a session.",
@@ -2289,14 +2297,21 @@ async def _resolve_attachment_input_target(
         control_surface,
     )
     if wid is None:
+        if silent_unbound:
+            return None
         await safe_reply(
             update.message,
             _build_unbound_input_message(user.id, control_surface),
         )
         return None
 
+    if silent_unbound and chat.type in ("group", "supergroup") and thread_id is not None:
+        session_manager.set_group_chat_id(user.id, thread_id, chat.id)
+
     w = await tmux_manager.find_window_by_id(wid)
     if not w:
+        if silent_unbound:
+            return None
         display = session_manager.get_display_name(wid)
         if not using_shared_group_binding:
             session_manager.unbind_thread(user.id, thread_id)
@@ -2335,7 +2350,11 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not update.message or not update.message.photo:
         return
 
-    target = await _resolve_attachment_input_target(update, context)
+    target = await _resolve_attachment_input_target(
+        update,
+        context,
+        silent_unbound=True,
+    )
     if target is None:
         return
 
@@ -2620,7 +2639,11 @@ async def sticker_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not update.message or not update.message.sticker:
         return
 
-    target = await _resolve_attachment_input_target(update, context)
+    target = await _resolve_attachment_input_target(
+        update,
+        context,
+        silent_unbound=True,
+    )
     if target is None:
         return
 

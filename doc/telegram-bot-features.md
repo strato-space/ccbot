@@ -146,6 +146,7 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | **sendDocument** | ✅ | Screenshots and runtime document/file attachments sent as Telegram documents |
 | **Sticker ingress** | ✅ | Inbound Telegram stickers are normalized to runtime image attachments; animated/video stickers use Telegram thumbnails as visual input and preserve original animation artifacts for direct result delivery |
 | **ccbot send file delivery** | ✅ | Local `ccbot send --file-path --file-type photo\|animation` returns generated artifacts to the Telegram surface without using runtime-input/TUI injection |
+| **Generated-image success text** | ✅ | Image-generation tool output that reports a saved local artifact is delivered as compact terminal text; automatic media attachment is not implied |
 | **ReplyKeyboardRemove** | ✅ | Used when switching away from reply keyboard |
 | **Codex command forwarding** | ✅ | Raw `/command` input is forwarded to tmux; the documented menu only exposes the supported Codex subset |
 | **Message rate limiting** | ✅ | 1.1s minimum interval per user to avoid flood control |
@@ -286,6 +287,9 @@ Named-topic behavior:
 
 - In **private chats with topics enabled**, a fresh topic may still start with implicit bind from the first plain message.
 - In **group/supergroup topics**, ordinary messages and bot-addressed `@mention` messages in an unbound topic must stay silent; they do not open bind flow.
+- In **group/supergroup topics**, unbound photo and sticker messages must also
+  stay silent; they do not download media, reply with bind guidance, call
+  runtime input, or mutate bind-flow state.
 - In **group/supergroup topics**, explicit `/bind` and explicit `/resume` remain valid explicit entry paths.
 - Explicit command entry paths store Telegram group routing metadata, including
   the group `chat_id`, so later topic title sync and delivery use the group

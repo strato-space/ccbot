@@ -22,8 +22,10 @@ import re
 from dataclasses import replace
 
 from .runtime_types import (
+    ASSISTANT_FINAL_SEMANTIC_KIND,
     COMMAND_EXECUTION_SEMANTIC_KIND,
     COMMENTARY_SEMANTIC_KIND,
+    DELIVERY_CLASS_HISTORY,
     FILE_CHANGE_SEMANTIC_KIND,
     ORCHESTRATION_SEMANTIC_KIND,
     PLAN_UPDATE_SEMANTIC_KIND,
@@ -52,6 +54,14 @@ _STATUS_ONLY_SEMANTIC_KINDS = {
     FILE_CHANGE_SEMANTIC_KIND,
 }
 _COMPACT_STATUS_LIMIT = 560
+_GENERATED_IMAGE_TOOL_NAMES = {
+    "gpt-image-2",
+    "image_gen",
+    "image_gen.imagegen",
+    "imagegen",
+    "media-gen",
+    "media_gen",
+}
 
 
 def is_internal_user_payload(text: str) -> bool:
@@ -168,6 +178,19 @@ def _compact_single_block(text: str, *, max_chars: int = _COMPACT_STATUS_LIMIT) 
     return text[: max_chars - 1].rstrip() + "…"
 
 
+def is_generated_image_success_text(text: str, tool_name: str | None = None) -> bool:
+    """Return True for image-generation success text that substitutes for final."""
+    lowered = text.lower()
+    if "generated image" not in lowered or "saved to:" not in lowered:
+        return False
+    if not any(marker in lowered for marker in ("file://", "generated_images", ".png")):
+        return False
+    normalized_tool = (tool_name or "").strip().lower()
+    if not normalized_tool:
+        return True
+    return normalized_tool in _GENERATED_IMAGE_TOOL_NAMES or "image" in normalized_tool
+
+
 def _suppress(event: NormalizedEvent) -> NormalizedEvent:
     event.dispatch_to_telegram = False
     event.include_in_history = False
@@ -235,6 +258,19 @@ def apply_telegram_delivery_policy(
 
     if projected.content_type == "tool_result" and (projected.tool_name or "").lower() == "skill":
         return _suppress(projected)
+
+    if projected.content_type == "tool_result" and is_generated_image_success_text(
+        text,
+        projected.tool_name,
+    ):
+        projected.content_type = "text"
+        projected.semantic_kind = ASSISTANT_FINAL_SEMANTIC_KIND
+        projected.delivery_class = DELIVERY_CLASS_HISTORY
+        projected.include_in_history = True
+        projected.dispatch_to_telegram = True
+        projected.status_message_eligible = False
+        projected.is_complete = True
+        return projected
 
     if projected.semantic_kind in _STATUS_ONLY_SEMANTIC_KINDS:
         projected.text = _compact_single_block(text)

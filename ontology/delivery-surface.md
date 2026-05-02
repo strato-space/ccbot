@@ -126,6 +126,9 @@ Durable bubbles in `compact` mode are intentionally narrow:
 - orchestration milestones
 - warning artifacts
 - final assistant text
+- generated-image success text with a saved artifact path, when it substitutes
+  for the absent final assistant text; this is not an automatic image
+  attachment claim
 
 In addition:
 
