@@ -533,21 +533,22 @@ class CodexThreadCatalog:
     def hidden_helper_thread_ids(self) -> frozenset[str]:
         """Thread ids that have rollouts but are helper/non-resumable sessions."""
         hidden: set[str] = set()
-        if not self.sessions_root.exists():
-            return frozenset()
-        for path in sorted(
-            (
-                path
-                for path in self.sessions_root.rglob("*")
-                if path.is_file() and path.suffix in {".jsonl", ".json"}
-            ),
-            key=lambda path: str(path),
-        ):
-            lookup = self._load_rollout_identity(path, include_non_resumable=True)
-            if lookup is None:
+        for sessions_root in self.sessions_roots:
+            if not sessions_root.exists():
                 continue
-            if not _is_resumable_session(lookup.originator, lookup.source):
-                hidden.add(lookup.thread_id)
+            for path in sorted(
+                (
+                    path
+                    for path in sessions_root.rglob("*")
+                    if path.is_file() and path.suffix in {".jsonl", ".json"}
+                ),
+                key=lambda path: str(path),
+            ):
+                lookup = self._load_rollout_identity(path, include_non_resumable=True)
+                if lookup is None:
+                    continue
+                if not _is_resumable_session(lookup.originator, lookup.source):
+                    hidden.add(lookup.thread_id)
         return frozenset(hidden)
 
     @cached_property
@@ -615,8 +616,13 @@ class CodexThreadCatalog:
         if not thread_id:
             return None
         index_by_id = {entry.thread_id: entry for entry in self.index_entries}
+        candidate_paths: list[Path] = []
+        for sessions_root in self.sessions_roots:
+            if not sessions_root.exists():
+                continue
+            candidate_paths.extend(sessions_root.rglob(f"*{thread_id}*.jsonl"))
         for path in sorted(
-            self.sessions_root.rglob(f"*{thread_id}*.jsonl"),
+            (path for path in candidate_paths if path.is_file()),
             key=lambda candidate: candidate.stat().st_mtime,
             reverse=True,
         ):

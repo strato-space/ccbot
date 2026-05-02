@@ -52,6 +52,10 @@ def test_codex_catalog_keeps_home_fallback_with_codex_home_env(
 
     assert catalog.codex_home == runtime_home
     assert catalog.get_candidate("019d4e63-f279-79b1-8dfd-be785dc4a419") is not None
+    assert (
+        catalog.get_candidate_fast("019d4e63-f279-79b1-8dfd-be785dc4a419")
+        is not None
+    )
 
 
 def _build_fixture_codex_home(tmp_path: Path) -> Path:
