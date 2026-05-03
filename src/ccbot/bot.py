@@ -62,6 +62,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatAction
+from telegram.error import BadRequest
 from telegram.ext import (
     AIORateLimiter,
     Application,
@@ -2241,6 +2242,7 @@ _MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 _DEFAULT_MAX_AUDIO_BYTES = 50 * 1024 * 1024
 _DEFAULT_MAX_VIDEO_BYTES = 100 * 1024 * 1024
+_DEFAULT_MAX_TELEGRAM_DOWNLOAD_BYTES = 20 * 1024 * 1024
 _VIDEO_PREVIEW_FFMPEG_TIMEOUT_SECONDS = 20
 _AUDIO_SUFFIXES = {
     ".aac",
@@ -2320,6 +2322,74 @@ def _max_media_bytes(env_name: str, default: int) -> int:
     return max(0, parsed)
 
 
+def _kind_media_limit_bytes(kind: str) -> int:
+    return _max_media_bytes(
+        "CCBOT_MAX_AUDIO_BYTES" if kind == "audio" else "CCBOT_MAX_VIDEO_BYTES",
+        _DEFAULT_MAX_AUDIO_BYTES if kind == "audio" else _DEFAULT_MAX_VIDEO_BYTES,
+    )
+
+
+def _telegram_download_limit_bytes() -> int:
+    return _max_media_bytes(
+        "CCBOT_MAX_TELEGRAM_DOWNLOAD_BYTES",
+        _DEFAULT_MAX_TELEGRAM_DOWNLOAD_BYTES,
+    )
+
+
+def _effective_media_download_limit(kind: str) -> tuple[int, str]:
+    """Return the active pre-download size cap and the cap source."""
+    limits = [
+        ("ccbot media forwarding", _kind_media_limit_bytes(kind)),
+        ("Telegram bot download", _telegram_download_limit_bytes()),
+    ]
+    enabled = [(source, value) for source, value in limits if value > 0]
+    if not enabled:
+        return 0, "ccbot media forwarding"
+    source, value = min(enabled, key=lambda item: item[1])
+    return value, source
+
+
+def _media_too_large_warning(
+    *,
+    kind: str,
+    file_size: int | None,
+    limit: int,
+    limit_source: str,
+) -> str:
+    details: list[str] = []
+    if file_size is not None:
+        details.append(f"{file_size} bytes")
+    if limit > 0:
+        details.append(f"limit {limit} bytes")
+    detail_text = f" ({'; '.join(details)})" if details else ""
+    if limit_source == "Telegram bot download":
+        return (
+            f"⚠ {kind.capitalize()} file is too large for Telegram bot download"
+            f"{detail_text}. Send a smaller file or a downloadable document/link."
+        )
+    return (
+        f"⚠ {kind.capitalize()} file is too large for ccbot media forwarding"
+        f"{detail_text}."
+    )
+
+
+def _telegram_file_too_big_warning(media: Any, *, kind: str) -> str:
+    limit = _telegram_download_limit_bytes()
+    return _media_too_large_warning(
+        kind=kind,
+        file_size=_optional_int_attr(media, "file_size"),
+        limit=limit,
+        limit_source="Telegram bot download",
+    )
+
+
+def _is_telegram_file_too_big_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "file is too big" in text and (
+        isinstance(exc, BadRequest) or exc.__class__.__module__.startswith("telegram")
+    )
+
+
 def _media_mime_allowed(mime_type: str | None, *, kind: str) -> bool:
     if not mime_type:
         return True
@@ -2349,15 +2419,14 @@ def _mime_fallback_suffix(mime_type: str | None, fallback: str) -> str:
 
 
 def _media_preflight_warning(media: Any, *, kind: str) -> str | None:
-    max_bytes = _max_media_bytes(
-        "CCBOT_MAX_AUDIO_BYTES" if kind == "audio" else "CCBOT_MAX_VIDEO_BYTES",
-        _DEFAULT_MAX_AUDIO_BYTES if kind == "audio" else _DEFAULT_MAX_VIDEO_BYTES,
-    )
+    max_bytes, limit_source = _effective_media_download_limit(kind)
     file_size = _optional_int_attr(media, "file_size")
     if max_bytes and file_size is not None and file_size > max_bytes:
-        return (
-            f"⚠ {kind.capitalize()} file is too large "
-            f"({file_size} bytes; limit {max_bytes} bytes)."
+        return _media_too_large_warning(
+            kind=kind,
+            file_size=file_size,
+            limit=max_bytes,
+            limit_source=limit_source,
         )
 
     mime_type = _optional_str_attr(media, "mime_type")
@@ -2406,10 +2475,7 @@ def _post_download_media_warning(path: Path, *, kind: str) -> str | None:
         logger.warning("Could not stat downloaded %s artifact %s: %s", kind, path, exc)
         return f"⚠ Could not verify downloaded {kind} artifact."
 
-    max_bytes = _max_media_bytes(
-        "CCBOT_MAX_AUDIO_BYTES" if kind == "audio" else "CCBOT_MAX_VIDEO_BYTES",
-        _DEFAULT_MAX_AUDIO_BYTES if kind == "audio" else _DEFAULT_MAX_VIDEO_BYTES,
-    )
+    max_bytes = _kind_media_limit_bytes(kind)
     if max_bytes and file_size > max_bytes:
         return (
             f"⚠ {kind.capitalize()} file is too large "
@@ -2430,22 +2496,48 @@ async def _download_media_artifact(
 
     try:
         tg_file = await media.get_file()
-        file_path = _build_media_artifact_path(
-            media,
-            tg_file,
-            kind=kind,
-            fallback_suffix=fallback_suffix,
-        )
-        suffix = file_path.suffix.lower()
-        if suffix and not _media_suffix_allowed(suffix, kind=kind):
-            return (
-                None,
-                f"⚠ Unsupported {kind} file extension: {suffix}. "
-                "Send a standard audio/video file.",
+    except Exception as exc:
+        if _is_telegram_file_too_big_error(exc):
+            logger.warning(
+                "Telegram refused %s artifact getFile as too large: %s",
+                kind,
+                exc,
             )
-        file_path.parent.mkdir(parents=True, exist_ok=True)
+            return None, _telegram_file_too_big_warning(media, kind=kind)
+        logger.warning("Failed to fetch Telegram %s artifact metadata: %s", kind, exc)
+        return None, f"⚠ Could not download {kind} artifact for Codex."
+
+    file_path = _build_media_artifact_path(
+        media,
+        tg_file,
+        kind=kind,
+        fallback_suffix=fallback_suffix,
+    )
+    suffix = file_path.suffix.lower()
+    if suffix and not _media_suffix_allowed(suffix, kind=kind):
+        return (
+            None,
+            f"⚠ Unsupported {kind} file extension: {suffix}. "
+            "Send a standard audio/video file.",
+        )
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
         await tg_file.download_to_drive(file_path)
     except Exception as exc:
+        if _is_telegram_file_too_big_error(exc):
+            logger.warning(
+                "Telegram refused %s artifact download as too large: %s",
+                kind,
+                exc,
+            )
+            try:
+                file_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning(
+                    "Could not remove rejected %s artifact %s", kind, file_path
+                )
+            return None, _telegram_file_too_big_warning(media, kind=kind)
         logger.warning("Failed to download Telegram %s artifact: %s", kind, exc)
         return None, f"⚠ Could not download {kind} artifact for Codex."
 

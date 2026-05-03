@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from telegram import CallbackQuery, MessageEntity, User
+from telegram.error import BadRequest
 
 from ccbot import bot as bot_mod
 from ccbot.handlers.callback_data import append_bind_flow_token
@@ -2055,6 +2056,88 @@ class TestMediaForwarding:
         assert "too large" in mock_reply.await_args.args[1]
 
     @pytest.mark.asyncio
+    async def test_audio_oversize_above_telegram_download_cap_fails_before_get_file(
+        self, monkeypatch
+    ):
+        update = _make_topic_update()
+        context = _make_context()
+        monkeypatch.delenv("CCBOT_MAX_AUDIO_BYTES", raising=False)
+        monkeypatch.setenv(
+            "CCBOT_MAX_TELEGRAM_DOWNLOAD_BYTES",
+            str(bot_mod._DEFAULT_MAX_TELEGRAM_DOWNLOAD_BYTES),
+        )
+        audio = MagicMock(
+            file_unique_id="audio-bot-limit",
+            file_name="too-large.mp3",
+            mime_type="audio/mpeg",
+            file_size=bot_mod._DEFAULT_MAX_TELEGRAM_DOWNLOAD_BYTES + 1,
+        )
+        audio.get_file = AsyncMock()
+        update.message.audio = audio
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.audio_handler(update, context)
+
+        audio.get_file.assert_not_called()
+        mock_sm.send_to_window.assert_not_called()
+        warning = mock_reply.await_args.args[1]
+        assert "too large for Telegram bot download" in warning
+        assert str(bot_mod._DEFAULT_MAX_TELEGRAM_DOWNLOAD_BYTES) in warning
+
+    @pytest.mark.asyncio
+    async def test_audio_get_file_too_big_error_returns_clear_warning(
+        self, monkeypatch
+    ):
+        update = _make_topic_update()
+        context = _make_context()
+        monkeypatch.delenv("CCBOT_MAX_AUDIO_BYTES", raising=False)
+        monkeypatch.setenv(
+            "CCBOT_MAX_TELEGRAM_DOWNLOAD_BYTES",
+            str(bot_mod._DEFAULT_MAX_TELEGRAM_DOWNLOAD_BYTES),
+        )
+        audio = MagicMock(
+            file_unique_id="audio-runtime-limit",
+            file_name="runtime-limit.mp3",
+            mime_type="audio/mpeg",
+            file_size=None,
+        )
+        audio.get_file = AsyncMock(side_effect=BadRequest("File is too big"))
+        update.message.audio = audio
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.audio_handler(update, context)
+
+        audio.get_file.assert_awaited_once()
+        mock_sm.send_to_window.assert_not_called()
+        warning = mock_reply.await_args.args[1]
+        assert "too large for Telegram bot download" in warning
+        assert "Could not download" not in warning
+
+    @pytest.mark.asyncio
     async def test_video_forwarding_saves_artifact_and_thumbnail_preview(
         self, tmp_path
     ):
@@ -2183,6 +2266,98 @@ class TestMediaForwarding:
         mock_sm.send_to_window.assert_not_called()
         mock_tmux.find_window_by_id.assert_not_called()
         mock_reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_video_oversize_above_telegram_download_cap_fails_before_get_file(
+        self, monkeypatch
+    ):
+        update = _make_topic_update()
+        context = _make_context()
+        monkeypatch.delenv("CCBOT_MAX_VIDEO_BYTES", raising=False)
+        monkeypatch.setenv(
+            "CCBOT_MAX_TELEGRAM_DOWNLOAD_BYTES",
+            str(bot_mod._DEFAULT_MAX_TELEGRAM_DOWNLOAD_BYTES),
+        )
+        video = MagicMock(
+            file_unique_id="video-bot-limit",
+            file_name="too-large.mp4",
+            mime_type="video/mp4",
+            file_size=bot_mod._DEFAULT_MAX_TELEGRAM_DOWNLOAD_BYTES + 1,
+        )
+        video.get_file = AsyncMock()
+        update.message.video = video
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.video_handler(update, context)
+
+        video.get_file.assert_not_called()
+        mock_sm.send_to_window.assert_not_called()
+        warning = mock_reply.await_args.args[1]
+        assert "too large for Telegram bot download" in warning
+        assert str(bot_mod._DEFAULT_MAX_TELEGRAM_DOWNLOAD_BYTES) in warning
+
+    @pytest.mark.asyncio
+    async def test_video_download_too_big_error_returns_clear_warning(
+        self, tmp_path, monkeypatch
+    ):
+        update = _make_topic_update()
+        context = _make_context()
+        monkeypatch.delenv("CCBOT_MAX_VIDEO_BYTES", raising=False)
+        monkeypatch.setenv(
+            "CCBOT_MAX_TELEGRAM_DOWNLOAD_BYTES",
+            str(bot_mod._DEFAULT_MAX_TELEGRAM_DOWNLOAD_BYTES),
+        )
+        video = MagicMock(
+            file_unique_id="video-runtime-limit",
+            file_name="runtime-limit.mp4",
+            mime_type="video/mp4",
+            duration=8,
+            file_size=None,
+            thumbnail=None,
+        )
+        video.get_file = AsyncMock()
+        video_file = MagicMock(file_path="videos/runtime-limit.mp4")
+        video_file.download_to_drive = AsyncMock(
+            side_effect=BadRequest("File is too big")
+        )
+        video.get_file.return_value = video_file
+        update.message.video = video
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._MEDIA_DIR", tmp_path),
+            patch("ccbot.bot.time.time", return_value=1700000000),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.video_handler(update, context)
+
+        video.get_file.assert_awaited_once()
+        video_file.download_to_drive.assert_awaited_once()
+        mock_sm.send_to_window.assert_not_called()
+        warning = mock_reply.await_args.args[1]
+        assert "too large for Telegram bot download" in warning
+        assert "Could not download" not in warning
 
     @pytest.mark.asyncio
     async def test_static_sticker_forwarding_normalizes_to_image_attachment(

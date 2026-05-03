@@ -132,7 +132,7 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   status polling does not turn ordinary footer churn into repeated screenshots.
 - **Prompt-safe control lane** — Detect `input ready`, `busy`, and `blocked prompt` terminal states before sending input
 - **Voice messages** — Voice messages are transcribed via OpenAI and forwarded as text
-- **Audio/video messages** — Telegram audio/video files are saved under `$CCBOT_DIR/media` and forwarded artifact-first to the runtime as local paths plus metadata; transcription is optional future enrichment
+- **Audio/video messages** — Telegram audio/video files within the configured Telegram bot download cap are saved under `$CCBOT_DIR/media` and forwarded artifact-first to the runtime as local paths plus metadata; transcription is optional future enrichment
 - **Document messages** — Telegram documents/files such as `tar.gz` archives are downloaded and forwarded to the runtime as local file paths
 - **Sticker messages** — Telegram stickers are normalized to image attachments for the runtime; animated/video stickers use their Telegram thumbnail when available
 - **Generated-image result text** — successful image-generation tool output that
@@ -210,6 +210,7 @@ ALLOWED_USERS=your_telegram_user_id
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI API base URL (for proxies or compatible APIs) |
 | `CCBOT_MAX_AUDIO_BYTES` | `52428800` | Maximum inbound Telegram audio artifact size before refusing download/forward |
 | `CCBOT_MAX_VIDEO_BYTES` | `104857600` | Maximum inbound Telegram video artifact size before refusing download/forward |
+| `CCBOT_MAX_TELEGRAM_DOWNLOAD_BYTES` | `20971520` | Maximum Bot API `getFile`/download size for inbound media; effective audio/video preflight uses the lower of this cap and the media-specific cap |
 
 Message formatting is always HTML via `chatgpt-md-converter` (`chatgpt_md_converter` package).
 There is no runtime formatter switch to MarkdownV2.
@@ -386,7 +387,10 @@ Telegram thumbnail or `ffmpeg` frame preview is attached when available; if no
 preview can be produced, the video artifact path is still delivered with
 `Preview unavailable`. Audio/video transcription is not attempted in the MVP
 when OpenAI credentials are unavailable; local OSS ASR/diarization is future
-optional enrichment.
+optional enrichment. The default remote Telegram Bot API download cap is
+`CCBOT_MAX_TELEGRAM_DOWNLOAD_BYTES=20971520`; audio/video files above the
+effective cap fail before download with a clear “too large for Telegram bot
+download” warning rather than a generic artifact failure.
 
 If photo, sticker, audio, or video media arrives before the topic has an
 active writable runtime binding, it is ignored silently. Use `/bind` or

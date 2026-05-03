@@ -53,6 +53,9 @@ control surface at a time.
 - **Inbound media artifact path**
   - runtime input text produced from a Telegram media message after the control
     surface is already bound to a writable live runtime
+  - only exists after Telegram Bot API download guardrails pass; oversized
+    bot-inaccessible media must fail closed with a warning instead of creating
+    a generic artifact-failure bubble
   - current examples:
     - audio original saved under `$CCBOT_DIR/media` and forwarded as
       `Audio artifact: /path`

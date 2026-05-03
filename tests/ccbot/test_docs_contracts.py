@@ -68,6 +68,9 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "Generated-image result text" in readme
     assert "does not automatically attach that generated image" in readme
     assert "photo, sticker, audio, or video media arrives before the topic" in readme
+    assert "CCBOT_MAX_TELEGRAM_DOWNLOAD_BYTES" in readme
+    assert "too large for Telegram bot" in readme
+    assert "download” warning" in readme
     assert "Verbose/debug paths may expose more raw execution surface" in readme
 
 
@@ -190,6 +193,7 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "must drop rather than reopen the lane" in delivery
     assert "generated-image success text with a saved artifact path" in delivery
     assert "Inbound media artifact path" in delivery
+    assert "Telegram Bot API download guardrails pass" in delivery
     assert "Audio artifact: /path" in delivery
     assert "Video artifact: /path" in delivery
     assert "automatic image" in delivery
@@ -202,6 +206,7 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "surface policy == binding state" in boundaries
     assert "surface key == full control-surface identity" in boundaries
     assert "Inbound Telegram audio/video handling is a third boundary" in boundaries
+    assert "Bot API download guardrails pass" in boundaries
     assert "Replay evidence is written by" in boundaries
 
 
