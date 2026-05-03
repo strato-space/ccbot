@@ -132,6 +132,7 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   status polling does not turn ordinary footer churn into repeated screenshots.
 - **Prompt-safe control lane** — Detect `input ready`, `busy`, and `blocked prompt` terminal states before sending input
 - **Voice messages** — Voice messages are transcribed via OpenAI and forwarded as text
+- **Audio/video messages** — Telegram audio/video files are saved under `$CCBOT_DIR/media` and forwarded artifact-first to the runtime as local paths plus metadata; transcription is optional future enrichment
 - **Document messages** — Telegram documents/files such as `tar.gz` archives are downloaded and forwarded to the runtime as local file paths
 - **Sticker messages** — Telegram stickers are normalized to image attachments for the runtime; animated/video stickers use their Telegram thumbnail when available
 - **Generated-image result text** — successful image-generation tool output that
@@ -207,6 +208,8 @@ ALLOWED_USERS=your_telegram_user_id
 | `CCBOT_SHOW_HIDDEN_DIRS` | `false` | Show hidden (dot) directories in directory browser |
 | `OPENAI_API_KEY` | _(none)_ | OpenAI API key for voice message transcription |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI API base URL (for proxies or compatible APIs) |
+| `CCBOT_MAX_AUDIO_BYTES` | `52428800` | Maximum inbound Telegram audio artifact size before refusing download/forward |
+| `CCBOT_MAX_VIDEO_BYTES` | `104857600` | Maximum inbound Telegram video artifact size before refusing download/forward |
 
 Message formatting is always HTML via `chatgpt-md-converter` (`chatgpt_md_converter` package).
 There is no runtime formatter switch to MarkdownV2.
@@ -368,26 +371,32 @@ routing warm-up in shared group surfaces.
 **Sending messages:**
 
 Once a topic is bound to a live tmux window, plain text, voice, photo,
-document, and sticker messages are forwarded to the active runtime for every
-allowed participant in that bound surface. Voice is transcribed first, while
-photos and stickers are downloaded under `$CCBOT_DIR/images`; documents are
-downloaded under `$CCBOT_DIR/documents`. Static stickers are normalized to PNG
-image attachments. Animated/video stickers use their Telegram thumbnail as the
-runtime visual input when available, also preserving the original animation
-artifact path for direct result delivery. Video stickers may get a GIF sibling
-when `ffmpeg` is available; `.tgs` stickers keep the original `.tgs` artifact
-without pretending it is an image/GIF. Stickers fail closed when no thumbnail
-exists and no useful visual fallback is available.
+document, sticker, audio, and video messages are forwarded to the active
+runtime for every allowed participant in that bound surface. Voice is
+transcribed first. Photos and stickers are downloaded under
+`$CCBOT_DIR/images`; documents are downloaded under `$CCBOT_DIR/documents`;
+audio/video originals are downloaded under `$CCBOT_DIR/media` and forwarded
+artifact-first as local paths plus metadata. Static stickers are normalized to
+PNG image attachments. Animated/video stickers use their Telegram thumbnail as
+the runtime visual input when available, also preserving the original
+animation artifact path for direct result delivery. Video stickers may get a
+GIF sibling when `ffmpeg` is available; `.tgs` stickers keep the original
+`.tgs` artifact without pretending it is an image/GIF. For regular videos, a
+Telegram thumbnail or `ffmpeg` frame preview is attached when available; if no
+preview can be produced, the video artifact path is still delivered with
+`Preview unavailable`. Audio/video transcription is not attempted in the MVP
+when OpenAI credentials are unavailable; local OSS ASR/diarization is future
+optional enrichment.
 
-If a photo or sticker arrives before the topic has an active writable runtime
-binding, it is ignored silently. Use `/bind` or `/resume` first; media ingress
-does not open or repair bind flow by itself.
+If photo, sticker, audio, or video media arrives before the topic has an
+active writable runtime binding, it is ignored silently. Use `/bind` or
+`/resume` first; media ingress does not open or repair bind flow by itself.
 
 If the topic is bound to an external persisted thread without live tmux, input
 injection fails closed with an explicit read-only warning and a reattach hint.
 
 Routing note:
-- Telegram text, voice, photo, document, and sticker inputs enter the equal message layer in `queue` mode by default.
+- Telegram text, voice, photo, document, sticker, audio, and video inputs enter the equal message layer in `queue` mode by default.
 - `steer` is a routing semantic for runtime-aware control flows; it is not the same thing as raw terminal takeover.
 - Raw terminal control in tmux remains a separate operator layer and is never modeled as an ordinary queued message.
 - Multiline text sent to a writable live tmux runtime is pasted as one
@@ -429,7 +438,10 @@ CCBOT_DIR=/data/iqdoctor/.ccbot-imm_arena_bot \
   --message "animation"
 ```
 
-`--file-type gif` is accepted as an alias for `animation`.
+`--file-type gif` is accepted as an alias for `animation`; outbound `audio`
+and `video` file types are supported for generated/service artifacts. This is
+separate from inbound Telegram audio/video ingress, which forwards local media
+artifact paths into the runtime.
 
 **Killing a session:**
 

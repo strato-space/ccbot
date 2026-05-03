@@ -9,7 +9,7 @@ The current Codex adaptation only advertises the supported Telegram core lane:
 - control surface -> live tmux or external replay binding in the master
   ontology
 - directory / thread picker
-- text / voice / photo / document / sticker forwarding
+- text / voice / photo / document / sticker / audio / video forwarding
 - history and screenshot inspection
 - a small supported Codex slash-command menu
 
@@ -145,7 +145,8 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | **BotCommand + set_my_commands** | ✅ | Bot menu is limited to the supported Codex core lane plus a small passthrough subset |
 | **sendDocument** | ✅ | Screenshots and runtime document/file attachments sent as Telegram documents |
 | **Sticker ingress** | ✅ | Inbound Telegram stickers are normalized to runtime image attachments; animated/video stickers use Telegram thumbnails as visual input and preserve original animation artifacts for direct result delivery |
-| **ccbot send file delivery** | ✅ | Local `ccbot send --file-path --file-type photo\|animation` returns generated artifacts to the Telegram surface without using runtime-input/TUI injection |
+| **Audio/video ingress** | ✅ | Inbound Telegram audio/video messages are artifact-first runtime inputs: originals are saved under `$CCBOT_DIR/media`, audio/video paths and metadata are sent to the bound runtime, video previews are best-effort, and transcription is optional future enrichment rather than an OpenAI gate |
+| **ccbot send file delivery** | ✅ | Local `ccbot send --file-path --file-type photo\|animation\|audio\|video` returns generated artifacts to the Telegram surface without using runtime-input/TUI injection |
 | **Generated-image success text** | ✅ | Image-generation tool output that reports a saved local artifact is delivered as compact terminal text; automatic media attachment is not implied |
 | **ReplyKeyboardRemove** | ✅ | Used when switching away from reply keyboard |
 | **Codex command forwarding** | ✅ | Raw `/command` input is forwarded to tmux; the documented menu only exposes the supported Codex subset |
@@ -287,7 +288,7 @@ Named-topic behavior:
 
 - In **private chats with topics enabled**, a fresh topic may still start with implicit bind from the first plain message.
 - In **group/supergroup topics**, ordinary messages and bot-addressed `@mention` messages in an unbound topic must stay silent; they do not open bind flow.
-- In **group/supergroup topics**, unbound photo and sticker messages must also
+- In **group/supergroup topics**, unbound photo, sticker, audio, and video messages must also
   stay silent; they do not download media, reply with bind guidance, call
   runtime input, or mutate bind-flow state.
 - In **group/supergroup topics**, explicit `/bind` and explicit `/resume` remain valid explicit entry paths.

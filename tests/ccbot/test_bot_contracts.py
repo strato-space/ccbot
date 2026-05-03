@@ -133,9 +133,20 @@ class TestBotRegistration:
         assert "photo_handler" in callbacks
         assert "document_handler" in callbacks
         assert "sticker_handler" in callbacks
+        assert "audio_handler" in callbacks
+        assert "video_handler" in callbacks
         assert "voice_handler" in callbacks
         assert "topic_closed_handler" in callbacks
         assert "topic_edited_handler" in callbacks
+
+        ordered_callbacks = [
+            getattr(handler, "callback", None).__name__
+            for handler in app.handlers
+            if getattr(handler, "callback", None) is not None
+        ]
+        unsupported_index = ordered_callbacks.index("unsupported_content_handler")
+        assert ordered_callbacks.index("audio_handler") < unsupported_index
+        assert ordered_callbacks.index("video_handler") < unsupported_index
 
     def test_create_bot_applies_telegram_proxy_from_env(self, monkeypatch):
         """Freeze explicit proxy wiring for PTB/HTTPX bootstrap."""
@@ -1937,6 +1948,243 @@ class TestMediaForwarding:
             )
 
     @pytest.mark.asyncio
+    async def test_audio_forwarding_saves_artifact_without_openai_transcription(
+        self, tmp_path
+    ):
+        update = _make_topic_update()
+        context = _make_context()
+        audio = MagicMock(
+            file_unique_id="audio-unique",
+            file_name="../meeting.mp3",
+            mime_type="audio/mpeg",
+            duration=37,
+            file_size=12345,
+        )
+        audio.get_file = AsyncMock()
+        audio_file = MagicMock(file_path="voice/meeting.mp3")
+        audio_file.download_to_drive = AsyncMock(
+            side_effect=lambda path: Path(path).write_bytes(b"mp3")
+        )
+        audio.get_file.return_value = audio_file
+        update.message.audio = audio
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._MEDIA_DIR", tmp_path),
+            patch("ccbot.bot.time.time", return_value=1700000000),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+            patch("ccbot.bot.transcribe_voice", new_callable=AsyncMock) as mock_tx,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.audio_handler(update, context)
+
+            expected_path = tmp_path / "1700000000_audio-unique_meeting.mp3"
+            audio_file.download_to_drive.assert_called_once_with(expected_path)
+            mock_tx.assert_not_called()
+            mock_sm.send_to_window.assert_called_once()
+            window_id, text_to_send = mock_sm.send_to_window.call_args.args
+            assert window_id == "@7"
+            assert "Audio artifact received." in text_to_send
+            assert f"Audio artifact: {expected_path}" in text_to_send
+            assert "Audio metadata: mime=audio/mpeg, duration=37, size=12345" in text_to_send
+            assert "Transcript: unavailable" in text_to_send
+
+    @pytest.mark.asyncio
+    async def test_unbound_audio_ingress_is_silent(self):
+        update = _make_topic_update()
+        context = _make_context()
+        audio = MagicMock(file_unique_id="audio-unique", mime_type="audio/mpeg")
+        audio.get_file = AsyncMock()
+        update.message.audio = audio
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+
+            await bot_mod.audio_handler(update, context)
+
+        audio.get_file.assert_not_called()
+        mock_sm.set_group_chat_id.assert_not_called()
+        mock_sm.send_to_window.assert_not_called()
+        mock_tmux.find_window_by_id.assert_not_called()
+        mock_reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_audio_oversize_fails_closed_without_download(self):
+        update = _make_topic_update()
+        context = _make_context()
+        audio = MagicMock(
+            file_unique_id="audio-huge",
+            file_name="huge.mp3",
+            mime_type="audio/mpeg",
+            file_size=bot_mod._DEFAULT_MAX_AUDIO_BYTES + 1,
+        )
+        audio.get_file = AsyncMock()
+        update.message.audio = audio
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.audio_handler(update, context)
+
+        audio.get_file.assert_not_called()
+        mock_sm.send_to_window.assert_not_called()
+        assert "too large" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_video_forwarding_saves_artifact_and_thumbnail_preview(
+        self, tmp_path
+    ):
+        update = _make_topic_update()
+        context = _make_context()
+        thumbnail = MagicMock(file_unique_id="thumb-unique")
+        video = MagicMock(
+            file_unique_id="video-unique",
+            file_name="../clip.mp4",
+            mime_type="video/mp4",
+            duration=8,
+            file_size=45678,
+            thumbnail=thumbnail,
+        )
+        video.get_file = AsyncMock()
+        video_file = MagicMock(file_path="videos/clip.mp4")
+        video_file.download_to_drive = AsyncMock(
+            side_effect=lambda path: Path(path).write_bytes(b"mp4")
+        )
+        video.get_file.return_value = video_file
+        update.message.video = video
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._MEDIA_DIR", tmp_path / "media"),
+            patch("ccbot.bot.time.time", return_value=1700000000),
+            patch(
+                "ccbot.bot._download_attachment_image_as_png",
+                new_callable=AsyncMock,
+                return_value=tmp_path / "images" / "clip_preview.png",
+            ) as mock_preview,
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.video_handler(update, context)
+
+            expected_path = tmp_path / "media" / "1700000000_video-unique_clip.mp4"
+            video_file.download_to_drive.assert_called_once_with(expected_path)
+            mock_preview.assert_awaited_once_with(
+                thumbnail,
+                "1700000000_video-unique_clip_thumb-unique_video_thumbnail",
+            )
+            text_to_send = mock_sm.send_to_window.call_args.args[1]
+            assert "Video artifact received." in text_to_send
+            assert f"Video artifact: {expected_path}" in text_to_send
+            assert "Video thumbnail: (image attached:" in text_to_send
+            assert "Video metadata: mime=video/mp4, duration=8, size=45678" in text_to_send
+            assert "Transcript: not attempted in MVP" in text_to_send
+
+    @pytest.mark.asyncio
+    async def test_video_without_preview_still_forwards_artifact_path(
+        self, tmp_path
+    ):
+        update = _make_topic_update()
+        context = _make_context()
+        video = MagicMock(
+            file_unique_id="video-unique",
+            file_name="clip.mp4",
+            mime_type="video/mp4",
+            duration=8,
+            file_size=45678,
+            thumbnail=None,
+        )
+        video.get_file = AsyncMock()
+        video_file = MagicMock(file_path="videos/clip.mp4")
+        video_file.download_to_drive = AsyncMock(
+            side_effect=lambda path: Path(path).write_bytes(b"mp4")
+        )
+        video.get_file.return_value = video_file
+        update.message.video = video
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._MEDIA_DIR", tmp_path),
+            patch("ccbot.bot.time.time", return_value=1700000000),
+            patch("ccbot.bot.shutil.which", return_value=None),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.video_handler(update, context)
+
+            expected_path = tmp_path / "1700000000_video-unique_clip.mp4"
+            video_file.download_to_drive.assert_called_once_with(expected_path)
+            text_to_send = mock_sm.send_to_window.call_args.args[1]
+            assert f"Video artifact: {expected_path}" in text_to_send
+            assert "Preview unavailable" in text_to_send
+            assert "Transcript: not attempted in MVP" in text_to_send
+
+    @pytest.mark.asyncio
+    async def test_unbound_video_ingress_is_silent(self):
+        update = _make_topic_update()
+        context = _make_context()
+        video = MagicMock(file_unique_id="video-unique", mime_type="video/mp4")
+        video.get_file = AsyncMock()
+        update.message.video = video
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+
+            await bot_mod.video_handler(update, context)
+
+        video.get_file.assert_not_called()
+        mock_sm.set_group_chat_id.assert_not_called()
+        mock_sm.send_to_window.assert_not_called()
+        mock_tmux.find_window_by_id.assert_not_called()
+        mock_reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_static_sticker_forwarding_normalizes_to_image_attachment(
         self, tmp_path
     ):
@@ -2360,6 +2608,9 @@ class TestMediaForwarding:
         message = await_args.args[1]
         assert "document" in message
         assert "sticker" in message
+        assert "audio" in message
+        assert "video messages are supported" in message
+        assert "Video notes, animations" in message
         assert "Stickers, video" not in message
 
     @pytest.mark.asyncio

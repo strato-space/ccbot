@@ -67,7 +67,7 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "lifecycle `turn_started`" in readme
     assert "Generated-image result text" in readme
     assert "does not automatically attach that generated image" in readme
-    assert "unbound photo and sticker ingress also stays" in readme
+    assert "photo, sticker, audio, or video media arrives before the topic" in readme
     assert "Verbose/debug paths may expose more raw execution surface" in readme
 
 
@@ -167,7 +167,7 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "Telegram group routing coordinates" in topic_control
     assert "group_chat_ids[user_id:thread_id] -> Telegram group chat_id" in topic_control
     assert "command-only entry must not depend on prior text, mention, or callback input" in topic_control
-    assert "photo/sticker ingress is not an addressed entry" in topic_control
+    assert "photo/sticker/audio/video ingress is not an addressed entry" in topic_control
     assert "pending slot" in topic_control
     assert "no-topics main-chat control surface" in topic_control
     assert "legacy `topic_*` maps are compatibility mirrors" in topic_control
@@ -189,6 +189,9 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "visibility-first mutable" in delivery
     assert "must drop rather than reopen the lane" in delivery
     assert "generated-image success text with a saved artifact path" in delivery
+    assert "Inbound media artifact path" in delivery
+    assert "Audio artifact: /path" in delivery
+    assert "Video artifact: /path" in delivery
     assert "automatic image" in delivery
     assert "attachment claim" in delivery
     assert "queue-empty, binding-stale, or explicit clear" in delivery
@@ -198,6 +201,7 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "control surface == topic" in boundaries
     assert "surface policy == binding state" in boundaries
     assert "surface key == full control-surface identity" in boundaries
+    assert "Inbound Telegram audio/video handling is a third boundary" in boundaries
     assert "Replay evidence is written by" in boundaries
 
 
@@ -413,7 +417,7 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
     assert "(user_id, surface_key)" in doc
     assert "no-topics group chat" in doc or "no-topics group" in doc
     assert "bot-addressed `@mention` messages in an unbound topic must stay silent" in doc
-    assert "unbound photo and sticker messages must also" in doc
+    assert "unbound photo, sticker, audio, and video messages must also" in doc
     assert "do not download media" in doc
     assert "Identical numeric `thread_id` values in different groups are different control surfaces" in doc
     assert "explicit `/bind` and explicit `/resume` remain valid explicit entry paths" in doc

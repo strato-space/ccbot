@@ -48,6 +48,13 @@ control-surface/window state and calls the same runtime input driver as
 Telegram text. `ccbot send` is the opposite direction: outbound Telegram
 delivery for service results, not a runtime/TUI injection command.
 
+Inbound Telegram audio/video handling is a third boundary: after a writable
+runtime binding is resolved, ccbot saves the original media under
+`$CCBOT_DIR/media` and sends a text payload containing the local artifact path
+to the runtime. That artifact-first ingress is not outbound `ccbot send`, and
+optional transcript/preview enrichment must not become a gate for delivering
+the original artifact path.
+
 ## Replay Evidence Write Ownership
 
 Replay evidence is written by:

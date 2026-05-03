@@ -50,6 +50,20 @@ control surface at a time.
   - must not create or mutate a tmux binding; it is a direct outbound Telegram
     delivery path for adjacent services built on top of a ccbot instance
 
+- **Inbound media artifact path**
+  - runtime input text produced from a Telegram media message after the control
+    surface is already bound to a writable live runtime
+  - current examples:
+    - audio original saved under `$CCBOT_DIR/media` and forwarded as
+      `Audio artifact: /path`
+    - video original saved under `$CCBOT_DIR/media` and forwarded as
+      `Video artifact: /path`
+  - may include optional enrichment such as transcript availability status or
+    a video thumbnail line, but the saved original media artifact is the MVP
+    payload
+  - is not an outbound Telegram delivery artifact and must not use
+    `ccbot send`
+
 - **Pending input artifact**
   - mutable preview of future input already queued behind the current turn
   - examples:

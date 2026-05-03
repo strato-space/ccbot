@@ -15,14 +15,15 @@ Core responsibilities:
     Unbound topics trigger the directory browser to create or resume a thread.
     The current handler path requires a resolved topic id; a future no-topics
     mode would need an explicit `thread_id is None` main-chat path.
-  - Photo/document/sticker handling: photos, documents, and stickers sent by
-    user are downloaded and forwarded to Codex as file paths
-    (photo_handler, document_handler, sticker_handler).
+  - Photo/document/sticker/audio/video handling: incoming media sent by user is
+    downloaded and forwarded to Codex as runtime text with local artifact paths
+    or image markers (photo_handler, document_handler, sticker_handler,
+    audio_handler, video_handler).
   - Voice handling: voice messages are transcribed via OpenAI API and
     forwarded as text (voice_handler).
   - Automatic cleanup: closing a topic kills the associated window
-    (topic_closed_handler). Unsupported content (video, etc.) is rejected with
-    a warning (unsupported_content_handler).
+    (topic_closed_handler). Unsupported content (video notes, animations, etc.)
+    is rejected with a warning (unsupported_content_handler).
   - Bot lifecycle management: post_init, post_shutdown, create_bot.
 
 Handler modules (in handlers/):
@@ -41,6 +42,7 @@ Key functions: create_bot(), handle_new_message().
 import asyncio
 import io
 import logging
+import mimetypes
 import os
 import re
 import shutil
@@ -2216,7 +2218,7 @@ async def unsupported_content_handler(
     update: Update,
     _context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Reply to unsupported non-text messages (video, etc.)."""
+    """Reply to unsupported non-text messages (video notes, animations, etc.)."""
     if not update.message:
         return
     user = update.effective_user
@@ -2225,7 +2227,7 @@ async def unsupported_content_handler(
     logger.debug("Unsupported content from user %d", user.id)
     await safe_reply(
         update.message,
-        "⚠ Only text, photo, document, sticker, and voice messages are supported. Video and other media cannot be forwarded to Codex.",
+        "⚠ Only text, photo, document, sticker, voice, audio, and video messages are supported. Video notes, animations, and other media cannot be forwarded to Codex.",
     )
 
 
@@ -2234,6 +2236,41 @@ _IMAGES_DIR = ccbot_dir() / "images"
 _IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 _DOCUMENTS_DIR = ccbot_dir() / "documents"
 _DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)
+_MEDIA_DIR = ccbot_dir() / "media"
+_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+_DEFAULT_MAX_AUDIO_BYTES = 50 * 1024 * 1024
+_DEFAULT_MAX_VIDEO_BYTES = 100 * 1024 * 1024
+_VIDEO_PREVIEW_FFMPEG_TIMEOUT_SECONDS = 20
+_AUDIO_SUFFIXES = {
+    ".aac",
+    ".flac",
+    ".m4a",
+    ".mp3",
+    ".mp4",
+    ".oga",
+    ".ogg",
+    ".opus",
+    ".wav",
+    ".webm",
+}
+_VIDEO_SUFFIXES = {
+    ".avi",
+    ".m4v",
+    ".mkv",
+    ".mov",
+    ".mp4",
+    ".mpeg",
+    ".mpg",
+    ".webm",
+}
+_AUDIO_MIME_ALLOWLIST = {
+    "application/ogg",
+    "application/octet-stream",
+}
+_VIDEO_MIME_ALLOWLIST = {
+    "application/octet-stream",
+}
 
 
 def _sanitize_attachment_filename(filename: str | None, fallback: str) -> str:
@@ -2253,6 +2290,261 @@ def _sanitize_attachment_filename(filename: str | None, fallback: str) -> str:
         else:
             safe = safe[:180]
     return safe
+
+
+def _optional_str_attr(obj: Any, name: str) -> str | None:
+    value = getattr(obj, name, None)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _optional_int_attr(obj: Any, name: str) -> int | None:
+    value = getattr(obj, name, None)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _max_media_bytes(env_name: str, default: int) -> int:
+    value = os.getenv(env_name, "").strip()
+    if not value:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %d", env_name, value, default)
+        return default
+    return max(0, parsed)
+
+
+def _media_mime_allowed(mime_type: str | None, *, kind: str) -> bool:
+    if not mime_type:
+        return True
+    normalized = mime_type.lower()
+    if kind == "audio":
+        return normalized.startswith("audio/") or normalized in _AUDIO_MIME_ALLOWLIST
+    if kind == "video":
+        return normalized.startswith("video/") or normalized in _VIDEO_MIME_ALLOWLIST
+    return False
+
+
+def _media_suffix_allowed(suffix: str, *, kind: str) -> bool:
+    if kind == "audio":
+        return suffix in _AUDIO_SUFFIXES
+    if kind == "video":
+        return suffix in _VIDEO_SUFFIXES
+    return False
+
+
+def _mime_fallback_suffix(mime_type: str | None, fallback: str) -> str:
+    if not mime_type:
+        return fallback
+    guessed = mimetypes.guess_extension(mime_type.split(";", 1)[0].strip().lower())
+    if guessed and re.fullmatch(r"\.[a-z0-9]{1,10}", guessed):
+        return guessed.lower()
+    return fallback
+
+
+def _media_preflight_warning(media: Any, *, kind: str) -> str | None:
+    max_bytes = _max_media_bytes(
+        "CCBOT_MAX_AUDIO_BYTES" if kind == "audio" else "CCBOT_MAX_VIDEO_BYTES",
+        _DEFAULT_MAX_AUDIO_BYTES if kind == "audio" else _DEFAULT_MAX_VIDEO_BYTES,
+    )
+    file_size = _optional_int_attr(media, "file_size")
+    if max_bytes and file_size is not None and file_size > max_bytes:
+        return (
+            f"⚠ {kind.capitalize()} file is too large "
+            f"({file_size} bytes; limit {max_bytes} bytes)."
+        )
+
+    mime_type = _optional_str_attr(media, "mime_type")
+    if not _media_mime_allowed(mime_type, kind=kind):
+        return (
+            f"⚠ Unsupported {kind} MIME type: {mime_type}. "
+            "Send a standard audio/video file."
+        )
+    return None
+
+
+def _build_media_artifact_path(
+    media: Any,
+    tg_file: Any,
+    *,
+    kind: str,
+    fallback_suffix: str,
+) -> Path:
+    unique_id = _sanitize_attachment_filename(
+        _optional_str_attr(media, "file_unique_id"),
+        kind,
+    )
+    original_name = _optional_str_attr(media, "file_name")
+    tg_suffix = _telegram_file_suffix(tg_file, fallback_suffix)
+    mime_suffix = _mime_fallback_suffix(
+        _optional_str_attr(media, "mime_type"),
+        fallback_suffix,
+    )
+    suffix = tg_suffix if tg_suffix != fallback_suffix else mime_suffix
+
+    if original_name:
+        original_safe = _sanitize_attachment_filename(original_name, f"{kind}{suffix}")
+        if not Path(original_safe).suffix and suffix:
+            original_safe = f"{original_safe}{suffix}"
+        filename = f"{int(time.time())}_{unique_id}_{original_safe}"
+    else:
+        filename = f"{int(time.time())}_{unique_id}{suffix}"
+
+    return _MEDIA_DIR / filename
+
+
+def _post_download_media_warning(path: Path, *, kind: str) -> str | None:
+    try:
+        file_size = path.stat().st_size
+    except OSError as exc:
+        logger.warning("Could not stat downloaded %s artifact %s: %s", kind, path, exc)
+        return f"⚠ Could not verify downloaded {kind} artifact."
+
+    max_bytes = _max_media_bytes(
+        "CCBOT_MAX_AUDIO_BYTES" if kind == "audio" else "CCBOT_MAX_VIDEO_BYTES",
+        _DEFAULT_MAX_AUDIO_BYTES if kind == "audio" else _DEFAULT_MAX_VIDEO_BYTES,
+    )
+    if max_bytes and file_size > max_bytes:
+        return (
+            f"⚠ {kind.capitalize()} file is too large "
+            f"({file_size} bytes; limit {max_bytes} bytes)."
+        )
+    return None
+
+
+async def _download_media_artifact(
+    media: Any,
+    *,
+    kind: str,
+    fallback_suffix: str,
+) -> tuple[Path | None, str | None]:
+    warning = _media_preflight_warning(media, kind=kind)
+    if warning:
+        return None, warning
+
+    try:
+        tg_file = await media.get_file()
+        file_path = _build_media_artifact_path(
+            media,
+            tg_file,
+            kind=kind,
+            fallback_suffix=fallback_suffix,
+        )
+        suffix = file_path.suffix.lower()
+        if suffix and not _media_suffix_allowed(suffix, kind=kind):
+            return (
+                None,
+                f"⚠ Unsupported {kind} file extension: {suffix}. "
+                "Send a standard audio/video file.",
+            )
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        await tg_file.download_to_drive(file_path)
+    except Exception as exc:
+        logger.warning("Failed to download Telegram %s artifact: %s", kind, exc)
+        return None, f"⚠ Could not download {kind} artifact for Codex."
+
+    warning = _post_download_media_warning(file_path, kind=kind)
+    if warning:
+        try:
+            file_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove rejected %s artifact %s", kind, file_path)
+        return None, warning
+    return file_path, None
+
+
+def _format_media_metadata(prefix: str, media: Any, artifact_path: Path) -> str:
+    parts: list[str] = []
+    mime_type = _optional_str_attr(media, "mime_type")
+    duration = _optional_int_attr(media, "duration")
+    file_size = _optional_int_attr(media, "file_size")
+    if mime_type:
+        parts.append(f"mime={mime_type}")
+    if duration is not None:
+        parts.append(f"duration={duration}")
+    if file_size is None:
+        try:
+            file_size = artifact_path.stat().st_size
+        except OSError:
+            file_size = None
+    if file_size is not None:
+        parts.append(f"size={file_size}")
+    if not parts:
+        parts.append("unavailable")
+    return f"{prefix} metadata: " + ", ".join(parts)
+
+
+def _build_audio_runtime_text(audio: Any, artifact_path: Path) -> str:
+    return "\n".join(
+        [
+            "Audio artifact received.",
+            f"Audio artifact: {artifact_path}",
+            _format_media_metadata("Audio", audio, artifact_path),
+            (
+                "Transcript: unavailable (OpenAI API key not configured/invalid; "
+                "local OSS ASR integration pending)"
+            ),
+        ]
+    )
+
+
+def _build_video_runtime_text(
+    video: Any,
+    artifact_path: Path,
+    preview_path: Path | None,
+    preview_warning: str | None,
+) -> str:
+    lines = [
+        "Video artifact received.",
+        f"Video artifact: {artifact_path}",
+    ]
+    if preview_path is not None:
+        lines.append(f"Video thumbnail: (image attached: {preview_path})")
+    else:
+        lines.append(preview_warning or "Preview unavailable")
+    lines.extend(
+        [
+            _format_media_metadata("Video", video, artifact_path),
+            "Transcript: not attempted in MVP (local OSS video/audio extraction pending)",
+        ]
+    )
+    return "\n".join(lines)
+
+
+async def _send_attachment_runtime_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    target: _AttachmentInputTarget,
+    text_to_send: str,
+    success_reply: str,
+) -> None:
+    await update.message.chat.send_action(ChatAction.TYPING)
+    clear_status_msg_info(target.user_id, target.thread_id)
+
+    success, message = await session_manager.send_to_window(
+        target.window_id,
+        text_to_send,
+    )
+    if not success:
+        if message == BLOCKED_PROMPT_SEND_MESSAGE:
+            await _surface_blocked_prompt_state(
+                context.bot,
+                target.user_id,
+                target.window_id,
+                target.thread_id,
+                reply_message=update.message,
+            )
+            return
+        await safe_reply(update.message, f"❌ {message}")
+        return
+
+    await safe_reply(update.message, success_reply)
 
 
 async def _resolve_attachment_input_target(
@@ -2486,6 +2778,71 @@ def _telegram_file_suffix(tg_file: Any, fallback: str) -> str:
     return fallback
 
 
+def _extract_video_preview_frame(source_path: Path, preview_path: Path) -> str | None:
+    """Best-effort video preview extraction; returns a status on failure."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return "ffmpeg not found"
+
+    try:
+        subprocess.run(  # nosec B603 - fixed argv, no shell, local sanitized paths
+            [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(source_path),
+                "-frames:v",
+                "1",
+                str(preview_path),
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=_VIDEO_PREVIEW_FFMPEG_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"ffmpeg failed: {exc.__class__.__name__}"
+
+    if not preview_path.exists() or preview_path.stat().st_size == 0:
+        return "ffmpeg produced no preview"
+    return None
+
+
+async def _maybe_video_preview(
+    video: Any,
+    artifact_path: Path,
+    filename_stem: str,
+) -> tuple[Path | None, str | None]:
+    """Create a best-effort image preview without gating video artifact delivery."""
+    thumbnail = getattr(video, "thumbnail", None)
+    if thumbnail is not None:
+        thumbnail_id = _sanitize_attachment_filename(
+            _optional_str_attr(thumbnail, "file_unique_id"),
+            "thumbnail",
+        )
+        try:
+            return (
+                await _download_attachment_image_as_png(
+                    thumbnail,
+                    f"{filename_stem}_{thumbnail_id}_video_thumbnail",
+                ),
+                None,
+            )
+        except Exception as exc:
+            logger.warning("Failed to normalize Telegram video thumbnail: %s", exc)
+
+    preview_path = _IMAGES_DIR / f"{filename_stem}_video_preview.png"
+    preview_path.parent.mkdir(parents=True, exist_ok=True)
+    failure = await asyncio.to_thread(
+        _extract_video_preview_frame,
+        artifact_path,
+        preview_path,
+    )
+    if failure:
+        return None, f"Preview unavailable ({failure})"
+    return preview_path, None
+
+
 async def _download_sticker_original(
     sticker: Any,
     filename_stem: str,
@@ -2679,6 +3036,87 @@ async def sticker_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     await safe_reply(update.message, "🏷 Sticker sent to Codex as image.")
+
+
+async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle Telegram audio as artifact-first runtime input."""
+    if not update.message or not update.message.audio:
+        return
+
+    target = await _resolve_attachment_input_target(
+        update,
+        context,
+        silent_unbound=True,
+    )
+    if target is None:
+        return
+
+    audio = update.message.audio
+    artifact_path, warning = await _download_media_artifact(
+        audio,
+        kind="audio",
+        fallback_suffix=".mp3",
+    )
+    if artifact_path is None:
+        await safe_reply(
+            update.message,
+            warning or "⚠ Could not forward audio artifact to Codex.",
+        )
+        return
+
+    await _send_attachment_runtime_text(
+        update,
+        context,
+        target,
+        _build_audio_runtime_text(audio, artifact_path),
+        "🎧 Audio artifact sent to Codex.",
+    )
+
+
+async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle Telegram video as artifact-first runtime input."""
+    if not update.message or not update.message.video:
+        return
+
+    target = await _resolve_attachment_input_target(
+        update,
+        context,
+        silent_unbound=True,
+    )
+    if target is None:
+        return
+
+    video = update.message.video
+    artifact_path, warning = await _download_media_artifact(
+        video,
+        kind="video",
+        fallback_suffix=".mp4",
+    )
+    if artifact_path is None:
+        await safe_reply(
+            update.message,
+            warning or "⚠ Could not forward video artifact to Codex.",
+        )
+        return
+
+    filename_stem = artifact_path.stem
+    preview_path, preview_warning = await _maybe_video_preview(
+        video,
+        artifact_path,
+        filename_stem,
+    )
+    await _send_attachment_runtime_text(
+        update,
+        context,
+        target,
+        _build_video_runtime_text(
+            video,
+            artifact_path,
+            preview_path,
+            preview_warning,
+        ),
+        "🎬 Video artifact sent to Codex.",
+    )
 
 
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4477,9 +4915,13 @@ def create_bot() -> Application:
     application.add_handler(MessageHandler(filters.Document.ALL, document_handler))
     # Stickers: normalize static stickers/thumbnails to image attachments
     application.add_handler(MessageHandler(filters.Sticker.ALL, sticker_handler))
+    # Audio: save original artifact and forward path/metadata to Codex
+    application.add_handler(MessageHandler(filters.AUDIO, audio_handler))
+    # Video: save original artifact and optional preview path to Codex
+    application.add_handler(MessageHandler(filters.VIDEO, video_handler))
     # Voice: transcribe via OpenAI and forward text to Codex
     application.add_handler(MessageHandler(filters.VOICE, voice_handler))
-    # Catch-all: unsupported non-text content (video, etc.)
+    # Catch-all: unsupported non-text content (video notes, animations, etc.)
     application.add_handler(
         MessageHandler(
             ~filters.COMMAND & ~filters.TEXT & ~filters.StatusUpdate.ALL,
