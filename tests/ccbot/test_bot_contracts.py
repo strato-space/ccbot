@@ -499,6 +499,81 @@ class TestTelegramPollingHealth:
 
         terminate.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_repeated_timeout_health_failures_trigger_watchdog_exit(
+        self, monkeypatch
+    ):
+        pool_timeout = type("PoolTimeout", (Exception,), {})
+        bot = SimpleNamespace(
+            get_webhook_info=AsyncMock(side_effect=pool_timeout("pool timeout"))
+        )
+        exits: list[int] = []
+
+        async def _sleep(_seconds):
+            return None
+
+        def _terminate(exit_code: int) -> None:
+            exits.append(exit_code)
+            raise RuntimeError("watchdog-timeout-exit")
+
+        monkeypatch.setattr(bot_mod.asyncio, "sleep", _sleep)
+        monkeypatch.setattr(bot_mod, "_terminate_for_polling_stall", _terminate)
+        monkeypatch.setattr(bot_mod, "_last_telegram_update_monotonic", 0.0)
+        monkeypatch.setattr(bot_mod.time, "monotonic", lambda: 1000.0)
+        monkeypatch.setenv("CCBOT_TELEGRAM_POLL_STALE_SECONDS", "180")
+        monkeypatch.setenv("CCBOT_TELEGRAM_POLL_HEALTH_FAILURE_THRESHOLD", "2")
+        monkeypatch.setenv("CCBOT_TELEGRAM_POLL_WATCHDOG_EXIT_CODE", "75")
+
+        with pytest.raises(RuntimeError, match="watchdog-timeout-exit"):
+            await bot_mod._polling_health_loop(bot)
+
+        assert bot.get_webhook_info.await_count == 2
+        assert exits == [75]
+
+    @pytest.mark.asyncio
+    async def test_first_timeout_health_failure_below_threshold_does_not_exit(
+        self, monkeypatch
+    ):
+        pool_timeout = type("PoolTimeout", (Exception,), {})
+        bot = SimpleNamespace(
+            get_webhook_info=AsyncMock(side_effect=pool_timeout("pool timeout"))
+        )
+        sleeps = 0
+
+        async def _sleep(_seconds):
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps > 1:
+                raise bot_mod.asyncio.CancelledError
+
+        terminate = MagicMock()
+        monkeypatch.setattr(bot_mod.asyncio, "sleep", _sleep)
+        monkeypatch.setattr(bot_mod, "_terminate_for_polling_stall", terminate)
+        monkeypatch.setattr(bot_mod, "_last_telegram_update_monotonic", 0.0)
+        monkeypatch.setattr(bot_mod.time, "monotonic", lambda: 1000.0)
+        monkeypatch.setenv("CCBOT_TELEGRAM_POLL_STALE_SECONDS", "180")
+        monkeypatch.setenv("CCBOT_TELEGRAM_POLL_HEALTH_FAILURE_THRESHOLD", "2")
+
+        with pytest.raises(bot_mod.asyncio.CancelledError):
+            await bot_mod._polling_health_loop(bot)
+
+        terminate.assert_not_called()
+
+    def test_health_error_text_redacts_tokens_and_proxy_credentials(self):
+        exc = RuntimeError(
+            "PoolTimeout requesting https://api.telegram.org/bot123456:SECRET/getMe "
+            "via http://user:pass@127.0.0.1:10809?api_key=secret"
+        )
+
+        safe = bot_mod._safe_health_error_text(exc)
+
+        assert "SECRET" not in safe
+        assert "user:pass" not in safe
+        assert "api_key=secret" not in safe
+        assert "bot<redacted>" in safe
+        assert "http://<redacted>@127.0.0.1:10809" in safe
+        assert "api_key=<redacted>" in safe
+
 
 class TestSurfacePendingSlots:
     def test_put_pending_slot_uses_keyword_surface_key(self):

@@ -222,6 +222,7 @@ ALLOWED_USERS=your_telegram_user_id
 | `CCBOT_TELEGRAM_POLL_HEALTH_INTERVAL` | `60.0` | Watchdog check interval in seconds |
 | `CCBOT_TELEGRAM_POLL_STALE_SECONDS` | `180.0` | Stale dispatcher age that allows watchdog restart when pending updates exist |
 | `CCBOT_TELEGRAM_POLL_PENDING_THRESHOLD` | `1` | Pending update count threshold for watchdog restart |
+| `CCBOT_TELEGRAM_POLL_HEALTH_FAILURE_THRESHOLD` | `3` | Consecutive timeout-like watchdog health failures before restart when dispatcher progress is stale |
 | `CCBOT_TELEGRAM_POLL_WATCHDOG_EXIT_CODE` | `75` | Exit code used by the watchdog so systemd restarts a polling-dead service |
 
 Message formatting is always HTML via `chatgpt-md-converter` (`chatgpt_md_converter` package).
@@ -322,9 +323,15 @@ connection pool and timeouts explicitly, then runs a watchdog that checks
 `pending_update_count`. If Telegram reports pending updates while no inbound
 Telegram handler has run for `CCBOT_TELEGRAM_POLL_STALE_SECONDS`, the watchdog
 logs the stale state and exits with `CCBOT_TELEGRAM_POLL_WATCHDOG_EXIT_CODE` so
-systemd can restart the service. The watchdog does not drain updates and does
-not mutate topic bindings; it only recovers a service-alive-but-polling-dead
-process.
+systemd can restart the service. The same fail-fast path is used after
+`CCBOT_TELEGRAM_POLL_HEALTH_FAILURE_THRESHOLD` consecutive timeout-like
+watchdog health failures while dispatcher progress is stale, covering pool
+starvation cases where the health probe itself cannot complete. Logs include
+key/value fields such as `event=telegram_polling_pending_stalled`,
+`event=telegram_polling_health_timeout_stalled`, failure counts, age, thresholds,
+and exit code; token/proxy credentials are redacted from health error text. The
+watchdog does not drain updates and does not mutate topic bindings; it only
+recovers a service-alive-but-polling-dead process.
 
 ### Topic Workflow
 

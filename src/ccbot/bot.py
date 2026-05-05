@@ -308,7 +308,13 @@ _DEFAULT_TELEGRAM_POLL_TIMEOUT = 10
 _DEFAULT_POLL_HEALTH_INTERVAL_SECONDS = 60.0
 _DEFAULT_POLL_STALE_SECONDS = 180.0
 _DEFAULT_POLL_PENDING_THRESHOLD = 1
+_DEFAULT_POLL_HEALTH_FAILURE_THRESHOLD = 3
 _DEFAULT_POLL_WATCHDOG_EXIT_CODE = 75
+_LOG_URL_AUTH_RE = re.compile(r"([a-z][a-z0-9+.-]*://)[^/@\s]+@", re.IGNORECASE)
+_LOG_BOT_TOKEN_RE = re.compile(r"bot\d{6,}:[A-Za-z0-9_-]+")
+_LOG_SECRET_PARAM_RE = re.compile(
+    r"(?i)\b(token|password|passwd|secret|api_key|key)=([^&\s]+)"
+)
 
 
 def _default_launch_runtime_kind() -> str:
@@ -1197,6 +1203,13 @@ def _polling_health_pending_threshold() -> int:
     )
 
 
+def _polling_health_failure_threshold() -> int:
+    return _env_int(
+        "CCBOT_TELEGRAM_POLL_HEALTH_FAILURE_THRESHOLD",
+        _DEFAULT_POLL_HEALTH_FAILURE_THRESHOLD,
+    )
+
+
 def _polling_health_exit_code() -> int:
     return _env_int(
         "CCBOT_TELEGRAM_POLL_WATCHDOG_EXIT_CODE",
@@ -1222,30 +1235,96 @@ def _terminate_for_polling_stall(exit_code: int) -> None:
     os._exit(exit_code)  # noqa: S404  # nosec B404 - deliberate watchdog fail-fast
 
 
+def _telegram_health_error_is_timeout_like(exc: BaseException) -> bool:
+    """Return whether a watchdog health failure matches timeout/pool starvation."""
+    timeout_markers = (
+        "pooltimeout",
+        "timedout",
+        "timed out",
+        "timeout",
+        "pool timeout",
+    )
+    cursor: BaseException | None = exc
+    while cursor is not None:
+        haystack = f"{cursor.__class__.__name__} {cursor}".lower()
+        if any(marker in haystack for marker in timeout_markers):
+            return True
+        cursor = cursor.__cause__ or cursor.__context__
+    return False
+
+
+def _safe_health_error_text(exc: BaseException) -> str:
+    """Return a bounded Telegram health error string safe for service logs."""
+    text = str(exc)
+    text = _LOG_URL_AUTH_RE.sub(r"\1<redacted>@", text)
+    text = _LOG_BOT_TOKEN_RE.sub("bot<redacted>", text)
+    text = _LOG_SECRET_PARAM_RE.sub(r"\1=<redacted>", text)
+    return text[:500]
+
+
+def _telegram_dispatcher_age_seconds() -> float:
+    last_seen = _last_telegram_update_monotonic
+    return float("inf") if last_seen is None else time.monotonic() - last_seen
+
+
 async def _polling_health_loop(bot: Bot) -> None:
     """Exit when Telegram has pending updates but dispatcher progress is stale."""
+    consecutive_failures = 0
     while True:
         await asyncio.sleep(_polling_health_interval_seconds())
         if not _polling_health_enabled():
+            consecutive_failures = 0
             continue
         threshold = _polling_health_pending_threshold()
         stale_seconds = _polling_health_stale_seconds()
         try:
             info = await bot.get_webhook_info()
         except Exception as exc:
-            logger.warning("Telegram polling health check failed: %s", exc)
+            consecutive_failures += 1
+            failure_threshold = _polling_health_failure_threshold()
+            age = _telegram_dispatcher_age_seconds()
+            timeout_like = _telegram_health_error_is_timeout_like(exc)
+            logger.warning(
+                "event=telegram_polling_health_check_failed "
+                "failure_count=%d failure_threshold=%d last_update_age=%.1f "
+                "stale_threshold=%.1f timeout_like=%s error_type=%s error=%s",
+                consecutive_failures,
+                failure_threshold,
+                age,
+                stale_seconds,
+                timeout_like,
+                exc.__class__.__name__,
+                _safe_health_error_text(exc),
+            )
+            if (
+                timeout_like
+                and consecutive_failures >= failure_threshold
+                and age >= stale_seconds
+            ):
+                exit_code = _polling_health_exit_code()
+                logger.error(
+                    "event=telegram_polling_health_timeout_stalled "
+                    "failure_count=%d failure_threshold=%d last_update_age=%.1f "
+                    "stale_threshold=%.1f exit_code=%d; exiting for supervisor restart",
+                    consecutive_failures,
+                    failure_threshold,
+                    age,
+                    stale_seconds,
+                    exit_code,
+                )
+                _terminate_for_polling_stall(exit_code)
             continue
 
+        consecutive_failures = 0
         pending = getattr(info, "pending_update_count", 0) or 0
         if pending < threshold:
             continue
 
-        last_seen = _last_telegram_update_monotonic
-        age = float("inf") if last_seen is None else time.monotonic() - last_seen
+        age = _telegram_dispatcher_age_seconds()
         if age < stale_seconds:
             logger.debug(
-                "Telegram pending updates observed but dispatcher is recent "
-                "(pending=%d, age=%.1fs, threshold=%ds)",
+                "event=telegram_polling_pending_dispatcher_recent "
+                "pending_update_count=%d last_update_age=%.1f pending_threshold=%d",
                 pending,
                 age,
                 threshold,
@@ -1254,9 +1333,9 @@ async def _polling_health_loop(bot: Bot) -> None:
 
         exit_code = _polling_health_exit_code()
         logger.error(
-            "Telegram polling appears stalled: pending_update_count=%d, "
-            "last_update_age=%.1fs, stale_threshold=%.1fs; exiting with code %d "
-            "for supervisor restart",
+            "event=telegram_polling_pending_stalled pending_update_count=%d "
+            "last_update_age=%.1f stale_threshold=%.1f exit_code=%d; "
+            "exiting for supervisor restart",
             pending,
             age,
             stale_seconds,

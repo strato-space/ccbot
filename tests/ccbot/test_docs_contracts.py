@@ -75,6 +75,9 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "CCBOT_TELEGRAM_GET_UPDATES_POOL_SIZE" in readme
     assert "CCBOT_TELEGRAM_GET_UPDATES_POOL_TIMEOUT" in readme
     assert "CCBOT_TELEGRAM_POLL_HEALTH_ENABLED" in readme
+    assert "CCBOT_TELEGRAM_POLL_HEALTH_FAILURE_THRESHOLD" in readme
+    assert "event=telegram_polling_health_timeout_stalled" in readme
+    assert "token/proxy credentials are redacted" in readme
     assert "pending_update_count" in readme
     assert "Verbose/debug paths may expose more raw execution surface" in readme
 
