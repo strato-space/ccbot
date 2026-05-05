@@ -44,6 +44,7 @@ import io
 import logging
 import mimetypes
 import os
+import contextlib
 import re
 import shutil
 import subprocess  # nosec B404 - ffmpeg is invoked with fixed argv and no shell
@@ -70,6 +71,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -195,6 +197,10 @@ session_monitor: SessionMonitor | None = None
 # Status polling task
 _status_poll_task: asyncio.Task | None = None
 
+# Telegram polling liveness watchdog task
+_polling_health_task: asyncio.Task | None = None
+_last_telegram_update_monotonic: float | None = None
+
 # Codex passthrough commands intentionally advertised in the Telegram menu.
 # Keep this list limited to the supported core lane; other raw slash commands
 # may still be typed manually and are forwarded best-effort.
@@ -292,6 +298,17 @@ _TELEGRAM_PROXY_ENV_KEYS = (
     "ws_proxy",
 )
 _STICKER_GIF_FFMPEG_TIMEOUT_SECONDS = 30
+_DEFAULT_TELEGRAM_POOL_TIMEOUT = 10.0
+_DEFAULT_GET_UPDATES_POOL_SIZE = 4
+_DEFAULT_GET_UPDATES_POOL_TIMEOUT = 10.0
+_DEFAULT_GET_UPDATES_CONNECT_TIMEOUT = 10.0
+_DEFAULT_GET_UPDATES_READ_TIMEOUT = 30.0
+_DEFAULT_GET_UPDATES_WRITE_TIMEOUT = 10.0
+_DEFAULT_TELEGRAM_POLL_TIMEOUT = 10
+_DEFAULT_POLL_HEALTH_INTERVAL_SECONDS = 60.0
+_DEFAULT_POLL_STALE_SECONDS = 180.0
+_DEFAULT_POLL_PENDING_THRESHOLD = 1
+_DEFAULT_POLL_WATCHDOG_EXIT_CODE = 75
 
 
 def _default_launch_runtime_kind() -> str:
@@ -1115,6 +1132,137 @@ def _telegram_proxy_from_env() -> str | None:
         if value:
             return value
     return None
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %.1f", name, value, default)
+        return default
+    return max(0.0, parsed)
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %d", name, value, default)
+        return default
+    return max(0, parsed)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name, "").strip().lower()
+    if not value:
+        return default
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    logger.warning("Invalid %s=%r; using default %s", name, value, default)
+    return default
+
+
+def telegram_poll_timeout() -> int:
+    """Return long-poll timeout used by Application.run_polling."""
+    return _env_int("CCBOT_TELEGRAM_POLL_TIMEOUT", _DEFAULT_TELEGRAM_POLL_TIMEOUT)
+
+
+def _polling_health_enabled() -> bool:
+    return _env_bool("CCBOT_TELEGRAM_POLL_HEALTH_ENABLED", True)
+
+
+def _polling_health_interval_seconds() -> float:
+    return _env_float(
+        "CCBOT_TELEGRAM_POLL_HEALTH_INTERVAL",
+        _DEFAULT_POLL_HEALTH_INTERVAL_SECONDS,
+    )
+
+
+def _polling_health_stale_seconds() -> float:
+    return _env_float("CCBOT_TELEGRAM_POLL_STALE_SECONDS", _DEFAULT_POLL_STALE_SECONDS)
+
+
+def _polling_health_pending_threshold() -> int:
+    return _env_int(
+        "CCBOT_TELEGRAM_POLL_PENDING_THRESHOLD",
+        _DEFAULT_POLL_PENDING_THRESHOLD,
+    )
+
+
+def _polling_health_exit_code() -> int:
+    return _env_int(
+        "CCBOT_TELEGRAM_POLL_WATCHDOG_EXIT_CODE",
+        _DEFAULT_POLL_WATCHDOG_EXIT_CODE,
+    )
+
+
+def _mark_telegram_update_received() -> None:
+    global _last_telegram_update_monotonic
+    _last_telegram_update_monotonic = time.monotonic()
+
+
+async def _mark_telegram_update_handler(
+    _update: Update,
+    _context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Mark inbound Telegram dispatcher progress before regular handlers run."""
+    _mark_telegram_update_received()
+
+
+def _terminate_for_polling_stall(exit_code: int) -> None:
+    """Terminate immediately so systemd restarts a polling-dead service."""
+    os._exit(exit_code)  # noqa: S404  # nosec B404 - deliberate watchdog fail-fast
+
+
+async def _polling_health_loop(bot: Bot) -> None:
+    """Exit when Telegram has pending updates but dispatcher progress is stale."""
+    while True:
+        await asyncio.sleep(_polling_health_interval_seconds())
+        if not _polling_health_enabled():
+            continue
+        threshold = _polling_health_pending_threshold()
+        stale_seconds = _polling_health_stale_seconds()
+        try:
+            info = await bot.get_webhook_info()
+        except Exception as exc:
+            logger.warning("Telegram polling health check failed: %s", exc)
+            continue
+
+        pending = getattr(info, "pending_update_count", 0) or 0
+        if pending < threshold:
+            continue
+
+        last_seen = _last_telegram_update_monotonic
+        age = float("inf") if last_seen is None else time.monotonic() - last_seen
+        if age < stale_seconds:
+            logger.debug(
+                "Telegram pending updates observed but dispatcher is recent "
+                "(pending=%d, age=%.1fs, threshold=%ds)",
+                pending,
+                age,
+                threshold,
+            )
+            continue
+
+        exit_code = _polling_health_exit_code()
+        logger.error(
+            "Telegram polling appears stalled: pending_update_count=%d, "
+            "last_update_age=%.1fs, stale_threshold=%.1fs; exiting with code %d "
+            "for supervisor restart",
+            pending,
+            age,
+            stale_seconds,
+            exit_code,
+        )
+        _terminate_for_polling_stall(exit_code)
 
 
 async def _surface_blocked_prompt_state(
@@ -4904,10 +5052,11 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
 
 
 async def post_init(application: Application) -> None:
-    global session_monitor, _status_poll_task
+    global session_monitor, _status_poll_task, _polling_health_task
 
     await application.bot.delete_my_commands()
     await application.bot.set_my_commands(build_bot_commands())
+    _mark_telegram_update_received()
 
     # Re-resolve stale window IDs from persisted state against live tmux windows
     await session_manager.resolve_stale_ids()
@@ -4937,9 +5086,22 @@ async def post_init(application: Application) -> None:
     _status_poll_task = asyncio.create_task(status_poll_loop(application.bot))
     logger.info("Status polling task started")
 
+    if _polling_health_enabled():
+        _polling_health_task = asyncio.create_task(
+            _polling_health_loop(application.bot)
+        )
+        logger.info("Telegram polling health watchdog started")
+
 
 async def post_shutdown(application: Application) -> None:
-    global _status_poll_task
+    global _status_poll_task, _polling_health_task
+
+    if _polling_health_task:
+        _polling_health_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _polling_health_task
+        _polling_health_task = None
+        logger.info("Telegram polling health watchdog stopped")
 
     # Stop status polling
     if _status_poll_task:
@@ -4961,16 +5123,60 @@ async def post_shutdown(application: Application) -> None:
     await close_transcribe_client()
 
 
+def _configure_telegram_request_builder(builder: Any) -> Any:
+    """Apply explicit PTB request pool/timeouts for long-poll reliability."""
+    return (
+        builder.pool_timeout(
+            _env_float("CCBOT_TELEGRAM_POOL_TIMEOUT", _DEFAULT_TELEGRAM_POOL_TIMEOUT)
+        )
+        .get_updates_connection_pool_size(
+            _env_int(
+                "CCBOT_TELEGRAM_GET_UPDATES_POOL_SIZE",
+                _DEFAULT_GET_UPDATES_POOL_SIZE,
+            )
+        )
+        .get_updates_pool_timeout(
+            _env_float(
+                "CCBOT_TELEGRAM_GET_UPDATES_POOL_TIMEOUT",
+                _DEFAULT_GET_UPDATES_POOL_TIMEOUT,
+            )
+        )
+        .get_updates_connect_timeout(
+            _env_float(
+                "CCBOT_TELEGRAM_GET_UPDATES_CONNECT_TIMEOUT",
+                _DEFAULT_GET_UPDATES_CONNECT_TIMEOUT,
+            )
+        )
+        .get_updates_read_timeout(
+            _env_float(
+                "CCBOT_TELEGRAM_GET_UPDATES_READ_TIMEOUT",
+                _DEFAULT_GET_UPDATES_READ_TIMEOUT,
+            )
+        )
+        .get_updates_write_timeout(
+            _env_float(
+                "CCBOT_TELEGRAM_GET_UPDATES_WRITE_TIMEOUT",
+                _DEFAULT_GET_UPDATES_WRITE_TIMEOUT,
+            )
+        )
+    )
+
+
 def create_bot() -> Application:
     builder = Application.builder().token(config.telegram_bot_token).rate_limiter(
         AIORateLimiter(max_retries=5)
     )
+    builder = _configure_telegram_request_builder(builder)
     telegram_proxy = _telegram_proxy_from_env()
     if telegram_proxy:
         builder = builder.proxy(telegram_proxy).get_updates_proxy(telegram_proxy)
 
     application = builder.post_init(post_init).post_shutdown(post_shutdown).build()
 
+    application.add_handler(
+        TypeHandler(Update, _mark_telegram_update_handler, block=True),
+        group=-100,
+    )
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("history", history_command))

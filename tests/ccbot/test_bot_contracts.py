@@ -87,20 +87,52 @@ class TestBotRegistration:
         class _StubApplication:
             def __init__(self) -> None:
                 self.handlers = []
+                self.handler_groups = []
 
-            def add_handler(self, handler) -> None:
+            def add_handler(self, handler, group=0) -> None:
                 self.handlers.append(handler)
+                self.handler_groups.append(group)
 
         class _StubBuilder:
             def __init__(self) -> None:
                 self._app = _StubApplication()
                 self.proxy_url = None
                 self.get_updates_proxy_url = None
+                self.pool_timeout_value = None
+                self.get_updates_pool_size = None
+                self.get_updates_pool_timeout_value = None
+                self.get_updates_connect_timeout_value = None
+                self.get_updates_read_timeout_value = None
+                self.get_updates_write_timeout_value = None
 
             def token(self, _token):
                 return self
 
             def rate_limiter(self, _rate_limiter):
+                return self
+
+            def pool_timeout(self, value):
+                self.pool_timeout_value = value
+                return self
+
+            def get_updates_connection_pool_size(self, value):
+                self.get_updates_pool_size = value
+                return self
+
+            def get_updates_pool_timeout(self, value):
+                self.get_updates_pool_timeout_value = value
+                return self
+
+            def get_updates_connect_timeout(self, value):
+                self.get_updates_connect_timeout_value = value
+                return self
+
+            def get_updates_read_timeout(self, value):
+                self.get_updates_read_timeout_value = value
+                return self
+
+            def get_updates_write_timeout(self, value):
+                self.get_updates_write_timeout_value = value
                 return self
 
             def proxy(self, proxy_url):
@@ -148,6 +180,8 @@ class TestBotRegistration:
         unsupported_index = ordered_callbacks.index("unsupported_content_handler")
         assert ordered_callbacks.index("audio_handler") < unsupported_index
         assert ordered_callbacks.index("video_handler") < unsupported_index
+        assert ordered_callbacks.index("_mark_telegram_update_handler") < ordered_callbacks.index("start_command")
+        assert app.handler_groups[ordered_callbacks.index("_mark_telegram_update_handler")] == -100
 
     def test_create_bot_applies_telegram_proxy_from_env(self, monkeypatch):
         """Freeze explicit proxy wiring for PTB/HTTPX bootstrap."""
@@ -156,7 +190,7 @@ class TestBotRegistration:
             def __init__(self) -> None:
                 self.handlers = []
 
-            def add_handler(self, handler) -> None:
+            def add_handler(self, handler, group=0) -> None:
                 self.handlers.append(handler)
 
         class _StubBuilder:
@@ -164,11 +198,41 @@ class TestBotRegistration:
                 self._app = _StubApplication()
                 self.proxy_url = None
                 self.get_updates_proxy_url = None
+                self.pool_timeout_value = None
+                self.get_updates_pool_size = None
+                self.get_updates_pool_timeout_value = None
+                self.get_updates_connect_timeout_value = None
+                self.get_updates_read_timeout_value = None
+                self.get_updates_write_timeout_value = None
 
             def token(self, _token):
                 return self
 
             def rate_limiter(self, _rate_limiter):
+                return self
+
+            def pool_timeout(self, value):
+                self.pool_timeout_value = value
+                return self
+
+            def get_updates_connection_pool_size(self, value):
+                self.get_updates_pool_size = value
+                return self
+
+            def get_updates_pool_timeout(self, value):
+                self.get_updates_pool_timeout_value = value
+                return self
+
+            def get_updates_connect_timeout(self, value):
+                self.get_updates_connect_timeout_value = value
+                return self
+
+            def get_updates_read_timeout(self, value):
+                self.get_updates_read_timeout_value = value
+                return self
+
+            def get_updates_write_timeout(self, value):
+                self.get_updates_write_timeout_value = value
                 return self
 
             def proxy(self, proxy_url):
@@ -197,6 +261,73 @@ class TestBotRegistration:
 
         assert builder.proxy_url == "socks5h://127.0.0.1:10810"
         assert builder.get_updates_proxy_url == "socks5h://127.0.0.1:10810"
+        assert builder.pool_timeout_value == 10.0
+        assert builder.get_updates_pool_size == 4
+        assert builder.get_updates_pool_timeout_value == 10.0
+        assert builder.get_updates_connect_timeout_value == 10.0
+        assert builder.get_updates_read_timeout_value == 30.0
+        assert builder.get_updates_write_timeout_value == 10.0
+
+    def test_telegram_request_builder_honors_polling_env_overrides(
+        self, monkeypatch
+    ):
+        """Freeze explicit getUpdates pool/timeout configuration."""
+
+        class _RecorderBuilder:
+            def __init__(self) -> None:
+                self.calls: dict[str, float | int] = {}
+
+            def pool_timeout(self, value):
+                self.calls["pool_timeout"] = value
+                return self
+
+            def get_updates_connection_pool_size(self, value):
+                self.calls["get_updates_connection_pool_size"] = value
+                return self
+
+            def get_updates_pool_timeout(self, value):
+                self.calls["get_updates_pool_timeout"] = value
+                return self
+
+            def get_updates_connect_timeout(self, value):
+                self.calls["get_updates_connect_timeout"] = value
+                return self
+
+            def get_updates_read_timeout(self, value):
+                self.calls["get_updates_read_timeout"] = value
+                return self
+
+            def get_updates_write_timeout(self, value):
+                self.calls["get_updates_write_timeout"] = value
+                return self
+
+        monkeypatch.setenv("CCBOT_TELEGRAM_POOL_TIMEOUT", "12.5")
+        monkeypatch.setenv("CCBOT_TELEGRAM_GET_UPDATES_POOL_SIZE", "8")
+        monkeypatch.setenv("CCBOT_TELEGRAM_GET_UPDATES_POOL_TIMEOUT", "13.5")
+        monkeypatch.setenv("CCBOT_TELEGRAM_GET_UPDATES_CONNECT_TIMEOUT", "14.5")
+        monkeypatch.setenv("CCBOT_TELEGRAM_GET_UPDATES_READ_TIMEOUT", "44.5")
+        monkeypatch.setenv("CCBOT_TELEGRAM_GET_UPDATES_WRITE_TIMEOUT", "15.5")
+
+        builder = _RecorderBuilder()
+        assert bot_mod._configure_telegram_request_builder(builder) is builder
+
+        assert builder.calls == {
+            "pool_timeout": 12.5,
+            "get_updates_connection_pool_size": 8,
+            "get_updates_pool_timeout": 13.5,
+            "get_updates_connect_timeout": 14.5,
+            "get_updates_read_timeout": 44.5,
+            "get_updates_write_timeout": 15.5,
+        }
+
+    def test_invalid_polling_env_falls_back_without_crashing(self, monkeypatch):
+        monkeypatch.setenv("CCBOT_TELEGRAM_GET_UPDATES_POOL_SIZE", "bad")
+        monkeypatch.setenv("CCBOT_TELEGRAM_GET_UPDATES_POOL_TIMEOUT", "bad")
+        monkeypatch.setenv("CCBOT_TELEGRAM_POLL_TIMEOUT", "bad")
+
+        assert bot_mod._env_int("CCBOT_TELEGRAM_GET_UPDATES_POOL_SIZE", 4) == 4
+        assert bot_mod._env_float("CCBOT_TELEGRAM_GET_UPDATES_POOL_TIMEOUT", 10.0) == 10.0
+        assert bot_mod.telegram_poll_timeout() == 10
 
     def test_build_bot_commands_advertises_only_codex_core_lane(self):
         with patch.object(bot_mod.config, "claude_command", "codex"):
@@ -286,6 +417,87 @@ class TestBotRegistration:
         assert "rename" in command_names
         assert "usage" not in command_names
         assert "model" not in command_names
+
+
+class TestTelegramPollingHealth:
+    @pytest.mark.asyncio
+    async def test_pending_updates_with_stale_dispatcher_triggers_watchdog_exit(
+        self, monkeypatch
+    ):
+        bot = SimpleNamespace(
+            get_webhook_info=AsyncMock(
+                return_value=SimpleNamespace(pending_update_count=3)
+            )
+        )
+        exits: list[int] = []
+
+        async def _sleep(_seconds):
+            return None
+
+        def _terminate(exit_code: int) -> None:
+            exits.append(exit_code)
+            raise RuntimeError("watchdog-exit")
+
+        monkeypatch.setattr(bot_mod.asyncio, "sleep", _sleep)
+        monkeypatch.setattr(bot_mod, "_terminate_for_polling_stall", _terminate)
+        monkeypatch.setattr(bot_mod, "_last_telegram_update_monotonic", 0.0)
+        monkeypatch.setattr(bot_mod.time, "monotonic", lambda: 1000.0)
+        monkeypatch.setenv("CCBOT_TELEGRAM_POLL_STALE_SECONDS", "180")
+        monkeypatch.setenv("CCBOT_TELEGRAM_POLL_WATCHDOG_EXIT_CODE", "75")
+
+        with pytest.raises(RuntimeError, match="watchdog-exit"):
+            await bot_mod._polling_health_loop(bot)
+
+        assert exits == [75]
+
+    @pytest.mark.asyncio
+    async def test_pending_updates_with_recent_dispatcher_does_not_exit(
+        self, monkeypatch
+    ):
+        bot = SimpleNamespace(
+            get_webhook_info=AsyncMock(
+                return_value=SimpleNamespace(pending_update_count=3)
+            )
+        )
+        sleeps = 0
+
+        async def _sleep(_seconds):
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps > 1:
+                raise bot_mod.asyncio.CancelledError
+
+        terminate = MagicMock()
+        monkeypatch.setattr(bot_mod.asyncio, "sleep", _sleep)
+        monkeypatch.setattr(bot_mod, "_terminate_for_polling_stall", terminate)
+        monkeypatch.setattr(bot_mod, "_last_telegram_update_monotonic", 995.0)
+        monkeypatch.setattr(bot_mod.time, "monotonic", lambda: 1000.0)
+        monkeypatch.setenv("CCBOT_TELEGRAM_POLL_STALE_SECONDS", "180")
+
+        with pytest.raises(bot_mod.asyncio.CancelledError):
+            await bot_mod._polling_health_loop(bot)
+
+        terminate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_polling_health_error_does_not_exit(self, monkeypatch):
+        bot = SimpleNamespace(get_webhook_info=AsyncMock(side_effect=RuntimeError("api")))
+        sleeps = 0
+
+        async def _sleep(_seconds):
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps > 1:
+                raise bot_mod.asyncio.CancelledError
+
+        terminate = MagicMock()
+        monkeypatch.setattr(bot_mod.asyncio, "sleep", _sleep)
+        monkeypatch.setattr(bot_mod, "_terminate_for_polling_stall", terminate)
+
+        with pytest.raises(bot_mod.asyncio.CancelledError):
+            await bot_mod._polling_health_loop(bot)
+
+        terminate.assert_not_called()
 
 
 class TestSurfacePendingSlots:

@@ -71,6 +71,11 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "CCBOT_MAX_TELEGRAM_DOWNLOAD_BYTES" in readme
     assert "too large for Telegram bot" in readme
     assert "download” warning" in readme
+    assert "ccbot --help" in readme
+    assert "CCBOT_TELEGRAM_GET_UPDATES_POOL_SIZE" in readme
+    assert "CCBOT_TELEGRAM_GET_UPDATES_POOL_TIMEOUT" in readme
+    assert "CCBOT_TELEGRAM_POLL_HEALTH_ENABLED" in readme
+    assert "pending_update_count" in readme
     assert "Verbose/debug paths may expose more raw execution surface" in readme
 
 
@@ -430,6 +435,8 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
     assert "the group `chat_id`" in doc
     assert "**Pre-final terminal surface barrier**" in doc
     assert "Codex-style command/tool previews" in doc
+    assert "Polling liveness guard" in doc
+    assert "service-alive-but-polling-dead" in doc
     assert "OMX interactive question artifacts" in doc
     assert "whole pre-final visible surface is" in doc
     assert "mutable technical status artifact are both closed" in doc

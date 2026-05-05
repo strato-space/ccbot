@@ -211,6 +211,18 @@ ALLOWED_USERS=your_telegram_user_id
 | `CCBOT_MAX_AUDIO_BYTES` | `52428800` | Maximum inbound Telegram audio artifact size before refusing download/forward |
 | `CCBOT_MAX_VIDEO_BYTES` | `104857600` | Maximum inbound Telegram video artifact size before refusing download/forward |
 | `CCBOT_MAX_TELEGRAM_DOWNLOAD_BYTES` | `20971520` | Maximum Bot API `getFile`/download size for inbound media; effective audio/video preflight uses the lower of this cap and the media-specific cap |
+| `CCBOT_TELEGRAM_POOL_TIMEOUT` | `10.0` | HTTPX connection-pool wait timeout for ordinary Telegram Bot API requests |
+| `CCBOT_TELEGRAM_GET_UPDATES_POOL_SIZE` | `4` | Dedicated Telegram `getUpdates` connection pool size; keep above PTB's single-connection default for long-poll resilience |
+| `CCBOT_TELEGRAM_GET_UPDATES_POOL_TIMEOUT` | `10.0` | Connection-pool wait timeout for `getUpdates` requests |
+| `CCBOT_TELEGRAM_GET_UPDATES_CONNECT_TIMEOUT` | `10.0` | Connect timeout for Telegram long-poll requests |
+| `CCBOT_TELEGRAM_GET_UPDATES_READ_TIMEOUT` | `30.0` | Read timeout for Telegram long-poll requests; should exceed `CCBOT_TELEGRAM_POLL_TIMEOUT` |
+| `CCBOT_TELEGRAM_GET_UPDATES_WRITE_TIMEOUT` | `10.0` | Write timeout for Telegram long-poll requests |
+| `CCBOT_TELEGRAM_POLL_TIMEOUT` | `10` | Telegram long-poll timeout passed to `run_polling` |
+| `CCBOT_TELEGRAM_POLL_HEALTH_ENABLED` | `true` | Enable watchdog that exits the process when Bot API has pending updates but no Telegram update handler has run recently |
+| `CCBOT_TELEGRAM_POLL_HEALTH_INTERVAL` | `60.0` | Watchdog check interval in seconds |
+| `CCBOT_TELEGRAM_POLL_STALE_SECONDS` | `180.0` | Stale dispatcher age that allows watchdog restart when pending updates exist |
+| `CCBOT_TELEGRAM_POLL_PENDING_THRESHOLD` | `1` | Pending update count threshold for watchdog restart |
+| `CCBOT_TELEGRAM_POLL_WATCHDOG_EXIT_CODE` | `75` | Exit code used by the watchdog so systemd restarts a polling-dead service |
 
 Message formatting is always HTML via `chatgpt-md-converter` (`chatgpt_md_converter` package).
 There is no runtime formatter switch to MarkdownV2.
@@ -229,6 +241,9 @@ ccbot
 
 # If installed from source
 uv run ccbot
+
+# Show top-level CLI help without loading bot secrets or starting polling
+ccbot --help
 ```
 
 ### Commands
@@ -299,6 +314,17 @@ path as Telegram text: external replay-only bindings are read-only, inactive
 or helper windows fail closed, blocked prompts are not bypassed, and Codex
 multiline input uses bracketed paste plus the bare-`Enter` replay-evidence ACK
 path. `ccbot send` remains Telegram delivery only.
+
+**Polling liveness:**
+
+The bot uses Telegram long polling. ccbot configures a dedicated `getUpdates`
+connection pool and timeouts explicitly, then runs a watchdog that checks
+`pending_update_count`. If Telegram reports pending updates while no inbound
+Telegram handler has run for `CCBOT_TELEGRAM_POLL_STALE_SECONDS`, the watchdog
+logs the stale state and exits with `CCBOT_TELEGRAM_POLL_WATCHDOG_EXIT_CODE` so
+systemd can restart the service. The watchdog does not drain updates and does
+not mutate topic bindings; it only recovers a service-alive-but-polling-dead
+process.
 
 ### Topic Workflow
 

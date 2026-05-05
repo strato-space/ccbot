@@ -147,6 +147,7 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | **Sticker ingress** | ✅ | Inbound Telegram stickers are normalized to runtime image attachments; animated/video stickers use Telegram thumbnails as visual input and preserve original animation artifacts for direct result delivery |
 | **Audio/video ingress** | ✅ | Inbound Telegram audio/video messages are artifact-first runtime inputs: originals within the effective Telegram bot download cap are saved under `$CCBOT_DIR/media`, audio/video paths and metadata are sent to the bound runtime, video previews are best-effort, and transcription is optional future enrichment rather than an OpenAI gate |
 | **ccbot send file delivery** | ✅ | Local `ccbot send --file-path --file-type photo\|animation\|audio\|video` returns generated artifacts to the Telegram surface without using runtime-input/TUI injection |
+| **Polling liveness guard** | ✅ | Telegram long polling uses explicit getUpdates pool/timeouts and a pending-update watchdog so service-alive-but-polling-dead processes exit for systemd restart instead of silently accumulating updates |
 | **Generated-image success text** | ✅ | Image-generation tool output that reports a saved local artifact is delivered as compact terminal text; automatic media attachment is not implied |
 | **ReplyKeyboardRemove** | ✅ | Used when switching away from reply keyboard |
 | **Codex command forwarding** | ✅ | Raw `/command` input is forwarded to tmux; the documented menu only exposes the supported Codex subset |

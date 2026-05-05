@@ -2,31 +2,59 @@
 
 Handles two execution modes:
   1. `ccbot hook` — delegates to hook.hook_main() for Claude Code hook processing.
-  2. Default — configures logging, initializes tmux session, and starts the
+  2. `ccbot send` / `ccbot runtime-input` — delegates to focused CLIs.
+  3. Default — configures logging, initializes tmux session, and starts the
      Telegram bot polling loop via bot.create_bot().
 """
 
+import argparse
 import logging
 import sys
 
 
-def main() -> None:
+def _build_parser(prog: str = "ccbot") -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=prog,
+        description=(
+            "Control tmux-hosted coding runtimes from Telegram. Run without a "
+            "subcommand to start the Telegram bot service."
+        ),
+    )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=("hook", "send", "send_bot_message", "runtime-input", "inject"),
+        help=(
+            "Optional subcommand. `send` delivers text/files to Telegram; "
+            "`runtime-input`/`inject` send text to a live runtime input plane."
+        ),
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
     """Main entry point."""
-    if len(sys.argv) > 1 and sys.argv[1] == "hook":
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] in {"-h", "--help"}:
+        _build_parser().print_help()
+        raise SystemExit(0)
+    if args and args[0] == "hook":
         from .hook import hook_main
 
         hook_main()
         return
-    if len(sys.argv) > 1 and sys.argv[1] in {"send_bot_message", "send"}:
+    if args and args[0] in {"send_bot_message", "send"}:
         from .send_bot_message import send_bot_message_main
 
-        command_name = sys.argv[1]
-        raise SystemExit(send_bot_message_main(sys.argv[2:], prog=f"ccbot {command_name}"))
-    if len(sys.argv) > 1 and sys.argv[1] in {"runtime-input", "inject"}:
+        command_name = args[0]
+        raise SystemExit(send_bot_message_main(args[1:], prog=f"ccbot {command_name}"))
+    if args and args[0] in {"runtime-input", "inject"}:
         from .runtime_input_cli import runtime_input_main
 
-        command_name = sys.argv[1]
-        raise SystemExit(runtime_input_main(sys.argv[2:], prog=f"ccbot {command_name}"))
+        command_name = args[0]
+        raise SystemExit(runtime_input_main(args[1:], prog=f"ccbot {command_name}"))
+    if args:
+        _build_parser().error(f"unknown command: {args[0]}")
 
     logging.basicConfig(
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -65,10 +93,13 @@ def main() -> None:
     logger.info("Tmux session '%s' ready", session.session_name)
 
     logger.info("Starting Telegram bot...")
-    from .bot import create_bot
+    from .bot import create_bot, telegram_poll_timeout
 
     application = create_bot()
-    application.run_polling(allowed_updates=["message", "callback_query"])
+    application.run_polling(
+        allowed_updates=["message", "callback_query"],
+        timeout=telegram_poll_timeout(),
+    )
 
 
 if __name__ == "__main__":
