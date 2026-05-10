@@ -410,6 +410,8 @@ def test_send_bot_message_edit_document_attachment(monkeypatch, tmp_path):
     assert captured["chat_id"] == -100200300
     assert "message_thread_id" not in captured
     assert captured["media"].caption == "new report caption"
+    assert captured["media"].media.field_tuple[0] == "report.pdf"
+    assert captured["media"].media.mimetype == "application/pdf"
 
 
 def test_send_alias_help_includes_edit_message_id():

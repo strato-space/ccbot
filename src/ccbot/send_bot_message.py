@@ -658,6 +658,7 @@ async def send_bot_message(
                     return await _edit_attachment(
                         bot,
                         attachment=path.read_bytes(),
+                        attachment_filename=filename or path.name,
                         file_type=normalized_file_type,
                         caption=message,
                         target=send_target,
@@ -691,6 +692,11 @@ async def send_bot_message(
                 return await _edit_attachment(
                     bot,
                     attachment=file_bytes,
+                    attachment_filename=_default_attachment_filename(
+                        file_type=normalized_file_type,
+                        filename=filename,
+                        mime_type=mime_type,
+                    ),
                     file_type=normalized_file_type,
                     caption=message,
                     target=send_target,
@@ -820,6 +826,7 @@ async def _send_attachment(
     bot: Bot,
     *,
     attachment: InputFile | bytes,
+    attachment_filename: str | None = None,
     file_type: str,
     caption: str,
     target: DeliveryTarget,
@@ -847,6 +854,7 @@ async def _send_attachment(
 def _input_media_for_attachment(
     *,
     attachment: InputFile | bytes,
+    attachment_filename: str | None = None,
     file_type: str,
     caption: str,
     parse_mode: ParseMode | None,
@@ -855,6 +863,7 @@ def _input_media_for_attachment(
         "media": attachment,
         "caption": caption or None,
         "parse_mode": parse_mode,
+        "filename": attachment_filename,
     }
     if file_type == "document":
         return InputMediaDocument(**kwargs)
@@ -871,6 +880,7 @@ async def _edit_attachment(
     bot: Bot,
     *,
     attachment: InputFile | bytes,
+    attachment_filename: str | None = None,
     file_type: str,
     caption: str,
     target: DeliveryTarget,
@@ -884,6 +894,7 @@ async def _edit_attachment(
     parse_mode = edit_kwargs.pop("parse_mode", None)
     media = _input_media_for_attachment(
         attachment=attachment,
+        attachment_filename=attachment_filename,
         file_type=file_type,
         caption=caption,
         parse_mode=parse_mode,
