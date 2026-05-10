@@ -170,7 +170,7 @@ def test_send_bot_message_document_from_default_state(monkeypatch, tmp_path):
     )
     captured: dict = {}
 
-    def _bot_factory(token: str):
+    def _bot_factory(token: str, **_kwargs):
         assert token == "token-123"
         return _FakeBot(token, captured)
 
@@ -204,7 +204,7 @@ def test_send_bot_message_file_base64_photo(monkeypatch, tmp_path):
     )
     captured: dict = {}
 
-    def _bot_factory(token: str):
+    def _bot_factory(token: str, **_kwargs):
         assert token == "token-456"
         return _FakeBot(token, captured)
 
@@ -239,7 +239,7 @@ def test_send_bot_message_gif_file_type_uses_animation_alias(monkeypatch, tmp_pa
     )
     captured: dict = {}
 
-    def _bot_factory(token: str):
+    def _bot_factory(token: str, **_kwargs):
         assert token == "token-456"
         return _FakeBot(token, captured)
 
@@ -267,7 +267,7 @@ def test_send_bot_message_explicit_token_and_chat_id_does_not_need_config(
 ):
     captured: dict = {}
 
-    def _bot_factory(token: str):
+    def _bot_factory(token: str, **_kwargs):
         assert token == "token-explicit"
         return _FakeBot(token, captured)
 
@@ -335,8 +335,9 @@ def test_send_bot_message_edit_text_message(monkeypatch, tmp_path):
     captured: dict = {}
 
     class FakeBot:
-        def __init__(self, token):
+        def __init__(self, token, request=None):
             captured["token"] = token
+            captured["request"] = request
 
         async def edit_message_text(self, **kwargs):
             captured.update(kwargs)
@@ -377,8 +378,9 @@ def test_send_bot_message_edit_document_attachment(monkeypatch, tmp_path):
     captured: dict = {}
 
     class FakeBot:
-        def __init__(self, token):
+        def __init__(self, token, request=None):
             captured["token"] = token
+            captured["request"] = request
 
         async def edit_message_media(self, **kwargs):
             captured.update(kwargs)
@@ -414,3 +416,42 @@ def test_send_alias_help_includes_edit_message_id():
     help_text = sender._build_parser(prog="ccbot send").format_help()
 
     assert "--edit-message-id" in help_text
+def test_send_bot_message_uses_proxy_env(monkeypatch, tmp_path):
+    state_path = tmp_path / "state.json"
+    _write_state(
+        state_path,
+        {"surface_bindings": {"12345": {"c:-100200300": "@7"}}},
+    )
+    captured: dict = {}
+
+    class FakeRequest:
+        def __init__(self, **kwargs):
+            captured["request_kwargs"] = kwargs
+
+    class FakeBot:
+        def __init__(self, token, request=None):
+            captured["token"] = token
+            captured["request"] = request
+
+        async def send_message(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                message_id=999,
+                chat=SimpleNamespace(id=kwargs["chat_id"], username=None),
+            )
+
+    monkeypatch.setattr(sender, "HTTPXRequest", FakeRequest)
+    monkeypatch.setattr(sender, "Bot", FakeBot)
+    monkeypatch.setenv("CCBOT_TELEGRAM_PROXY", "http://127.0.0.1:10809")
+
+    result = asyncio.run(
+        sender.send_bot_message(
+            message="proxied",
+            token="token-proxy",
+            state_path=state_path,
+        )
+    )
+
+    assert result["status"] == "success"
+    assert captured["request_kwargs"]["proxy"] == "http://127.0.0.1:10809"
+    assert captured["request"] is not None

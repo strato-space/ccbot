@@ -30,6 +30,7 @@ from telegram import (
     InputMediaVideo,
 )
 from telegram.constants import ParseMode
+from telegram.request import HTTPXRequest
 
 from .telegram_sender import split_message
 
@@ -611,7 +612,14 @@ async def send_bot_message(
             "message": "Provide either file_path or file_base64, not both",
         }
 
-    bot = Bot(token=bot_token)
+    telegram_proxy = _env_default(
+        "CCBOT_TELEGRAM_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "HTTP_PROXY",
+    )
+    request = HTTPXRequest(proxy=telegram_proxy) if telegram_proxy else None
+    bot = Bot(token=bot_token, request=request)
     pm = _resolve_parse_mode(parse_mode)
     reply_to_id = _parse_optional_int(
         reply_to_message_id,
