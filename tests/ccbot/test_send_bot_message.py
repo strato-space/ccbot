@@ -324,3 +324,93 @@ def test_legacy_send_bot_message_help_keeps_legacy_command_name():
     help_text = sender._build_parser().format_help()
 
     assert "usage: ccbot send_bot_message " in help_text
+
+
+def test_send_bot_message_edit_text_message(monkeypatch, tmp_path):
+    state_path = tmp_path / "state.json"
+    _write_state(
+        state_path,
+        {"surface_bindings": {"12345": {"c:-100200300": "@7"}}},
+    )
+    captured: dict = {}
+
+    class FakeBot:
+        def __init__(self, token):
+            captured["token"] = token
+
+        async def edit_message_text(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                message_id=777,
+                chat=SimpleNamespace(id=kwargs["chat_id"], username=None),
+            )
+
+    monkeypatch.setattr(sender, "Bot", FakeBot)
+
+    result = asyncio.run(
+        sender.send_bot_message(
+            message="updated text",
+            token="token-edit",
+            edit_message_id="777",
+            state_path=state_path,
+        )
+    )
+
+    assert result["status"] == "success"
+    assert result["message_id"] == 777
+    assert captured["message_id"] == 777
+    assert captured["text"] == "updated text"
+    assert captured["chat_id"] == -100200300
+
+
+def test_send_bot_message_edit_document_attachment(monkeypatch, tmp_path):
+    state_path = tmp_path / "state.json"
+    report_path = tmp_path / "report.pdf"
+    report_path.write_bytes(b"pdf")
+    _write_state(
+        state_path,
+        {
+            "surface_bindings": {"12345": {"t:42": "@7"}},
+            "group_chat_ids": {"12345:42": -100200300},
+        },
+    )
+    captured: dict = {}
+
+    class FakeBot:
+        def __init__(self, token):
+            captured["token"] = token
+
+        async def edit_message_media(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                message_id=888,
+                message_thread_id=42,
+                chat=SimpleNamespace(id=kwargs["chat_id"], username=None),
+            )
+
+    monkeypatch.setattr(sender, "Bot", FakeBot)
+
+    result = asyncio.run(
+        sender.send_bot_message(
+            message="new report caption",
+            token="token-edit",
+            edit_message_id="888",
+            file_path=str(report_path),
+            file_type="document",
+            state_path=state_path,
+        )
+    )
+
+    assert result["status"] == "success"
+    assert result["message_id"] == 888
+    assert result["thread_id"] == 42
+    assert captured["message_id"] == 888
+    assert captured["chat_id"] == -100200300
+    assert "message_thread_id" not in captured
+    assert captured["media"].caption == "new report caption"
+
+
+def test_send_alias_help_includes_edit_message_id():
+    help_text = sender._build_parser(prog="ccbot send").format_help()
+
+    assert "--edit-message-id" in help_text

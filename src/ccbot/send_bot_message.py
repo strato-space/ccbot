@@ -20,7 +20,15 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from telegram import Bot, InputFile
+from telegram import (
+    Bot,
+    InputFile,
+    InputMediaAnimation,
+    InputMediaAudio,
+    InputMediaDocument,
+    InputMediaPhoto,
+    InputMediaVideo,
+)
 from telegram.constants import ParseMode
 
 from .telegram_sender import split_message
@@ -566,6 +574,7 @@ async def send_bot_message(
     chat_id: str | int | None = None,
     message_thread_id: str | int | None = None,
     reply_to_message_id: str | int | None = None,
+    edit_message_id: str | int | None = None,
     user_id: str | int | None = None,
     surface_key: str | None = None,
     parse_mode: str = "TEXT",
@@ -608,6 +617,10 @@ async def send_bot_message(
         reply_to_message_id,
         field_name="reply_to_message_id",
     )
+    edit_id = _parse_optional_int(
+        edit_message_id,
+        field_name="edit_message_id",
+    )
 
     async def _send_once(send_target: DeliveryTarget) -> dict[str, Any]:
         common_kwargs: dict[str, Any] = {
@@ -635,6 +648,16 @@ async def send_bot_message(
                     }
                 with path.open("rb") as handle:
                     attachment = InputFile(handle, filename=filename or path.name)
+                    if edit_id is not None:
+                        return await _edit_attachment(
+                            bot,
+                            attachment=attachment,
+                            file_type=normalized_file_type,
+                            caption=message,
+                            target=send_target,
+                            common_kwargs=common_kwargs,
+                            edit_message_id=edit_id,
+                        )
                     return await _send_attachment(
                         bot,
                         attachment=attachment,
@@ -656,6 +679,16 @@ async def send_bot_message(
                     mime_type=mime_type,
                 ),
             )
+            if edit_id is not None:
+                return await _edit_attachment(
+                    bot,
+                    attachment=attachment,
+                    file_type=normalized_file_type,
+                    caption=message,
+                    target=send_target,
+                    common_kwargs=common_kwargs,
+                    edit_message_id=edit_id,
+                )
             return await _send_attachment(
                 bot,
                 attachment=attachment,
@@ -664,6 +697,23 @@ async def send_bot_message(
                 target=send_target,
                 common_kwargs=common_kwargs,
             )
+
+        if edit_id is not None:
+            edit_kwargs = dict(common_kwargs)
+            edit_kwargs.pop("disable_notification", None)
+            edit_kwargs.pop("reply_to_message_id", None)
+            edit_kwargs.pop("message_thread_id", None)
+            msg = await bot.edit_message_text(
+                message_id=edit_id,
+                text=message or "",
+                disable_web_page_preview=disable_web_page_preview,
+                **edit_kwargs,
+            )
+            return {
+                "status": "success",
+                **_message_result(msg, send_target),
+                "target": asdict(send_target),
+            }
 
         sent_messages: list[dict[str, Any]] = []
         for part in split_message(message or ""):
@@ -786,6 +836,62 @@ async def _send_attachment(
     }
 
 
+def _input_media_for_attachment(
+    *,
+    attachment: InputFile,
+    file_type: str,
+    caption: str,
+    parse_mode: ParseMode | None,
+) -> Any:
+    kwargs = {
+        "media": attachment,
+        "caption": caption or None,
+        "parse_mode": parse_mode,
+    }
+    if file_type == "document":
+        return InputMediaDocument(**kwargs)
+    if file_type == "photo":
+        return InputMediaPhoto(**kwargs)
+    if file_type == "video":
+        return InputMediaVideo(**kwargs)
+    if file_type == "audio":
+        return InputMediaAudio(**kwargs)
+    return InputMediaAnimation(**kwargs)
+
+
+async def _edit_attachment(
+    bot: Bot,
+    *,
+    attachment: InputFile,
+    file_type: str,
+    caption: str,
+    target: DeliveryTarget,
+    common_kwargs: dict[str, Any],
+    edit_message_id: int,
+) -> dict[str, Any]:
+    edit_kwargs = dict(common_kwargs)
+    edit_kwargs.pop("disable_notification", None)
+    edit_kwargs.pop("reply_to_message_id", None)
+    edit_kwargs.pop("message_thread_id", None)
+    parse_mode = edit_kwargs.pop("parse_mode", None)
+    media = _input_media_for_attachment(
+        attachment=attachment,
+        file_type=file_type,
+        caption=caption,
+        parse_mode=parse_mode,
+    )
+    msg = await bot.edit_message_media(
+        message_id=edit_message_id,
+        media=media,
+        **edit_kwargs,
+    )
+    return {
+        "status": "success",
+        **_message_result(msg, target),
+        "target": asdict(target),
+    }
+
+
 def _read_message_from_args(args: argparse.Namespace) -> str | None:
     if args.message_file:
         return Path(args.message_file).read_text(encoding="utf-8")
@@ -830,6 +936,10 @@ def _build_parser(prog: str = "ccbot send_bot_message") -> argparse.ArgumentPars
     parser.add_argument("--user-id", default=_env_default("CCBOT_SEND_USER_ID"))
     parser.add_argument("--surface-key", default=_env_default("CCBOT_SEND_SURFACE_KEY"))
     parser.add_argument("--reply-to-message-id")
+    parser.add_argument(
+        "--edit-message-id",
+        help="Edit an existing Telegram message instead of sending a new one",
+    )
     parser.add_argument("--parse-mode", default=_env_default("CCBOT_SEND_PARSE_MODE") or "TEXT")
     parser.add_argument(
         "--disable-web-page-preview",
@@ -883,6 +993,7 @@ def send_bot_message_main(
                 chat_id=args.chat_id,
                 message_thread_id=args.message_thread_id,
                 reply_to_message_id=args.reply_to_message_id,
+                edit_message_id=args.edit_message_id,
                 user_id=args.user_id,
                 surface_key=args.surface_key,
                 parse_mode=args.parse_mode,
