@@ -3014,7 +3014,11 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not update.message or not update.message.document:
         return
 
-    target = await _resolve_attachment_input_target(update, context)
+    target = await _resolve_attachment_input_target(
+        update,
+        context,
+        silent_unbound=True,
+    )
     if target is None:
         return
 
@@ -3449,6 +3453,14 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not update.message or not update.message.voice:
         return
 
+    target = await _resolve_attachment_input_target(
+        update,
+        context,
+        silent_unbound=True,
+    )
+    if target is None:
+        return
+
     if not config.openai_api_key:
         await safe_reply(
             update.message,
@@ -3457,60 +3469,6 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
-    chat = update.message.chat
-    control_surface = control_surface_classifier(update)
-    thread_id = _get_thread_id(update)
-    if chat.type in ("group", "supergroup") and thread_id is not None:
-        session_manager.set_group_chat_id(user.id, thread_id, chat.id)
-
-    if thread_id is None:
-        await safe_reply(
-            update.message,
-            "❌ This build currently requires a Telegram topic. Create a named topic to start a session.",
-        )
-        return
-
-    wid, using_shared_group_binding = _get_writable_window_for_surface(
-        context,
-        user.id,
-        control_surface,
-    )
-    if wid is None:
-        await safe_reply(
-            update.message,
-            _build_unbound_input_message(user.id, control_surface),
-        )
-        return
-
-    w = await tmux_manager.find_window_by_id(wid)
-    if not w:
-        display = session_manager.get_display_name(wid)
-        if not using_shared_group_binding:
-            session_manager.unbind_thread(user.id, thread_id)
-            await safe_reply(
-                update.message,
-                f"❌ Window '{display}' no longer exists. Binding removed.\n"
-                "Send a message to start a new session.",
-            )
-        else:
-            await safe_reply(
-                update.message,
-                f"❌ Shared window '{display}' no longer exists. Use /unbind, "
-                "then start a new session.",
-            )
-        return
-
-    if await _surface_omx_question_state(
-        context.bot,
-        user.id,
-        wid,
-        control_surface.message_thread_id,
-        reply_message=update.message,
-        window=w,
-    ):
-        return
-
-    # Download voice as in-memory bytes
     voice_file = await update.message.voice.get_file()
     ogg_data = bytes(await voice_file.download_as_bytearray())
 
@@ -3526,16 +3484,16 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     await update.message.chat.send_action(ChatAction.TYPING)
-    clear_status_msg_info(user.id, thread_id)
+    clear_status_msg_info(target.user_id, target.thread_id)
 
-    success, message = await session_manager.send_to_window(wid, text)
+    success, message = await session_manager.send_to_window(target.window_id, text)
     if not success:
         if message == BLOCKED_PROMPT_SEND_MESSAGE:
             await _surface_blocked_prompt_state(
                 context.bot,
-                user.id,
-                wid,
-                thread_id,
+                target.user_id,
+                target.window_id,
+                target.thread_id,
                 reply_message=update.message,
             )
             return

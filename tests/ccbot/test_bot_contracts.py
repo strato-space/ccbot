@@ -2236,6 +2236,31 @@ class TestMediaForwarding:
             )
 
     @pytest.mark.asyncio
+    async def test_unbound_document_ingress_is_silent(self):
+        update = _make_topic_update()
+        context = _make_context()
+        document = MagicMock(file_unique_id="doc-unique", file_name="file.txt")
+        document.get_file = AsyncMock()
+        update.message.document = document
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+
+            await bot_mod.document_handler(update, context)
+
+        document.get_file.assert_not_called()
+        mock_sm.set_group_chat_id.assert_not_called()
+        mock_sm.send_to_window.assert_not_called()
+        mock_tmux.find_window_by_id.assert_not_called()
+        mock_reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_audio_forwarding_saves_artifact_without_openai_transcription(
         self, tmp_path
     ):
@@ -3084,13 +3109,46 @@ class TestMediaForwarding:
         with (
             patch.object(bot_mod.config, "openai_api_key", ""),
             patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
             patch("ccbot.bot.transcribe_voice", new_callable=AsyncMock) as mock_tx,
         ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+
             await bot_mod.voice_handler(update, context)
 
             mock_reply.assert_called_once()
             mock_tx.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unbound_voice_ingress_is_silent_before_api_key_check(self):
+        update = _make_topic_update()
+        context = _make_context()
+        update.message.voice = MagicMock()
+        update.message.voice.get_file = AsyncMock()
+
+        with (
+            patch.object(bot_mod.config, "openai_api_key", ""),
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+            patch("ccbot.bot.transcribe_voice", new_callable=AsyncMock) as mock_tx,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+
+            await bot_mod.voice_handler(update, context)
+
+        update.message.voice.get_file.assert_not_called()
+        mock_sm.set_group_chat_id.assert_not_called()
+        mock_sm.send_to_window.assert_not_called()
+        mock_tmux.find_window_by_id.assert_not_called()
+        mock_reply.assert_not_awaited()
+        mock_tx.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_voice_handler_transcribes_and_sends_text(self):
