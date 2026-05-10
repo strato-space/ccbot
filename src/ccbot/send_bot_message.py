@@ -654,18 +654,18 @@ async def send_bot_message(
                         "status": "error",
                         "message": f"File not found: {file_path}",
                     }
+                if edit_id is not None:
+                    return await _edit_attachment(
+                        bot,
+                        attachment=path.read_bytes(),
+                        file_type=normalized_file_type,
+                        caption=message,
+                        target=send_target,
+                        common_kwargs=common_kwargs,
+                        edit_message_id=edit_id,
+                    )
                 with path.open("rb") as handle:
                     attachment = InputFile(handle, filename=filename or path.name)
-                    if edit_id is not None:
-                        return await _edit_attachment(
-                            bot,
-                            attachment=attachment,
-                            file_type=normalized_file_type,
-                            caption=message,
-                            target=send_target,
-                            common_kwargs=common_kwargs,
-                            edit_message_id=edit_id,
-                        )
                     return await _send_attachment(
                         bot,
                         attachment=attachment,
@@ -690,7 +690,7 @@ async def send_bot_message(
             if edit_id is not None:
                 return await _edit_attachment(
                     bot,
-                    attachment=attachment,
+                    attachment=file_bytes,
                     file_type=normalized_file_type,
                     caption=message,
                     target=send_target,
@@ -819,7 +819,7 @@ async def send_bot_message(
 async def _send_attachment(
     bot: Bot,
     *,
-    attachment: InputFile,
+    attachment: InputFile | bytes,
     file_type: str,
     caption: str,
     target: DeliveryTarget,
@@ -846,7 +846,7 @@ async def _send_attachment(
 
 def _input_media_for_attachment(
     *,
-    attachment: InputFile,
+    attachment: InputFile | bytes,
     file_type: str,
     caption: str,
     parse_mode: ParseMode | None,
@@ -870,7 +870,7 @@ def _input_media_for_attachment(
 async def _edit_attachment(
     bot: Bot,
     *,
-    attachment: InputFile,
+    attachment: InputFile | bytes,
     file_type: str,
     caption: str,
     target: DeliveryTarget,
