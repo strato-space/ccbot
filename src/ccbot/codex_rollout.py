@@ -2448,6 +2448,8 @@ class CodexRolloutNormalizer:
                     )
                 )
                 continue
+            if not incremental_mode and state.pending_event_messages:
+                result.extend(_flush_all_pending_event_messages(state))
             result.extend(events)
         # In incremental monitor mode, keep lightweight event_msg duplicates
         # buffered until an idle poll. Flushing them on an unrelated non-idle
@@ -2464,7 +2466,7 @@ class CodexRolloutNormalizer:
         else:
             flushed = []
         if flushed:
-            return flushed + result
+            return result + flushed
         return result
 
     @classmethod

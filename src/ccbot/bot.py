@@ -4308,7 +4308,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     ):
         return
 
-    if surface.surface_key and chat and chat.id is not None and binding_owner_id is not None:
+    if (
+        not text.startswith("!")
+        and surface.surface_key
+        and chat
+        and chat.id is not None
+        and binding_owner_id is not None
+    ):
         binding_generation = _capture_surface_binding_generation(
             binding_owner_id,
             surface,

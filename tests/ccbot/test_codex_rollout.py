@@ -548,6 +548,37 @@ def test_codex_rollout_suppresses_duplicate_event_msg_commentary_delivery() -> N
     ]
 
 
+def test_codex_rollout_stateless_fallback_event_msg_preserves_prior_order() -> None:
+    records = [
+        {
+            "timestamp": "2026-04-04T10:19:59.999Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "start task"}],
+            },
+        },
+        {
+            "timestamp": "2026-04-04T10:20:00.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "phase": "commentary",
+                "message": "Working on it.",
+            },
+        },
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    dispatchable = [event for event in events if event.dispatch_to_telegram]
+    assert [(event.role, event.text) for event in dispatchable] == [
+        ("user", "start task"),
+        ("assistant", "Working on it."),
+    ]
+
+
 def test_codex_rollout_suppresses_empty_reasoning_summary() -> None:
     records = [
         {

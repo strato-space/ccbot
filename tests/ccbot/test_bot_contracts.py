@@ -2808,6 +2808,43 @@ class TestMediaForwarding:
 
         mock_sm.send_to_window.assert_awaited_once_with("@7", "hello")
 
+    @pytest.mark.asyncio
+    async def test_bang_text_command_keeps_direct_bash_capture_path(self):
+        update = _make_topic_update(text="!ls -la")
+        context = _make_context()
+        dummy_task = MagicMock()
+        dummy_task.done.return_value = False
+
+        def _capture_task(coro):
+            coro.close()
+            return dummy_task
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+            patch("ccbot.bot._surface_omx_question_state", new_callable=AsyncMock, return_value=False),
+            patch("ccbot.bot._capture_bash_output", new_callable=AsyncMock) as mock_capture,
+            patch("ccbot.bot.asyncio.create_task", side_effect=_capture_task) as mock_create_task,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.capture_pane = AsyncMock(return_value="")
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.text_handler(update, context)
+
+        mock_sm.send_to_window.assert_awaited_once_with("@7", "!ls -la")
+        mock_capture.assert_called_once_with(context.bot, 1, 42, "@7", "ls -la")
+        mock_create_task.assert_called_once()
+        assert bot_mod._attachment_batcher.keys() == []
+        assert bot_mod._bash_capture_tasks[(1, 42)] is dummy_task
+        bot_mod._bash_capture_tasks.pop((1, 42), None)
+
     def test_audio_video_sticker_voice_do_not_use_attachment_batcher(self):
         for handler in (
             bot_mod.audio_handler,
