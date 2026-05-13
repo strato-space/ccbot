@@ -15,6 +15,7 @@ Key class: TmuxManager (singleton instantiated as `tmux_manager`).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shlex
 import uuid
@@ -26,6 +27,7 @@ import libtmux
 from .config import SENSITIVE_ENV_VARS, config
 from .launcher_registration import infer_runtime_kind_from_command
 from .runtime_types import runtime_capability_registry
+from .state_schema import split_session_map_payload
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,12 @@ class TmuxPane:
     pane_current_command: str = ""
     pane_active: bool = False
     pane_title: str = ""
+
+
+@dataclass(frozen=True)
+class _RegisteredWindowIdentity:
+    thread_id: str
+    runtime_kind: str
 
 
 class TmuxManager:
@@ -523,6 +531,60 @@ class TmuxManager:
         )
         return f"cd {shlex.quote(str(path))} && {cmd}"
 
+    def _registered_window_identity(
+        self,
+        window: TmuxWindow,
+        *,
+        expected_cwd: Path,
+    ) -> _RegisteredWindowIdentity | None:
+        """Return a verified hook-registered live identity for a tmux window.
+
+        The tmux window id is the only non-ambiguous key for a live process.
+        Legacy name-keyed entries are intentionally not accepted here because
+        this identity gates /resume reuse and must fail closed rather than bind
+        a requested thread to a same-name, unrelated live runtime.
+        """
+        if not config.session_map_file.exists():
+            return None
+        try:
+            raw = json.loads(config.session_map_file.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(raw, dict):
+            return None
+        entries, _, _ = split_session_map_payload(raw)
+        info = entries.get(f"{self.session_name}:{window.window_id}")
+        if not isinstance(info, dict):
+            return None
+
+        thread_id = str(info.get("thread_id") or info.get("session_id") or "").strip()
+        if not thread_id:
+            return None
+
+        registered_cwd = str(info.get("cwd") or "").strip()
+        if registered_cwd:
+            try:
+                resolved_cwd = str(
+                    Path(registered_cwd).expanduser().resolve(strict=False)
+                )
+            except (OSError, RuntimeError, ValueError):
+                resolved_cwd = str(Path(registered_cwd).expanduser())
+            if resolved_cwd != str(expected_cwd):
+                return None
+
+        registered_window_name = str(info.get("window_name") or "").strip()
+        if (
+            registered_window_name
+            and window.window_name
+            and registered_window_name != window.window_name
+        ):
+            return None
+
+        return _RegisteredWindowIdentity(
+            thread_id=thread_id,
+            runtime_kind=str(info.get("runtime_kind") or "").strip(),
+        )
+
     async def kill_window(self, window_id: str) -> bool:
         """Kill a tmux window by its ID."""
 
@@ -680,6 +742,12 @@ class TmuxManager:
                 requested_runtime = runtime_kind or infer_runtime_kind_from_command(
                     launch_command or config.ccbot_command
                 )
+                registered_identity = self._registered_window_identity(
+                    existing,
+                    expected_cwd=path,
+                )
+                if active_runtime is None and registered_identity:
+                    active_runtime = registered_identity.runtime_kind or requested_runtime
                 if active_runtime and active_runtime != requested_runtime:
                     return (
                         False,
@@ -691,6 +759,33 @@ class TmuxManager:
                         "",
                         False,
                     )
+
+                if start_claude and resume_session_id and active_runtime:
+                    if registered_identity is None:
+                        return (
+                            False,
+                            (
+                                f"Existing window '{final_window_name}' is running "
+                                f"{active_runtime} but has no verified live "
+                                "runtime identity for resume"
+                            ),
+                            "",
+                            "",
+                            False,
+                        )
+                    if registered_identity.thread_id != resume_session_id:
+                        return (
+                            False,
+                            (
+                                f"Existing window '{final_window_name}' is running "
+                                f"{active_runtime} thread "
+                                f"{registered_identity.thread_id}, not "
+                                f"{resume_session_id}"
+                            ),
+                            "",
+                            "",
+                            False,
+                        )
 
                 if start_claude and active_runtime is None:
                     launch_cmd = self._build_runtime_launch_command(

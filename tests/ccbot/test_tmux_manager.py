@@ -1,5 +1,9 @@
+import json
+
 import pytest
 
+from ccbot.state_schema import build_session_map_payload
+from ccbot import tmux_manager as tmux_manager_module
 from ccbot.tmux_manager import TmuxManager, TmuxWindow
 
 
@@ -322,6 +326,57 @@ async def test_create_or_reuse_window_fails_closed_on_runtime_or_cwd_mismatch(
 
     assert ok is False
     assert "running claude, not codex" in message
+    assert window_name == ""
+    assert window_id == ""
+    assert reused is False
+
+
+@pytest.mark.asyncio
+async def test_create_or_reuse_window_fails_closed_on_resume_identity_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session_map_file = tmp_path / "session_map.json"
+    session_map_file.write_text(
+        json.dumps(
+            build_session_map_payload(
+                {
+                    "ccbot-test:@7": {
+                        "session_id": "thread-other",
+                        "cwd": str(workspace),
+                        "window_name": "workspace",
+                        "runtime_kind": "codex",
+                    }
+                },
+                runtime_kind="codex",
+            )
+        )
+    )
+    existing = TmuxWindow(
+        window_id="@7",
+        window_name="workspace",
+        cwd=str(workspace),
+        pane_current_command="codex",
+    )
+    manager = TmuxManager(session_name="ccbot-test")
+
+    async def _find_window_by_name(window_name: str):
+        return existing if window_name == "workspace" else None
+
+    monkeypatch.setattr(manager, "find_window_by_name", _find_window_by_name)
+    monkeypatch.setattr(tmux_manager_module.config, "session_map_file", session_map_file)
+
+    ok, message, window_name, window_id, reused = await manager.create_or_reuse_window(
+        str(workspace),
+        window_name="workspace",
+        resume_session_id="thread-requested",
+        runtime_kind="codex",
+    )
+
+    assert ok is False
+    assert "thread thread-other, not thread-requested" in message
     assert window_name == ""
     assert window_id == ""
     assert reused is False
