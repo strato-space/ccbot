@@ -6,6 +6,7 @@ cleanup, and raw slash-command passthrough so refactors cannot silently change
 behavior in shared modules.
 """
 
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -42,6 +43,8 @@ def _make_topic_update(
     update.message.chat.type = chat_type
     update.message.chat.send_action = AsyncMock()
     update.message.text = text
+    update.message.caption = None
+    update.message.media_group_id = None
     update.message.entities = []
     update.effective_chat = update.message.chat
     return update
@@ -78,6 +81,22 @@ def _write_test_webp(path) -> None:
     from PIL import Image
 
     Image.new("RGBA", (2, 2), (255, 0, 0, 255)).save(path, format="WEBP")
+
+
+def _make_document(
+    file_unique_id: str,
+    file_name: str,
+    *,
+    content: bytes = b"document",
+) -> tuple[MagicMock, MagicMock]:
+    document = MagicMock(file_unique_id=file_unique_id, file_name=file_name)
+    document.get_file = AsyncMock()
+    document_file = MagicMock()
+    document_file.download_to_drive = AsyncMock(
+        side_effect=lambda path: Path(path).write_bytes(content)
+    )
+    document.get_file.return_value = document_file
+    return document, document_file
 
 
 @pytest.fixture(autouse=True)
@@ -2176,6 +2195,7 @@ class TestMediaForwarding:
         ):
             mock_sm.get_window_for_thread.return_value = "@7"
             mock_sm.get_display_name.return_value = "project"
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
             mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
             mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
 
@@ -2240,6 +2260,7 @@ class TestMediaForwarding:
         ):
             mock_sm.get_window_for_thread.return_value = "@7"
             mock_sm.get_display_name.return_value = "project"
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
             mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
             mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
 
@@ -2253,7 +2274,7 @@ class TestMediaForwarding:
             )
 
     @pytest.mark.asyncio
-    async def test_document_get_file_failure_with_caption_sends_failure_record(
+    async def test_document_get_file_failure_with_caption_does_not_send_runtime_input(
         self, tmp_path
     ):
         update = _make_topic_update()
@@ -2273,7 +2294,7 @@ class TestMediaForwarding:
             patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.clear_status_msg_info"),
             patch("ccbot.bot.safe_edit", new_callable=AsyncMock, return_value=None),
-            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
             mock_sm.get_window_for_thread.return_value = "@7"
             mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
@@ -2284,11 +2305,60 @@ class TestMediaForwarding:
             await bot_mod.document_handler(update, context)
 
             document.get_file.assert_awaited_once()
-            mock_sm.send_to_window.assert_awaited_once()
-            payload = mock_sm.send_to_window.await_args.args[1]
-            assert "use these files" in payload
-            assert "Attachment download failures:" in payload
-            assert "- document: README.md — getFile failed" in payload
+            mock_sm.send_to_window.assert_not_awaited()
+            assert any(
+                "all attachment downloads failed" in call.args[1]
+                for call in mock_reply.await_args_list
+            )
+
+    @pytest.mark.asyncio
+    async def test_media_group_document_album_batches_after_idle_without_last_marker(
+        self, tmp_path
+    ):
+        context = _make_context()
+        first = _make_topic_update()
+        first.message.media_group_id = "album-1"
+        first_doc, _ = _make_document("readme-id", "README.md", content=b"readme")
+        first.message.document = first_doc
+
+        second = _make_topic_update()
+        second.message.media_group_id = "album-1"
+        second_doc, _ = _make_document("init-id", "__init__.py", content=b"init")
+        second.message.document = second_doc
+
+        clock = {"monotonic": 0.0, "time": 1700000000}
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._DOCUMENTS_DIR", tmp_path),
+            patch("ccbot.bot.time.time", side_effect=lambda: clock["time"]),
+            patch("ccbot.bot.time.monotonic", side_effect=lambda: clock["monotonic"]),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock, return_value=None),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.capture_pane = AsyncMock(return_value="")
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.document_handler(first, context)
+            clock["monotonic"] = 0.5
+            clock["time"] = 1700000001
+            await bot_mod.document_handler(second, context)
+            await bot_mod._flush_due_attachment_batches(now=1.49)
+            mock_sm.send_to_window.assert_not_called()
+
+            await bot_mod._flush_due_attachment_batches(now=1.5)
+
+        mock_sm.send_to_window.assert_awaited_once()
+        payload = mock_sm.send_to_window.await_args.args[1]
+        assert "1. document:" in payload and "README.md" in payload
+        assert "2. document:" in payload and "__init__.py" in payload
 
     @pytest.mark.asyncio
     async def test_observed_style_orphan_attachment_sequence_batches_after_12_seconds(
@@ -2395,6 +2465,216 @@ class TestMediaForwarding:
         )
 
     @pytest.mark.asyncio
+    async def test_attachment_batch_fails_closed_for_external_binding_before_flush(
+        self, tmp_path
+    ):
+        update = _make_topic_update()
+        context = _make_context()
+        document, _ = _make_document("doc-unique", "README.md", content=b"readme")
+        update.message.document = document
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._DOCUMENTS_DIR", tmp_path),
+            patch("ccbot.bot.time.time", return_value=1700000000),
+            patch("ccbot.bot.time.monotonic", return_value=0.0),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock, return_value=None),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.side_effect = ["@7", "external:codex:thread"]
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
+            mock_sm.is_external_binding_window_id.side_effect = (
+                lambda window_id: str(window_id).startswith("external:")
+            )
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.capture_pane = AsyncMock(return_value="")
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.document_handler(update, context)
+            await bot_mod._flush_due_attachment_batches(now=15.0)
+
+        mock_sm.send_to_window.assert_not_awaited()
+        assert any(
+            "bound runtime changed" in call.args[1]
+            for call in mock_reply.await_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_attachment_batch_revalidation_rejects_generation_before_window_lookup(
+        self, tmp_path
+    ):
+        update = _make_topic_update()
+        context = _make_context()
+        document, _ = _make_document("doc-unique", "README.md", content=b"readme")
+        update.message.document = document
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._DOCUMENTS_DIR", tmp_path),
+            patch("ccbot.bot.time.time", return_value=1700000000),
+            patch("ccbot.bot.time.monotonic", return_value=0.0),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock, return_value=None),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_bind_flow_credentials.side_effect = [
+                (1, "nonce"),
+                (2, "nonce"),
+            ]
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.capture_pane = AsyncMock(return_value="")
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.document_handler(update, context)
+            assert mock_tmux.find_window_by_id.await_count == 1
+            await bot_mod._flush_due_attachment_batches(now=15.0)
+
+        assert mock_tmux.find_window_by_id.await_count == 1
+        mock_sm.send_to_window.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_attachment_batch_revalidation_rejects_binding_kind_change(
+        self, tmp_path
+    ):
+        update = _make_topic_update(user_id=2)
+        context = _make_context()
+        document, _ = _make_document("doc-unique", "README.md", content=b"readme")
+        update.message.document = document
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._DOCUMENTS_DIR", tmp_path),
+            patch("ccbot.bot.time.time", return_value=1700000000),
+            patch("ccbot.bot.time.monotonic", return_value=0.0),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock, return_value=None),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.side_effect = [None, "@7"]
+            mock_sm.surface_bindings = {1: {"t:42": "@7"}}
+            mock_sm.resolve_chat_id.return_value = 100
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.capture_pane = AsyncMock(return_value="")
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.document_handler(update, context)
+            await bot_mod._flush_due_attachment_batches(now=15.0)
+
+        mock_sm.send_to_window.assert_not_awaited()
+        assert any(
+            "bound runtime changed" in call.args[1]
+            for call in mock_reply.await_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_attachment_batch_fails_closed_for_blocked_prompt_before_flush(
+        self, tmp_path
+    ):
+        update = _make_topic_update()
+        context = _make_context()
+        document, _ = _make_document("doc-unique", "README.md", content=b"readme")
+        update.message.document = document
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._DOCUMENTS_DIR", tmp_path),
+            patch("ccbot.bot.time.time", return_value=1700000000),
+            patch("ccbot.bot.time.monotonic", return_value=0.0),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+            patch(
+                "ccbot.bot._surface_blocked_prompt_state",
+                new_callable=AsyncMock,
+            ) as mock_blocked,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.capture_pane = AsyncMock(
+                return_value="OpenAI Codex\n› ping\n■ Approval required\n"
+            )
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.document_handler(update, context)
+            await bot_mod._flush_due_attachment_batches(now=15.0)
+
+        mock_blocked.assert_awaited_once()
+        mock_sm.send_to_window.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_attachment_batch_fails_closed_for_active_runtime_question_before_flush(
+        self, tmp_path
+    ):
+        update = _make_topic_update()
+        context = _make_context()
+        document, _ = _make_document("doc-unique", "README.md", content=b"readme")
+        update.message.document = document
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._DOCUMENTS_DIR", tmp_path),
+            patch("ccbot.bot.time.time", return_value=1700000000),
+            patch("ccbot.bot.time.monotonic", return_value=0.0),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+            patch(
+                "ccbot.bot._surface_omx_question_state",
+                new_callable=AsyncMock,
+                side_effect=[False, True],
+            ),
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.capture_pane = AsyncMock(return_value="")
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.document_handler(update, context)
+            await bot_mod._flush_due_attachment_batches(now=15.0)
+
+        mock_sm.send_to_window.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_attachment_generation_capture_failure_fails_closed_before_download(
+        self, tmp_path
+    ):
+        update = _make_topic_update()
+        context = _make_context()
+        document, _ = _make_document("doc-unique", "README.md", content=b"readme")
+        update.message.document = document
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._DOCUMENTS_DIR", tmp_path),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_bind_flow_credentials.side_effect = RuntimeError("boom")
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+
+            await bot_mod.document_handler(update, context)
+
+        document.get_file.assert_not_called()
+        mock_sm.send_to_window.assert_not_called()
+        assert "Could not verify writable binding" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
     async def test_unbound_document_ingress_is_silent(self):
         update = _make_topic_update()
         context = _make_context()
@@ -2418,6 +2698,124 @@ class TestMediaForwarding:
         mock_sm.send_to_window.assert_not_called()
         mock_tmux.find_window_by_id.assert_not_called()
         mock_reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_attachment_batches_do_not_cross_chat_or_user(self, tmp_path):
+        context = _make_context()
+        first = _make_topic_update(user_id=1)
+        first_doc, _ = _make_document("doc-one", "one.txt", content=b"one")
+        first.message.document = first_doc
+
+        second = _make_topic_update(user_id=2)
+        second.message.chat.id = 200
+        second.effective_chat.id = 200
+        second_doc, _ = _make_document("doc-two", "two.txt", content=b"two")
+        second.message.document = second_doc
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._DOCUMENTS_DIR", tmp_path),
+            patch("ccbot.bot.time.time", return_value=1700000000),
+            patch("ccbot.bot.time.monotonic", return_value=0.0),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock, return_value=None),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.capture_pane = AsyncMock(return_value="")
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.document_handler(first, context)
+            await bot_mod.document_handler(second, context)
+            await bot_mod._flush_due_attachment_batches(now=15.0)
+
+        assert mock_sm.send_to_window.await_count == 2
+        payloads = [call.args[1] for call in mock_sm.send_to_window.await_args_list]
+        assert any("one.txt" in payload for payload in payloads)
+        assert any("two.txt" in payload for payload in payloads)
+
+    @pytest.mark.asyncio
+    async def test_text_immediately_before_document_joins_attachment_batch(self, tmp_path):
+        context = _make_context()
+        text_update = _make_topic_update(text="install this")
+        doc_update = _make_topic_update()
+        document, _ = _make_document("doc-unique", "README.md", content=b"readme")
+        doc_update.message.document = document
+        clock = {"monotonic": 0.0}
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._DOCUMENTS_DIR", tmp_path),
+            patch("ccbot.bot.time.time", return_value=1700000000),
+            patch("ccbot.bot.time.monotonic", side_effect=lambda: clock["monotonic"]),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock, return_value=None),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+            patch("ccbot.bot._surface_omx_question_state", new_callable=AsyncMock, return_value=False),
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.capture_pane = AsyncMock(return_value="")
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.text_handler(text_update, context)
+            mock_sm.send_to_window.assert_not_called()
+            clock["monotonic"] = 0.5
+            await bot_mod.document_handler(doc_update, context)
+
+        mock_sm.send_to_window.assert_awaited_once()
+        payload = mock_sm.send_to_window.await_args.args[1]
+        assert payload.startswith("install this\n\nAttachments:")
+        assert "README.md" in payload
+
+    @pytest.mark.asyncio
+    async def test_text_without_attachment_flushes_after_lead_hold(self):
+        update = _make_topic_update(text="hello")
+        context = _make_context()
+        clock = {"monotonic": 0.0}
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.time.monotonic", side_effect=lambda: clock["monotonic"]),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+            patch("ccbot.bot._surface_omx_question_state", new_callable=AsyncMock, return_value=False),
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.capture_pane = AsyncMock(return_value="")
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.text_handler(update, context)
+            await bot_mod._flush_due_attachment_batches(now=0.74)
+            mock_sm.send_to_window.assert_not_called()
+
+            await bot_mod._flush_due_attachment_batches(now=0.75)
+
+        mock_sm.send_to_window.assert_awaited_once_with("@7", "hello")
+
+    def test_audio_video_sticker_voice_do_not_use_attachment_batcher(self):
+        for handler in (
+            bot_mod.audio_handler,
+            bot_mod.video_handler,
+            bot_mod.sticker_handler,
+            bot_mod.voice_handler,
+        ):
+            assert "_attachment_batcher" not in inspect.getsource(handler)
 
     @pytest.mark.asyncio
     async def test_audio_forwarding_saves_artifact_without_openai_transcription(

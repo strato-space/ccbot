@@ -131,6 +131,13 @@ class PendingAttachmentBatch:
     def has_usable_content(self) -> bool:
         return bool(self.attachments) or bool(self.texts)
 
+    def has_sendable_runtime_input(self) -> bool:
+        if self.attachments:
+            return True
+        if self.failures:
+            return False
+        return bool(self.texts)
+
     def is_sufficiently_complete(self, now: float) -> bool:
         if self.text_only:
             return now >= self.due_at()
@@ -248,6 +255,10 @@ class AttachmentBatcher:
     def has_usable_content(self, key: IngressBatchKey) -> bool:
         batch = self._batches.get(key)
         return False if batch is None else batch.has_usable_content()
+
+    def has_sendable_runtime_input(self, key: IngressBatchKey) -> bool:
+        batch = self._batches.get(key)
+        return False if batch is None else batch.has_sendable_runtime_input()
 
     def is_full(self, key: IngressBatchKey) -> bool:
         batch = self._batches.get(key)

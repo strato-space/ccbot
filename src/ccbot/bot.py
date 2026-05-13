@@ -970,7 +970,7 @@ def _get_surface_bind_flow_credentials(
 def _capture_surface_binding_generation(
     user_id: int,
     surface: ControlSurface,
-) -> tuple[int, str]:
+) -> tuple[int, str] | None:
     """Return a stable comparable binding-generation tuple for delayed flushes."""
     try:
         version, nonce = _get_surface_bind_flow_credentials(user_id, surface)
@@ -981,7 +981,7 @@ def _capture_surface_binding_generation(
             surface.surface_key,
             exc,
         )
-        return (0, "")
+        return None
 
 
 def _validate_surface_bind_flow_callback(
@@ -2993,6 +2993,22 @@ async def _warn_attachment_batch_not_sent(key: IngressBatchKey) -> None:
     await safe_reply(batch.latest_message, warning)
 
 
+async def _warn_attachment_batch_downloads_failed(key: IngressBatchKey) -> None:
+    batch = _attachment_batcher.get(key)
+    if batch is None or batch.latest_message is None:
+        return
+    warning = (
+        "❌ Attachment batch could not be sent because all attachment downloads "
+        "failed. Please resend the files and instruction."
+    )
+    if batch.progress_message is not None:
+        edited = await safe_edit(batch.progress_message, warning)
+        if edited is not None:
+            batch.progress_message = edited
+            return
+    await safe_reply(batch.latest_message, warning)
+
+
 def _surface_from_captured_target(target: CapturedBindingTarget) -> ControlSurface:
     return ControlSurface(
         kind="group_topic" if target.message_thread_id is not None else "group_main_chat",
@@ -3008,6 +3024,23 @@ def _surface_from_captured_target(target: CapturedBindingTarget) -> ControlSurfa
     )
 
 
+def _resolve_current_attachment_binding(
+    target: CapturedBindingTarget,
+) -> tuple[int, str, str] | None:
+    surface = _surface_from_captured_target(target)
+    direct_window = _get_session_window_for_surface(target.requesting_user_id, surface)
+    if direct_window is not None:
+        return target.requesting_user_id, "direct", direct_window
+    shared_binding = _get_shared_group_binding_for_surface(
+        target.requesting_user_id,
+        surface,
+    )
+    if shared_binding is not None:
+        owner_id, window_id = shared_binding
+        return owner_id, "shared", window_id
+    return None
+
+
 async def _revalidate_attachment_batch_target(
     key: IngressBatchKey,
 ) -> tuple[bool, str]:
@@ -3016,27 +3049,25 @@ async def _revalidate_attachment_batch_target(
         return False, "missing"
     target = batch.target
     surface = _surface_from_captured_target(target)
-    current_window = None
-    bindings_by_user = getattr(session_manager, "surface_bindings", None)
-    if isinstance(bindings_by_user, dict):
-        owner_bindings = bindings_by_user.get(target.binding_owner_user_id)
-        if isinstance(owner_bindings, dict):
-            bound = owner_bindings.get(target.surface_key)
-            if isinstance(bound, str) and bound:
-                current_window = bound
-    if current_window is None:
-        current_window = _get_session_window_for_surface(
-            target.binding_owner_user_id,
-            surface,
-        )
+    current_binding = _resolve_current_attachment_binding(target)
+    if current_binding is None:
+        return False, "binding_changed"
+    current_owner_id, current_binding_kind, current_window = current_binding
+    if current_owner_id != target.binding_owner_user_id:
+        return False, "binding_owner_changed"
+    if current_binding_kind != target.binding_kind:
+        return False, "binding_kind_changed"
     if current_window != target.window_id:
         return False, "binding_changed"
     if session_manager.is_external_binding_window_id(current_window) is True:
         return False, "external_binding"
-    if (
-        _capture_surface_binding_generation(target.binding_owner_user_id, surface)
-        != target.binding_generation
-    ):
+    current_generation = _capture_surface_binding_generation(
+        target.binding_owner_user_id,
+        surface,
+    )
+    if current_generation is None:
+        return False, "binding_generation_unavailable"
+    if current_generation != target.binding_generation:
         return False, "binding_generation_changed"
     window = await tmux_manager.find_window_by_id(target.window_id)
     if not window:
@@ -3101,8 +3132,10 @@ async def _flush_attachment_batch(key: IngressBatchKey) -> bool:
     if batch is None:
         _attachment_batch_bots.pop(key, None)
         return False
-    if not batch.has_usable_content():
-        if batch.latest_message is not None:
+    if not batch.has_sendable_runtime_input():
+        if batch.failures:
+            await _warn_attachment_batch_downloads_failed(key)
+        elif batch.latest_message is not None:
             await safe_reply(
                 batch.latest_message,
                 "❌ Attachment batch could not be sent.",
@@ -3171,6 +3204,7 @@ async def _resolve_attachment_input_target(
     context: ContextTypes.DEFAULT_TYPE,
     *,
     silent_unbound: bool = False,
+    require_binding_generation: bool = False,
 ) -> _AttachmentInputTarget | None:
     """Resolve a media attachment to the bound live runtime input target."""
     user = update.effective_user
@@ -3261,6 +3295,14 @@ async def _resolve_attachment_input_target(
         binding_owner_id,
         control_surface,
     )
+    if binding_generation is None:
+        if require_binding_generation:
+            await safe_reply(
+                update.message,
+                "⚠️ Could not verify writable binding. Please retry after binding is ready.",
+            )
+            return None
+        binding_generation = (0, "")
     return _AttachmentInputTarget(
         user_id=user.id,
         thread_id=thread_id,
@@ -3282,6 +3324,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         update,
         context,
         silent_unbound=True,
+        require_binding_generation=True,
     )
     if target is None:
         return
@@ -3359,6 +3402,7 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         update,
         context,
         silent_unbound=True,
+        require_binding_generation=True,
     )
     if target is None:
         return
@@ -4265,6 +4309,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     if surface.surface_key and chat and chat.id is not None and binding_owner_id is not None:
+        binding_generation = _capture_surface_binding_generation(
+            binding_owner_id,
+            surface,
+        )
+        if binding_generation is None:
+            await safe_reply(
+                update.message,
+                "⚠️ Could not verify writable binding. Please retry after binding is ready.",
+            )
+            return
         captured = CapturedBindingTarget(
             requesting_user_id=user.id,
             binding_owner_user_id=binding_owner_id,
@@ -4273,10 +4327,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             chat_id=chat.id,
             message_thread_id=surface.message_thread_id,
             window_id=wid,
-            binding_generation=_capture_surface_binding_generation(
-                binding_owner_id,
-                surface,
-            ),
+            binding_generation=binding_generation,
         )
         key = IngressBatchKey.from_target(captured, media_group_id=None)
         _attachment_batcher.add_text(

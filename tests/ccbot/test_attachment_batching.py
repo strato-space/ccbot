@@ -197,7 +197,7 @@ def test_all_downloads_failed_not_usable():
     assert batcher.is_due(key, now=15.0)
 
 
-def test_failed_attachment_with_instruction_flushes_with_failure_record():
+def test_failed_attachment_with_instruction_is_not_runtime_sendable():
     batcher = AttachmentBatcher()
     key = _key()
     target = _target()
@@ -215,6 +215,7 @@ def test_failed_attachment_with_instruction_flushes_with_failure_record():
     )
 
     assert batcher.is_due(key, now=0.1)
+    assert not batcher.has_sendable_runtime_input(key)
     payload = batcher.format_runtime_input(key)
     assert "use this if it downloaded" in payload
     assert "- document: README.md — getFile failed" in payload
