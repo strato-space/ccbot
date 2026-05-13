@@ -57,6 +57,9 @@ control surface at a time.
     bot-inaccessible media must fail closed with a warning instead of creating
     a generic artifact-failure bubble
   - current examples:
+    - photo/document ingress batches saved under `$CCBOT_DIR/images` or
+      `$CCBOT_DIR/documents` and forwarded as a single `Attachments:` runtime
+      input when the captured binding target still revalidates
     - audio original saved under `$CCBOT_DIR/media` and forwarded as
       `Audio artifact: /path`
     - video original saved under `$CCBOT_DIR/media` and forwarded as
@@ -64,6 +67,9 @@ control surface at a time.
   - may include optional enrichment such as transcript availability status or
     a video thumbnail line, but the saved original media artifact is the MVP
     payload
+  - waiting/progress notices for inbound batches are Telegram ingress progress
+    notices, not runtime user echoes, not replay evidence, not runtime turn
+    openers, and not assistant-final artifacts
   - is not an outbound Telegram delivery artifact and must not use
     `ccbot send`
 

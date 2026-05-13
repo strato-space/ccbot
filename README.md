@@ -133,7 +133,7 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
 - **Prompt-safe control lane** — Detect `input ready`, `busy`, and `blocked prompt` terminal states before sending input
 - **Voice messages** — Voice messages are transcribed via OpenAI and forwarded as text
 - **Audio/video messages** — Telegram audio/video files within the configured Telegram bot download cap are saved under `$CCBOT_DIR/media` and forwarded artifact-first to the runtime as local paths plus metadata; transcription is optional future enrichment
-- **Document messages** — Telegram documents/files such as `tar.gz` archives are downloaded and forwarded to the runtime as local file paths
+- **Photo/document messages** — Telegram photos and documents/files such as `tar.gz` archives are downloaded and forwarded to the runtime as local file paths; Telegram media groups and same-surface orphan attachment bursts are batched into one runtime input when safe
 - **Sticker messages** — Telegram stickers are normalized to image attachments for the runtime; animated/video stickers use their Telegram thumbnail when available
 - **Generated-image result text** — successful image-generation tool output that
   reports a saved local file is delivered as terminal Telegram text in compact
@@ -393,7 +393,7 @@ routing warm-up in shared group surfaces.
 
 - In **private chats with topics enabled**, the first plain text message in a fresh topic may still trigger the bind flow automatically.
 - In **group/supergroup topics**, ordinary text and bot-addressed `@mention` in an unbound topic stay silent.
-- In **group/supergroup topics**, unbound photo and sticker ingress also stays
+- In **group/supergroup topics**, unbound photo, document, and sticker ingress also stays
   silent: the bot does not download the media, reply with bind guidance, or
   mutate bind state.
 - In **no-topics group main chat mode**, ordinary text and bot-addressed `@mention` stay silent.
@@ -416,8 +416,8 @@ routing warm-up in shared group surfaces.
 Once a topic is bound to a live tmux window, plain text, voice, photo,
 document, sticker, audio, and video messages are forwarded to the active
 runtime for every allowed participant in that bound surface. Voice is
-transcribed first. Photos and stickers are downloaded under
-`$CCBOT_DIR/images`; documents are downloaded under `$CCBOT_DIR/documents`;
+transcribed first. Photos are downloaded under
+`$CCBOT_DIR/images`; documents are downloaded under `$CCBOT_DIR/documents`; photo/document media groups and orphan attachment bursts are coalesced into one runtime input with an `Attachments:` list when the same surface/binding proof remains valid;
 audio/video originals are downloaded under `$CCBOT_DIR/media` and forwarded
 artifact-first as local paths plus metadata. Static stickers are normalized to
 PNG image attachments. Animated/video stickers use their Telegram thumbnail as
@@ -434,7 +434,7 @@ optional enrichment. The default remote Telegram Bot API download cap is
 effective cap fail before download with a clear “too large for Telegram bot
 download” warning rather than a generic artifact failure.
 
-If photo, sticker, audio, or video media arrives before the topic has an
+If photo, document, sticker, audio, or video media arrives before the topic has an
 active writable runtime binding, it is ignored silently. Use `/bind` or
 `/resume` first; media ingress does not open or repair bind flow by itself.
 

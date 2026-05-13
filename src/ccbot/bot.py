@@ -45,6 +45,7 @@ import logging
 import mimetypes
 import os
 import contextlib
+import inspect
 import re
 import shutil
 import subprocess  # nosec B404 - ffmpeg is invoked with fixed argv and no shell
@@ -76,6 +77,14 @@ from telegram.ext import (
 )
 
 from .config import config
+from .attachment_batching import (
+    AttachmentBatcher,
+    AttachmentBatchFailure,
+    AttachmentBatchItem,
+    AttachmentTextFragment,
+    CapturedBindingTarget,
+    IngressBatchKey,
+)
 from .handlers.callback_data import (
     CB_ASK_DOWN,
     CB_ASK_ENTER,
@@ -200,6 +209,9 @@ _status_poll_task: asyncio.Task | None = None
 # Telegram polling liveness watchdog task
 _polling_health_task: asyncio.Task | None = None
 _last_telegram_update_monotonic: float | None = None
+_attachment_batcher = AttachmentBatcher()
+_attachment_flush_tasks: dict[IngressBatchKey, asyncio.Task] = {}
+_attachment_batch_bots: dict[IngressBatchKey, Bot] = {}
 
 # Codex passthrough commands intentionally advertised in the Telegram menu.
 # Keep this list limited to the supported core lane; other raw slash commands
@@ -262,6 +274,11 @@ class _AttachmentInputTarget:
     user_id: int
     thread_id: int
     window_id: str
+    surface_key: str
+    chat_id: int
+    binding_owner_user_id: int
+    binding_kind: str
+    binding_generation: tuple[int, str]
 
 
 @dataclass(frozen=True)
@@ -821,6 +838,23 @@ def _get_writable_window_for_surface(
     return None, False
 
 
+def _get_writable_window_binding_for_surface(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    surface: ControlSurface,
+) -> tuple[str | None, bool, int | None, str | None]:
+    """Return window plus binding provenance for delayed input revalidation."""
+    wid = _get_session_window_for_surface(user_id, surface)
+    if wid is not None:
+        return wid, False, user_id, "direct"
+    binding = _get_shared_group_binding_for_surface(user_id, surface)
+    if binding is not None:
+        owner_id, wid = binding
+        _clear_shared_group_peer_flow_state(context, user_id, surface)
+        return wid, True, owner_id, "shared"
+    return None, False, None, None
+
+
 def _resolve_session_window_for_surface(
     user_id: int, surface: ControlSurface
 ) -> str | None:
@@ -931,6 +965,23 @@ def _get_surface_bind_flow_credentials(
     if legacy_scope_id is None:
         return (0, "")
     return session_manager.get_topic_bind_flow_credentials(user_id, legacy_scope_id)
+
+
+def _capture_surface_binding_generation(
+    user_id: int,
+    surface: ControlSurface,
+) -> tuple[int, str]:
+    """Return a stable comparable binding-generation tuple for delayed flushes."""
+    try:
+        version, nonce = _get_surface_bind_flow_credentials(user_id, surface)
+        return int(version), str(nonce or "")
+    except Exception as exc:
+        logger.warning(
+            "Could not capture binding generation for surface %s: %s",
+            surface.surface_key,
+            exc,
+        )
+        return (0, "")
 
 
 def _validate_surface_bind_flow_callback(
@@ -2866,6 +2917,255 @@ async def _send_attachment_runtime_text(
     await safe_reply(update.message, success_reply)
 
 
+def _captured_target_from_attachment_target(
+    target: _AttachmentInputTarget,
+) -> CapturedBindingTarget:
+    return CapturedBindingTarget(
+        requesting_user_id=target.user_id,
+        binding_owner_user_id=target.binding_owner_user_id,
+        binding_kind="shared" if target.binding_kind == "shared" else "direct",
+        surface_key=target.surface_key,
+        chat_id=target.chat_id,
+        message_thread_id=target.thread_id,
+        window_id=target.window_id,
+        binding_generation=target.binding_generation,
+    )
+
+
+def _attachment_batch_key(
+    target: _AttachmentInputTarget,
+    *,
+    media_group_id: str | None,
+) -> IngressBatchKey:
+    return IngressBatchKey.from_target(
+        _captured_target_from_attachment_target(target),
+        media_group_id=media_group_id,
+    )
+
+
+def _telegram_media_group_id(update: Update) -> str | None:
+    value = getattr(getattr(update, "message", None), "media_group_id", None)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
+async def _update_attachment_batch_progress(key: IngressBatchKey) -> None:
+    batch = _attachment_batcher.get(key)
+    if batch is None or batch.latest_message is None:
+        return
+    text = _attachment_batcher.progress_text(key)
+    if batch.progress_message is not None:
+        edited = await safe_edit(batch.progress_message, text)
+        if edited is not None:
+            batch.progress_message = edited
+            return
+    batch.progress_message = await safe_reply(batch.latest_message, text)
+
+
+async def _ack_attachment_batch_sent(key: IngressBatchKey) -> None:
+    batch = _attachment_batcher.get(key)
+    if batch is None or batch.latest_message is None:
+        return
+    text = _attachment_batcher.final_ack_text(key)
+    if batch.progress_message is not None:
+        edited = await safe_edit(batch.progress_message, text)
+        if edited is not None:
+            batch.progress_message = edited
+            return
+    await safe_reply(batch.latest_message, text)
+
+
+async def _warn_attachment_batch_not_sent(key: IngressBatchKey) -> None:
+    batch = _attachment_batcher.get(key)
+    if batch is None or batch.latest_message is None:
+        return
+    warning = (
+        "⚠️ Attachment batch was not sent because the bound runtime changed or "
+        "is no longer writable. Please resend after binding is ready."
+    )
+    if batch.progress_message is not None:
+        edited = await safe_edit(batch.progress_message, warning)
+        if edited is not None:
+            batch.progress_message = edited
+            return
+    await safe_reply(batch.latest_message, warning)
+
+
+def _surface_from_captured_target(target: CapturedBindingTarget) -> ControlSurface:
+    return ControlSurface(
+        kind="group_topic" if target.message_thread_id is not None else "group_main_chat",
+        chat_id=target.chat_id,
+        thread_id=target.message_thread_id,
+        legacy_scope_id=target.message_thread_id
+        if target.message_thread_id is not None
+        else target.chat_id,
+        surface_key=target.surface_key,
+        label="topic" if target.message_thread_id is not None else "chat",
+        is_shared_group=True,
+        supports_bind_flow=True,
+    )
+
+
+async def _revalidate_attachment_batch_target(
+    key: IngressBatchKey,
+) -> tuple[bool, str]:
+    batch = _attachment_batcher.get(key)
+    if batch is None:
+        return False, "missing"
+    target = batch.target
+    surface = _surface_from_captured_target(target)
+    current_window = None
+    bindings_by_user = getattr(session_manager, "surface_bindings", None)
+    if isinstance(bindings_by_user, dict):
+        owner_bindings = bindings_by_user.get(target.binding_owner_user_id)
+        if isinstance(owner_bindings, dict):
+            bound = owner_bindings.get(target.surface_key)
+            if isinstance(bound, str) and bound:
+                current_window = bound
+    if current_window is None:
+        current_window = _get_session_window_for_surface(
+            target.binding_owner_user_id,
+            surface,
+        )
+    if current_window != target.window_id:
+        return False, "binding_changed"
+    if session_manager.is_external_binding_window_id(current_window) is True:
+        return False, "external_binding"
+    if (
+        _capture_surface_binding_generation(target.binding_owner_user_id, surface)
+        != target.binding_generation
+    ):
+        return False, "binding_generation_changed"
+    window = await tmux_manager.find_window_by_id(target.window_id)
+    if not window:
+        return False, "stale_window"
+    captured = tmux_manager.capture_pane(target.window_id)
+    pane_text = await captured if inspect.isawaitable(captured) else ""
+    input_surface = classify_input_surface(pane_text) if pane_text else None
+    if input_surface and input_surface.kind == "blocked_prompt":
+        bot = _attachment_batch_bots.get(key)
+        if bot is not None:
+            await _surface_blocked_prompt_state(
+                bot,
+                target.requesting_user_id,
+                target.window_id,
+                target.message_thread_id,
+                reply_message=batch.latest_message,
+            )
+        return False, "blocked_prompt"
+    bot = _attachment_batch_bots.get(key)
+    if bot is not None and await _surface_omx_question_state(
+        bot,
+        target.requesting_user_id,
+        target.window_id,
+        target.message_thread_id,
+        reply_message=batch.latest_message,
+        window=window,
+    ):
+        return False, "active_question"
+    return True, "ok"
+
+
+def _schedule_attachment_batch_flush(key: IngressBatchKey) -> None:
+    due_at = _attachment_batcher.flush_due_at(key)
+    if due_at is None:
+        return
+    existing = _attachment_flush_tasks.pop(key, None)
+    if existing is not None:
+        existing.cancel()
+    delay = max(0.0, due_at - time.monotonic())
+    _attachment_flush_tasks[key] = asyncio.create_task(
+        _delayed_attachment_batch_flush(key, delay)
+    )
+
+
+async def _delayed_attachment_batch_flush(
+    key: IngressBatchKey,
+    delay: float,
+) -> None:
+    try:
+        await asyncio.sleep(delay)
+        await _flush_attachment_batch(key)
+    except asyncio.CancelledError:
+        return
+
+
+async def _flush_attachment_batch(key: IngressBatchKey) -> bool:
+    task = _attachment_flush_tasks.pop(key, None)
+    current = asyncio.current_task()
+    if task is not None and task is not current:
+        task.cancel()
+    batch = _attachment_batcher.get(key)
+    if batch is None:
+        _attachment_batch_bots.pop(key, None)
+        return False
+    if not batch.has_usable_content():
+        if batch.latest_message is not None:
+            await safe_reply(
+                batch.latest_message,
+                "❌ Attachment batch could not be sent.",
+            )
+        _attachment_batcher.pop(key)
+        _attachment_batch_bots.pop(key, None)
+        return False
+    ok, reason = await _revalidate_attachment_batch_target(key)
+    if not ok:
+        if reason != "blocked_prompt":
+            await _warn_attachment_batch_not_sent(key)
+        _attachment_batcher.pop(key)
+        _attachment_batch_bots.pop(key, None)
+        return False
+    payload = _attachment_batcher.format_runtime_input(key)
+    clear_status_msg_info(
+        batch.target.requesting_user_id,
+        batch.target.message_thread_id,
+    )
+    success, message = await session_manager.send_to_window(
+        batch.target.window_id,
+        payload,
+    )
+    if not success:
+        bot = _attachment_batch_bots.get(key)
+        if message == BLOCKED_PROMPT_SEND_MESSAGE and bot is not None:
+            await _surface_blocked_prompt_state(
+                bot,
+                batch.target.requesting_user_id,
+                batch.target.window_id,
+                batch.target.message_thread_id,
+                reply_message=batch.latest_message,
+            )
+        elif batch.latest_message is not None:
+            await safe_reply(batch.latest_message, f"❌ {message}")
+        _attachment_batcher.pop(key)
+        _attachment_batch_bots.pop(key, None)
+        return False
+    if not batch.text_only:
+        await _ack_attachment_batch_sent(key)
+    _attachment_batcher.pop(key)
+    _attachment_batch_bots.pop(key, None)
+    return True
+
+
+async def _flush_due_attachment_batches(*, now: float | None = None) -> int:
+    now = time.monotonic() if now is None else now
+    count = 0
+    for key in list(_attachment_batcher.keys()):
+        if _attachment_batcher.is_due(key, now=now):
+            if await _flush_attachment_batch(key):
+                count += 1
+    return count
+
+
+async def _cancel_attachment_batch_tasks() -> None:
+    for task in list(_attachment_flush_tasks.values()):
+        task.cancel()
+    _attachment_flush_tasks.clear()
+    _attachment_batch_bots.clear()
+    _attachment_batcher.clear()
+
+
 async def _resolve_attachment_input_target(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -2902,10 +3202,12 @@ async def _resolve_attachment_input_target(
         )
         return None
 
-    wid, using_shared_group_binding = _get_writable_window_for_surface(
-        context,
-        user.id,
-        control_surface,
+    wid, using_shared_group_binding, binding_owner_id, binding_kind = (
+        _get_writable_window_binding_for_surface(
+            context,
+            user.id,
+            control_surface,
+        )
     )
     if wid is None:
         if silent_unbound:
@@ -2949,10 +3251,25 @@ async def _resolve_attachment_input_target(
     ):
         return None
 
+    if (
+        control_surface.surface_key is None
+        or chat.id is None
+        or binding_owner_id is None
+    ):
+        return None
+    binding_generation = _capture_surface_binding_generation(
+        binding_owner_id,
+        control_surface,
+    )
     return _AttachmentInputTarget(
         user_id=user.id,
         thread_id=thread_id,
         window_id=wid,
+        surface_key=control_surface.surface_key,
+        chat_id=chat.id,
+        binding_owner_user_id=binding_owner_id,
+        binding_kind=binding_kind or "direct",
+        binding_generation=binding_generation,
     )
 
 
@@ -2971,42 +3288,66 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # Download the highest-resolution photo
     photo = update.message.photo[-1]
-    tg_file = await photo.get_file()
 
     # Save to ~/.ccbot/images/<timestamp>_<file_unique_id>.jpg
     filename = f"{int(time.time())}_{photo.file_unique_id}.jpg"
     file_path = _IMAGES_DIR / filename
-    await tg_file.download_to_drive(file_path)
+    display_name = _sanitize_attachment_filename(filename, "photo.jpg")
+    order = _attachment_batcher.next_order()
+    captured = _captured_target_from_attachment_target(target)
+    key = _attachment_batch_key(
+        target,
+        media_group_id=_telegram_media_group_id(update),
+    )
+    now = time.monotonic()
+    try:
+        tg_file = await photo.get_file()
+        await tg_file.download_to_drive(file_path)
+        downloaded_size = file_path.stat().st_size if file_path.exists() else 0
+        if _attachment_batcher.should_start_new_batch_for_attachment(
+            key,
+            downloaded_size=downloaded_size,
+        ):
+            await _flush_attachment_batch(key)
+        _attachment_batcher.add_attachment(
+            key,
+            captured,
+            AttachmentBatchItem(
+                "image",
+                file_path,
+                display_name,
+                downloaded_size,
+                order,
+            ),
+            now=now,
+            latest_message=update.message,
+        )
+    except Exception as exc:
+        _attachment_batcher.add_failure(
+            key,
+            captured,
+            AttachmentBatchFailure("image", display_name, str(exc), order),
+            now=now,
+            latest_message=update.message,
+        )
 
-    # Build the message to send to Codex
     caption = update.message.caption or ""
     if caption:
-        text_to_send = f"{caption}\n\n(image attached: {file_path})"
-    else:
-        text_to_send = f"(image attached: {file_path})"
+        _attachment_batcher.add_text(
+            key,
+            captured,
+            AttachmentTextFragment(caption, _attachment_batcher.next_order()),
+            now=now,
+            latest_message=update.message,
+        )
 
+    _attachment_batch_bots[key] = context.bot
     await update.message.chat.send_action(ChatAction.TYPING)
-    clear_status_msg_info(target.user_id, target.thread_id)
-
-    success, message = await session_manager.send_to_window(
-        target.window_id,
-        text_to_send,
-    )
-    if not success:
-        if message == BLOCKED_PROMPT_SEND_MESSAGE:
-            await _surface_blocked_prompt_state(
-                context.bot,
-                target.user_id,
-                target.window_id,
-                target.thread_id,
-                reply_message=update.message,
-            )
-            return
-        await safe_reply(update.message, f"❌ {message}")
-        return
-
-    # Confirm to user
-    await safe_reply(update.message, "📷 Image sent to Codex.")
+    await _update_attachment_batch_progress(key)
+    if _attachment_batcher.is_due(key, now=now):
+        await _flush_attachment_batch(key)
+    else:
+        _schedule_attachment_batch_flush(key)
 
 
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3023,8 +3364,6 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     document = update.message.document
-    tg_file = await document.get_file()
-
     unique_id = _sanitize_attachment_filename(
         getattr(document, "file_unique_id", None),
         "document",
@@ -3035,36 +3374,61 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
     filename = f"{int(time.time())}_{unique_id}_{original_name}"
     file_path = _DOCUMENTS_DIR / filename
-    await tg_file.download_to_drive(file_path)
+    order = _attachment_batcher.next_order()
+    captured = _captured_target_from_attachment_target(target)
+    key = _attachment_batch_key(
+        target,
+        media_group_id=_telegram_media_group_id(update),
+    )
+    now = time.monotonic()
+    try:
+        tg_file = await document.get_file()
+        await tg_file.download_to_drive(file_path)
+        downloaded_size = file_path.stat().st_size if file_path.exists() else 0
+        if _attachment_batcher.should_start_new_batch_for_attachment(
+            key,
+            downloaded_size=downloaded_size,
+        ):
+            await _flush_attachment_batch(key)
+        _attachment_batcher.add_attachment(
+            key,
+            captured,
+            AttachmentBatchItem(
+                "document",
+                file_path,
+                original_name,
+                downloaded_size,
+                order,
+            ),
+            now=now,
+            latest_message=update.message,
+        )
+    except Exception as exc:
+        _attachment_batcher.add_failure(
+            key,
+            captured,
+            AttachmentBatchFailure("document", original_name, str(exc), order),
+            now=now,
+            latest_message=update.message,
+        )
 
     caption = update.message.caption or ""
     if caption:
-        text_to_send = f"{caption}\n\n(document attached: {file_path})"
-    else:
-        text_to_send = f"(document attached: {file_path})"
+        _attachment_batcher.add_text(
+            key,
+            captured,
+            AttachmentTextFragment(caption, _attachment_batcher.next_order()),
+            now=now,
+            latest_message=update.message,
+        )
 
+    _attachment_batch_bots[key] = context.bot
     await update.message.chat.send_action(ChatAction.TYPING)
-    clear_status_msg_info(target.user_id, target.thread_id)
-
-    success, message = await session_manager.send_to_window(
-        target.window_id,
-        text_to_send,
-    )
-    if not success:
-        if message == BLOCKED_PROMPT_SEND_MESSAGE:
-            await _surface_blocked_prompt_state(
-                context.bot,
-                target.user_id,
-                target.window_id,
-                target.thread_id,
-                reply_message=update.message,
-            )
-            return
-        await safe_reply(update.message, f"❌ {message}")
-        return
-
-    # Confirm to user
-    await safe_reply(update.message, "📎 Document sent to Codex.")
+    await _update_attachment_batch_progress(key)
+    if _attachment_batcher.is_due(key, now=now):
+        await _flush_attachment_batch(key)
+    else:
+        _schedule_attachment_batch_flush(key)
 
 
 def _convert_attachment_image_to_png(source_path: Path, png_path: Path) -> None:
@@ -3749,10 +4113,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    wid, using_shared_group_binding = _get_writable_window_for_surface(
-        context,
-        user.id,
-        surface,
+    wid, using_shared_group_binding, binding_owner_id, binding_kind = (
+        _get_writable_window_binding_for_surface(
+            context,
+            user.id,
+            surface,
+        )
     )
     if wid is None:
         binding_state = _get_surface_binding_state(user.id, surface)
@@ -3896,6 +4262,35 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         reply_message=update.message,
         window=w,
     ):
+        return
+
+    if surface.surface_key and chat and chat.id is not None and binding_owner_id is not None:
+        captured = CapturedBindingTarget(
+            requesting_user_id=user.id,
+            binding_owner_user_id=binding_owner_id,
+            binding_kind="shared" if binding_kind == "shared" else "direct",
+            surface_key=surface.surface_key,
+            chat_id=chat.id,
+            message_thread_id=surface.message_thread_id,
+            window_id=wid,
+            binding_generation=_capture_surface_binding_generation(
+                binding_owner_id,
+                surface,
+            ),
+        )
+        key = IngressBatchKey.from_target(captured, media_group_id=None)
+        _attachment_batcher.add_text(
+            key,
+            captured,
+            AttachmentTextFragment(text, _attachment_batcher.next_order()),
+            now=time.monotonic(),
+            latest_message=update.message,
+        )
+        _attachment_batch_bots[key] = context.bot
+        if _attachment_batcher.is_due(key, now=time.monotonic()):
+            await _flush_attachment_batch(key)
+        else:
+            _schedule_attachment_batch_flush(key)
         return
 
     success, message = await session_manager.send_to_window(wid, text)
@@ -5145,6 +5540,8 @@ async def post_init(application: Application) -> None:
 
 async def post_shutdown(application: Application) -> None:
     global _status_poll_task, _polling_health_task
+
+    await _cancel_attachment_batch_tasks()
 
     if _polling_health_task:
         _polling_health_task.cancel()

@@ -145,6 +145,7 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | **BotCommand + set_my_commands** | ✅ | Bot menu is limited to the supported Codex core lane plus a small passthrough subset |
 | **sendDocument** | ✅ | Screenshots and runtime document/file attachments sent as Telegram documents |
 | **Sticker ingress** | ✅ | Inbound Telegram stickers are normalized to runtime image attachments; animated/video stickers use Telegram thumbnails as visual input and preserve original animation artifacts for direct result delivery |
+| **Photo/document batching** | ✅ | Inbound Telegram photo/document media groups and same-surface orphan attachment bursts are saved under `$CCBOT_DIR/images` / `$CCBOT_DIR/documents` and coalesced into one runtime input with an `Attachments:` list when binding proof still revalidates |
 | **Audio/video ingress** | ✅ | Inbound Telegram audio/video messages are artifact-first runtime inputs: originals within the effective Telegram bot download cap are saved under `$CCBOT_DIR/media`, audio/video paths and metadata are sent to the bound runtime, video previews are best-effort, and transcription is optional future enrichment rather than an OpenAI gate |
 | **ccbot send file delivery** | ✅ | Local `ccbot send --file-path --file-type photo\|animation\|audio\|video` returns generated artifacts to the Telegram surface without using runtime-input/TUI injection |
 | **Polling liveness guard** | ✅ | Telegram long polling uses explicit getUpdates pool/timeouts and a pending-update watchdog so service-alive-but-polling-dead processes exit for systemd restart instead of silently accumulating updates |
@@ -289,7 +290,7 @@ Named-topic behavior:
 
 - In **private chats with topics enabled**, a fresh topic may still start with implicit bind from the first plain message.
 - In **group/supergroup topics**, ordinary messages and bot-addressed `@mention` messages in an unbound topic must stay silent; they do not open bind flow.
-- In **group/supergroup topics**, unbound photo, sticker, audio, and video messages must also
+- In **group/supergroup topics**, unbound photo, document, sticker, audio, and video messages must also
   stay silent; they do not download media, reply with bind guidance, call
   runtime input, or mutate bind-flow state.
 - In **group/supergroup topics**, explicit `/bind` and explicit `/resume` remain valid explicit entry paths.
