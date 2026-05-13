@@ -503,8 +503,8 @@ class TmuxManager:
         """Build the exact shell command used to start or resume a runtime."""
         if not start_runtime:
             return ""
-        configured_runtime_kind = infer_runtime_kind_from_command(config.claude_command)
-        source_command = launch_command or config.claude_command
+        configured_runtime_kind = infer_runtime_kind_from_command(config.ccbot_command)
+        source_command = launch_command or config.ccbot_command
         inferred_runtime_kind = (
             runtime_kind or infer_runtime_kind_from_command(source_command)
         )
@@ -513,7 +513,7 @@ class TmuxManager:
             base_command=(
                 launch_command
                 or (
-                    config.claude_command
+                    config.ccbot_command
                     if runtime_kind is None
                     or inferred_runtime_kind == configured_runtime_kind
                     else None
@@ -678,7 +678,7 @@ class TmuxManager:
                     existing.pane_current_command
                 )
                 requested_runtime = runtime_kind or infer_runtime_kind_from_command(
-                    launch_command or config.claude_command
+                    launch_command or config.ccbot_command
                 )
                 if active_runtime and active_runtime != requested_runtime:
                     return (

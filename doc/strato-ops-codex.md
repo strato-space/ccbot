@@ -57,9 +57,11 @@ Important optional values:
 - `TMUX_SESSION_NAME`
   - Default: `ccbot`
   - All topic-bound windows live under this tmux session
+- `CCBOT_COMMAND`
+  - Runtime-neutral launcher command for new windows
+  - Set this to `codex`, `omx --madmax`, or to a host-specific Codex launcher string
 - `CLAUDE_COMMAND`
-  - Legacy variable name retained for compatibility
-  - Set this to `codex` or to a host-specific Codex launcher string
+  - Legacy variable name retained as a fallback when `CCBOT_COMMAND` is unset
 - `MONITOR_POLL_INTERVAL`
   - Default: `2.0`
 
@@ -69,13 +71,14 @@ Recommended `~/.ccbot/.env` shape:
 TELEGRAM_BOT_TOKEN=...
 ALLOWED_USERS=123456789
 TMUX_SESSION_NAME=ccbot
-CLAUDE_COMMAND=codex
+CCBOT_COMMAND=codex
 ```
 
-If your host requires an explicit Codex wrapper, keep it in `CLAUDE_COMMAND`. Example patterns:
+If your host requires an explicit Codex wrapper, keep it in `CCBOT_COMMAND`. Example patterns:
 
-- `CLAUDE_COMMAND=codex`
-- `CLAUDE_COMMAND=/home/tools/bin/codex-wrapper`
+- `CCBOT_COMMAND=codex`
+- `CCBOT_COMMAND=omx --madmax`
+- `CCBOT_COMMAND=/home/tools/bin/codex-wrapper`
 
 Prefer explicit non-interactive Codex policy in that command when your host policy requires it. Do not make the release depend on a prompt that only exists in an attached terminal.
 

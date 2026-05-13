@@ -117,3 +117,21 @@ class TestConfigOpenAI:
         monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
         Config()
         assert os.environ.get("OPENAI_API_KEY") is None
+
+
+def test_resolve_ccbot_command_prefers_ccbot_command_over_legacy() -> None:
+    from ccbot.config import resolve_ccbot_command
+
+    assert (
+        resolve_ccbot_command(
+            {"CCBOT_COMMAND": "omx --madmax", "CLAUDE_COMMAND": "codex"}
+        )
+        == "omx --madmax"
+    )
+
+
+def test_resolve_ccbot_command_falls_back_to_legacy_and_default() -> None:
+    from ccbot.config import resolve_ccbot_command
+
+    assert resolve_ccbot_command({"CLAUDE_COMMAND": "codex"}) == "codex"
+    assert resolve_ccbot_command({}) == "claude"

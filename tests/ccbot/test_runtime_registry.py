@@ -47,6 +47,9 @@ def test_registry_infers_runtime_kind_from_command_aliases() -> None:
     assert runtime_capability_registry.infer_runtime_kind_from_command(
         "claude-code --dangerously-skip-permissions"
     ) == "claude"
+    assert runtime_capability_registry.infer_runtime_kind_from_command(
+        "omx --madmax"
+    ) == "codex"
 
 
 def test_registry_distinguishes_known_runtime_commands_from_shell() -> None:
@@ -63,4 +66,10 @@ def test_registry_distinguishes_known_runtime_commands_from_shell() -> None:
             "fast-agent-acp --transport acp"
         )
         == "fast-agent"
+    )
+    assert (
+        runtime_capability_registry.known_runtime_kind_from_command(
+            "env FOO=1 omx --madmax resume thread-1"
+        )
+        == "codex"
     )

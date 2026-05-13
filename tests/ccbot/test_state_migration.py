@@ -44,6 +44,7 @@ async def test_legacy_session_map_is_migrated_with_backup(tmp_path, monkeypatch)
 
     monkeypatch.setattr(session_module.config, "state_file", state_file)
     monkeypatch.setattr(session_module.config, "session_map_file", session_map_file)
+    monkeypatch.setattr(session_module.config, "tmux_session_name", "ccbot")
     monkeypatch.setattr(session_module.SessionManager, "_load_state", lambda self: None)
 
     manager = SessionManager()
@@ -259,6 +260,7 @@ async def test_versioned_session_map_is_read_by_session_monitor(tmp_path, monkey
     )
 
     monkeypatch.setattr(session_module.config, "session_map_file", session_map_file)
+    monkeypatch.setattr(session_module.config, "tmux_session_name", "ccbot")
     monkeypatch.setattr(session_module.config, "claude_projects_path", project_root)
     monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
     manager = SessionManager()
@@ -653,4 +655,3 @@ def test_surface_key_conflict_resolution_prefers_surface_maps_over_legacy(tmp_pa
     assert saved["thread_bindings"]["100"]["42"] == "@surface"
     assert saved["topic_policies"]["100"]["42"] == TOPIC_POLICY_MANUAL_BIND_REQUIRED
     assert saved["topic_binding_states"]["100"]["42"] == BINDING_STATE_BIND_FLOW
-

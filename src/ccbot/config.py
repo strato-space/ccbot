@@ -28,6 +28,16 @@ SENSITIVE_ENV_VARS = {
 }
 
 
+def resolve_ccbot_command(environ: dict[str, str] | None = None) -> str:
+    """Resolve the configured runtime launcher command.
+
+    ``CCBOT_COMMAND`` is the runtime-neutral name.  ``CLAUDE_COMMAND`` remains
+    a compatibility fallback for existing deployments.
+    """
+    source = os.environ if environ is None else environ
+    return source.get("CCBOT_COMMAND") or source.get("CLAUDE_COMMAND", "claude")
+
+
 class Config:
     """Application configuration loaded from environment variables."""
 
@@ -67,8 +77,11 @@ class Config:
         self.tmux_session_name = os.getenv("TMUX_SESSION_NAME", "ccbot")
         self.tmux_main_window_name = "__main__"
 
-        # Claude command to run in new windows
-        self.claude_command = os.getenv("CLAUDE_COMMAND", "claude")
+        # Runtime command to run in new windows.  Keep the legacy
+        # claude_command attribute as a compatibility alias while call sites
+        # migrate to ccbot_command.
+        self.ccbot_command = resolve_ccbot_command()
+        self.claude_command = self.ccbot_command
 
         # All state files live under config_dir
         self.state_file = self.config_dir / "state.json"
@@ -147,6 +160,14 @@ class Config:
     def is_user_allowed(self, user_id: int) -> bool:
         """Check if a user is in the allowed list."""
         return user_id in self.allowed_users
+
+    def __setattr__(self, name: str, value: object) -> None:
+        """Keep legacy claude_command and ccbot_command aliases in sync."""
+        object.__setattr__(self, name, value)
+        if name == "ccbot_command":
+            object.__setattr__(self, "claude_command", value)
+        elif name == "claude_command":
+            object.__setattr__(self, "ccbot_command", value)
 
 
 config = Config()

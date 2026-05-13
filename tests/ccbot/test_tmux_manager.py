@@ -133,6 +133,34 @@ async def test_create_window_explicitly_cd_into_requested_directory(monkeypatch,
 
 
 @pytest.mark.asyncio
+async def test_create_window_prefers_ccbot_command_over_legacy_claude_command(
+    monkeypatch, tmp_path
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    pane = _FakePane()
+    window = _FakeWindow(pane)
+    session = _FakeSession(window)
+    manager = TmuxManager(session_name="ccbot-test")
+
+    async def _no_conflict(_name: str):
+        return None
+
+    monkeypatch.setattr(manager, "find_window_by_name", _no_conflict)
+    monkeypatch.setattr(manager, "get_or_create_session", lambda: session)
+    monkeypatch.setattr("ccbot.tmux_manager.config.ccbot_command", "omx --madmax")
+    ok, _message, _window_name, _window_id = await manager.create_window(
+        str(workspace),
+        resume_session_id="thread-123",
+    )
+
+    assert ok is True
+    assert pane.commands == [
+        (f"cd {workspace} && omx --madmax resume thread-123", True)
+    ]
+
+
+@pytest.mark.asyncio
 async def test_create_window_derives_basename_and_collision_suffix(monkeypatch, tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -152,7 +180,6 @@ async def test_create_window_derives_basename_and_collision_suffix(monkeypatch, 
     monkeypatch.setattr(manager, "find_window_by_name", _find_window_by_name)
     monkeypatch.setattr(manager, "get_or_create_session", lambda: session)
     monkeypatch.setattr("ccbot.tmux_manager.config.claude_command", "codex")
-
     ok, _message, window_name, window_id = await manager.create_window(str(workspace))
 
     assert ok is True
@@ -248,6 +275,7 @@ async def test_create_or_reuse_window_reuses_exact_match_and_launches_codex_resu
     monkeypatch.setattr(manager, "find_window_by_name", _find_window_by_name)
     monkeypatch.setattr(manager, "send_literal_text", _send_literal_text)
     monkeypatch.setattr(manager, "send_enter", _send_enter)
+    monkeypatch.setattr("ccbot.tmux_manager.config.ccbot_command", "codex")
 
     ok, message, window_name, window_id, reused = await manager.create_or_reuse_window(
         str(workspace),

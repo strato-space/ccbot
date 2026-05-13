@@ -203,7 +203,8 @@ ALLOWED_USERS=your_telegram_user_id
 | ----------------------- | ---------- | ------------------------------------------------ |
 | `CCBOT_DIR`             | `~/.ccbot` | Config/state directory (`.env` loaded from here) |
 | `TMUX_SESSION_NAME`     | `ccbot`    | Tmux session name                                |
-| `CLAUDE_COMMAND`        | `claude`   | Legacy env var name for the command run in new windows; set this explicitly to `codex` or your Codex wrapper in this fork |
+| `CCBOT_COMMAND`         | `claude`   | Runtime launcher command for new windows; set to `codex`, `omx --madmax`, or a host-specific wrapper |
+| `CLAUDE_COMMAND`        | `claude`   | Legacy fallback used only when `CCBOT_COMMAND` is unset |
 | `MONITOR_POLL_INTERVAL` | `2.0`      | Polling interval in seconds                      |
 | `CCBOT_SHOW_HIDDEN_DIRS` | `false` | Show hidden (dot) directories in directory browser |
 | `OPENAI_API_KEY` | _(none)_ | OpenAI API key for voice message transcription |
@@ -363,7 +364,15 @@ Each supported surface controls one delivery source at a time:
 - live tmux window (writable control lane)
 - external persisted Codex thread (read-only replay lane)
 
-The concrete runtime lane depends on `CLAUDE_COMMAND`.
+The concrete runtime lane depends on `CCBOT_COMMAND` (`CLAUDE_COMMAND` remains
+a legacy fallback when `CCBOT_COMMAND` is unset).
+
+Optional startup restore intent may be declared per bot instance with
+`CCBOT_RESTORE_*` variables. These variables declare intended window/cwd/runtime
+identity/control-surface coordinates only; canonical `surface_bindings` state is
+still written only after startup validates the runtime identity, full
+`(user_id, surface_key)` control-surface identity, and any required group
+`chat_id` routing coordinates.
 
 **Creating a new session:**
 

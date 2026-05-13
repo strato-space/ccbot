@@ -201,7 +201,8 @@ Inventory rules:
 When promoting a runtime lane:
 
 1. Freeze the target host/bot instance to one intended runtime lane.
-2. Set `CLAUDE_COMMAND` to the target launcher.
+2. Set `CCBOT_COMMAND` to the target launcher (`CLAUDE_COMMAND` is only the
+   legacy fallback when `CCBOT_COMMAND` is unset).
 3. Run targeted regression tests for that lane plus shared topic-policy and
    Telegram-delivery coverage.
 4. Restart only the scoped bot process.

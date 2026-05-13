@@ -319,7 +319,7 @@ _LOG_SECRET_PARAM_RE = re.compile(
 
 def _default_launch_runtime_kind() -> str:
     """Return the configured runtime lane for new explicit launches."""
-    return infer_runtime_kind_from_command(config.claude_command)
+    return infer_runtime_kind_from_command(config.ccbot_command)
 
 
 def _build_resume_usage(runtime_kind: str) -> str:
@@ -5097,6 +5097,19 @@ async def post_init(application: Application) -> None:
 
     # Re-resolve stale window IDs from persisted state against live tmux windows
     await session_manager.resolve_stale_ids()
+    from .restore import restore_configured_startup_target
+
+    restore_result = await restore_configured_startup_target(
+        session_manager,
+        tmux_manager,
+    )
+    if restore_result.status != "skipped":
+        logger.info(
+            "Startup restore result: status=%s window_id=%s message=%s",
+            restore_result.status,
+            restore_result.window_id,
+            restore_result.message,
+        )
 
     # Pre-fill global rate limiter bucket on restart.
     # AsyncLimiter starts at _level=0 (full burst capacity), but Telegram's
