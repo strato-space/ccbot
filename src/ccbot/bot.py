@@ -509,7 +509,7 @@ def _get_thread_id(update: Update) -> int | None:
     if msg is None:
         return None
     tid = getattr(msg, "message_thread_id", None)
-    if tid is None or tid == 1:
+    if tid is None:
         return None
     return tid
 
@@ -568,6 +568,11 @@ def control_surface_classifier(update: Update) -> ControlSurface:
 def surface_key_adapter(surface: ControlSurface) -> int | None:
     """Return the legacy numeric scope id used by pre-surface session APIs."""
     return surface.legacy_scope_id
+
+
+def _artifact_thread_id_for_surface(surface: ControlSurface) -> int | None:
+    """Return the artifact key used by thread-scoped Telegram state helpers."""
+    return surface.thread_id
 
 
 def _remember_group_chat_id_for_surface(user_id: int, update: Update) -> None:
@@ -1914,7 +1919,7 @@ async def unbind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         _require_manual_bind(user.id, surface)
         await clear_topic_state(
             user.id,
-            surface.legacy_scope_id,
+            _artifact_thread_id_for_surface(surface),
             context.bot,
             context.user_data,
         )
@@ -1935,14 +1940,14 @@ async def unbind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         _require_manual_bind(binding_owner_id, surface)
     await clear_topic_state(
         user.id,
-        surface.legacy_scope_id,
+        _artifact_thread_id_for_surface(surface),
         context.bot,
         context.user_data,
     )
     if binding_owner_id != user.id:
         await clear_topic_state(
             binding_owner_id,
-            surface.legacy_scope_id,
+            _artifact_thread_id_for_surface(surface),
             context.bot,
             None,
         )

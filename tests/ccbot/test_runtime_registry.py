@@ -50,6 +50,9 @@ def test_registry_infers_runtime_kind_from_command_aliases() -> None:
     assert runtime_capability_registry.infer_runtime_kind_from_command(
         "omx --madmax"
     ) == "codex"
+    assert runtime_capability_registry.infer_runtime_kind_from_command(
+        "/home/tools/bin/codex-wrapper --madmax"
+    ) == "codex"
 
 
 def test_registry_distinguishes_known_runtime_commands_from_shell() -> None:
@@ -70,6 +73,12 @@ def test_registry_distinguishes_known_runtime_commands_from_shell() -> None:
     assert (
         runtime_capability_registry.known_runtime_kind_from_command(
             "env FOO=1 omx --madmax resume thread-1"
+        )
+        == "codex"
+    )
+    assert (
+        runtime_capability_registry.known_runtime_kind_from_command(
+            "env FOO=1 /home/tools/bin/codex-wrapper resume thread-1"
         )
         == "codex"
     )

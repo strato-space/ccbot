@@ -687,6 +687,23 @@ class TestSurfacePendingSlots:
 
 
 class TestCommandSurface:
+    def test_forum_general_topic_stays_topic_surface(self):
+        update = _make_topic_update(thread_id=1)
+        update.effective_chat.is_forum = True
+
+        surface = bot_mod.control_surface_classifier(update)
+
+        assert surface == bot_mod.ControlSurface(
+            kind="group_topic",
+            chat_id=100,
+            thread_id=1,
+            legacy_scope_id=1,
+            surface_key="t:1",
+            label="topic",
+            is_shared_group=True,
+            supports_bind_flow=True,
+        )
+
     @pytest.mark.asyncio
     async def test_start_command_describes_codex_tmux_core_lane(self):
         update = _make_topic_update()
@@ -828,6 +845,28 @@ class TestCommandSurface:
         mock_sm.allow_implicit_bind.assert_called_once_with(1, 42)
         mock_sm.start_topic_bind_flow.assert_called_once_with(1, 42)
         mock_reply.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_bind_command_forum_general_does_not_use_main_chat_surface(self):
+        update = _make_topic_update(thread_id=1)
+        update.effective_chat.is_forum = True
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce123")
+            mock_tmux.list_windows = AsyncMock(return_value=[])
+
+            await bot_mod.bind_command(update, context)
+
+        mock_sm.set_group_chat_id.assert_called_once_with(1, 1, 100)
+        mock_sm.allow_implicit_bind.assert_called_once_with(1, 1)
+        mock_sm.start_topic_bind_flow.assert_called_once_with(1, 1)
 
     @pytest.mark.asyncio
     async def test_bind_command_with_codex_token_binds_external_read_only(self):
@@ -1353,6 +1392,26 @@ class TestCommandSurface:
         mock_clear.assert_awaited_once_with(1, 42, context.bot, context.user_data)
         mock_reply.assert_awaited_once()
         assert "/resume <thread-name|id>" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_unbind_command_main_chat_clears_threadless_artifacts(self):
+        update = _make_main_chat_update(text="/unbind")
+        context = _make_context()
+
+        with (
+            patch.object(bot_mod.config, "claude_command", "codex"),
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.clear_topic_state", new_callable=AsyncMock) as mock_clear,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+
+            await bot_mod.unbind_command(update, context)
+
+        mock_sm.unbind_surface.assert_called_once_with(1, surface_key="c:-100200")
+        mock_clear.assert_awaited_once_with(1, None, context.bot, context.user_data)
 
     @pytest.mark.asyncio
     async def test_unbind_command_peer_user_removes_shared_surface_binding(self):

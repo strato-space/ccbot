@@ -347,7 +347,7 @@ def _build_default_runtime_capabilities() -> dict[str, RuntimeCapability]:
             display_name="Codex",
             launch_command_name="codex",
             resume_style="subcommand",
-            command_aliases=("codex-acp", "omx"),
+            command_aliases=("codex-acp", "codex-wrapper", "omx"),
             rename_tmux_supported=True,
             rename_identity_mode="unsupported_degraded",
             live_stream_discovery="rollout_tail",

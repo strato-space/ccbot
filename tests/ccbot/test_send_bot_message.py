@@ -3,6 +3,8 @@ import base64
 import json
 from types import SimpleNamespace
 
+from telegram.error import BadRequest
+
 from ccbot import send_bot_message as sender
 from ccbot import config as config_mod
 
@@ -71,6 +73,27 @@ def test_resolve_delivery_target_single_main_chat_surface(tmp_path):
     assert target.chat_id == -100200300
     assert target.message_thread_id is None
     assert target.surface_key == "c:-100200300"
+
+
+def test_normalize_chat_id_preserves_basic_group_ids():
+    assert sender.normalize_chat_id("-12345") == -12345
+    assert sender.normalize_chat_id("-10012345") == -10012345
+
+
+def test_resolve_delivery_target_basic_group_main_chat_surface(tmp_path):
+    state_path = tmp_path / "state.json"
+    _write_state(
+        state_path,
+        {
+            "surface_bindings": {"12345": {"c:-12345": "@8"}},
+        },
+    )
+
+    target = sender.resolve_delivery_target(state_path=state_path)
+
+    assert target.chat_id == -12345
+    assert target.message_thread_id is None
+    assert target.surface_key == "c:-12345"
 
 
 def test_resolve_delivery_target_single_topic_uses_group_coordinates(tmp_path):
@@ -290,6 +313,42 @@ def test_send_bot_message_explicit_token_and_chat_id_does_not_need_config(
     assert result["status"] == "success"
     assert captured["chat_id"] == -100200300
     assert captured["message_thread_id"] == 42
+
+
+def test_send_bot_message_basic_group_uses_original_chat_id_before_fallback(
+    monkeypatch,
+    tmp_path,
+):
+    seen_chat_ids: list[int] = []
+
+    class FakeBot:
+        def __init__(self, token, request=None):
+            assert token == "token-basic-group"
+
+        async def send_message(self, **kwargs):
+            seen_chat_ids.append(kwargs["chat_id"])
+            if len(seen_chat_ids) == 1:
+                raise BadRequest("Chat not found")
+            return SimpleNamespace(
+                message_id=123,
+                message_thread_id=kwargs.get("message_thread_id"),
+                chat=SimpleNamespace(id=kwargs["chat_id"]),
+            )
+
+    monkeypatch.setattr(sender, "Bot", FakeBot)
+
+    result = asyncio.run(
+        sender.send_bot_message(
+            message="hello",
+            token="token-basic-group",
+            chat_id="-12345",
+            state_path=tmp_path / "missing-state.json",
+        )
+    )
+
+    assert seen_chat_ids == [-12345, -10012345]
+    assert result["status"] == "success"
+    assert result["target"]["reason"] == "explicit_chat_id:supergroup_fallback"
 
 
 def test_send_bot_message_missing_token_returns_error_dict(monkeypatch):

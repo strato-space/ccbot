@@ -141,7 +141,7 @@ def normalize_chat_id(chat_id: str | int) -> int:
     if negative:
         if digits.startswith("100"):
             return int(f"-{digits}")
-        return int(f"-100{digits}")
+        return int(f"-{digits}")
     return int(digits)
 
 
