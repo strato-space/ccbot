@@ -2377,6 +2377,7 @@ class TestMediaForwarding:
         context = _make_context()
         first = _make_topic_update()
         first.message.media_group_id = "album-1"
+        first.message.caption = "install these files"
         first_doc, _ = _make_document("readme-id", "README.md", content=b"readme")
         first.message.document = first_doc
 
@@ -2416,6 +2417,7 @@ class TestMediaForwarding:
 
         mock_sm.send_to_window.assert_awaited_once()
         payload = mock_sm.send_to_window.await_args.args[1]
+        assert "install these files" in payload
         assert "1. document:" in payload and "README.md" in payload
         assert "2. document:" in payload and "__init__.py" in payload
 

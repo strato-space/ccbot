@@ -63,6 +63,30 @@ def test_media_group_waits_for_idle_without_total_count():
     assert batcher.is_due(key, now=11.5)
 
 
+def test_media_group_caption_does_not_flush_before_idle_window():
+    batcher = AttachmentBatcher()
+    key = _key("album-with-caption")
+    target = _target()
+    batcher.add_attachment(
+        key,
+        target,
+        AttachmentBatchItem(
+            kind="document",
+            path=Path("/tmp/a.txt"),
+            display_name="a.txt",
+            downloaded_size=1,
+            order=1,
+        ),
+        now=10.0,
+    )
+    batcher.add_text(key, target, AttachmentTextFragment("install these", 2), now=10.0)
+
+    assert batcher.flush_due_at(key) == 11.0
+    assert not batcher.is_due(key, now=10.0)
+    assert not batcher.is_due(key, now=10.99)
+    assert batcher.is_due(key, now=11.0)
+
+
 def test_orphan_attachment_hold_extends_on_each_new_file():
     batcher = AttachmentBatcher()
     key = _key()

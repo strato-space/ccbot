@@ -139,6 +139,8 @@ class PendingAttachmentBatch:
         return bool(self.texts)
 
     def is_sufficiently_complete(self, now: float) -> bool:
+        if self.has_media_group:
+            return now >= self.due_at()
         if self.text_only:
             return now >= self.due_at()
         if self.has_instruction_text():
