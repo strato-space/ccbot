@@ -33,14 +33,17 @@ and operator control outrank protocol purity for the live execution surface.
 
 Telegram text injection into a writable live tmux binding is a two-step
 operator-layer act: deliver the payload, then deliver the runtime submit key.
-Raw paste success alone is not a message-layer turn opener. Paste failure or
-submit failure must surface as explicit delivery failure rather than as a
-successful queued message. For multiline Codex payloads, field evidence shows
-that tmux `C-m` can leave the pasted payload in the composer; the post-paste
-turn opener is therefore the bare `Enter` key path, while single-line typed
-input may keep the normal submit-key path. The Codex multiline boundary also
-includes a post-paste readiness gap: the bot must not treat "paste accepted by
-tmux" and "Codex composer is ready for submit" as the same event.
+Raw paste/key success alone is not a message-layer turn opener. Paste failure,
+submit failure, or missing runtime acknowledgement must surface as explicit
+delivery failure rather than as a successful queued message. For Codex
+conversational payloads, single-line and multiline alike, field evidence shows
+that tmux submit-key success can leave the payload in the composer; authoritative
+success is same-runtime-identity replay acknowledgement, not the key event. The
+post-payload turn opener uses the runtime-native Codex submit path such as bare
+`Enter`, but key choice is an implementation detail below the replay-ACK
+invariant. The Codex boundary also includes a post-payload readiness gap: the
+bot must not treat "payload accepted by tmux", "Codex composer is ready for
+submit", and "runtime turn opened" as the same event.
 
 Local automation must not duplicate this with ad-hoc tmux commands. The
 automation boundary is `ccbot runtime-input`, which resolves the same
