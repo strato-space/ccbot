@@ -264,7 +264,7 @@ def test_codex_command_semantics_doc_captures_resume_and_rename_contract() -> No
     assert "Non-interactive helper sessions such as `originator=codex_exec`" in doc
     assert "raw thread id is only a last-resort label" in doc
     assert "tmux is the authoritative operator intervention surface" in doc
-    assert "Multiline Submit ACK" in doc
+    assert "Codex Conversational Submit ACK" in doc
     assert "turn-acceptance" in doc
 
 

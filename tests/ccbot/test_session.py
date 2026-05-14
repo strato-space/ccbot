@@ -1,5 +1,7 @@
 """Tests for SessionManager pure dict operations."""
 
+import asyncio
+import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -682,14 +684,38 @@ class TestRuntimeInputDriverIntegration:
         mock_driver.send_text.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_send_to_window_uses_text_path_for_regular_messages(
-        self, mgr: SessionManager
+    async def test_send_to_window_single_line_codex_waits_for_rollout_ack(
+        self,
+        mgr: SessionManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ):
+        rollout = tmp_path / "thread-1.jsonl"
+        rollout.write_text("", encoding="utf-8")
         mgr.window_states["@1"] = LiveProcessDescriptor(
             thread_id="thread-1",
             cwd="/tmp/project",
             runtime_kind="codex",
         )
+        mgr.resolve_thread_for_window = AsyncMock(
+            return_value=ThreadLocator(
+                thread_id="thread-1",
+                summary="Thread One",
+                message_count=1,
+                file_path=str(rollout),
+                runtime_kind="codex",
+                cwd="/tmp/project",
+            )
+        )
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_RETRY_SECONDS", 0.01)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_POLL_SECONDS", 0.001)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_TIMEOUT_SECONDS", 0.05)
+
+        async def submit_and_append_ack(*args, **kwargs):
+            with rollout.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"type": "turn_context"}) + "\n")
+            return True, "Submitted text to @1"
 
         with (
             patch("ccbot.session.tmux_manager") as mock_tmux,
@@ -701,17 +727,83 @@ class TestRuntimeInputDriverIntegration:
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
             mock_driver.send_raw_slash_command = AsyncMock()
+            mock_driver.send_multiline_submit_key = AsyncMock(
+                side_effect=submit_and_append_ack
+            )
 
-            success, message = await mgr.send_to_window("@1", "hello")
+            success, message = await mgr.send_to_window(
+                "@1",
+                "hello $oh-my-codex:deep-interview",
+            )
 
         assert success is True
         assert message == "Sent to @1"
         mock_driver.send_text.assert_awaited_once_with(
             "@1",
-            "hello",
+            "hello $oh-my-codex:deep-interview",
+            runtime_kind="codex",
+            submit=False,
+        )
+        mock_driver.send_multiline_submit_key.assert_awaited_once_with(
+            "@1",
             runtime_kind="codex",
         )
         mock_driver.send_raw_slash_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_send_to_window_single_line_codex_fails_without_ack(
+        self,
+        mgr: SessionManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        rollout = tmp_path / "thread-1.jsonl"
+        rollout.write_text("", encoding="utf-8")
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+        mgr.resolve_thread_for_window = AsyncMock(
+            return_value=ThreadLocator(
+                thread_id="thread-1",
+                summary="Thread One",
+                message_count=1,
+                file_path=str(rollout),
+                runtime_kind="codex",
+                cwd="/tmp/project",
+            )
+        )
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_RETRY_SECONDS", 0.001)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_POLL_SECONDS", 0.001)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_TIMEOUT_SECONDS", 0.003)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_MAX_ATTEMPTS", 1)
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+            )
+            mock_tmux.capture_pane = AsyncMock(return_value="")
+            mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
+            mock_driver.send_multiline_submit_key = AsyncMock(
+                return_value=(True, "Submitted text to @1")
+            )
+
+            success, message = await mgr.send_to_window("@1", "hello")
+
+        assert success is False
+        assert "did not persist a new turn" in message
+        assert "draft may still be waiting" in message
+        mock_driver.send_text.assert_awaited_once_with(
+            "@1",
+            "hello",
+            runtime_kind="codex",
+            submit=False,
+        )
 
     @pytest.mark.asyncio
     async def test_send_to_window_codex_multiline_waits_for_rollout_ack(
@@ -810,7 +902,47 @@ class TestRuntimeInputDriverIntegration:
             success, message = await mgr.send_to_window("@1", "line one\nline two")
 
         assert success is False
-        assert "missing persisted rollout evidence" in message
+        assert "missing or mismatched persisted rollout evidence" in message
+        mock_driver.send_text.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_to_window_codex_fails_on_mismatched_runtime_identity(
+        self,
+        mgr: SessionManager,
+        tmp_path: Path,
+    ):
+        rollout = tmp_path / "other-thread.jsonl"
+        rollout.write_text("", encoding="utf-8")
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+        mgr.resolve_thread_for_window = AsyncMock(
+            return_value=ThreadLocator(
+                thread_id="other-thread",
+                summary="Other",
+                message_count=1,
+                file_path=str(rollout),
+                runtime_kind="codex",
+                cwd="/tmp/project",
+            )
+        )
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+            )
+            mock_tmux.capture_pane = AsyncMock(return_value="")
+            mock_driver.send_text = AsyncMock()
+
+            success, message = await mgr.send_to_window("@1", "hello")
+
+        assert success is False
+        assert "mismatched persisted rollout evidence" in message
         mock_driver.send_text.assert_not_called()
 
     @pytest.mark.asyncio
@@ -840,11 +972,288 @@ class TestRuntimeInputDriverIntegration:
             )
             mock_driver.send_text = AsyncMock()
 
-            success, message = await mgr.send_to_window("@1", "line one\nline two")
+            success, message = await mgr.send_to_window("@1", "hello")
 
         assert success is False
         assert "requires an idle/input-ready pane" in message
         mock_driver.send_text.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_to_window_bang_command_bypasses_codex_ack(
+        self, mgr: SessionManager
+    ):
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+        mgr.resolve_thread_for_window = AsyncMock(return_value=None)
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+            patch.object(
+                mgr,
+                "_submit_codex_text_with_rollout_ack",
+                new_callable=AsyncMock,
+            ) as mock_ack,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+            )
+            mock_tmux.capture_pane = AsyncMock(return_value="")
+            mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
+
+            success, message = await mgr.send_to_window("@1", "!pwd")
+
+        assert success is True
+        assert message == "Sent to @1"
+        mock_driver.send_text.assert_awaited_once_with(
+            "@1",
+            "!pwd",
+            runtime_kind="codex",
+        )
+        mock_ack.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_codex_turn_context_ack_requires_guard_flag(
+        self,
+        mgr: SessionManager,
+        tmp_path: Path,
+    ):
+        rollout = tmp_path / "thread-1.jsonl"
+        rollout.write_text(json.dumps({"type": "turn_context"}) + "\n")
+
+        assert not await mgr._codex_rollout_has_submit_ack(
+            file_path=rollout,
+            start_byte=0,
+            expected_text="hello",
+            allow_turn_context=True,
+        )
+        assert await mgr._codex_rollout_has_submit_ack(
+            file_path=rollout,
+            start_byte=0,
+            expected_text="hello",
+            allow_turn_context=True,
+            turn_context_start_byte=0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_codex_submit_ignores_turn_context_before_submit_key(
+        self,
+        mgr: SessionManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        rollout = tmp_path / "thread-1.jsonl"
+        rollout.write_text(json.dumps({"type": "turn_context"}) + "\n")
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_RETRY_SECONDS", 0.01)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_POLL_SECONDS", 0.001)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_TIMEOUT_SECONDS", 0.05)
+
+        async def submit_and_append_user_message(*args, **kwargs):
+            with rollout.open("a", encoding="utf-8") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "type": "response_item",
+                            "payload": {
+                                "type": "message",
+                                "role": "user",
+                                "content": [
+                                    {"type": "input_text", "text": "hello"}
+                                ],
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+            return True, "Submitted text to @1"
+
+        with patch("ccbot.session.runtime_input_driver") as mock_driver:
+            mock_driver.send_multiline_submit_key = AsyncMock(
+                side_effect=submit_and_append_user_message
+            )
+
+            success, message = await mgr._submit_codex_text_with_rollout_ack(
+                window_id="@1",
+                file_path=rollout,
+                start_byte=0,
+                text="hello",
+                allow_turn_context=True,
+            )
+
+        assert success is True
+        assert message == "Sent text to @1"
+        mock_driver.send_multiline_submit_key.assert_awaited_once_with(
+            "@1",
+            runtime_kind="codex",
+        )
+
+    @pytest.mark.asyncio
+    async def test_codex_ack_after_first_submit_does_not_retry(
+        self,
+        mgr: SessionManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        rollout = tmp_path / "thread-1.jsonl"
+        rollout.write_text("", encoding="utf-8")
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_RETRY_SECONDS", 0.01)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_POLL_SECONDS", 0.001)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_MAX_ATTEMPTS", 3)
+
+        async def submit_and_append_ack(*args, **kwargs):
+            with rollout.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"type": "turn_context"}) + "\n")
+            return True, "Submitted text to @1"
+
+        with patch("ccbot.session.runtime_input_driver") as mock_driver:
+            mock_driver.send_multiline_submit_key = AsyncMock(
+                side_effect=submit_and_append_ack
+            )
+
+            success, message = await mgr._submit_codex_text_with_rollout_ack(
+                window_id="@1",
+                file_path=rollout,
+                start_byte=0,
+                text="hello",
+                allow_turn_context=True,
+            )
+
+        assert success is True
+        assert message == "Sent text to @1"
+        mock_driver.send_multiline_submit_key.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_codex_mismatched_user_message_does_not_ack(
+        self,
+        mgr: SessionManager,
+        tmp_path: Path,
+    ):
+        rollout = tmp_path / "thread-1.jsonl"
+        rollout.write_text(
+            json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "other"}],
+                    },
+                }
+            )
+            + "\n"
+        )
+
+        assert not await mgr._codex_rollout_has_submit_ack(
+            file_path=rollout,
+            start_byte=0,
+            expected_text="hello",
+            allow_turn_context=True,
+        )
+
+    def test_codex_ack_path_does_not_write_replay_evidence(self):
+        source = "\n".join(
+            (
+                inspect.getsource(SessionManager._codex_rollout_has_submit_ack),
+                inspect.getsource(SessionManager._submit_codex_text_with_rollout_ack),
+                inspect.getsource(SessionManager.send_to_window),
+            )
+        )
+
+        assert ".open(\"a\"" not in source
+        assert ".open('a'" not in source
+        assert "write_text(" not in source
+
+    @pytest.mark.asyncio
+    async def test_same_window_codex_sends_are_serialized_by_ack_guard(
+        self,
+        mgr: SessionManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        rollout = tmp_path / "thread-1.jsonl"
+        rollout.write_text("", encoding="utf-8")
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+        mgr.resolve_thread_for_window = AsyncMock(
+            return_value=ThreadLocator(
+                thread_id="thread-1",
+                summary="Thread One",
+                message_count=1,
+                file_path=str(rollout),
+                runtime_kind="codex",
+                cwd="/tmp/project",
+            )
+        )
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_RETRY_SECONDS", 0.01)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_POLL_SECONDS", 0.001)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_TIMEOUT_SECONDS", 0.1)
+        first_submit_started = asyncio.Event()
+        release_first_submit = asyncio.Event()
+        submit_count = 0
+
+        async def submit_and_append_ack(*args, **kwargs):
+            nonlocal submit_count
+            submit_count += 1
+            if submit_count == 1:
+                first_submit_started.set()
+                await release_first_submit.wait()
+                with rollout.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps({"type": "turn_context"}) + "\n")
+            else:
+                with rollout.open("a", encoding="utf-8") as f:
+                    f.write(
+                        json.dumps(
+                            {
+                                "type": "response_item",
+                                "payload": {
+                                    "type": "message",
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "input_text", "text": "second"}
+                                    ],
+                                },
+                            }
+                        )
+                        + "\n"
+                    )
+            return True, "Submitted text to @1"
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+            )
+            mock_tmux.capture_pane = AsyncMock(return_value="")
+            mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
+            mock_driver.send_multiline_submit_key = AsyncMock(
+                side_effect=submit_and_append_ack
+            )
+
+            first = asyncio.create_task(mgr.send_to_window("@1", "first"))
+            await asyncio.wait_for(first_submit_started.wait(), timeout=1)
+            second = asyncio.create_task(mgr.send_to_window("@1", "second"))
+            await asyncio.sleep(0)
+
+            assert mock_driver.send_text.await_count == 1
+
+            release_first_submit.set()
+            assert await first == (True, "Sent to @1")
+            assert await second == (True, "Sent to @1")
+
+        assert mock_driver.send_text.await_count == 2
+        assert mock_driver.send_multiline_submit_key.await_count == 2
 
     @pytest.mark.asyncio
     async def test_send_to_window_fails_closed_when_codex_window_falls_back_to_shell(
@@ -904,19 +1313,43 @@ class TestRuntimeInputDriverIntegration:
 
     @pytest.mark.asyncio
     async def test_send_to_window_keeps_codex_conversation_interrupted_writable_on_node_command(
-        self, mgr: SessionManager
+        self,
+        mgr: SessionManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ):
+        rollout = tmp_path / "thread-1.jsonl"
+        rollout.write_text("", encoding="utf-8")
         mgr.window_states["@1"] = LiveProcessDescriptor(
             thread_id="thread-1",
             cwd="/tmp/project",
             runtime_kind="codex",
         )
+        mgr.resolve_thread_for_window = AsyncMock(
+            return_value=ThreadLocator(
+                thread_id="thread-1",
+                summary="Thread One",
+                message_count=1,
+                file_path=str(rollout),
+                runtime_kind="codex",
+                cwd="/tmp/project",
+            )
+        )
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_RETRY_SECONDS", 0.01)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_POLL_SECONDS", 0.001)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_TIMEOUT_SECONDS", 0.05)
         pane_text = (
             "previous output\n"
             "■ Conversation interrupted - tell the model what to do differently.\n"
             "› Find and fix a bug in @filename\n"
             "  gpt-5.5 high · main · Context 29% left\n"
         )
+
+        async def submit_and_append_ack(*args, **kwargs):
+            with rollout.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"type": "turn_context"}) + "\n")
+            return True, "Submitted text to @1"
 
         with (
             patch("ccbot.session.tmux_manager") as mock_tmux,
@@ -927,6 +1360,9 @@ class TestRuntimeInputDriverIntegration:
             )
             mock_tmux.capture_pane = AsyncMock(return_value=pane_text)
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
+            mock_driver.send_multiline_submit_key = AsyncMock(
+                side_effect=submit_and_append_ack
+            )
             mock_driver.send_raw_slash_command = AsyncMock()
 
             success, message = await mgr.send_to_window("@1", "try again")
@@ -937,6 +1373,7 @@ class TestRuntimeInputDriverIntegration:
             "@1",
             "try again",
             runtime_kind="codex",
+            submit=False,
         )
         mock_driver.send_raw_slash_command.assert_not_awaited()
 

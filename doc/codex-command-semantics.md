@@ -64,22 +64,26 @@ and the Telegram topic title is normalized to that suffix-applied name.
 - For fast-agent, `/rename` updates the tmux title and also updates the
   persisted session title metadata, but not the persisted session id.
 
-## Multiline Submit ACK
+## Codex Conversational Submit ACK
 
-Codex multiline input is a two-step tmux operation: bracketed paste first, then
-bare `Enter`. The initial post-paste delay is deliberately tiny; it is only a
-readiness gap, not proof of delivery. ccbot reports success for multiline
-Codex input only after the bound Codex rollout JSONL appends a turn-acceptance
-record such as `turn_context` or a matching user message. If the visible Codex
-surface is still busy, ccbot does not paste multiline Telegram input; it fails
-closed because immediate JSONL ACK cannot be proven. If no persisted ACK appears
-within the bounded retry window on an input-ready pane, the send path fails
-closed and warns that the draft may still be waiting in the terminal composer.
+Codex conversational input is a two-step tmux operation: deliver the payload,
+then send the runtime-native submit key. Single-line payloads use literal text;
+multiline payloads use bracketed paste followed by bare `Enter`. The initial
+post-payload delay is deliberately tiny; it is only a readiness gap, not proof
+of delivery. ccbot reports success for Codex conversational input only after
+the same-runtime-identity rollout JSONL appends a turn-acceptance record. A
+matching user message is the strongest ACK; bare `turn_context` can count only
+inside the per-window ACK guard after the submit key has been sent. If the
+visible Codex surface is still busy, ccbot does not inject Telegram input; it
+fails closed because immediate JSONL ACK cannot be proven. If no persisted ACK
+appears within the bounded retry window on an input-ready pane, the send path
+fails closed and warns that the draft may still be waiting in the terminal
+composer.
 
 Local service automation that needs to submit Codex input must enter through
 `ccbot runtime-input`, not through `ccbot send` and not through copied tmux
 paste/send-key snippets. This keeps the local automation path on the same
-live-input-plane checks and multiline ACK contract as Telegram-originated text.
+live-input-plane checks and Codex conversational ACK contract as Telegram-originated text.
 
 ## Fail-Closed Rules
 

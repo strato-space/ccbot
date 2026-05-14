@@ -2868,6 +2868,40 @@ class TestMediaForwarding:
         mock_sm.send_to_window.assert_awaited_once_with("@7", "hello")
 
     @pytest.mark.asyncio
+    async def test_text_flush_failed_codex_ack_surfaces_warning_reply(self):
+        update = _make_topic_update(text="hello")
+        context = _make_context()
+        clock = {"monotonic": 0.0}
+        warning = (
+            "Codex did not persist a new turn after submit; "
+            "the draft may still be waiting in the terminal composer"
+        )
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.time.monotonic", side_effect=lambda: clock["monotonic"]),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+            patch("ccbot.bot._surface_omx_question_state", new_callable=AsyncMock, return_value=False),
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.capture_pane = AsyncMock(return_value="")
+            mock_sm.send_to_window = AsyncMock(return_value=(False, warning))
+
+            await bot_mod.text_handler(update, context)
+            await bot_mod._flush_due_attachment_batches(now=0.75)
+
+        mock_sm.send_to_window.assert_awaited_once_with("@7", "hello")
+        mock_reply.assert_awaited_once()
+        assert mock_reply.await_args.args[0] is update.message
+        assert mock_reply.await_args.args[1] == f"❌ {warning}"
+
+    @pytest.mark.asyncio
     async def test_bang_text_command_keeps_direct_bash_capture_path(self):
         update = _make_topic_update(text="!ls -la")
         context = _make_context()

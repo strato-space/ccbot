@@ -314,8 +314,9 @@ ccbot runtime-input --window-id @7 "continue"
 `ccbot runtime-input` uses the same `SessionManager` / `RuntimeInputDriver`
 path as Telegram text: external replay-only bindings are read-only, inactive
 or helper windows fail closed, blocked prompts are not bypassed, and Codex
-multiline input uses bracketed paste plus the bare-`Enter` replay-evidence ACK
-path. `ccbot send` remains Telegram delivery only.
+conversational input uses runtime-native submit plus same-identity
+replay-evidence ACK. Multiline payloads still use bracketed paste before
+submit. `ccbot send` remains Telegram delivery only.
 
 **Polling liveness:**
 
@@ -445,14 +446,14 @@ Routing note:
 - Telegram text, voice, photo, document, sticker, audio, and video inputs enter the equal message layer in `queue` mode by default.
 - `steer` is a routing semantic for runtime-aware control flows; it is not the same thing as raw terminal takeover.
 - Raw terminal control in tmux remains a separate operator layer and is never modeled as an ordinary queued message.
-- Multiline text sent to a writable live tmux runtime is pasted as one
-  bracketed-paste-aware payload and then submitted with a separate runtime
-  submit key; paste-only success is not considered successful message delivery.
-  For Codex multiline paste, the submit primitive is bare `Enter` rather than
-  `C-m`: ccbot waits only a minimal post-paste readiness gap, then retries
-  `Enter` until Codex writes a persisted JSONL turn event. Telegram reports
-  success only after that replay-evidence ACK; otherwise it fails closed with a
-  composer-draft warning instead of claiming the message was sent.
+- Text sent to a writable live tmux runtime is delivered as payload plus
+  a separate runtime submit key; payload/key success is not considered
+  successful message delivery. For Codex conversational input (single-line and
+  multiline), Telegram reports success only after same-runtime-identity
+  persisted JSONL turn event / replay evidence proves a new turn. Multiline
+  Codex payloads are still bracketed-pasted before bare `Enter`; if no
+  persisted ACK appears within the bounded retry window, ccbot fails closed
+  with a composer-draft warning instead of claiming the message was sent.
 - A Codex-bound tmux window that has fallen back to a shell prompt is read as a
   dead input plane; Telegram input fails closed instead of being pasted into
   `bash`.

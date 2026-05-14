@@ -244,11 +244,16 @@ def _codex_text_matches_expected(observed: str, expected: str) -> bool:
     )
 
 
-def _codex_record_confirms_submit(record: dict[str, Any], expected_text: str) -> bool:
+def _codex_record_confirms_submit(
+    record: dict[str, Any],
+    expected_text: str,
+    *,
+    allow_turn_context: bool = False,
+) -> bool:
     """Return True when a Codex rollout record proves a submitted turn exists."""
     record_type = str(record.get("type") or "").strip()
     payload = record.get("payload")
-    if record_type == "turn_context":
+    if record_type == "turn_context" and allow_turn_context:
         return True
     if not isinstance(payload, dict):
         return False
@@ -325,6 +330,9 @@ class SessionManager:
     codex_thread_catalog: CodexThreadCatalog | None = field(default=None, repr=False)
     fast_agent_session_catalog: FastAgentSessionCatalog | None = field(
         default=None, repr=False
+    )
+    _codex_ack_locks: dict[str, asyncio.Lock] = field(
+        default_factory=dict, init=False, repr=False
     )
 
     def __post_init__(self) -> None:
@@ -2821,6 +2829,8 @@ class SessionManager:
         file_path: Path,
         start_byte: int,
         expected_text: str,
+        allow_turn_context: bool = False,
+        turn_context_start_byte: int | None = None,
     ) -> bool:
         """Check appended Codex JSONL for a persisted event proving submit."""
         if not file_path.exists():
@@ -2828,38 +2838,88 @@ class SessionManager:
         try:
             with file_path.open("rb") as f:
                 f.seek(start_byte)
-                for raw_line in f:
+                while True:
+                    line_start = f.tell()
+                    raw_line = f.readline()
+                    if not raw_line:
+                        break
                     if not raw_line.strip():
                         continue
                     try:
                         record = json.loads(raw_line.decode("utf-8"))
                     except (UnicodeDecodeError, json.JSONDecodeError):
                         continue
+                    record_allows_turn_context = (
+                        allow_turn_context
+                        and turn_context_start_byte is not None
+                        and line_start >= turn_context_start_byte
+                    )
                     if isinstance(record, dict) and _codex_record_confirms_submit(
                         record,
                         expected_text,
+                        allow_turn_context=record_allows_turn_context,
                     ):
                         return True
         except OSError as exc:
             logger.warning("codex_submit_ack: failed to read %s: %s", file_path, exc)
         return False
 
-    async def _submit_codex_multiline_with_rollout_ack(
+    def _codex_ack_lock(self, window_id: str) -> asyncio.Lock:
+        """Return the per-window guard for Codex conversational input ACKs."""
+        lock = self._codex_ack_locks.get(window_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._codex_ack_locks[window_id] = lock
+        return lock
+
+    def _codex_thread_locator_matches_live_identity(
+        self,
+        *,
+        window_id: str,
+        locator: ThreadLocator | None,
+    ) -> bool:
+        """Return True when replay evidence belongs to the live Codex identity."""
+        if not locator or not locator.file_path:
+            return False
+        live = self.window_states.get(window_id)
+        if live is None:
+            return False
+        live_thread_id = str(live.thread_id or "").strip()
+        locator_thread_id = str(locator.thread_id or "").strip()
+        if not live_thread_id or not locator_thread_id:
+            return False
+        if live_thread_id != locator_thread_id:
+            return False
+        locator_runtime = str(locator.runtime_kind or "").strip()
+        return not locator_runtime or locator_runtime == "codex"
+
+    async def _submit_codex_text_with_rollout_ack(
         self,
         *,
         window_id: str,
         file_path: Path,
         start_byte: int,
         text: str,
+        allow_turn_context: bool = False,
     ) -> tuple[bool, str]:
-        """Submit a pasted Codex multiline turn and wait for JSONL ACK."""
+        """Submit a Codex conversational turn and wait for JSONL ACK."""
         await asyncio.sleep(CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS)
         loop = asyncio.get_event_loop()
         deadline = loop.time() + CODEX_MULTILINE_ACK_TIMEOUT_SECONDS
         attempts = 0
+        turn_context_start_byte: int | None = None
 
         while attempts < CODEX_MULTILINE_ACK_MAX_ATTEMPTS and loop.time() < deadline:
+            if attempts and await self._codex_rollout_has_submit_ack(
+                file_path=file_path,
+                start_byte=start_byte,
+                expected_text=text,
+                allow_turn_context=allow_turn_context,
+                turn_context_start_byte=turn_context_start_byte,
+            ):
+                return True, f"Sent text to {window_id}"
             attempts += 1
+            turn_context_start_byte = _codex_rollout_file_size(file_path)
             success, message = await runtime_input_driver.send_multiline_submit_key(
                 window_id,
                 runtime_kind="codex",
@@ -2867,7 +2927,7 @@ class SessionManager:
             if not success:
                 return False, message
             logger.info(
-                "codex_submit_ack: sent multiline submit attempt %d/%d to %s; "
+                "codex_submit_ack: sent submit attempt %d/%d to %s; "
                 "rollout=%s offset=%d",
                 attempts,
                 CODEX_MULTILINE_ACK_MAX_ATTEMPTS,
@@ -2885,9 +2945,11 @@ class SessionManager:
                     file_path=file_path,
                     start_byte=start_byte,
                     expected_text=text,
+                    allow_turn_context=allow_turn_context,
+                    turn_context_start_byte=turn_context_start_byte,
                 ):
                     logger.info(
-                        "codex_submit_ack: confirmed multiline submit to %s "
+                        "codex_submit_ack: confirmed submit to %s "
                         "after %d attempt(s)",
                         window_id,
                         attempts,
@@ -2899,10 +2961,12 @@ class SessionManager:
             file_path=file_path,
             start_byte=start_byte,
             expected_text=text,
+            allow_turn_context=allow_turn_context,
+            turn_context_start_byte=turn_context_start_byte,
         ):
             return True, f"Sent text to {window_id}"
         logger.warning(
-            "codex_submit_ack: no JSONL ACK for multiline submit to %s "
+            "codex_submit_ack: no JSONL ACK for submit to %s "
             "within %.1fs after %d attempt(s)",
             window_id,
             CODEX_MULTILINE_ACK_TIMEOUT_SECONDS,
@@ -2910,8 +2974,25 @@ class SessionManager:
         )
         return (
             False,
-            "Codex did not persist a new turn after multiline submit; "
+            "Codex did not persist a new turn after submit; "
             "the draft may still be waiting in the terminal composer",
+        )
+
+    async def _submit_codex_multiline_with_rollout_ack(
+        self,
+        *,
+        window_id: str,
+        file_path: Path,
+        start_byte: int,
+        text: str,
+    ) -> tuple[bool, str]:
+        """Backward-compatible wrapper for Codex text ACK submit."""
+        return await self._submit_codex_text_with_rollout_ack(
+            window_id=window_id,
+            file_path=file_path,
+            start_byte=start_byte,
+            text=text,
+            allow_turn_context=False,
         )
 
     async def send_to_window(self, window_id: str, text: str) -> tuple[bool, str]:
@@ -2955,34 +3036,47 @@ class SessionManager:
                 text,
                 runtime_kind=runtime_kind,
             )
-        elif runtime_kind == "codex" and "\n" in text:
-            if surface.kind == "busy":
-                return (
-                    False,
-                    "Codex is still working; multiline Telegram input requires an "
-                    "idle/input-ready pane so ccbot can verify the JSONL turn ACK",
-                )
-            session = await self.resolve_thread_for_window(window_id)
-            if not session or not session.file_path:
-                return (
-                    False,
-                    "Cannot verify Codex multiline submit: missing persisted rollout evidence",
-                )
-            rollout_file = Path(session.file_path)
-            start_byte = _codex_rollout_file_size(rollout_file)
+        elif trimmed.startswith("!"):
             success, message = await runtime_input_driver.send_text(
                 window.window_id,
                 text,
                 runtime_kind=runtime_kind,
-                submit=False,
             )
-            if success:
-                success, message = await self._submit_codex_multiline_with_rollout_ack(
-                    window_id=window.window_id,
-                    file_path=rollout_file,
-                    start_byte=start_byte,
-                    text=text,
+        elif runtime_kind == "codex":
+            if surface.kind == "busy":
+                return (
+                    False,
+                    "Codex is still working; Telegram input requires an "
+                    "idle/input-ready pane so ccbot can verify the JSONL turn ACK",
                 )
+            async with self._codex_ack_lock(window.window_id):
+                session = await self.resolve_thread_for_window(window_id)
+                if not self._codex_thread_locator_matches_live_identity(
+                    window_id=window_id,
+                    locator=session,
+                ):
+                    return (
+                        False,
+                        "Cannot verify Codex submit: missing or mismatched persisted "
+                        "rollout evidence for the live runtime identity",
+                    )
+                assert session is not None  # narrowed by identity check
+                rollout_file = Path(session.file_path)
+                start_byte = _codex_rollout_file_size(rollout_file)
+                success, message = await runtime_input_driver.send_text(
+                    window.window_id,
+                    text,
+                    runtime_kind=runtime_kind,
+                    submit=False,
+                )
+                if success:
+                    success, message = await self._submit_codex_text_with_rollout_ack(
+                        window_id=window.window_id,
+                        file_path=rollout_file,
+                        start_byte=start_byte,
+                        text=text,
+                        allow_turn_context=True,
+                    )
         else:
             success, message = await runtime_input_driver.send_text(
                 window.window_id,

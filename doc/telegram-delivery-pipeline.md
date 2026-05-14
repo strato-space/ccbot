@@ -452,17 +452,25 @@ surface as an injection operation with distinct phases:
 
 - payload delivery
 - runtime submit-key delivery
+- runtime acknowledgement from same-runtime-identity replay evidence
 
-Multiline text is injected through tmux's paste-buffer path so alternate-screen
-TUIs such as Codex can treat it as one paste event. A paste-only success is not
-a turn opener. For Codex, the post-paste turn opener uses bare `Enter` rather
-than `C-m`, because live `server-np4` evidence showed `C-m` can leave
-multiline Telegram text in the composer. Live `str` evidence on 2026-04-30
-also showed that submitting too soon after paste can leave the same draft
-visible until a later manual Enter, so Codex multiline submit includes a short
-post-paste readiness delay before sending `Enter`. If payload delivery or
-submit-key delivery fails, the bot must return an explicit delivery failure
-instead of reporting the message as sent.
+Payload/key success is not a turn opener. For Codex conversational input,
+single-line and multiline alike, ccbot reports success only after the currently
+attached Codex runtime identity appends replay evidence proving that a new turn
+opened. A matching user-message record is the strongest ACK; a bare
+`turn_context` may count only inside the per-window ACK guard after the submit
+key has been sent.
+
+Multiline text is still injected through tmux's paste-buffer path so
+alternate-screen TUIs such as Codex can treat it as one paste event. For Codex
+multiline payloads, the post-paste submit primitive uses bare `Enter` rather
+than `C-m`, because live `server-np4` evidence showed `C-m` can leave Telegram
+text in the composer. Live `str` evidence on 2026-04-30 also showed that
+submitting too soon after paste can leave the same draft visible until a later
+manual Enter, so Codex multiline submit includes a short post-paste readiness
+delay before sending `Enter`. If payload delivery, submit-key delivery, or
+replay ACK fails, the bot must return an explicit delivery failure instead of
+reporting the message as sent.
 
 A Codex-bound tmux window is writable only while it still exposes a live Codex
 input plane. If the window has fallen back to a shell prompt, Telegram input

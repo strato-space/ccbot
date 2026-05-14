@@ -311,11 +311,12 @@ Named-topic behavior:
 - Telegram text enters the equal message layer in `queue` mode by default.
 - `steer` is a routing semantic for runtime-aware control actions, not a claim that tmux keystrokes are ordinary chat messages.
 - Raw terminal control remains a separate operator layer. A human typing directly in tmux is not modeled as an equal queued message channel.
-- Multiline Telegram text delivered to a writable live tmux runtime uses a
-  paste-buffer payload followed by a separate submit key. Codex multiline
-  paste is submitted with bare `Enter`, not `C-m`, because `server-np4` showed
-  `C-m` can leave the payload in the composer. The bot must not report
-  paste-only success as a completed queued message.
+- Telegram text delivered to a writable live tmux runtime uses a payload
+  followed by a separate submit key. Codex conversational input, whether
+  single-line or multiline, is reported successful only after same-identity
+  replay evidence proves a new turn; submit-key success alone can leave the
+  payload in the composer. Multiline Codex payloads remain bracketed-paste
+  plus bare `Enter`, but the ACK invariant is no longer multiline-only.
 
 ### Compact Bubble Semantics
 
