@@ -36,12 +36,6 @@ def test_no_args_starts_bot_with_configured_poll_timeout(monkeypatch):
             claude_projects_path="/tmp/claude-projects",
         )
     )
-    fake_tmux_mod = SimpleNamespace(
-        tmux_manager=SimpleNamespace(
-            get_or_create_session=lambda: SimpleNamespace(session_name="ccbot")
-        )
-    )
-
     class _FakeApplication:
         def run_polling(self, **kwargs):
             calls.append(kwargs)
@@ -51,7 +45,6 @@ def test_no_args_starts_bot_with_configured_poll_timeout(monkeypatch):
         telegram_poll_timeout=lambda: 17,
     )
     monkeypatch.setitem(sys.modules, "ccbot.config", fake_config_mod)
-    monkeypatch.setitem(sys.modules, "ccbot.tmux_manager", fake_tmux_mod)
     monkeypatch.setitem(sys.modules, "ccbot.bot", fake_bot_mod)
 
     main_mod.main([])

@@ -373,7 +373,37 @@ Optional startup restore intent may be declared per bot instance with
 identity/control-surface coordinates only; canonical `surface_bindings` state is
 still written only after startup validates the runtime identity, full
 `(user_id, surface_key)` control-surface identity, and any required group
-`chat_id` routing coordinates.
+`chat_id` routing coordinates.  Restore treats `chat_id` as a Telegram routing
+coordinate, not as part of the full control-surface identity.
+
+For Codex-backed restore, the controller service environment must also include
+the Codex replay root and non-interactive OMX setting, for example:
+
+```env
+CODEX_HOME=/data/iqdoctor/.codex
+OMX_AUTO_UPDATE=0
+CCBOT_RESTORE_ENABLED=1
+CCBOT_RESTORE_WINDOW=comfy-agent
+CCBOT_RESTORE_CWD=/home/tools/server/comfy
+CCBOT_RESTORE_RUNTIME_ID=019d6825-88ba-7f10-948e-eaaf162ea2a9
+CCBOT_RESTORE_USER_ID=3045664
+CCBOT_RESTORE_SURFACE_KEY=t:555
+CCBOT_RESTORE_CHAT_ID=-1003685295814
+CCBOT_RESTORE_SHARED_GROUP=true
+CCBOT_RESTORE_COMMAND=omx --madmax
+```
+
+Startup restore is non-destructive in v1: it inventories the tmux
+session/window/panes before acting, distinguishes `LiveRuntimeProof` from
+`ResumeTargetProof`, ignores OMX HUD/question/update/helper panes as bindable
+runtime surfaces, and fails closed rather than killing tmux or restarting
+services when live identity is ambiguous.  `CCBOT_RESTORE_*` remains restore
+intent, not proof.  Local automation and live smoke validation must use
+`ccbot runtime-input` and same-runtime replay-evidence ACK; do not use
+`ccbot send` or copied `tmux paste-buffer` commands as a runtime input path.
+The service startup path does not inject a smoke message automatically; its
+bind-time gate stops at `LiveRuntimeProof`, while the operator live-ops gate
+must prove `ccbot runtime-input` replay ACK for both configured bots.
 
 **Creating a new session:**
 

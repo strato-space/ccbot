@@ -38,6 +38,16 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "no-topics group main chat" in readme
     assert "ordinary text and `@bot` mentions stay silent until a command is used" in readme
     assert "Command entry paths also capture the Telegram group `chat_id`" in readme
+    assert "`chat_id` as a Telegram routing\ncoordinate" in readme
+    assert "CODEX_HOME=/data/iqdoctor/.codex" in readme
+    assert "OMX_AUTO_UPDATE=0" in readme
+    assert "`CCBOT_RESTORE_*` remains restore\nintent, not proof" in readme
+    assert "LiveRuntimeProof" in readme
+    assert "ResumeTargetProof" in readme
+    assert "OMX HUD/question/update/helper panes" in readme
+    assert "do not use\n`ccbot send` or copied `tmux paste-buffer`" in readme
+    assert "does not inject a smoke message automatically" in readme
+    assert "bind-time gate stops at `LiveRuntimeProof`" in readme
     assert "Command handlers persist group routing metadata" in readme
     assert "shared group topics" in readme
     assert "queue" in readme
@@ -94,6 +104,15 @@ def test_strato_ops_runbook_captures_cutover_and_rollback_contract() -> None:
     assert "voice" in runbook
     assert "raw `/task`" in runbook
     assert "raw `/ACP`" in runbook
+    assert "Startup restore must inventory before action" in runbook
+    assert "`CCBOT_RESTORE_*` declares intent only" in runbook
+    assert "CODEX_HOME" in runbook
+    assert "OMX_AUTO_UPDATE=0" in runbook
+    assert "Do not blindly restart `imm_arena_bot.service`" in runbook
+    assert "ccbot runtime-input" in runbook
+    assert "replay-evidence ACK" in runbook
+    assert "does not inject its own smoke message" in runbook
+    assert "binds after `LiveRuntimeProof`" in runbook
 
 
 def test_multi_runtime_rollout_doc_requires_explicit_staged_enablement() -> None:

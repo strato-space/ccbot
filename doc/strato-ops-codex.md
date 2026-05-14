@@ -88,6 +88,22 @@ Prefer explicit non-interactive Codex policy in that command when your host poli
 - The tmux session is the live control surface; do not bypass it with sidecar SDK sessions.
 - Manual operator work should happen inside the same tmux session when possible.
 - Reboot is forbidden by default. Restart only the scoped bot process or tmux window if needed.
+- Startup restore must inventory before action: service process, controller
+  env, tmux session/window/panes, work runtime process, runtime conversation
+  identity, replay evidence, Telegram control-surface identity, and Telegram
+  routing coordinates are distinct.  `CCBOT_RESTORE_*` declares intent only.
+- For Codex restore, set `CODEX_HOME` in the controller service env so replay
+  ACK/catalog lookup uses the intended root, and set `OMX_AUTO_UPDATE=0` so an
+  OMX update prompt cannot block non-interactive startup.
+- Do not blindly restart `imm_arena_bot.service` or kill tmux to self-heal:
+  on `str`, a shared tmux server may live under that service cgroup.  Ambiguous
+  live layers fail closed for manual inspection.
+- Validate restored writability with `ccbot runtime-input` and same-runtime
+  replay-evidence ACK, not with `ccbot send` and not with ad-hoc tmux paste/key
+  commands.
+- The service startup restore path does not inject its own smoke message; it
+  binds after `LiveRuntimeProof`, and the explicit live-ops gate proves
+  `ccbot runtime-input` ACK for ComfyCodexBot and ImmArenaBot.
 
 Useful commands:
 
