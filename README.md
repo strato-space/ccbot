@@ -123,9 +123,12 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   `Other` answer and follows the same return-pane bridge. If the record times
   out with an error while the same-window renderer pane is still alive and
   visibly matches the record, Telegram keeps/reopens the question artifact as
-  answerable instead of treating the timeout as final. While a question is
-  active or recoverable, ordinary Telegram input to that window fails closed
-  unless it is consumed as an allowed `Other` answer.
+  answerable instead of treating the timeout as final. If renderer startup fails
+  before a helper pane is created but the session-scoped OMX mode state still
+  names a same-window tmux return pane, Telegram may recover the question using
+  that return bridge instead of surfacing the renderer error as final technical
+  status. While a question is active or recoverable, ordinary Telegram input to
+  that window fails closed unless it is consumed as an allowed `Other` answer.
 - **Heads-up warnings stay visible without breaking turn closure** — Operator
   warning notices remain visible in Telegram while assistant-final semantics
   and post-final artifact closure remain intact. Repeated identical warning

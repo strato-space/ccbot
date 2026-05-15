@@ -187,8 +187,13 @@ answer, written to the durable record, bridged back to the recorded return pane,
 and the temporary question pane is closed. A timeout/error terminal record is
 not final while its same-window renderer pane is still alive and visibly
 matches the record; in that case the Telegram question artifact remains or is
-reopened as answerable, including `Other` recovery when allowed. This artifact
-is not a technical status artifact, not a user turn opener, and not a terminal
+reopened as answerable, including `Other` recovery when allowed. A renderer
+startup failure is also recoverable when no helper pane exists yet but the
+session-scoped OMX mode state names a same-window tmux return pane; Telegram
+then owns the visible question artifact and best-effort bridges the answer to
+that return pane instead of presenting the renderer error as final technical
+status. This artifact is not a technical status artifact, not a user turn opener,
+and not a terminal
 assistant answer.
 
 This preserves the upstream Claude shape:

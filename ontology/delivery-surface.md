@@ -101,9 +101,12 @@ control surface at a time.
   - a timeout/error record with a same-window renderer pane that is still alive
     and visibly matches the record remains recoverable and answerable; the
     timeout is not by itself final technical status
+  - a renderer-start failure before a helper pane exists remains recoverable
+    when session-scoped OMX mode state names a same-window tmux return pane;
+    the return pane is a continuation bridge, not a bindable question surface
   - answering writes the durable question record to terminal state
     `answered`, then best-effort bridges the answer back to the recorded tmux
-    return pane and closes the temporary question pane
+    or session-state tmux return pane and closes the temporary question pane
   - while the durable record is active or recoverable, ordinary Telegram input
     to the same bound tmux window fails closed and must not bypass the question
     artifact

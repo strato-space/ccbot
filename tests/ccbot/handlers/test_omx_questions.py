@@ -23,6 +23,7 @@ def _write_question(
     return_target: str = "%0",
     allow_other: bool = False,
     error: dict[str, object] | None = None,
+    include_renderer: bool = True,
 ) -> Path:
     if scope == "root":
         path = root / ".omx/state/questions" / f"{question_id}.json"
@@ -52,13 +53,14 @@ def _write_question(
         "multi_select": multi_select,
         "type": "multi-answerable" if multi_select else "single-answerable",
         "source": "deep-interview",
-        "renderer": {
+    }
+    if include_renderer:
+        payload["renderer"] = {
             "renderer": "tmux-pane",
             "target": target,
             "return_target": return_target,
             "return_transport": "tmux-send-keys",
-        },
-    }
+        }
     if error is not None:
         payload["error"] = error
     path.write_text(
@@ -435,6 +437,91 @@ async def test_handle_omx_question_ui_reopens_timeout_error_with_live_renderer(
     assert "pre-delivery self-test gate" in text
     assert "Timed out waiting" not in text
     assert "Other is available" in text
+
+
+@pytest.mark.asyncio
+async def test_handle_omx_question_ui_recovers_renderer_start_failure_from_state_pane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_cwd = tmp_path / "runtime"
+    runtime_cwd.mkdir()
+    run_root = tmp_path / "omx-runs" / "run-20260515131437-9496"
+    question_path = _write_question(
+        run_root,
+        question=(
+            "Round 2 | Target: Success criteria | Ambiguity: 72%\n\n"
+            "Для Comfy media only: какой минимальный pre-delivery gate?"
+        ),
+        status="error",
+        allow_other=True,
+        include_renderer=False,
+        error={
+            "code": "question_runtime_failed",
+            "message": (
+                "omx question cannot open a visible renderer because this tmux "
+                "session has no attached client."
+            ),
+        },
+    )
+    state_path = question_path.parent.parent / "deep-interview-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "active": False,
+                "mode": "deep-interview",
+                "current_phase": "blocked",
+                "tmux_pane_id": "%16",
+                "tmux_window_id": "@8",
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = TmuxWindow(
+        window_id="@8",
+        window_name="comfy-agent",
+        cwd=str(runtime_cwd),
+        pane_current_command="node",
+        pane_id="%16",
+        pane_ids=("%16", "%18"),
+    )
+    bot = AsyncMock()
+    bot.send_message.return_value = SimpleNamespace(message_id=93)
+    monkeypatch.setattr(
+        omx_questions.tmux_manager,
+        "find_window_by_id",
+        AsyncMock(return_value=window),
+    )
+    monkeypatch.setattr(
+        omx_questions.session_manager,
+        "resolve_chat_id",
+        lambda user_id, thread_id=None: -1003685295814,
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_candidate_question_paths_from_window_processes",
+        AsyncMock(return_value=[question_path]),
+    )
+
+    assert await omx_questions.handle_omx_question_ui(bot, 3045664, "@8", 555) is True
+
+    bot.send_message.assert_awaited_once()
+    text = bot.send_message.await_args.kwargs["text"]
+    assert "❓ OMX Question" in text
+    assert "local OMX question renderer did not open" in text
+    assert "минимальный pre-delivery gate" in text
+
+    record = await omx_questions.find_answerable_omx_question_for_window(window)
+    assert record is not None
+    assert record.renderer["return_target"] == "%16"
+    send_line = AsyncMock(return_value=True)
+    monkeypatch.setattr(omx_questions, "_tmux_send_line", send_line)
+
+    await omx_questions.answer_omx_question_other(record, "risk-tiered gates")
+
+    send_line.assert_awaited_once_with(
+        "%16",
+        "[omx question answered] risk-tiered gates",
+    )
 
 
 @pytest.mark.asyncio

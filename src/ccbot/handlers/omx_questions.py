@@ -40,6 +40,11 @@ _PANE_ID_RE = re.compile(r"^%\d+$")
 _MAX_QUESTION_AGE_SECONDS = 24 * 60 * 60
 _MAX_TEXT_CHARS = 3600
 _STATE_PATH_FLAG = "--state-path"
+_QUESTION_STATE_FILES = (
+    "deep-interview-state.json",
+    "ralplan-state.json",
+    "ralph-state.json",
+)
 
 _QuestionKey = tuple[int, str]
 _QuestionSelectionKey = tuple[int, str, str]
@@ -184,6 +189,7 @@ def _load_question_record(path: Path) -> OmxQuestionRecord | None:
         else:
             logger.debug("Skipping invalid OMX question option %s in %s", index, path)
     renderer = payload.get("renderer") if isinstance(payload.get("renderer"), dict) else {}
+    renderer = _renderer_with_state_return_bridge(path, renderer)
     return OmxQuestionRecord(
         path=path,
         question_id=question_id,
@@ -199,6 +205,59 @@ def _load_question_record(path: Path) -> OmxQuestionRecord | None:
         renderer=renderer,
         updated_at=_safe_str(payload.get("updated_at")).strip(),
     )
+
+
+def _session_state_dir_for_question(path: Path) -> Path | None:
+    """Return the state directory that owns a session-scoped question path."""
+    # .../.omx/state/sessions/<session-id>/questions/question-*.json
+    if path.parent.name != "questions":
+        return None
+    session_state_dir = path.parent.parent
+    if not session_state_dir.is_dir():
+        return None
+    if session_state_dir.parent.name != "sessions":
+        return None
+    return session_state_dir
+
+
+def _renderer_with_state_return_bridge(
+    path: Path,
+    renderer: dict[str, Any],
+) -> dict[str, Any]:
+    """Fill a missing return bridge from session-scoped OMX mode state.
+
+    A Codex/OMX runtime can write an ``error`` question record before the
+    renderer pane exists (for example stale ``OMX_QUESTION_RETURN_PANE`` or a
+    misleading "no attached client" failure).  In that case there is no
+    renderer payload, but the session mode state may still contain the current
+    same-window leader pane.  Telegram can safely use that pane as a
+    best-effort return bridge, provided later window matching proves it belongs
+    to the currently bound tmux window.
+    """
+    if _safe_str(renderer.get("return_target")).strip():
+        return dict(renderer)
+    session_state_dir = _session_state_dir_for_question(path)
+    if session_state_dir is None:
+        return dict(renderer)
+    for filename in _QUESTION_STATE_FILES:
+        try:
+            payload = json.loads((session_state_dir / filename).read_text("utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        pane_id = _safe_str(payload.get("tmux_pane_id")).strip()
+        if not _PANE_ID_RE.match(pane_id):
+            continue
+        enriched = dict(renderer)
+        enriched.setdefault("return_transport", "tmux-send-keys")
+        enriched["return_target"] = pane_id
+        window_id = _safe_str(payload.get("tmux_window_id")).strip()
+        if window_id:
+            enriched["return_window_id"] = window_id
+        enriched["return_source"] = filename
+        return enriched
+    return dict(renderer)
 
 
 def _candidate_question_paths(cwd: str) -> list[Path]:
@@ -260,6 +319,94 @@ def _cmdline_for_pid(pid: int) -> list[str]:
     except OSError:
         return []
     return [part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part]
+
+
+def _env_for_pid(pid: int) -> dict[str, str]:
+    """Read a process environment without invoking a shell."""
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return {}
+    result: dict[str, str] = {}
+    for part in raw.split(b"\0"):
+        if not part or b"=" not in part:
+            continue
+        key, value = part.split(b"=", 1)
+        try:
+            result[key.decode("utf-8", errors="replace")] = value.decode(
+                "utf-8",
+                errors="replace",
+            )
+        except Exception:
+            continue
+    return result
+
+
+def _child_pids(pid: int) -> list[int]:
+    """Return direct child PIDs using procfs."""
+    try:
+        raw = Path(f"/proc/{pid}/task/{pid}/children").read_text("utf-8")
+    except OSError:
+        return []
+    result: list[int] = []
+    for item in raw.split():
+        try:
+            child = int(item)
+        except ValueError:
+            continue
+        if child > 0:
+            result.append(child)
+    return result
+
+
+def _descendant_pids(root_pid: int, *, max_nodes: int = 64) -> list[int]:
+    """Return root plus descendants, bounded for live-controller safety."""
+    seen: set[int] = set()
+    pending = [root_pid]
+    result: list[int] = []
+    while pending and len(result) < max_nodes:
+        pid = pending.pop(0)
+        if pid in seen or pid <= 0:
+            continue
+        seen.add(pid)
+        result.append(pid)
+        pending.extend(_child_pids(pid))
+    return result
+
+
+def _question_paths_from_omx_env(env: dict[str, str]) -> list[Path]:
+    root = _safe_str(env.get("OMX_ROOT")).strip()
+    session_id = _safe_str(env.get("OMX_SESSION_ID")).strip()
+    if not root or not session_id:
+        return []
+    questions_dir = Path(root) / ".omx" / "state" / "sessions" / session_id / "questions"
+    if not questions_dir.is_dir():
+        return []
+    return sorted(
+        questions_dir.glob("question-*.json"),
+        key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
+        reverse=True,
+    )
+
+
+async def _candidate_question_paths_from_window_processes(
+    window: TmuxWindow,
+) -> list[Path]:
+    """Find OMX run-root question records from live same-window process env."""
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for _pane_id, pane_pid in await _list_pane_processes(window.window_id):
+        for pid in _descendant_pids(pane_pid):
+            for path in _question_paths_from_omx_env(_env_for_pid(pid)):
+                if path in seen:
+                    continue
+                seen.add(path)
+                candidates.append(path)
+    return sorted(
+        candidates,
+        key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
+        reverse=True,
+    )
 
 
 def _state_path_from_question_ui_cmdline(argv: list[str]) -> Path | None:
@@ -330,6 +477,22 @@ def _is_timeout_error_record(record: OmxQuestionRecord) -> bool:
     return code == "question_runtime_failed" and "timed out waiting" in message
 
 
+def _is_unrendered_question_runtime_error(record: OmxQuestionRecord) -> bool:
+    """Return True for renderer-start failures that Telegram can own."""
+    if record.status != "error":
+        return False
+    error = _question_error_payload(record)
+    code = _safe_str(error.get("code")).strip()
+    message = _safe_str(error.get("message")).strip().casefold()
+    if code != "question_runtime_failed":
+        return False
+    return (
+        "cannot open a visible renderer" in message
+        or "no attached client" in message
+        or "outside an attached tmux pane" in message
+    )
+
+
 def _record_visible_in_renderer(record: OmxQuestionRecord, pane_text: str) -> bool:
     haystack = " ".join((pane_text or "").split()).casefold()
     if not haystack:
@@ -351,6 +514,8 @@ def _record_visible_in_renderer(record: OmxQuestionRecord, pane_text: str) -> bo
 
 async def _is_recoverable_live_renderer_error(record: OmxQuestionRecord) -> bool:
     """Return whether a timeout/error record is still answerable in tmux."""
+    if _is_unrendered_question_runtime_error(record):
+        return bool(_safe_str(record.renderer.get("return_target")).strip())
     if not _is_timeout_error_record(record):
         return False
     renderer_target = _safe_str(record.renderer.get("target")).strip()
@@ -405,6 +570,15 @@ async def find_omx_question_for_window(
     )
     if record is not None:
         return record
+    for state_path in await _candidate_question_paths_from_window_processes(window):
+        record = _load_matching_question_record_from_path(
+            state_path,
+            window,
+            question_suffix=question_suffix,
+            statuses=statuses,
+        )
+        if record is not None:
+            return record
     pane_ids = {
         pane_id
         for pane_id in getattr(window, "pane_ids", ())
@@ -496,6 +670,9 @@ def _pane_matches_window(record: OmxQuestionRecord, window: TmuxWindow) -> bool:
         pane_ids.add(pane_id)
     renderer_target = _safe_str(record.renderer.get("target")).strip()
     return_target = _safe_str(record.renderer.get("return_target")).strip()
+    return_window_id = _safe_str(record.renderer.get("return_window_id")).strip()
+    if return_window_id and return_window_id != window.window_id:
+        return False
     referenced_panes = {value for value in (renderer_target, return_target) if value}
     if referenced_panes and pane_ids:
         return bool(referenced_panes & pane_ids)
@@ -739,12 +916,21 @@ def _build_question_text(
     selected = selected or set()
     lines = ["❓ OMX Question"]
     if record.status == "error":
-        lines.extend(
-            [
-                "",
-                "⚠️ The durable question record timed out, but the local renderer is still visible. Answering here will recover it.",
-            ]
-        )
+        renderer_target = _safe_str(record.renderer.get("target")).strip()
+        if not renderer_target and _is_unrendered_question_runtime_error(record):
+            lines.extend(
+                [
+                    "",
+                    "⚠️ The local OMX question renderer did not open, but Telegram can recover the question and bridge the answer back to the bound runtime pane.",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "",
+                    "⚠️ The durable question record timed out, but the local renderer is still visible. Answering here will recover it.",
+                ]
+            )
     if record.header:
         lines.extend(["", record.header])
     lines.extend(["", record.question.strip(), ""])
