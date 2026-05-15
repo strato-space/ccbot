@@ -922,6 +922,70 @@ async def _tmux_send_line(target: str, text: str) -> bool:
     return proc.returncode == 0
 
 
+async def _tmux_send_key(target: str, key: str) -> bool:
+    if not _PANE_ID_RE.match(target):
+        return False
+    proc = await asyncio.create_subprocess_exec(
+        "tmux",
+        "send-keys",
+        "-t",
+        target,
+        key,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.communicate()
+    return proc.returncode == 0
+
+
+_RENDERER_OPTION_RE = re.compile(
+    r"^(?P<prefix>\s*›?\s*)\[(?P<checked>[ xX])\]\s+"
+    r"(?P<number>\d+)\."
+)
+
+
+def _parse_renderer_options(pane_text: str) -> tuple[int | None, dict[int, bool]]:
+    highlighted: int | None = None
+    checked: dict[int, bool] = {}
+    for line in (pane_text or "").splitlines():
+        match = _RENDERER_OPTION_RE.match(line)
+        if not match:
+            continue
+        number = int(match.group("number"))
+        index = number - 1
+        checked[index] = match.group("checked").lower() == "x"
+        if "›" in match.group("prefix"):
+            highlighted = index
+    return highlighted, checked
+
+
+async def _sync_renderer_toggle(
+    record: OmxQuestionRecord,
+    index: int,
+    *,
+    desired_selected: bool,
+) -> bool:
+    """Best-effort mirror a Telegram multi-select toggle in the local UI pane."""
+    target = _safe_str(record.renderer.get("target")).strip()
+    if not _PANE_ID_RE.match(target):
+        return False
+    pane_text = await _capture_renderer_pane(target)
+    if pane_text is None:
+        return False
+    highlighted, checked = _parse_renderer_options(pane_text)
+    if checked.get(index) is desired_selected:
+        return True
+    if highlighted is None or index not in checked:
+        return False
+    delta = index - highlighted
+    key = "Down" if delta > 0 else "Up"
+    for _ in range(abs(delta)):
+        if not await _tmux_send_key(target, key):
+            return False
+        await asyncio.sleep(0.03)
+    return await _tmux_send_key(target, "Space")
+
+
 async def _tmux_kill_pane(target: str, *, return_target: str = "") -> bool:
     if not _PANE_ID_RE.match(target) or target == return_target:
         return False
@@ -1474,6 +1538,18 @@ async def handle_omx_question_callback(
         else:
             selected.add(index)
         _question_selections[key] = selected
+        synced = await _sync_renderer_toggle(
+            record,
+            index,
+            desired_selected=index in selected,
+        )
+        if not synced:
+            logger.debug(
+                "OMX question Telegram toggle was not mirrored to renderer: "
+                "question_id=%s index=%s",
+                record.question_id,
+                index,
+            )
         await handle_omx_question_ui(
             context.bot,
             user.id,

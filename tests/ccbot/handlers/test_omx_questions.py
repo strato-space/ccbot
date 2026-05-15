@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from ccbot.handlers import omx_questions
-from ccbot.handlers.callback_data import CB_OMX_QUESTION_SELECT
+from ccbot.handlers.callback_data import CB_OMX_QUESTION_SELECT, CB_OMX_QUESTION_TOGGLE
 from ccbot.tmux_manager import TmuxWindow
 
 
@@ -631,6 +631,72 @@ async def test_omx_question_callback_answers_current_record(
     assert payload["answer"]["value"] == "revise"
     query.edit_message_text.assert_awaited_once()
     query.answer.assert_awaited_once_with("Answered")
+
+
+@pytest.mark.asyncio
+async def test_omx_question_toggle_mirrors_selection_to_renderer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _write_question(
+        tmp_path,
+        multi_select=True,
+        target="%20",
+        return_target="%16",
+    )
+    window = TmuxWindow(
+        window_id="@8",
+        window_name="comfy-agent",
+        cwd=str(tmp_path),
+        pane_current_command="node",
+        pane_id="%16",
+        pane_ids=("%16", "%20"),
+    )
+    monkeypatch.setattr(
+        omx_questions.tmux_manager,
+        "find_window_by_id",
+        AsyncMock(return_value=window),
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_callback_window_authorized",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_capture_renderer_pane",
+        AsyncMock(
+            return_value=(
+                "› [ ] 1. Proceed\n"
+                "  [ ] 2. Revise\n"
+                "  [ ] 3. Other\n"
+            )
+        ),
+    )
+    sent_keys: list[tuple[str, str]] = []
+
+    async def fake_send_key(target: str, key: str) -> bool:
+        sent_keys.append((target, key))
+        return True
+
+    monkeypatch.setattr(omx_questions, "_tmux_send_key", fake_send_key)
+    query = SimpleNamespace(
+        data=f"{CB_OMX_QUESTION_TOGGLE}:1:a1b2c3d4:@8",
+        message=SimpleNamespace(message_thread_id=42),
+        answer=AsyncMock(),
+        edit_message_text=AsyncMock(),
+    )
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_user=SimpleNamespace(id=1),
+    )
+    context = SimpleNamespace(bot=AsyncMock())
+
+    assert await omx_questions.handle_omx_question_callback(update, context) is True
+
+    assert sent_keys == [("%20", "Down"), ("%20", "Space")]
+    query.answer.assert_awaited_once_with("Updated")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["status"] == "prompting"
 
 
 @pytest.mark.asyncio
