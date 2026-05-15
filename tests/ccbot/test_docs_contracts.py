@@ -79,6 +79,8 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "Queued follow-up preview" in readme
     assert "OMX interactive questions" in readme
     assert "omx.question/v1" in readme
+    assert "`--state-path`" in readme
+    assert "same-window OMX question renderer pane" in readme
     assert "visibility-first" in readme
     assert "Ordinary user echo remains visible" in readme
     assert "queue is empty" in readme
@@ -249,6 +251,8 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "Pending input artifact" in delivery
     assert "Interactive question artifact" in delivery
     assert "omx.question/v1" in delivery
+    assert "`--state-path`" in delivery
+    assert "same-window OMX question" in delivery
     assert "Warning artifact" in delivery
     assert "control surface" in delivery
     assert "usage-limit / quota-exhaustion notices" in delivery

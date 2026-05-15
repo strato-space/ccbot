@@ -6,7 +6,10 @@ on its next 1s tick.
 """
 
 import asyncio
+import json
 
+from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,6 +17,7 @@ import pytest
 
 from ccbot.handlers.status_polling import update_status_message
 from ccbot.handlers import status_polling as status_polling_mod
+from ccbot.tmux_manager import TmuxWindow
 
 
 @pytest.fixture
@@ -162,6 +166,112 @@ class TestStatusPollerSettingsDetection:
         mock_pending.assert_awaited_once()
         mock_runtime_warning.assert_awaited_once()
         mock_omx_question.assert_awaited_once_with(mock_bot, 1, window_id, 42)
+        mock_status.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_omx_question_helper_state_path_sends_prompt_not_status(
+        self,
+        mock_bot: AsyncMock,
+        tmp_path: Path,
+    ):
+        runtime_cwd = tmp_path / "runtime"
+        runtime_cwd.mkdir()
+        question_path = (
+            tmp_path
+            / "omx-runs/run-20260515065148-f3a6/.omx/state/sessions/s1/questions"
+            / "question-2026-05-15T07-54-50-805Z-91cbac1d.json"
+        )
+        question_path.parent.mkdir(parents=True)
+        question_path.write_text(
+            json.dumps(
+                {
+                    "kind": "omx.question/v1",
+                    "question_id": "question-2026-05-15T07-54-50-805Z-91cbac1d",
+                    "updated_at": datetime.now(UTC)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                    "status": "prompting",
+                    "question": "Which results need a pre-delivery self-test gate?",
+                    "options": [{"label": "All external deliverables", "value": "all"}],
+                    "allow_other": True,
+                    "type": "single-answerable",
+                    "source": "deep-interview",
+                    "renderer": {
+                        "renderer": "tmux-pane",
+                        "target": "%12",
+                        "return_target": "%5",
+                        "return_transport": "tmux-send-keys",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        window_id = "@4"
+        window = TmuxWindow(
+            window_id=window_id,
+            window_name="comfy-agent",
+            cwd=str(runtime_cwd),
+            pane_current_command="node",
+            pane_id="%5",
+            pane_ids=("%5", "%12", "%6"),
+        )
+
+        with (
+            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux_poll,
+            patch(
+                "ccbot.handlers.status_polling.enqueue_pending_input_update",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "ccbot.handlers.status_polling._maybe_enqueue_runtime_exit_warning",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "ccbot.handlers.status_polling.enqueue_status_update",
+                new_callable=AsyncMock,
+            ) as mock_status,
+            patch(
+                "ccbot.handlers.omx_questions.tmux_manager.find_window_by_id",
+                new_callable=AsyncMock,
+                return_value=window,
+            ),
+            patch(
+                "ccbot.handlers.omx_questions.session_manager.resolve_chat_id",
+                return_value=-1003685295814,
+            ),
+            patch(
+                "ccbot.handlers.omx_questions._list_pane_processes",
+                new_callable=AsyncMock,
+                return_value=[("%5", 1), ("%12", 2), ("%6", 3)],
+            ),
+            patch(
+                "ccbot.handlers.omx_questions._cmdline_for_pid",
+                side_effect=lambda pid: [
+                    "node",
+                    "omx.js",
+                    "question",
+                    "--ui",
+                    "--state-path",
+                    str(question_path),
+                ]
+                if pid == 2
+                else ["node", "omx.js", "hud", "--watch"],
+            ),
+        ):
+            mock_tmux_poll.find_window_by_id = AsyncMock(return_value=window)
+            mock_tmux_poll.capture_pane = AsyncMock(return_value="OpenAI Codex\n› ready")
+
+            await update_status_message(
+                mock_bot,
+                user_id=3045664,
+                window_id=window_id,
+                thread_id=555,
+            )
+
+        mock_bot.send_message.assert_awaited_once()
+        assert "❓ OMX Question" in mock_bot.send_message.await_args.kwargs["text"]
+        assert "pre-delivery self-test gate" in mock_bot.send_message.await_args.kwargs["text"]
         mock_status.assert_not_awaited()
 
     @pytest.mark.asyncio

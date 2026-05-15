@@ -162,7 +162,7 @@ from .handlers.message_sender import (
     send_with_fallback,
 )
 from .handlers.omx_questions import (
-    find_active_omx_question,
+    find_active_omx_question_for_window,
     handle_omx_question_callback,
     handle_omx_question_ui,
 )
@@ -1447,7 +1447,7 @@ async def _surface_omx_question_state(
         return False
     if not isinstance(getattr(w, "cwd", ""), str) or not getattr(w, "cwd", ""):
         return False
-    record = find_active_omx_question(w)
+    record = await find_active_omx_question_for_window(w)
     if record is None:
         return False
     shown = await handle_omx_question_ui(

@@ -21,6 +21,7 @@ def _write_question(
     question: str = "Pick a path",
     target: str = "%207",
     return_target: str = "%0",
+    allow_other: bool = False,
 ) -> Path:
     if scope == "root":
         path = root / ".omx/state/questions" / f"{question_id}.json"
@@ -47,7 +48,7 @@ def _write_question(
                     },
                     {"label": "Revise", "value": "revise"},
                 ],
-                "allow_other": False,
+                "allow_other": allow_other,
                 "other_label": "Other",
                 "multi_select": multi_select,
                 "type": "multi-answerable" if multi_select else "single-answerable",
@@ -223,6 +224,85 @@ async def test_handle_omx_question_ui_sends_once_then_reuses_existing_message(
 
 
 @pytest.mark.asyncio
+async def test_handle_omx_question_ui_reads_helper_pane_state_path_outside_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_cwd = tmp_path / "runtime"
+    runtime_cwd.mkdir()
+    run_root = tmp_path / "omx-runs" / "run-20260515065148-f3a6"
+    question_path = _write_question(
+        run_root,
+        question=(
+            "Round 1 | Target: Scope | Ambiguity: 100%\n\n"
+            "Для первого плана улучшений какой класс результатов должен получать "
+            "обязательный pre-delivery self-test gate перед отправкой пользователю?"
+        ),
+        target="%12",
+        return_target="%5",
+        allow_other=True,
+    )
+    window = TmuxWindow(
+        window_id="@4",
+        window_name="comfy-agent",
+        cwd=str(runtime_cwd),
+        pane_current_command="node",
+        pane_id="%5",
+        pane_ids=("%5", "%12", "%6"),
+    )
+    bot = AsyncMock()
+    bot.send_message.return_value = SimpleNamespace(message_id=91)
+    monkeypatch.setattr(
+        omx_questions.tmux_manager,
+        "find_window_by_id",
+        AsyncMock(return_value=window),
+    )
+    monkeypatch.setattr(
+        omx_questions.session_manager,
+        "resolve_chat_id",
+        lambda user_id, thread_id=None: -1003685295814,
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_list_pane_processes",
+        AsyncMock(
+            return_value=[
+                ("%5", 2258523),
+                ("%12", 2694043),
+                ("%6", 2258908),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_cmdline_for_pid",
+        lambda pid: (
+            [
+                "node",
+                "/data/iqdoctor/.nvm/versions/node/v24.14.0/lib/node_modules/"
+                "oh-my-codex/dist/cli/omx.js",
+                "question",
+                "--ui",
+                "--state-path",
+                str(question_path),
+            ]
+            if pid == 2694043
+            else ["node", "omx.js", "hud", "--watch"]
+        ),
+    )
+
+    assert await omx_questions.handle_omx_question_ui(bot, 3045664, "@4", 555) is True
+
+    bot.send_message.assert_awaited_once()
+    kwargs = bot.send_message.await_args.kwargs
+    assert kwargs["chat_id"] == -1003685295814
+    assert kwargs["message_thread_id"] == 555
+    assert "❓ OMX Question" in kwargs["text"]
+    assert "pre-delivery self-test gate" in kwargs["text"]
+    assert "1. Proceed" in kwargs["text"]
+    assert "Other is available" in kwargs["text"]
+
+
+@pytest.mark.asyncio
 async def test_omx_question_callback_answers_current_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -264,6 +344,84 @@ async def test_omx_question_callback_answers_current_record(
     assert payload["status"] == "answered"
     assert payload["answer"]["value"] == "revise"
     query.edit_message_text.assert_awaited_once()
+    query.answer.assert_awaited_once_with("Answered")
+
+
+@pytest.mark.asyncio
+async def test_omx_question_callback_answers_helper_pane_state_path_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_cwd = tmp_path / "runtime"
+    runtime_cwd.mkdir()
+    run_root = tmp_path / "omx-runs" / "run-20260515065148-f3a6"
+    path = _write_question(
+        run_root,
+        question_id="question-2026-05-15T07-54-50-805Z-91cbac1d",
+        target="%12",
+        return_target="%5",
+    )
+    window = TmuxWindow(
+        window_id="@4",
+        window_name="comfy-agent",
+        cwd=str(runtime_cwd),
+        pane_current_command="node",
+        pane_id="%5",
+        pane_ids=("%5", "%12", "%6"),
+    )
+    monkeypatch.setattr(
+        omx_questions.tmux_manager,
+        "find_window_by_id",
+        AsyncMock(return_value=window),
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_callback_window_authorized",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_list_pane_processes",
+        AsyncMock(return_value=[("%5", 1), ("%12", 2), ("%6", 3)]),
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_cmdline_for_pid",
+        lambda pid: (
+            [
+                "node",
+                "omx.js",
+                "question",
+                "--ui",
+                "--state-path",
+                str(path),
+            ]
+            if pid == 2
+            else ["node", "omx.js", "hud", "--watch"]
+        ),
+    )
+    send = AsyncMock(return_value=True)
+    kill = AsyncMock(return_value=True)
+    monkeypatch.setattr(omx_questions, "_tmux_send_line", send)
+    monkeypatch.setattr(omx_questions, "_tmux_kill_pane", kill)
+    query = SimpleNamespace(
+        data=f"{CB_OMX_QUESTION_SELECT}:0:91cbac1d:@4",
+        message=SimpleNamespace(message_thread_id=555, chat_id=-1003685295814),
+        answer=AsyncMock(),
+        edit_message_text=AsyncMock(),
+    )
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_user=SimpleNamespace(id=3045664),
+    )
+    context = SimpleNamespace(bot=AsyncMock())
+
+    assert await omx_questions.handle_omx_question_callback(update, context) is True
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["status"] == "answered"
+    assert payload["answer"]["value"] == "proceed"
+    send.assert_awaited_once_with("%5", "[omx question answered] proceed")
+    kill.assert_awaited_once_with("%12", return_target="%5")
     query.answer.assert_awaited_once_with("Answered")
 
 

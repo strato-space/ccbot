@@ -170,7 +170,8 @@ either status churn or pre-final visible content.
 Interactive question artifacts are a separate control lane. They are created
 from runtime-owned durable question records, not from pane scraping alone. For
 OMX, the source record is `kind=omx.question/v1` under
-`.omx/state/questions/` or `.omx/state/sessions/*/questions/`. Telegram
+`.omx/state/questions/`, `.omx/state/sessions/*/questions/`, or the explicit
+`--state-path` carried by a same-window OMX question renderer pane. Telegram
 renders the question body and predefined options with inline buttons, edits the
 same message while the question remains active, and answers by writing the
 durable record to terminal status `answered`. The OMX renderer may be a

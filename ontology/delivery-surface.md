@@ -86,6 +86,8 @@ control surface at a time.
   - current source:
     - OMX durable `omx.question/v1` records under
       `.omx/state/questions/` or `.omx/state/sessions/*/questions/`
+    - the explicit `--state-path` carried by a same-window OMX question
+      renderer pane when the runtime is launched from an `.omx-runs` state root
   - not a technical status artifact and not an assistant-final artifact
   - belongs to the control surface whose live tmux window/cwd/renderer return
     or target pane produced the record

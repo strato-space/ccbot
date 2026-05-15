@@ -3948,7 +3948,11 @@ class TestRuntimeInputRouting:
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
-            patch("ccbot.bot.find_active_omx_question", return_value=active_record),
+            patch(
+                "ccbot.bot.find_active_omx_question_for_window",
+                new_callable=AsyncMock,
+                return_value=active_record,
+            ),
             patch(
                 "ccbot.bot.handle_omx_question_ui",
                 new_callable=AsyncMock,

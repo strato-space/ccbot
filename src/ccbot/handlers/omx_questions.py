@@ -38,6 +38,7 @@ _TERMINAL_STATUSES = frozenset({"answered", "aborted", "error"})
 _PANE_ID_RE = re.compile(r"^%\d+$")
 _MAX_QUESTION_AGE_SECONDS = 24 * 60 * 60
 _MAX_TEXT_CHARS = 3600
+_STATE_PATH_FLAG = "--state-path"
 
 _QuestionKey = tuple[int, str]
 _QuestionSelectionKey = tuple[int, str, str]
@@ -215,6 +216,162 @@ def _candidate_question_paths(cwd: str) -> list[Path]:
         {path for path in candidates},
         key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
         reverse=True,
+    )
+
+
+async def _list_pane_processes(window_id: str) -> list[tuple[str, int]]:
+    """Return pane ids and owning PIDs for panes in a tmux window."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux",
+            "list-panes",
+            "-t",
+            window_id,
+            "-F",
+            "#{pane_id}\t#{pane_pid}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+    except Exception:
+        logger.debug("Failed to list tmux pane processes for %s", window_id, exc_info=True)
+        return []
+    if proc.returncode != 0:
+        return []
+    panes: list[tuple[str, int]] = []
+    for line in stdout.decode("utf-8", errors="replace").splitlines():
+        pane_id, sep, pid_text = line.partition("\t")
+        if not sep or not _PANE_ID_RE.match(pane_id):
+            continue
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if pid > 0:
+            panes.append((pane_id, pid))
+    return panes
+
+
+def _cmdline_for_pid(pid: int) -> list[str]:
+    """Read a process command line without invoking a shell."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    return [part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part]
+
+
+def _state_path_from_question_ui_cmdline(argv: list[str]) -> Path | None:
+    """Extract the durable OMX question record path from a helper-pane cmdline."""
+    if not argv:
+        return None
+    has_question = "question" in argv
+    has_ui = "--ui" in argv
+    if not has_question or not has_ui:
+        return None
+    for index, arg in enumerate(argv):
+        if arg == _STATE_PATH_FLAG and index + 1 < len(argv):
+            candidate = argv[index + 1]
+            break
+        if arg.startswith(f"{_STATE_PATH_FLAG}="):
+            candidate = arg.split("=", 1)[1]
+            break
+    else:
+        return None
+    if not candidate:
+        return None
+    path = Path(candidate)
+    if not path.is_absolute() or path.suffix != ".json":
+        return None
+    return path
+
+
+def _load_matching_question_record_from_path(
+    path: Path,
+    window: TmuxWindow,
+    *,
+    question_suffix: str | None = None,
+    statuses: frozenset[str] | None = None,
+) -> OmxQuestionRecord | None:
+    suffix = (question_suffix or "").strip()
+    allowed_statuses = statuses or _ACTIVE_STATUSES
+    record = _load_question_record(path)
+    if record is None:
+        return None
+    if record.status not in allowed_statuses:
+        return None
+    if suffix and record.short_id != suffix and record.question_id != suffix:
+        return None
+    if not _recent_enough(record):
+        return None
+    if not _pane_matches_window(record, window):
+        return None
+    return record
+
+
+async def find_omx_question_for_window(
+    window: TmuxWindow,
+    *,
+    question_suffix: str | None = None,
+    statuses: frozenset[str] | None = None,
+) -> OmxQuestionRecord | None:
+    """Return the newest matching OMX question for a tmux window.
+
+    The durable record normally lives below ``<cwd>/.omx/state``.  OMX CLI
+    sessions launched from a run directory can instead render a split-pane UI
+    whose process carries the exact ``--state-path`` under ``.omx-runs``.  That
+    helper pane is still tmux topology inside the bound window, not a separate
+    control surface, so it is safe to use only as a locator for the durable
+    record.
+    """
+    record = find_omx_question(
+        window,
+        question_suffix=question_suffix,
+        statuses=statuses,
+    )
+    if record is not None:
+        return record
+    pane_ids = {
+        pane_id
+        for pane_id in getattr(window, "pane_ids", ())
+        if isinstance(pane_id, str) and pane_id.strip()
+    }
+    if not pane_ids:
+        return None
+    candidates: list[OmxQuestionRecord] = []
+    for pane_id, pid in await _list_pane_processes(window.window_id):
+        if pane_id not in pane_ids:
+            continue
+        state_path = _state_path_from_question_ui_cmdline(_cmdline_for_pid(pid))
+        if state_path is None:
+            continue
+        record = _load_matching_question_record_from_path(
+            state_path,
+            window,
+            question_suffix=question_suffix,
+            statuses=statuses,
+        )
+        if record is not None:
+            candidates.append(record)
+    if not candidates:
+        return None
+    return sorted(
+        candidates,
+        key=lambda item: item.path.stat().st_mtime if item.path.exists() else 0.0,
+        reverse=True,
+    )[0]
+
+
+async def find_active_omx_question_for_window(
+    window: TmuxWindow,
+    *,
+    question_suffix: str | None = None,
+) -> OmxQuestionRecord | None:
+    """Return the newest active OMX question, including helper-pane records."""
+    return await find_omx_question_for_window(
+        window,
+        question_suffix=question_suffix,
+        statuses=_ACTIVE_STATUSES,
     )
 
 
@@ -625,12 +782,12 @@ async def handle_omx_question_ui(
         return False
     key = _question_surface_key(user_id, thread_id=thread_id, window_id=window_id)
     if record is None:
-        record = find_active_omx_question(window)
+        record = await find_active_omx_question_for_window(window)
     if record is None:
         existing_msg_id = _question_msgs.get(key)
         previous_state = _question_render_state.get(key)
         if existing_msg_id and previous_state:
-            terminal_record = find_omx_question(
+            terminal_record = await find_omx_question_for_window(
                 window,
                 question_suffix=previous_state[0],
                 statuses=_TERMINAL_STATUSES,
@@ -792,7 +949,10 @@ async def handle_omx_question_callback(
     if not window:
         await query.answer("Window not found", show_alert=True)
         return True
-    record = find_active_omx_question(window, question_suffix=question_suffix)
+    record = await find_active_omx_question_for_window(
+        window,
+        question_suffix=question_suffix,
+    )
     if record is None:
         await query.answer("Question is no longer active", show_alert=True)
         await clear_omx_question_msg(
