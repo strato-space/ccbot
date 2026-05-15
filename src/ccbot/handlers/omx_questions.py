@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import shutil
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +22,7 @@ from typing import Any
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from ..delivery_audit import log_telegram_delivery
 from ..session import session_manager
 from ..tmux_manager import TmuxWindow, tmux_manager
 from .callback_data import (
@@ -30,6 +32,7 @@ from .callback_data import (
     CB_OMX_QUESTION_TOGGLE,
 )
 from .message_sender import NO_LINK_PREVIEW
+from .message_queue import open_new_turn_generation
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +57,12 @@ _question_msgs: dict[_QuestionKey, int] = {}
 _question_windows: dict[_QuestionKey, str] = {}
 _question_selections: dict[_QuestionSelectionKey, set[int]] = {}
 _question_render_state: dict[_QuestionKey, tuple[str, tuple[int, ...]]] = {}
+_question_prompt_deferrals: dict[tuple[int, str, str], float] = {}
+_question_prompt_defer_audited: set[tuple[int, str, str, str]] = set()
+_QUESTION_PROMPT_GATE_TIMEOUT_SECONDS = 45.0
+QUESTION_PROMPT_TASK_TYPE = "question_prompt"
+QUESTION_PROMPT_CONTENT_TYPE = "question"
+QUESTION_PROMPT_SEMANTIC_KIND = "interactive_question"
 
 
 @dataclass(frozen=True)
@@ -115,6 +124,12 @@ def _drop_question_tracking(key: _QuestionKey) -> None:
     _question_msgs.pop(key, None)
     _question_windows.pop(key, None)
     _question_render_state.pop(key, None)
+    for deferral_key in list(_question_prompt_deferrals):
+        if deferral_key[0] == key[0] and deferral_key[1] == key[1]:
+            _question_prompt_deferrals.pop(deferral_key, None)
+    for audit_key in list(_question_prompt_defer_audited):
+        if audit_key[0] == key[0] and audit_key[1] == key[1]:
+            _question_prompt_defer_audited.discard(audit_key)
     for selection_key in [
         item for item in _question_selections if item[0] == key[0] and item[1] == key[1]
     ]:
@@ -139,6 +154,124 @@ def _is_question_replacement_edit_error(exc: Exception) -> bool:
             "message is inaccessible",
             "message_id_invalid",
         )
+    )
+
+
+def _question_deferral_key(
+    key: _QuestionKey,
+    record: OmxQuestionRecord,
+) -> tuple[int, str, str]:
+    return (key[0], key[1], record.question_id)
+
+
+def _clear_question_deferral(
+    key: _QuestionKey,
+    question_id: str,
+) -> None:
+    deferral_key = (key[0], key[1], question_id)
+    _question_prompt_deferrals.pop(deferral_key, None)
+    for audit_key in list(_question_prompt_defer_audited):
+        if audit_key[:3] == deferral_key:
+            _question_prompt_defer_audited.discard(audit_key)
+
+
+def has_visible_omx_question_artifact(
+    user_id: int,
+    *,
+    thread_id: int | None = None,
+    chat_id: int | None = None,
+    window_id: str = "",
+    question_id: str | None = None,
+) -> bool:
+    """Return whether Telegram already has a visible artifact for this question."""
+    key = _question_surface_key(
+        user_id,
+        thread_id=thread_id,
+        chat_id=chat_id,
+        window_id=window_id,
+    )
+    if key not in _question_msgs:
+        return False
+    if question_id is None:
+        return True
+    render_state = _question_render_state.get(key)
+    return render_state is not None and render_state[0] == question_id
+
+
+def _audit_question_artifact(
+    *,
+    action: str,
+    user_id: int,
+    chat_id: int | None,
+    thread_id: int | None,
+    window_id: str,
+    record: OmxQuestionRecord,
+    text: str,
+    message_id: int | None = None,
+    success: bool = True,
+    error: str | None = None,
+    reason: str | None = None,
+) -> None:
+    audit_text = f"question_id={record.question_id}\n{text}".strip()
+    log_telegram_delivery(
+        action=action,
+        user_id=user_id,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        message_id=message_id,
+        window_id=window_id,
+        task_type=QUESTION_PROMPT_TASK_TYPE,
+        content_type=QUESTION_PROMPT_CONTENT_TYPE,
+        semantic_kind=QUESTION_PROMPT_SEMANTIC_KIND,
+        text=audit_text,
+        success=success,
+        error=error,
+        reason=reason,
+    )
+
+
+def _should_override_question_deferral_for_timeout(
+    key: _QuestionKey,
+    record: OmxQuestionRecord,
+    *,
+    defer_reason: str | None,
+) -> bool:
+    if defer_reason != "pre_final_lane_open":
+        return False
+    first_seen = _question_prompt_deferrals.get(_question_deferral_key(key, record))
+    return (
+        first_seen is not None
+        and time.monotonic() - first_seen >= _QUESTION_PROMPT_GATE_TIMEOUT_SECONDS
+    )
+
+
+def _record_question_prompt_deferral(
+    *,
+    key: _QuestionKey,
+    user_id: int,
+    chat_id: int | None,
+    thread_id: int | None,
+    window_id: str,
+    record: OmxQuestionRecord,
+    text: str,
+    reason: str | None,
+) -> None:
+    resolved_reason = reason or "send_if_missing_false"
+    deferral_key = _question_deferral_key(key, record)
+    _question_prompt_deferrals.setdefault(deferral_key, time.monotonic())
+    audit_key = (*deferral_key, resolved_reason)
+    if audit_key in _question_prompt_defer_audited:
+        return
+    _question_prompt_defer_audited.add(audit_key)
+    _audit_question_artifact(
+        action="suppress",
+        user_id=user_id,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        window_id=window_id,
+        record=record,
+        text=text,
+        reason=resolved_reason,
     )
 
 
@@ -1282,6 +1415,7 @@ async def clear_omx_question_msg(
         chat_id=chat_id,
         window_id=window_id,
     )
+    previous_state = _question_render_state.get(key)
     msg_id = _question_msgs.pop(key, None)
     _drop_question_tracking(key)
     if bot and msg_id:
@@ -1292,6 +1426,22 @@ async def clear_omx_question_msg(
         )
         try:
             await bot.delete_message(chat_id=resolved_chat_id, message_id=msg_id)
+            log_telegram_delivery(
+                action="delete",
+                user_id=user_id,
+                chat_id=resolved_chat_id,
+                thread_id=thread_id,
+                message_id=msg_id,
+                window_id=window_id,
+                task_type=QUESTION_PROMPT_TASK_TYPE,
+                content_type=QUESTION_PROMPT_CONTENT_TYPE,
+                semantic_kind=QUESTION_PROMPT_SEMANTIC_KIND,
+                text=(
+                    f"question_id={previous_state[0]}"
+                    if previous_state is not None
+                    else ""
+                ),
+            )
         except Exception:
             logger.debug("Failed to delete OMX question message", exc_info=True)
 
@@ -1339,19 +1489,51 @@ async def _edit_terminal_question_artifact(
     msg_id: int,
     record: OmxQuestionRecord,
     thread_id: int | None,
+    window_id: str,
+    chat_id: int | None = None,
 ) -> bool:
+    resolved_chat_id = (
+        chat_id
+        if chat_id is not None
+        else session_manager.resolve_chat_id(user_id, thread_id)
+    )
+    text = _build_terminal_question_text(record)
     try:
         await bot.edit_message_text(
-            chat_id=session_manager.resolve_chat_id(user_id, thread_id),
+            chat_id=resolved_chat_id,
             message_id=msg_id,
-            text=_build_terminal_question_text(record),
+            text=text,
             reply_markup=None,
             link_preview_options=NO_LINK_PREVIEW,
         )
+        _audit_question_artifact(
+            action="edit",
+            user_id=user_id,
+            chat_id=resolved_chat_id,
+            thread_id=thread_id,
+            message_id=msg_id,
+            window_id=window_id,
+            record=record,
+            text=text,
+            reason="terminal_question_state",
+        )
         _drop_question_tracking(key)
         return True
-    except Exception:
+    except Exception as exc:
         logger.debug("Failed to edit terminal OMX question artifact", exc_info=True)
+        _audit_question_artifact(
+            action="edit",
+            user_id=user_id,
+            chat_id=resolved_chat_id,
+            thread_id=thread_id,
+            message_id=msg_id,
+            window_id=window_id,
+            record=record,
+            text=text,
+            success=False,
+            error=str(exc),
+            reason="terminal_question_state",
+        )
         return False
 
 
@@ -1382,10 +1564,11 @@ async def _edit_active_question_artifact(
         else session_manager.resolve_chat_id(user_id, thread_id)
     )
     try:
+        edit_text = _build_question_text(record, selected)
         await bot.edit_message_text(
             chat_id=resolved_chat_id,
             message_id=msg_id,
-            text=_build_question_text(record, selected),
+            text=edit_text,
             reply_markup=_build_question_keyboard(record, window_id, selected=selected),
             link_preview_options=NO_LINK_PREVIEW,
         )
@@ -1402,10 +1585,33 @@ async def _edit_active_question_artifact(
             logger.debug("Failed to edit active OMX question artifact", exc_info=True)
             _question_msgs[key] = msg_id
             _question_windows[key] = window_id
+            _audit_question_artifact(
+                action="edit",
+                user_id=user_id,
+                chat_id=resolved_chat_id,
+                thread_id=thread_id,
+                message_id=msg_id,
+                window_id=window_id,
+                record=record,
+                text=edit_text,
+                success=False,
+                error=str(exc),
+            )
             return "failed"
     _question_msgs[key] = msg_id
     _question_windows[key] = window_id
     _question_render_state[key] = render_state
+    _clear_question_deferral(key, record.question_id)
+    _audit_question_artifact(
+        action="edit",
+        user_id=user_id,
+        chat_id=resolved_chat_id,
+        thread_id=thread_id,
+        message_id=msg_id,
+        window_id=window_id,
+        record=record,
+        text=edit_text,
+    )
     return "ok"
 
 
@@ -1418,6 +1624,7 @@ async def handle_omx_question_ui(
     record: OmxQuestionRecord | None = None,
     chat_id: int | None = None,
     send_if_missing: bool = True,
+    defer_reason: str | None = None,
 ) -> bool:
     """Send/update an OMX question prompt for the bound window, if active."""
     window = await tmux_manager.find_window_by_id(window_id)
@@ -1449,6 +1656,8 @@ async def handle_omx_question_ui(
                     msg_id=existing_msg_id,
                     record=terminal_record,
                     thread_id=thread_id,
+                    window_id=window_id,
+                    chat_id=chat_id,
                 )
                 return True
         if existing_msg_id:
@@ -1495,6 +1704,16 @@ async def handle_omx_question_ui(
         if edit_result == "failed":
             return False
         _question_msgs.pop(key, None)
+    if (
+        not send_if_missing
+        and _should_override_question_deferral_for_timeout(
+            key,
+            record,
+            defer_reason=defer_reason,
+        )
+    ):
+        send_if_missing = True
+        defer_reason = "pre_final_gate_timeout"
     if not send_if_missing:
         logger.debug(
             "Deferring new OMX question artifact while earlier Telegram artifacts drain: "
@@ -1503,6 +1722,16 @@ async def handle_omx_question_ui(
             window_id,
             thread_id,
             record.question_id,
+        )
+        _record_question_prompt_deferral(
+            key=key,
+            user_id=user_id,
+            chat_id=resolved_chat_id,
+            thread_id=thread_id,
+            window_id=window_id,
+            record=record,
+            text=text,
+            reason=defer_reason,
         )
         return True
     try:
@@ -1513,13 +1742,37 @@ async def handle_omx_question_ui(
             link_preview_options=NO_LINK_PREVIEW,
             **thread_kwargs,  # type: ignore[arg-type]
         )
-    except Exception:
+    except Exception as exc:
         logger.error("Failed to send OMX question message", exc_info=True)
+        _audit_question_artifact(
+            action="send",
+            user_id=user_id,
+            chat_id=resolved_chat_id,
+            thread_id=thread_id,
+            window_id=window_id,
+            record=record,
+            text=text,
+            success=False,
+            error=str(exc),
+            reason=defer_reason,
+        )
         return False
     if sent:
         _question_msgs[key] = sent.message_id
         _question_windows[key] = window_id
         _question_render_state[key] = render_state
+        _clear_question_deferral(key, record.question_id)
+        _audit_question_artifact(
+            action="send",
+            user_id=user_id,
+            chat_id=resolved_chat_id,
+            thread_id=thread_id,
+            message_id=sent.message_id,
+            window_id=window_id,
+            record=record,
+            text=text,
+            reason=defer_reason,
+        )
         return True
     return False
 
@@ -1743,6 +1996,7 @@ async def handle_omx_question_callback(
             return True
         selected = [index]
 
+    open_new_turn_generation(user.id, thread_id)
     answer = await answer_omx_question(record, selected, window_id=window_id)
     selected_labels = answer.get("selected_labels")
     if isinstance(selected_labels, list):
@@ -1750,14 +2004,41 @@ async def handle_omx_question_callback(
     else:
         label_text = str(answer.get("value", ""))
     text = f"✅ OMX Question answered\n\n{record.question}\n\nAnswer: {label_text}".strip()
+    msg_id = _message_id_from_update(update)
     try:
         await query.edit_message_text(
             text=_clip(text),
             reply_markup=None,
             link_preview_options=NO_LINK_PREVIEW,
         )
-    except Exception:
+        if msg_id is not None:
+            _audit_question_artifact(
+                action="edit",
+                user_id=user.id,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                message_id=msg_id,
+                window_id=window_id,
+                record=record,
+                text=text,
+                reason="answered",
+            )
+    except Exception as exc:
         logger.debug("Failed to edit answered OMX question message", exc_info=True)
+        if msg_id is not None:
+            _audit_question_artifact(
+                action="edit",
+                user_id=user.id,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                message_id=msg_id,
+                window_id=window_id,
+                record=record,
+                text=text,
+                success=False,
+                error=str(exc),
+                reason="answered",
+            )
     await query.answer("Answered")
     await clear_omx_question_msg(
         user.id,

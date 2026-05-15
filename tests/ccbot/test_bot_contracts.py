@@ -4145,6 +4145,7 @@ class TestRuntimeInputRouting:
                 new_callable=AsyncMock,
                 return_value={"value": "All external deliverables"},
             ) as mock_answer,
+            patch("ccbot.bot.has_visible_omx_question_artifact", return_value=True),
             patch(
                 "ccbot.bot.clear_omx_question_msg",
                 new_callable=AsyncMock,
@@ -4166,6 +4167,55 @@ class TestRuntimeInputRouting:
         mock_sm.send_to_window.assert_not_called()
         mock_reply.assert_awaited_once()
         assert "answered as Other" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_text_handler_does_not_answer_other_for_invisible_deferred_question(
+        self,
+    ):
+        update = _make_topic_update()
+        update.message.text = "All external deliverables"
+        context = _make_context()
+        record = MagicMock()
+        record.allow_other = True
+        record.question_id = "question-hidden"
+        window = MagicMock()
+        window.window_id = "@7"
+        window.cwd = "/tmp/project"
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
+            patch(
+                "ccbot.bot.find_answerable_omx_question_for_window",
+                new_callable=AsyncMock,
+                return_value=record,
+            ),
+            patch(
+                "ccbot.bot.answer_omx_question_other",
+                new_callable=AsyncMock,
+            ) as mock_answer,
+            patch("ccbot.bot.has_visible_omx_question_artifact", return_value=False),
+            patch(
+                "ccbot.bot.handle_omx_question_ui",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_surface,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=window)
+            mock_tmux.capture_pane = AsyncMock(return_value="OpenAI Codex\n› ready\n")
+
+            await bot_mod.text_handler(update, context)
+
+        mock_answer.assert_not_awaited()
+        mock_surface.assert_awaited_once()
+        mock_sm.send_to_window.assert_not_called()
+        mock_reply.assert_awaited_once()
+        assert "OMX question is waiting for an answer" in mock_reply.await_args.args[1]
 
     @pytest.mark.asyncio
     async def test_usage_command_is_runtime_gated_for_codex(self):

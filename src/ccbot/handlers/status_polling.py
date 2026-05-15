@@ -56,6 +56,7 @@ from .message_queue import (
     enqueue_pending_input_update,
     enqueue_status_update,
     get_message_queue,
+    is_pre_final_visible_lane_closed,
 )
 
 logger = logging.getLogger(__name__)
@@ -563,12 +564,26 @@ async def update_status_message(
         pane_text=pane_text,
     )
 
+    turn_generation = current_turn_generation(user_id, thread_id)
+    pre_final_lane_open = (
+        turn_generation > 0
+        and not is_pre_final_visible_lane_closed(user_id, thread_id)
+    )
+    send_missing_question = not skip_status and not pre_final_lane_open
+    question_kwargs: dict[str, object] = {
+        "send_if_missing": send_missing_question,
+    }
+    if skip_status:
+        question_kwargs["defer_reason"] = "queue_not_empty"
+    elif pre_final_lane_open:
+        question_kwargs["defer_reason"] = "pre_final_lane_open"
+
     if await handle_omx_question_ui(
         bot,
         user_id,
         window_id,
         thread_id,
-        send_if_missing=not skip_status,
+        **question_kwargs,
     ):
         update_window_input_safety_snapshot(
             window_id=window_id,

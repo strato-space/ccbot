@@ -175,6 +175,61 @@ class TestStatusPollerSettingsDetection:
         mock_status.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_omx_question_first_prompt_defers_while_pre_final_lane_open(
+        self, mock_bot: AsyncMock
+    ):
+        window_id = "@5"
+        mock_window = MagicMock()
+        mock_window.window_id = window_id
+        mock_window.pane_current_command = "node"
+        pane_text = "Working\n────────────────\ngpt-5.5 high"
+
+        with (
+            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+            patch(
+                "ccbot.handlers.status_polling.enqueue_pending_input_update",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "ccbot.handlers.status_polling._maybe_enqueue_runtime_exit_warning",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "ccbot.handlers.status_polling.handle_omx_question_ui",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_omx_question,
+            patch(
+                "ccbot.handlers.status_polling.enqueue_status_update",
+                new_callable=AsyncMock,
+            ) as mock_status,
+            patch(
+                "ccbot.handlers.status_polling.current_turn_generation",
+                return_value=4,
+            ),
+            patch(
+                "ccbot.handlers.status_polling.is_pre_final_visible_lane_closed",
+                return_value=False,
+            ),
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
+            mock_tmux.capture_pane = AsyncMock(return_value=pane_text)
+
+            await update_status_message(
+                mock_bot, user_id=1, window_id=window_id, thread_id=42
+            )
+
+        mock_omx_question.assert_awaited_once_with(
+            mock_bot,
+            1,
+            window_id,
+            42,
+            send_if_missing=False,
+            defer_reason="pre_final_lane_open",
+        )
+        mock_status.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_omx_question_helper_state_path_sends_prompt_not_status(
         self,
         mock_bot: AsyncMock,

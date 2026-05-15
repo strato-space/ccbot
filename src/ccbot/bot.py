@@ -168,6 +168,7 @@ from .handlers.omx_questions import (
     answer_omx_question_other,
     clear_omx_question_msg,
     find_answerable_omx_question_for_window,
+    has_visible_omx_question_artifact,
     handle_omx_question_callback,
     handle_omx_question_ui,
 )
@@ -1531,6 +1532,13 @@ async def _surface_omx_question_state(
     handle_kwargs: dict[str, object] = {"record": record}
     if chat_id is not None:
         handle_kwargs["chat_id"] = chat_id
+    turn_generation = current_turn_generation(user_id, thread_id)
+    if turn_generation > 0 and not is_pre_final_visible_lane_closed(
+        user_id,
+        thread_id,
+    ):
+        handle_kwargs["send_if_missing"] = False
+        handle_kwargs["defer_reason"] = "pre_final_lane_open"
     shown = await handle_omx_question_ui(
         bot,
         user_id,
@@ -4415,7 +4423,24 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             allow_other=bool(getattr(record, "allow_other", False)) if record else None,
             source="question_record_scan",
         )
-    if record is not None and bool(getattr(record, "allow_other", False)) and text.strip():
+    question_artifact_visible = (
+        has_visible_omx_question_artifact(
+            user.id,
+            thread_id=surface.message_thread_id,
+            chat_id=chat.id if chat and chat.id is not None else None,
+            window_id=wid,
+            question_id=getattr(record, "question_id", None),
+        )
+        if record is not None
+        else False
+    )
+    if (
+        record is not None
+        and question_artifact_visible
+        and bool(getattr(record, "allow_other", False))
+        and text.strip()
+    ):
+        open_new_turn_generation(user.id, surface.message_thread_id)
         answer = await answer_omx_question_other(record, text, window_id=wid)
         await clear_omx_question_msg(
             user.id,

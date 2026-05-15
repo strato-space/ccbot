@@ -190,11 +190,16 @@ same message while the question remains active, and answers by writing the
 durable record to terminal status `answered`. The OMX renderer may be a
 temporary tmux split pane, but that pane inherits the parent bound tmux window;
 it is never promoted to a Telegram control surface or delivery source. When
-status polling discovers a new question while earlier informational/commentary
-content is still queued for the same user, the initial question prompt is
-deferred until that queue drains so the human sees the explanatory message
-before the questionnaire. Edits to an already visible question artifact remain
-allowed because they do not create a new out-of-order prompt. When
+status polling discovers a new question while the current turn's pre-final lane
+is still open, the initial question prompt is deferred until the explanatory
+terminal/informational artifact closes that lane, even if that artifact has not
+yet been discovered or queued. If earlier informational/commentary content is
+already queued for the same user, the prompt also waits for that queue to drain
+so the human sees the explanatory message before the questionnaire. Edits to an
+already visible question artifact remain allowed because they do not create a
+new out-of-order prompt. Prompt sends, edits, and first-send deferrals are audit
+events with `semantic_kind=interactive_question` rather than inferred from
+Telegram message-id gaps. When
 the OMX record provides a tmux return bridge, the bot closes the temporary
 question pane and best-effort sends the normal `[omx question answered] ...`
 continuation line through the bound runtime input path when a bound window is

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ccbot.handlers import omx_questions
+from ccbot.handlers import message_queue, omx_questions
 from ccbot.handlers.callback_data import (
     CB_OMX_QUESTION_REFRESH,
     CB_OMX_QUESTION_SELECT,
@@ -85,11 +85,21 @@ def _clear_question_state(monkeypatch: pytest.MonkeyPatch) -> None:
     omx_questions._question_windows.clear()
     omx_questions._question_selections.clear()
     omx_questions._question_render_state.clear()
+    omx_questions._question_prompt_deferrals.clear()
+    omx_questions._question_prompt_defer_audited.clear()
+    message_queue._turn_generations.clear()
+    message_queue._pre_final_visible_closed.clear()
+    message_queue._technical_status_closed.clear()
     yield
     omx_questions._question_msgs.clear()
     omx_questions._question_windows.clear()
     omx_questions._question_selections.clear()
     omx_questions._question_render_state.clear()
+    omx_questions._question_prompt_deferrals.clear()
+    omx_questions._question_prompt_defer_audited.clear()
+    message_queue._turn_generations.clear()
+    message_queue._pre_final_visible_closed.clear()
+    message_queue._technical_status_closed.clear()
 
 
 def test_find_active_omx_question_reads_durable_record(tmp_path: Path) -> None:
@@ -275,6 +285,122 @@ async def test_handle_omx_question_ui_sends_once_then_reuses_existing_message(
     assert "❓ OMX Question" in text
     assert "Pick a path" in text
     assert "1. Proceed" in text
+
+
+@pytest.mark.asyncio
+async def test_handle_omx_question_ui_audits_prompt_send(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ccbot import delivery_audit
+
+    audit_path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    _write_question(tmp_path)
+    window = TmuxWindow(
+        window_id="@7",
+        window_name="work",
+        cwd=str(tmp_path),
+        pane_current_command="node",
+        pane_id="%0",
+    )
+    bot = AsyncMock()
+    bot.send_message.return_value = SimpleNamespace(message_id=56)
+    monkeypatch.setattr(
+        omx_questions.tmux_manager,
+        "find_window_by_id",
+        AsyncMock(return_value=window),
+    )
+    monkeypatch.setattr(
+        omx_questions.session_manager,
+        "resolve_chat_id",
+        lambda user_id, thread_id=None: -100,
+    )
+
+    assert await omx_questions.handle_omx_question_ui(bot, 1, "@7", 42) is True
+
+    rows = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[-1]["action"] == "send"
+    assert rows[-1]["task_type"] == "question_prompt"
+    assert rows[-1]["semantic_kind"] == "interactive_question"
+    assert rows[-1]["content_type"] == "question"
+    assert rows[-1]["message_id"] == 56
+    assert "question-2026-04-30T01-00-00-000Z-a1b2c3d4" in rows[-1]["preview"]
+    assert "Pick a path" in rows[-1]["preview"]
+
+
+@pytest.mark.asyncio
+async def test_handle_omx_question_ui_defers_first_prompt_until_gate_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ccbot import delivery_audit
+
+    audit_path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    _write_question(tmp_path)
+    window = TmuxWindow(
+        window_id="@7",
+        window_name="work",
+        cwd=str(tmp_path),
+        pane_current_command="node",
+        pane_id="%0",
+    )
+    bot = AsyncMock()
+    bot.send_message.return_value = SimpleNamespace(message_id=57)
+    monotonic_values = [100.0, 146.0]
+    monkeypatch.setattr(
+        omx_questions.time,
+        "monotonic",
+        lambda: monotonic_values.pop(0) if monotonic_values else 146.0,
+    )
+    monkeypatch.setattr(
+        omx_questions.tmux_manager,
+        "find_window_by_id",
+        AsyncMock(return_value=window),
+    )
+    monkeypatch.setattr(
+        omx_questions.session_manager,
+        "resolve_chat_id",
+        lambda user_id, thread_id=None: -100,
+    )
+
+    assert (
+        await omx_questions.handle_omx_question_ui(
+            bot,
+            1,
+            "@7",
+            42,
+            send_if_missing=False,
+            defer_reason="pre_final_lane_open",
+        )
+        is True
+    )
+    bot.send_message.assert_not_awaited()
+
+    assert (
+        await omx_questions.handle_omx_question_ui(
+            bot,
+            1,
+            "@7",
+            42,
+            send_if_missing=False,
+            defer_reason="pre_final_lane_open",
+        )
+        is True
+    )
+    bot.send_message.assert_awaited_once()
+
+    rows = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["action"] == "suppress"
+    assert rows[0]["reason"] == "pre_final_lane_open"
+    assert rows[0]["semantic_kind"] == "interactive_question"
+    assert rows[-1]["action"] == "send"
+    assert rows[-1]["reason"] == "pre_final_gate_timeout"
 
 
 @pytest.mark.asyncio
@@ -614,7 +740,12 @@ async def test_omx_question_callback_answers_current_record(
         "_callback_window_authorized",
         lambda *args, **kwargs: True,
     )
-    send_to_window = AsyncMock(return_value=(True, "ok"))
+    generation_at_bridge: list[int] = []
+
+    async def send_to_window(window_id: str, text: str) -> tuple[bool, str]:
+        generation_at_bridge.append(message_queue.current_turn_generation(1, 42))
+        return True, "ok"
+
     kill_pane = AsyncMock(return_value=True)
     raw_send = AsyncMock()
     monkeypatch.setattr(omx_questions.session_manager, "send_to_window", send_to_window)
@@ -638,10 +769,11 @@ async def test_omx_question_callback_answers_current_record(
     assert payload["status"] == "answered"
     assert payload["answer"]["value"] == "revise"
     kill_pane.assert_awaited_once_with("%207", return_target="%0")
-    send_to_window.assert_awaited_once_with("@7", "[omx question answered] revise")
+    assert generation_at_bridge == [1]
     raw_send.assert_not_awaited()
     query.edit_message_text.assert_awaited_once()
     query.answer.assert_awaited_once_with("Answered")
+    assert message_queue.current_turn_generation(1, 42) == 1
 
 
 @pytest.mark.asyncio

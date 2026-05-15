@@ -113,9 +113,14 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
 - **OMX interactive questions** — Runtime-owned `omx.question/v1` records under
   `.omx/state/questions/`, `.omx/state/sessions/*/questions/`, or the explicit
   `--state-path` of a same-window OMX question renderer pane are rendered as a
-  separate mutable Telegram artifact with inline option buttons. The temporary
-  renderer pane belongs to the bound tmux window; it is not promoted to a
-  bindable control surface or delivery source. Choosing an option writes the
+  separate mutable Telegram artifact with inline option buttons. A newly
+  discovered first prompt is held while the current turn's pre-final lane is
+  open so explanatory final/info content lands before the questionnaire; edits
+  to an already visible prompt still happen in place and are not delayed by that
+  first-send gate. Prompt sends, edits, and first-send deferrals are written to
+  the delivery audit as interactive-question events. The temporary renderer
+  pane belongs to the bound tmux window; it is not promoted to a bindable
+  control surface or delivery source. Choosing an option writes the
   durable record as `answered`, closes the temporary question pane, and
   best-effort bridges the normal `[omx question answered] ...` continuation
   line through the bound runtime input path when a bound window is known (so
