@@ -7,7 +7,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from ccbot.handlers import omx_questions
-from ccbot.handlers.callback_data import CB_OMX_QUESTION_SELECT, CB_OMX_QUESTION_TOGGLE
+from ccbot.handlers.callback_data import (
+    CB_OMX_QUESTION_REFRESH,
+    CB_OMX_QUESTION_SELECT,
+    CB_OMX_QUESTION_TOGGLE,
+)
 from ccbot.tmux_manager import TmuxWindow
 
 
@@ -844,7 +848,7 @@ async def test_omx_question_multiselect_toggle_rerenders_exact_record_not_newest
     )
     query = SimpleNamespace(
         data=f"{omx_questions.CB_OMX_QUESTION_TOGGLE}:0:old12345:@7",
-        message=SimpleNamespace(message_thread_id=42),
+        message=SimpleNamespace(message_id=77, message_thread_id=42),
         answer=AsyncMock(),
         edit_message_text=AsyncMock(),
     )
@@ -856,9 +860,13 @@ async def test_omx_question_multiselect_toggle_rerenders_exact_record_not_newest
 
     assert await omx_questions.handle_omx_question_callback(update, context) is True
 
-    text = bot.send_message.await_args.kwargs["text"]
+    bot.send_message.assert_not_awaited()
+    bot.edit_message_text.assert_awaited_once()
+    assert bot.edit_message_text.await_args.kwargs["message_id"] == 77
+    text = bot.edit_message_text.await_args.kwargs["text"]
     assert "Old prompt" in text
     assert "New prompt" not in text
+    assert omx_questions._question_msgs[(1, "t:42")] == 77
     assert (
         omx_questions._question_selections[
             (1, "t:42", "question-2026-04-30T01-00-00-000Z-old12345")
@@ -866,6 +874,355 @@ async def test_omx_question_multiselect_toggle_rerenders_exact_record_not_newest
         == {0}
     )
     query.answer.assert_awaited_once_with("Updated")
+
+
+@pytest.mark.asyncio
+async def test_omx_question_multiselect_repeated_toggles_keep_callback_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_question(tmp_path, multi_select=True, target="", return_target="")
+    window = TmuxWindow(
+        window_id="@7",
+        window_name="work",
+        cwd=str(tmp_path),
+        pane_current_command="node",
+        pane_id="%0",
+    )
+    bot = AsyncMock()
+    monkeypatch.setattr(
+        omx_questions.tmux_manager,
+        "find_window_by_id",
+        AsyncMock(return_value=window),
+    )
+    monkeypatch.setattr(
+        omx_questions.session_manager,
+        "resolve_chat_id",
+        lambda user_id, thread_id=None: -100,
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_callback_window_authorized",
+        lambda *args, **kwargs: True,
+    )
+    update = SimpleNamespace(
+        callback_query=SimpleNamespace(
+            data=f"{omx_questions.CB_OMX_QUESTION_TOGGLE}:0:a1b2c3d4:@7",
+            message=SimpleNamespace(message_id=77, message_thread_id=42),
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        ),
+        effective_user=SimpleNamespace(id=1),
+    )
+    context = SimpleNamespace(bot=bot)
+
+    assert await omx_questions.handle_omx_question_callback(update, context) is True
+    update.callback_query.data = (
+        f"{omx_questions.CB_OMX_QUESTION_TOGGLE}:1:a1b2c3d4:@7"
+    )
+    assert await omx_questions.handle_omx_question_callback(update, context) is True
+
+    bot.send_message.assert_not_awaited()
+    assert bot.edit_message_text.await_count == 2
+    assert {
+        call.kwargs["message_id"] for call in bot.edit_message_text.await_args_list
+    } == {77}
+    assert (
+        omx_questions._question_selections[
+            (1, "t:42", "question-2026-04-30T01-00-00-000Z-a1b2c3d4")
+        ]
+        == {0, 1}
+    )
+
+
+@pytest.mark.asyncio
+async def test_omx_question_poll_after_callback_toggle_does_not_send_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_question(tmp_path, multi_select=True, target="", return_target="")
+    window = TmuxWindow(
+        window_id="@7",
+        window_name="work",
+        cwd=str(tmp_path),
+        pane_current_command="node",
+        pane_id="%0",
+    )
+    bot = AsyncMock()
+    monkeypatch.setattr(
+        omx_questions.tmux_manager,
+        "find_window_by_id",
+        AsyncMock(return_value=window),
+    )
+    monkeypatch.setattr(
+        omx_questions.session_manager,
+        "resolve_chat_id",
+        lambda user_id, thread_id=None: -100,
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_callback_window_authorized",
+        lambda *args, **kwargs: True,
+    )
+    update = SimpleNamespace(
+        callback_query=SimpleNamespace(
+            data=f"{omx_questions.CB_OMX_QUESTION_TOGGLE}:0:a1b2c3d4:@7",
+            message=SimpleNamespace(message_id=77, message_thread_id=42),
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        ),
+        effective_user=SimpleNamespace(id=1),
+    )
+    context = SimpleNamespace(bot=bot)
+
+    assert await omx_questions.handle_omx_question_callback(update, context) is True
+    bot.send_message.reset_mock()
+    bot.edit_message_text.reset_mock()
+
+    assert await omx_questions.handle_omx_question_ui(bot, 1, "@7", 42) is True
+
+    bot.send_message.assert_not_awaited()
+    bot.edit_message_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_omx_question_refresh_edits_callback_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_question(tmp_path, multi_select=True, target="", return_target="")
+    window = TmuxWindow(
+        window_id="@7",
+        window_name="work",
+        cwd=str(tmp_path),
+        pane_current_command="node",
+        pane_id="%0",
+    )
+    bot = AsyncMock()
+    monkeypatch.setattr(
+        omx_questions.tmux_manager,
+        "find_window_by_id",
+        AsyncMock(return_value=window),
+    )
+    monkeypatch.setattr(
+        omx_questions.session_manager,
+        "resolve_chat_id",
+        lambda user_id, thread_id=None: -100,
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_callback_window_authorized",
+        lambda *args, **kwargs: True,
+    )
+    query = SimpleNamespace(
+        data=f"{CB_OMX_QUESTION_REFRESH}:a1b2c3d4:@7",
+        message=SimpleNamespace(message_id=77, message_thread_id=42),
+        answer=AsyncMock(),
+        edit_message_text=AsyncMock(),
+    )
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_user=SimpleNamespace(id=1),
+    )
+    context = SimpleNamespace(bot=bot)
+
+    assert await omx_questions.handle_omx_question_callback(update, context) is True
+
+    bot.send_message.assert_not_awaited()
+    bot.edit_message_text.assert_awaited_once()
+    assert bot.edit_message_text.await_args.kwargs["message_id"] == 77
+    assert omx_questions._question_msgs[(1, "t:42")] == 77
+    query.answer.assert_awaited_once_with("Refreshed")
+
+
+@pytest.mark.asyncio
+async def test_omx_question_idempotent_edit_keeps_tracking_without_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_question(tmp_path, multi_select=True, target="", return_target="")
+    window = TmuxWindow(
+        window_id="@7",
+        window_name="work",
+        cwd=str(tmp_path),
+        pane_current_command="node",
+        pane_id="%0",
+    )
+    bot = AsyncMock()
+    bot.edit_message_text.side_effect = Exception("Message is not modified")
+    monkeypatch.setattr(
+        omx_questions.tmux_manager,
+        "find_window_by_id",
+        AsyncMock(return_value=window),
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_callback_window_authorized",
+        lambda *args, **kwargs: True,
+    )
+    query = SimpleNamespace(
+        data=f"{omx_questions.CB_OMX_QUESTION_TOGGLE}:0:a1b2c3d4:@7",
+        message=SimpleNamespace(message_id=77, message_thread_id=42, chat_id=-100),
+        answer=AsyncMock(),
+        edit_message_text=AsyncMock(),
+    )
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_user=SimpleNamespace(id=1),
+    )
+    context = SimpleNamespace(bot=bot)
+
+    assert await omx_questions.handle_omx_question_callback(update, context) is True
+
+    bot.send_message.assert_not_awaited()
+    assert omx_questions._question_msgs[(1, "t:42")] == 77
+    assert (
+        omx_questions._question_render_state[(1, "t:42")]
+        == ("question-2026-04-30T01-00-00-000Z-a1b2c3d4", (0,))
+    )
+    query.answer.assert_awaited_once_with("Updated")
+
+
+@pytest.mark.asyncio
+async def test_omx_question_toggle_replacement_send_is_tracked_after_real_edit_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_question(tmp_path, multi_select=True, target="", return_target="")
+    window = TmuxWindow(
+        window_id="@7",
+        window_name="work",
+        cwd=str(tmp_path),
+        pane_current_command="node",
+        pane_id="%0",
+    )
+    bot = AsyncMock()
+    bot.edit_message_text.side_effect = Exception("message to edit not found")
+    bot.send_message.return_value = SimpleNamespace(message_id=88)
+    monkeypatch.setattr(
+        omx_questions.tmux_manager,
+        "find_window_by_id",
+        AsyncMock(return_value=window),
+    )
+    monkeypatch.setattr(
+        omx_questions.session_manager,
+        "resolve_chat_id",
+        lambda user_id, thread_id=None: -100,
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_callback_window_authorized",
+        lambda *args, **kwargs: True,
+    )
+    query = SimpleNamespace(
+        data=f"{omx_questions.CB_OMX_QUESTION_TOGGLE}:0:a1b2c3d4:@7",
+        message=SimpleNamespace(message_id=77, message_thread_id=42),
+        answer=AsyncMock(),
+        edit_message_text=AsyncMock(),
+    )
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_user=SimpleNamespace(id=1),
+    )
+    context = SimpleNamespace(bot=bot)
+
+    assert await omx_questions.handle_omx_question_callback(update, context) is True
+
+    bot.edit_message_text.assert_awaited_once()
+    bot.send_message.assert_awaited_once()
+    assert omx_questions._question_msgs[(1, "t:42")] == 88
+    assert (
+        omx_questions._question_selections[
+            (1, "t:42", "question-2026-04-30T01-00-00-000Z-a1b2c3d4")
+        ]
+        == {0}
+    )
+    query.answer.assert_awaited_once_with("Updated")
+
+
+@pytest.mark.asyncio
+async def test_omx_question_toggle_unknown_edit_failure_does_not_send_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_question(tmp_path, multi_select=True, target="", return_target="")
+    window = TmuxWindow(
+        window_id="@7",
+        window_name="work",
+        cwd=str(tmp_path),
+        pane_current_command="node",
+        pane_id="%0",
+    )
+    bot = AsyncMock()
+    bot.edit_message_text.side_effect = Exception("temporary Telegram timeout")
+    monkeypatch.setattr(
+        omx_questions.tmux_manager,
+        "find_window_by_id",
+        AsyncMock(return_value=window),
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_callback_window_authorized",
+        lambda *args, **kwargs: True,
+    )
+    query = SimpleNamespace(
+        data=f"{omx_questions.CB_OMX_QUESTION_TOGGLE}:0:a1b2c3d4:@7",
+        message=SimpleNamespace(message_id=77, message_thread_id=42, chat_id=-100),
+        answer=AsyncMock(),
+        edit_message_text=AsyncMock(),
+    )
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_user=SimpleNamespace(id=1),
+    )
+    context = SimpleNamespace(bot=bot)
+
+    assert await omx_questions.handle_omx_question_callback(update, context) is True
+
+    bot.send_message.assert_not_awaited()
+    assert omx_questions._question_msgs[(1, "t:42")] == 77
+    assert (1, "t:42") not in omx_questions._question_render_state
+    query.answer.assert_awaited_once_with(
+        "Could not update question prompt; please retry",
+        show_alert=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_omx_question_replacement_send_preserves_callback_chat_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_question(tmp_path, multi_select=True, target="", return_target="")
+    window = TmuxWindow(
+        window_id="@7",
+        window_name="work",
+        cwd=str(tmp_path),
+        pane_current_command="node",
+        pane_id="%0",
+    )
+    bot = AsyncMock()
+    bot.edit_message_text.side_effect = Exception("message to edit not found")
+    bot.send_message.return_value = SimpleNamespace(message_id=88)
+    monkeypatch.setattr(
+        omx_questions.tmux_manager,
+        "find_window_by_id",
+        AsyncMock(return_value=window),
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_callback_window_authorized",
+        lambda *args, **kwargs: True,
+    )
+    query = SimpleNamespace(
+        data=f"{omx_questions.CB_OMX_QUESTION_TOGGLE}:0:a1b2c3d4:@7",
+        message=SimpleNamespace(message_id=77, chat_id=-12345),
+        answer=AsyncMock(),
+        edit_message_text=AsyncMock(),
+    )
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_user=SimpleNamespace(id=1),
+    )
+    context = SimpleNamespace(bot=bot)
+
+    assert await omx_questions.handle_omx_question_callback(update, context) is True
+
+    assert bot.send_message.await_args.kwargs["chat_id"] == -12345
+    assert omx_questions._question_msgs[(1, "c:-12345")] == 88
 
 
 @pytest.mark.asyncio
@@ -913,6 +1270,13 @@ async def test_omx_question_multiselect_submit_answers_selected_options(
     assert payload["status"] == "answered"
     assert payload["answer"]["kind"] == "multi"
     assert payload["answer"]["value"] == ["proceed", "revise"]
+    query.edit_message_text.assert_awaited_once()
+    assert (1, "t:42") not in omx_questions._question_msgs
+    assert (
+        1,
+        "t:42",
+        "question-2026-04-30T01-00-00-000Z-a1b2c3d4",
+    ) not in omx_questions._question_selections
     query.answer.assert_awaited_once_with("Answered")
 
 

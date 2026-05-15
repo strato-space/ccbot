@@ -121,6 +121,27 @@ def _drop_question_tracking(key: _QuestionKey) -> None:
         _question_selections.pop(selection_key, None)
 
 
+def _is_message_not_modified_error(exc: Exception) -> bool:
+    """Return whether Telegram reported an idempotent edit no-op."""
+    return "message is not modified" in str(exc).casefold()
+
+
+def _is_question_replacement_edit_error(exc: Exception) -> bool:
+    """Return whether an edit failure means a replacement prompt is appropriate."""
+    message = str(exc).casefold()
+    return any(
+        marker in message
+        for marker in (
+            "message to edit not found",
+            "message not found",
+            "message can't be edited",
+            "message cannot be edited",
+            "message is inaccessible",
+            "message_id_invalid",
+        )
+    )
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
@@ -1334,6 +1355,60 @@ async def _edit_terminal_question_artifact(
         return False
 
 
+async def _edit_active_question_artifact(
+    bot: Bot,
+    *,
+    user_id: int,
+    key: _QuestionKey,
+    msg_id: int,
+    record: OmxQuestionRecord,
+    window_id: str,
+    thread_id: int | None,
+    chat_id: int | None = None,
+    selected: set[int] | None = None,
+) -> str:
+    """Edit an existing active question artifact and repair local tracking.
+
+    Callback updates already carry the Telegram message id that the user tapped.
+    Use that id as the artifact identity so multi-select toggles remain mutable
+    updates instead of falling back to a new prompt send after process restart or
+    lost in-memory tracking.
+    """
+    selected = selected or set()
+    render_state = (record.question_id, tuple(sorted(selected)))
+    resolved_chat_id = (
+        chat_id
+        if chat_id is not None
+        else session_manager.resolve_chat_id(user_id, thread_id)
+    )
+    try:
+        await bot.edit_message_text(
+            chat_id=resolved_chat_id,
+            message_id=msg_id,
+            text=_build_question_text(record, selected),
+            reply_markup=_build_question_keyboard(record, window_id, selected=selected),
+            link_preview_options=NO_LINK_PREVIEW,
+        )
+    except Exception as exc:
+        if _is_message_not_modified_error(exc):
+            pass
+        elif _is_question_replacement_edit_error(exc):
+            logger.debug(
+                "OMX question artifact edit requires replacement",
+                exc_info=True,
+            )
+            return "replace"
+        else:
+            logger.debug("Failed to edit active OMX question artifact", exc_info=True)
+            _question_msgs[key] = msg_id
+            _question_windows[key] = window_id
+            return "failed"
+    _question_msgs[key] = msg_id
+    _question_windows[key] = window_id
+    _question_render_state[key] = render_state
+    return "ok"
+
+
 async def handle_omx_question_ui(
     bot: Bot,
     user_id: int,
@@ -1341,13 +1416,19 @@ async def handle_omx_question_ui(
     thread_id: int | None = None,
     *,
     record: OmxQuestionRecord | None = None,
+    chat_id: int | None = None,
 ) -> bool:
     """Send/update an OMX question prompt for the bound window, if active."""
     window = await tmux_manager.find_window_by_id(window_id)
     if not window:
         await clear_omx_question_msg(user_id, bot, thread_id, window_id=window_id)
         return False
-    key = _question_surface_key(user_id, thread_id=thread_id, window_id=window_id)
+    key = _question_surface_key(
+        user_id,
+        thread_id=thread_id,
+        chat_id=chat_id,
+        window_id=window_id,
+    )
     if record is None:
         record = await find_answerable_omx_question_for_window(window)
     if record is None:
@@ -1386,30 +1467,36 @@ async def handle_omx_question_ui(
     )
     text = _build_question_text(record, selected)
     keyboard = _build_question_keyboard(record, window_id, selected=selected)
-    chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+    resolved_chat_id = (
+        chat_id
+        if chat_id is not None
+        else session_manager.resolve_chat_id(user_id, thread_id)
+    )
     thread_kwargs = {"message_thread_id": thread_id} if thread_id is not None else {}
     existing_msg_id = _question_msgs.get(key)
     render_state = (record.question_id, tuple(sorted(selected)))
     if existing_msg_id:
         if _question_render_state.get(key) == render_state:
             return True
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=existing_msg_id,
-                text=text,
-                reply_markup=keyboard,
-                link_preview_options=NO_LINK_PREVIEW,
-            )
-            _question_windows[key] = window_id
-            _question_render_state[key] = render_state
+        edit_result = await _edit_active_question_artifact(
+            bot,
+            user_id=user_id,
+            key=key,
+            msg_id=existing_msg_id,
+            record=record,
+            window_id=window_id,
+            thread_id=thread_id,
+            chat_id=resolved_chat_id,
+            selected=selected,
+        )
+        if edit_result == "ok":
             return True
-        except Exception:
-            logger.debug("Failed to edit OMX question message", exc_info=True)
-            _question_msgs.pop(key, None)
+        if edit_result == "failed":
+            return False
+        _question_msgs.pop(key, None)
     try:
         sent = await bot.send_message(
-            chat_id=chat_id,
+            chat_id=resolved_chat_id,
             text=text,
             reply_markup=keyboard,
             link_preview_options=NO_LINK_PREVIEW,
@@ -1470,6 +1557,12 @@ def _chat_id_from_update(update: Update) -> int | None:
     effective_chat = getattr(update, "effective_chat", None)
     chat_id = getattr(effective_chat, "id", None)
     return chat_id if isinstance(chat_id, int) else None
+
+
+def _message_id_from_update(update: Update) -> int | None:
+    message = update.callback_query.message if update.callback_query else None
+    message_id = getattr(message, "message_id", None)
+    return message_id if isinstance(message_id, int) else None
 
 
 def _callback_window_authorized(
@@ -1541,13 +1634,37 @@ async def handle_omx_question_callback(
     )
     key = (*surface_key, record.question_id)
     if action == CB_OMX_QUESTION_REFRESH:
-        await handle_omx_question_ui(
-            context.bot,
-            user.id,
-            window_id,
-            thread_id,
-            record=record,
+        selected = (
+            set(_question_selections.get(key, set())) if record.multi_select else set()
         )
+        msg_id = _message_id_from_update(update)
+        refreshed = (
+            await _edit_active_question_artifact(
+                context.bot,
+                user_id=user.id,
+                key=surface_key,
+                msg_id=msg_id,
+                record=record,
+                window_id=window_id,
+                thread_id=thread_id,
+                chat_id=chat_id,
+                selected=selected,
+            )
+            if msg_id is not None
+            else False
+        )
+        if refreshed == "failed":
+            await query.answer("Could not update question prompt; please retry", show_alert=True)
+            return True
+        if refreshed != "ok":
+            await handle_omx_question_ui(
+                context.bot,
+                user.id,
+                window_id,
+                thread_id,
+                record=record,
+                chat_id=chat_id,
+            )
         await query.answer("Refreshed")
         return True
 
@@ -1573,13 +1690,34 @@ async def handle_omx_question_callback(
                 record.question_id,
                 index,
             )
-        await handle_omx_question_ui(
-            context.bot,
-            user.id,
-            window_id,
-            thread_id,
-            record=record,
+        msg_id = _message_id_from_update(update)
+        edited = (
+            await _edit_active_question_artifact(
+                context.bot,
+                user_id=user.id,
+                key=surface_key,
+                msg_id=msg_id,
+                record=record,
+                window_id=window_id,
+                thread_id=thread_id,
+                chat_id=chat_id,
+                selected=selected,
+            )
+            if msg_id is not None
+            else False
         )
+        if edited == "failed":
+            await query.answer("Could not update question prompt; please retry", show_alert=True)
+            return True
+        if edited != "ok":
+            await handle_omx_question_ui(
+                context.bot,
+                user.id,
+                window_id,
+                thread_id,
+                record=record,
+                chat_id=chat_id,
+            )
         await query.answer("Updated")
         return True
 

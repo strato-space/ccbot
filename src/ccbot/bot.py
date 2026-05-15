@@ -1528,12 +1528,15 @@ async def _surface_omx_question_state(
     record = await find_answerable_omx_question_for_window(w)
     if record is None:
         return False
+    handle_kwargs: dict[str, object] = {"record": record}
+    if chat_id is not None:
+        handle_kwargs["chat_id"] = chat_id
     shown = await handle_omx_question_ui(
         bot,
         user_id,
         window_id,
         thread_id,
-        record=record,
+        **handle_kwargs,
     )
     if not shown:
         logger.warning(
