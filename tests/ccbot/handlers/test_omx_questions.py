@@ -501,6 +501,11 @@ async def test_handle_omx_question_ui_recovers_renderer_start_failure_from_state
         "_candidate_question_paths_from_window_processes",
         AsyncMock(return_value=[question_path]),
     )
+    monkeypatch.setattr(
+        omx_questions,
+        "_launch_renderer_pane",
+        AsyncMock(return_value=None),
+    )
 
     assert await omx_questions.handle_omx_question_ui(bot, 3045664, "@8", 555) is True
 
@@ -522,6 +527,65 @@ async def test_handle_omx_question_ui_recovers_renderer_start_failure_from_state
         "%16",
         "[omx question answered] risk-tiered gates",
     )
+
+
+@pytest.mark.asyncio
+async def test_handle_omx_question_ui_materializes_renderer_start_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_cwd = tmp_path / "runtime"
+    runtime_cwd.mkdir()
+    run_root = tmp_path / "omx-runs" / "run-20260515131437-9496"
+    question_path = _write_question(
+        run_root,
+        question="Round 3 | Target: Non-goals | Ambiguity: 48%",
+        status="error",
+        include_renderer=False,
+        error={
+            "code": "question_runtime_failed",
+            "message": "omx question cannot open a visible renderer: no attached client",
+        },
+    )
+    (question_path.parent.parent / "deep-interview-state.json").write_text(
+        json.dumps({"tmux_pane_id": "%16", "tmux_window_id": "@8"}),
+        encoding="utf-8",
+    )
+    window = TmuxWindow(
+        window_id="@8",
+        window_name="comfy-agent",
+        cwd=str(runtime_cwd),
+        pane_current_command="node",
+        pane_id="%16",
+        pane_ids=("%16", "%18"),
+    )
+    bot = AsyncMock()
+    bot.send_message.return_value = SimpleNamespace(message_id=94)
+    monkeypatch.setattr(
+        omx_questions.tmux_manager,
+        "find_window_by_id",
+        AsyncMock(return_value=window),
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_candidate_question_paths_from_window_processes",
+        AsyncMock(return_value=[question_path]),
+    )
+    monkeypatch.setattr(omx_questions, "_tmux_pane_exists", AsyncMock(return_value=True))
+    launch = AsyncMock(return_value="%20")
+    monkeypatch.setattr(omx_questions, "_launch_renderer_pane", launch)
+
+    assert await omx_questions.handle_omx_question_ui(bot, 3045664, "@8", 555) is True
+
+    launch.assert_awaited_once()
+    payload = json.loads(question_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "prompting"
+    assert payload["renderer"] == {
+        "renderer": "tmux-pane",
+        "target": "%20",
+        "return_target": "%16",
+        "return_transport": "tmux-send-keys",
+    }
+    assert "error" not in payload
 
 
 @pytest.mark.asyncio

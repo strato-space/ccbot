@@ -192,7 +192,9 @@ startup failure is also recoverable when no helper pane exists yet but the
 session-scoped OMX mode state names a same-window tmux return pane; Telegram
 then owns the visible question artifact and best-effort bridges the answer to
 that return pane instead of presenting the renderer error as final technical
-status. This artifact is not a technical status artifact, not a user turn opener,
+status. When safe, the bot may also materialize a replacement same-window OMX
+question helper pane so the local tmux operator view and Telegram artifact stay
+aligned. This artifact is not a technical status artifact, not a user turn opener,
 and not a terminal
 assistant answer.
 

@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import re
+import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -218,6 +219,11 @@ def _session_state_dir_for_question(path: Path) -> Path | None:
     if session_state_dir.parent.name != "sessions":
         return None
     return session_state_dir
+
+
+def _session_id_for_question(path: Path) -> str:
+    session_state_dir = _session_state_dir_for_question(path)
+    return session_state_dir.name if session_state_dir is not None else ""
 
 
 def _renderer_with_state_return_bridge(
@@ -457,6 +463,118 @@ async def _capture_renderer_pane(target: str) -> str | None:
     if proc.returncode != 0:
         return None
     return stdout.decode("utf-8", errors="replace")
+
+
+async def _tmux_pane_exists(target: str) -> bool:
+    if not _PANE_ID_RE.match(target):
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux",
+            "display-message",
+            "-p",
+            "-t",
+            target,
+            "#{pane_id}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+    except Exception:
+        logger.debug("Failed to check tmux pane %s", target, exc_info=True)
+        return False
+    return proc.returncode == 0 and stdout.decode("utf-8", errors="replace").strip() == target
+
+
+async def _launch_renderer_pane(
+    record: OmxQuestionRecord,
+    window: TmuxWindow,
+) -> str | None:
+    """Best-effort create a same-window OMX question UI helper pane."""
+    return_target = _safe_str(record.renderer.get("return_target")).strip()
+    if not _PANE_ID_RE.match(return_target):
+        return None
+    if not await _tmux_pane_exists(return_target):
+        return None
+    omx = shutil.which("omx") or "omx"
+    session_id = _session_id_for_question(record.path)
+    env_args: list[str] = [f"OMX_QUESTION_RETURN_PANE={return_target}"]
+    if session_id:
+        env_args.append(f"OMX_SESSION_ID={session_id}")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux",
+            "split-window",
+            "-t",
+            return_target,
+            "-v",
+            "-l",
+            "16",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-c",
+            window.cwd,
+            "env",
+            *env_args,
+            omx,
+            "question",
+            "--ui",
+            "--state-path",
+            str(record.path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+    except Exception:
+        logger.debug("Failed to launch OMX question renderer pane", exc_info=True)
+        return None
+    if proc.returncode != 0:
+        logger.debug(
+            "OMX question renderer pane launch failed: %s",
+            stderr.decode("utf-8", errors="replace").strip(),
+        )
+        return None
+    pane_id = stdout.decode("utf-8", errors="replace").strip()
+    return pane_id if _PANE_ID_RE.match(pane_id) else None
+
+
+async def _ensure_renderer_for_unrendered_error(
+    record: OmxQuestionRecord,
+    window: TmuxWindow,
+) -> OmxQuestionRecord:
+    """Open a local helper pane for renderer-start failures when safe."""
+    if not _is_unrendered_question_runtime_error(record):
+        return record
+    if _safe_str(record.renderer.get("target")).strip():
+        return record
+    return_target = _safe_str(record.renderer.get("return_target")).strip()
+    pane_ids = {
+        pane_id
+        for pane_id in getattr(window, "pane_ids", ())
+        if isinstance(pane_id, str) and pane_id.strip()
+    }
+    if return_target not in pane_ids:
+        return record
+    pane_id = await _launch_renderer_pane(record, window)
+    if pane_id is None:
+        return record
+    try:
+        payload = _read_json_object(record.path)
+        payload["status"] = "prompting"
+        payload["updated_at"] = _now_iso()
+        payload["renderer"] = {
+            "renderer": "tmux-pane",
+            "target": pane_id,
+            "return_target": return_target,
+            "return_transport": "tmux-send-keys",
+        }
+        payload.pop("error", None)
+        _write_json_object(record.path, payload)
+    except Exception:
+        logger.debug("Failed to update OMX question renderer record", exc_info=True)
+        return record
+    return _load_question_record(record.path) or record
 
 
 def _question_error_payload(record: OmxQuestionRecord) -> dict[str, Any]:
@@ -1172,6 +1290,8 @@ async def handle_omx_question_ui(
                 window_id=window_id,
             )
         return False
+
+    record = await _ensure_renderer_for_unrendered_error(record, window)
 
     selection_key = (*key, record.question_id)
     selected = (
