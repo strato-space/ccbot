@@ -184,8 +184,12 @@ Telegram text/media input to the same bound window fails closed so it cannot
 bypass the blocking control question. If the OMX record allows `Other`, a
 free-text Telegram reply in the same bound thread is consumed as the `Other`
 answer, written to the durable record, bridged back to the recorded return pane,
-and the temporary question pane is closed. This artifact is not a technical
-status artifact, not a user turn opener, and not a terminal assistant answer.
+and the temporary question pane is closed. A timeout/error terminal record is
+not final while its same-window renderer pane is still alive and visibly
+matches the record; in that case the Telegram question artifact remains or is
+reopened as answerable, including `Other` recovery when allowed. This artifact
+is not a technical status artifact, not a user turn opener, and not a terminal
+assistant answer.
 
 This preserves the upstream Claude shape:
 

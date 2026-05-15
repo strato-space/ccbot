@@ -164,7 +164,7 @@ from .handlers.message_sender import (
 from .handlers.omx_questions import (
     answer_omx_question_other,
     clear_omx_question_msg,
-    find_active_omx_question_for_window,
+    find_answerable_omx_question_for_window,
     handle_omx_question_callback,
     handle_omx_question_ui,
 )
@@ -1449,7 +1449,7 @@ async def _surface_omx_question_state(
         return False
     if not isinstance(getattr(w, "cwd", ""), str) or not getattr(w, "cwd", ""):
         return False
-    record = await find_active_omx_question_for_window(w)
+    record = await find_answerable_omx_question_for_window(w)
     if record is None:
         return False
     shown = await handle_omx_question_ui(
@@ -4305,8 +4305,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    record = await find_active_omx_question_for_window(w)
-    if record is not None and record.allow_other and text.strip():
+    record = await find_answerable_omx_question_for_window(w)
+    if record is not None and bool(getattr(record, "allow_other", False)) and text.strip():
         answer = await answer_omx_question_other(record, text)
         await clear_omx_question_msg(
             user.id,

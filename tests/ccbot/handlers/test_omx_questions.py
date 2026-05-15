@@ -22,6 +22,7 @@ def _write_question(
     target: str = "%207",
     return_target: str = "%0",
     allow_other: bool = False,
+    error: dict[str, object] | None = None,
 ) -> Path:
     if scope == "root":
         path = root / ".omx/state/questions" / f"{question_id}.json"
@@ -30,40 +31,38 @@ def _write_question(
     else:
         raise ValueError(f"unsupported question scope: {scope}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
+    payload = {
+        "kind": "omx.question/v1",
+        "question_id": question_id,
+        "created_at": "2026-04-30T01:00:00.000Z",
+        "updated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "status": status,
+        "header": "Deep interview",
+        "question": question,
+        "options": [
             {
-                "kind": "omx.question/v1",
-                "question_id": question_id,
-                "created_at": "2026-04-30T01:00:00.000Z",
-                "updated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                "status": status,
-                "header": "Deep interview",
-                "question": question,
-                "options": [
-                    {
-                        "label": "Proceed",
-                        "value": "proceed",
-                        "description": "Continue safely",
-                    },
-                    {"label": "Revise", "value": "revise"},
-                ],
-                "allow_other": allow_other,
-                "other_label": "Other",
-                "multi_select": multi_select,
-                "type": "multi-answerable" if multi_select else "single-answerable",
-                "source": "deep-interview",
-                "renderer": {
-                    "renderer": "tmux-pane",
-                    "target": target,
-                    "return_target": return_target,
-                    "return_transport": "tmux-send-keys",
-                },
+                "label": "Proceed",
+                "value": "proceed",
+                "description": "Continue safely",
             },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
+            {"label": "Revise", "value": "revise"},
+        ],
+        "allow_other": allow_other,
+        "other_label": "Other",
+        "multi_select": multi_select,
+        "type": "multi-answerable" if multi_select else "single-answerable",
+        "source": "deep-interview",
+        "renderer": {
+            "renderer": "tmux-pane",
+            "target": target,
+            "return_target": return_target,
+            "return_transport": "tmux-send-keys",
+        },
+    }
+    if error is not None:
+        payload["error"] = error
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     return path
@@ -352,6 +351,93 @@ async def test_handle_omx_question_ui_reads_helper_pane_state_path_outside_cwd(
 
 
 @pytest.mark.asyncio
+async def test_handle_omx_question_ui_reopens_timeout_error_with_live_renderer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_cwd = tmp_path / "runtime"
+    runtime_cwd.mkdir()
+    run_root = tmp_path / "omx-runs" / "run-20260515065148-f3a6"
+    question_path = _write_question(
+        run_root,
+        question=(
+            "Round 1 | Target: Scope | Ambiguity: 100%\n\n"
+            "Для первого плана улучшений какой класс результатов должен получать "
+            "обязательный pre-delivery self-test gate перед отправкой пользователю?"
+        ),
+        status="error",
+        target="%12",
+        return_target="%5",
+        allow_other=True,
+        error={
+            "code": "question_runtime_failed",
+            "message": "Timed out waiting for question answer after 1800000ms",
+        },
+    )
+    window = TmuxWindow(
+        window_id="@4",
+        window_name="comfy-agent",
+        cwd=str(runtime_cwd),
+        pane_current_command="node",
+        pane_id="%5",
+        pane_ids=("%5", "%12", "%6"),
+    )
+    bot = AsyncMock()
+    bot.send_message.return_value = SimpleNamespace(message_id=92)
+    monkeypatch.setattr(
+        omx_questions.tmux_manager,
+        "find_window_by_id",
+        AsyncMock(return_value=window),
+    )
+    monkeypatch.setattr(
+        omx_questions.session_manager,
+        "resolve_chat_id",
+        lambda user_id, thread_id=None: -1003685295814,
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_list_pane_processes",
+        AsyncMock(return_value=[("%5", 1), ("%12", 2), ("%6", 3)]),
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_cmdline_for_pid",
+        lambda pid: [
+            "node",
+            "omx.js",
+            "question",
+            "--ui",
+            "--state-path",
+            str(question_path),
+        ]
+        if pid == 2
+        else ["node", "omx.js", "hud", "--watch"],
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_capture_renderer_pane",
+        AsyncMock(
+            return_value=(
+                "Round 1 | Target: Scope | Ambiguity: 100%\n\n"
+                "Для первого плана улучшений какой класс результатов должен получать "
+                "обязательный pre-delivery self-test gate перед отправкой пользователю?\n\n"
+                "› [x] 1. Proceed\n"
+                "  [ ] 2. Revise\n"
+                "  [ ] 4. Other\n"
+            )
+        ),
+    )
+
+    assert await omx_questions.handle_omx_question_ui(bot, 3045664, "@4", 555) is True
+
+    bot.send_message.assert_awaited_once()
+    text = bot.send_message.await_args.kwargs["text"]
+    assert "❓ OMX Question" in text
+    assert "pre-delivery self-test gate" in text
+    assert "Timed out waiting" not in text
+    assert "Other is available" in text
+
+
+@pytest.mark.asyncio
 async def test_omx_question_callback_answers_current_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -397,7 +483,7 @@ async def test_omx_question_callback_answers_current_record(
 
 
 @pytest.mark.asyncio
-async def test_omx_question_callback_answers_helper_pane_state_path_record(
+async def test_omx_question_callback_answers_recoverable_timeout_error_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime_cwd = tmp_path / "runtime"
@@ -406,8 +492,13 @@ async def test_omx_question_callback_answers_helper_pane_state_path_record(
     path = _write_question(
         run_root,
         question_id="question-2026-05-15T07-54-50-805Z-91cbac1d",
+        status="error",
         target="%12",
         return_target="%5",
+        error={
+            "code": "question_runtime_failed",
+            "message": "Timed out waiting for question answer after 1800000ms",
+        },
     )
     window = TmuxWindow(
         window_id="@4",
@@ -447,6 +538,11 @@ async def test_omx_question_callback_answers_helper_pane_state_path_record(
             if pid == 2
             else ["node", "omx.js", "hud", "--watch"]
         ),
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_capture_renderer_pane",
+        AsyncMock(return_value="Pick a path\n\n› [x] 1. Proceed\n  [ ] 2. Revise\n"),
     )
     send = AsyncMock(return_value=True)
     kill = AsyncMock(return_value=True)

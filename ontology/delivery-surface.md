@@ -98,11 +98,15 @@ control surface at a time.
     until answered or no longer active
   - if the record allows `Other`, a free-text Telegram reply on the same bound
     surface is consumed as the `Other` answer instead of ordinary runtime input
+  - a timeout/error record with a same-window renderer pane that is still alive
+    and visibly matches the record remains recoverable and answerable; the
+    timeout is not by itself final technical status
   - answering writes the durable question record to terminal state
     `answered`, then best-effort bridges the answer back to the recorded tmux
     return pane and closes the temporary question pane
-  - while the durable record is active, ordinary Telegram input to the same
-    bound tmux window fails closed and must not bypass the question artifact
+  - while the durable record is active or recoverable, ordinary Telegram input
+    to the same bound tmux window fails closed and must not bypass the question
+    artifact
     unless it is consumed through the allowed `Other` lane
 
 - **Warning artifact**

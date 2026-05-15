@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 _QUESTION_KIND = "omx.question/v1"
 _ACTIVE_STATUSES = frozenset({"pending", "prompting"})
 _TERMINAL_STATUSES = frozenset({"answered", "aborted", "error"})
+_ERROR_STATUSES = frozenset({"error"})
 _PANE_ID_RE = re.compile(r"^%\d+$")
 _MAX_QUESTION_AGE_SECONDS = 24 * 60 * 60
 _MAX_TEXT_CHARS = 3600
@@ -286,6 +287,79 @@ def _state_path_from_question_ui_cmdline(argv: list[str]) -> Path | None:
     return path
 
 
+async def _capture_renderer_pane(target: str) -> str | None:
+    """Capture a renderer pane by id for recovery validation only."""
+    if not _PANE_ID_RE.match(target):
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux",
+            "capture-pane",
+            "-p",
+            "-t",
+            target,
+            "-S",
+            "-80",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+    except Exception:
+        logger.debug("Failed to capture OMX renderer pane %s", target, exc_info=True)
+        return None
+    if proc.returncode != 0:
+        return None
+    return stdout.decode("utf-8", errors="replace")
+
+
+def _question_error_payload(record: OmxQuestionRecord) -> dict[str, Any]:
+    try:
+        payload = _read_json_object(record.path)
+    except Exception:
+        return {}
+    error = payload.get("error")
+    return error if isinstance(error, dict) else {}
+
+
+def _is_timeout_error_record(record: OmxQuestionRecord) -> bool:
+    if record.status != "error":
+        return False
+    error = _question_error_payload(record)
+    code = _safe_str(error.get("code")).strip()
+    message = _safe_str(error.get("message")).strip().casefold()
+    return code == "question_runtime_failed" and "timed out waiting" in message
+
+
+def _record_visible_in_renderer(record: OmxQuestionRecord, pane_text: str) -> bool:
+    haystack = " ".join((pane_text or "").split()).casefold()
+    if not haystack:
+        return False
+    question_lines = [line.strip() for line in record.question.splitlines() if line.strip()]
+    if question_lines:
+        question_anchor = max(question_lines, key=len)
+        if " ".join(question_anchor.split()).casefold() not in haystack:
+            return False
+    option_labels = [
+        " ".join(option.label.split()).casefold()
+        for option in record.options
+        if option.label.strip()
+    ]
+    if option_labels and not any(label in haystack for label in option_labels):
+        return False
+    return True
+
+
+async def _is_recoverable_live_renderer_error(record: OmxQuestionRecord) -> bool:
+    """Return whether a timeout/error record is still answerable in tmux."""
+    if not _is_timeout_error_record(record):
+        return False
+    renderer_target = _safe_str(record.renderer.get("target")).strip()
+    pane_text = await _capture_renderer_pane(renderer_target)
+    if not pane_text:
+        return False
+    return _record_visible_in_renderer(record, pane_text)
+
+
 def _load_matching_question_record_from_path(
     path: Path,
     window: TmuxWindow,
@@ -372,6 +446,42 @@ async def find_active_omx_question_for_window(
         window,
         question_suffix=question_suffix,
         statuses=_ACTIVE_STATUSES,
+    )
+
+
+async def find_recoverable_omx_question_for_window(
+    window: TmuxWindow,
+    *,
+    question_suffix: str | None = None,
+) -> OmxQuestionRecord | None:
+    """Return a terminal timeout/error prompt that still has a live renderer."""
+    record = await find_omx_question_for_window(
+        window,
+        question_suffix=question_suffix,
+        statuses=_ERROR_STATUSES,
+    )
+    if record is None:
+        return None
+    if await _is_recoverable_live_renderer_error(record):
+        return record
+    return None
+
+
+async def find_answerable_omx_question_for_window(
+    window: TmuxWindow,
+    *,
+    question_suffix: str | None = None,
+) -> OmxQuestionRecord | None:
+    """Return an active prompt or a timeout/error prompt still answerable in tmux."""
+    record = await find_active_omx_question_for_window(
+        window,
+        question_suffix=question_suffix,
+    )
+    if record is not None:
+        return record
+    return await find_recoverable_omx_question_for_window(
+        window,
+        question_suffix=question_suffix,
     )
 
 
@@ -628,6 +738,13 @@ def _build_question_text(
 ) -> str:
     selected = selected or set()
     lines = ["❓ OMX Question"]
+    if record.status == "error":
+        lines.extend(
+            [
+                "",
+                "⚠️ The durable question record timed out, but the local renderer is still visible. Answering here will recover it.",
+            ]
+        )
     if record.header:
         lines.extend(["", record.header])
     lines.extend(["", record.question.strip(), ""])
@@ -841,7 +958,7 @@ async def handle_omx_question_ui(
         return False
     key = _question_surface_key(user_id, thread_id=thread_id, window_id=window_id)
     if record is None:
-        record = await find_active_omx_question_for_window(window)
+        record = await find_answerable_omx_question_for_window(window)
     if record is None:
         existing_msg_id = _question_msgs.get(key)
         previous_state = _question_render_state.get(key)
@@ -1008,7 +1125,7 @@ async def handle_omx_question_callback(
     if not window:
         await query.answer("Window not found", show_alert=True)
         return True
-    record = await find_active_omx_question_for_window(
+    record = await find_answerable_omx_question_for_window(
         window,
         question_suffix=question_suffix,
     )
