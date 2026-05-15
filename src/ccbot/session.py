@@ -219,6 +219,38 @@ def _codex_composer_completion_popup_open(pane_text: str | None) -> bool:
     )
 
 
+def _workflow_command_aliases(text: str) -> set[str]:
+    """Return acceptable composer forms for a simple workflow command."""
+    stripped = (text or "").strip()
+    if not stripped or "\n" in stripped:
+        return set()
+    if not stripped.startswith("$") or len(stripped.split()) != 1:
+        return set()
+    aliases = {stripped}
+    command_name = stripped[1:]
+    if command_name and ":" not in command_name:
+        aliases.add(f"$oh-my-codex:{command_name}")
+    return aliases
+
+
+def _codex_composer_holds_workflow_command(
+    pane_text: str | None,
+    expected_text: str,
+) -> bool:
+    """Return True when Enter selected workflow autocomplete but did not submit."""
+    aliases = {alias.casefold() for alias in _workflow_command_aliases(expected_text)}
+    if not aliases:
+        return False
+    for line in (pane_text or "").splitlines()[-12:]:
+        candidate = line.strip()
+        if candidate.startswith(("›", ">")):
+            candidate = candidate[1:].strip()
+        candidate = " ".join(candidate.split()).casefold()
+        if candidate in aliases:
+            return True
+    return False
+
+
 def _codex_content_text(content: Any) -> str:
     if content is None:
         return ""
@@ -3257,6 +3289,27 @@ class SessionManager:
                 )
                 return False, message, proof
             self._log_fast_input_stage(proof, "submit_key_sent")
+            if _workflow_command_aliases(text):
+                await asyncio.sleep(FAST_CODEX_ACK_POLL_SECONDS)
+                pane_text = await tmux_manager.capture_pane(window.window_id)
+            else:
+                pane_text = None
+            if _codex_composer_holds_workflow_command(pane_text, text):
+                success, message = await runtime_input_driver.send_multiline_submit_key(
+                    window.window_id,
+                    runtime_kind="codex",
+                )
+                if not success:
+                    proof.status = "ack_failed"
+                    proof.failure_reason = message
+                    self._log_fast_input_stage(
+                        proof,
+                        "runtime_ack_failed",
+                        success=False,
+                        error=message,
+                    )
+                    return False, message, proof
+                self._log_fast_input_stage(proof, "autocomplete_submit_key_sent")
             asyncio.create_task(
                 self._monitor_fast_codex_ack(proof_id, text, on_complete)
             )
@@ -3366,6 +3419,20 @@ class SessionManager:
                 await asyncio.sleep(CODEX_MULTILINE_ACK_POLL_SECONDS)
 
             pane_text = await tmux_manager.capture_pane(window_id)
+            if _codex_composer_holds_workflow_command(pane_text, text):
+                logger.info(
+                    "codex_submit_ack: workflow autocomplete left command "
+                    "in composer; sending confirming Enter to %s",
+                    window_id,
+                )
+                success, message = await runtime_input_driver.send_multiline_submit_key(
+                    window_id,
+                    runtime_kind="codex",
+                )
+                if not success:
+                    return False, message
+                await asyncio.sleep(CODEX_MULTILINE_ACK_POLL_SECONDS)
+                continue
             if _codex_composer_completion_popup_open(pane_text):
                 logger.info(
                     "codex_submit_ack: closing composer completion popup "
