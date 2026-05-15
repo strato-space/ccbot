@@ -16,8 +16,14 @@ from telegram import CallbackQuery, MessageEntity, User
 from telegram.error import BadRequest
 
 from ccbot import bot as bot_mod
+from ccbot.input_safety import (
+    clear_window_input_safety_snapshot,
+    get_window_input_safety_snapshot,
+    update_window_input_safety_snapshot,
+)
 from ccbot.handlers.callback_data import append_bind_flow_token
 from ccbot.runtime_types import NormalizedEvent
+from ccbot.session import FastRuntimeInputProof
 from ccbot.telegram_delivery_policy import apply_telegram_delivery_policy
 from ccbot.state_schema import (
     BINDING_STATE_NONE,
@@ -77,6 +83,41 @@ def _make_context(*, bot_username: str = "ccbot", bot_id: int = 999) -> MagicMoc
     return context
 
 
+def test_simple_text_fast_path_classifier_preserves_attachment_and_shell_paths():
+    assert bot_mod._is_simple_text_fast_path_candidate("останови сервисы vilco")
+    assert not bot_mod._is_simple_text_fast_path_candidate("line one\nline two")
+    assert not bot_mod._is_simple_text_fast_path_candidate("!pwd")
+    assert not bot_mod._is_simple_text_fast_path_candidate("install this")
+    assert not bot_mod._is_simple_text_fast_path_candidate("посмотри файл")
+
+
+def test_window_input_safety_snapshot_requires_fresh_known_safe_state():
+    clear_window_input_safety_snapshot()
+    assert get_window_input_safety_snapshot("@7") is None
+    snapshot = update_window_input_safety_snapshot(
+        window_id="@7",
+        input_surface_kind="input_ready",
+        active_question_state="none",
+        captured_at_monotonic=10.0,
+    )
+    assert snapshot.permits_fast_input(now=10.5)
+    assert not snapshot.permits_fast_input(now=12.0)
+    blocked = update_window_input_safety_snapshot(
+        window_id="@7",
+        input_surface_kind="blocked_prompt",
+        active_question_state="none",
+        captured_at_monotonic=20.0,
+    )
+    assert not blocked.permits_fast_input(now=20.1)
+    question = update_window_input_safety_snapshot(
+        window_id="@7",
+        input_surface_kind="input_ready",
+        active_question_state="active",
+        captured_at_monotonic=30.0,
+    )
+    assert not question.permits_fast_input(now=30.1)
+
+
 def _write_test_webp(path) -> None:
     from PIL import Image
 
@@ -102,12 +143,14 @@ def _make_document(
 @pytest.fixture(autouse=True)
 def _reset_attachment_batch_state():
     bot_mod._attachment_batcher.clear()
+    clear_window_input_safety_snapshot()
     for task in list(bot_mod._attachment_flush_tasks.values()):
         task.cancel()
     bot_mod._attachment_flush_tasks.clear()
     bot_mod._attachment_batch_bots.clear()
     yield
     bot_mod._attachment_batcher.clear()
+    clear_window_input_safety_snapshot()
     for task in list(bot_mod._attachment_flush_tasks.values()):
         task.cancel()
     bot_mod._attachment_flush_tasks.clear()
@@ -2940,6 +2983,104 @@ class TestMediaForwarding:
         assert bot_mod._bash_capture_tasks[(1, 42)] is dummy_task
         bot_mod._bash_capture_tasks.pop((1, 42), None)
 
+    @pytest.mark.asyncio
+    async def test_simple_text_uses_fast_path_without_text_lead_hold(self):
+        update = _make_topic_update(text="останови сервисы vilco")
+        context = _make_context()
+        window = MagicMock(window_id="@7")
+        context.bot = MagicMock()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
+            patch("ccbot.bot.enqueue_ingress_receipt", new_callable=AsyncMock) as mock_receipt,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+            patch("ccbot.bot._surface_omx_question_state", new_callable=AsyncMock, return_value=False),
+            patch("ccbot.bot.find_answerable_omx_question_for_window", new_callable=AsyncMock, return_value=None),
+            patch("ccbot.bot._get_window_runtime_kind", return_value="codex"),
+            patch("ccbot.bot.uuid.uuid4", return_value=SimpleNamespace(hex="proof-1")),
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
+            mock_sm.has_pending_fast_input.return_value = False
+            mock_sm.send_to_window_fast_unverified = AsyncMock(
+                return_value=(True, "fast", object())
+            )
+            mock_tmux.find_window_by_id = AsyncMock(return_value=window)
+            mock_tmux.capture_pane = AsyncMock(return_value="OpenAI Codex\n› ready")
+
+            await bot_mod.text_handler(update, context)
+
+        mock_receipt.assert_awaited_once()
+        mock_sm.send_to_window_fast_unverified.assert_awaited_once()
+        mock_sm.send_to_window.assert_not_called()
+        assert bot_mod._attachment_batcher.keys() == []
+
+    @pytest.mark.asyncio
+    async def test_allowed_text_sends_typing_before_window_lookup(self):
+        update = _make_topic_update(text="ping")
+        context = _make_context()
+        order: list[str] = []
+
+        async def _typing(_action):
+            order.append("typing")
+
+        async def _find_window(_wid):
+            order.append("find_window")
+            return None
+
+        update.message.chat.send_action = AsyncMock(side_effect=_typing)
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "test"
+            mock_tmux.find_window_by_id = AsyncMock(side_effect=_find_window)
+
+            await bot_mod.text_handler(update, context)
+
+        assert order == ["typing", "find_window"]
+
+    @pytest.mark.asyncio
+    async def test_attachment_intent_text_stays_on_batching_path(self):
+        update = _make_topic_update(text="install this")
+        context = _make_context()
+        window = MagicMock(window_id="@7")
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
+            patch("ccbot.bot.enqueue_ingress_receipt", new_callable=AsyncMock) as mock_receipt,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+            patch("ccbot.bot._surface_omx_question_state", new_callable=AsyncMock, return_value=False),
+            patch("ccbot.bot.find_answerable_omx_question_for_window", new_callable=AsyncMock, return_value=None),
+            patch("ccbot.bot._get_window_runtime_kind", return_value="codex"),
+            patch("ccbot.bot._schedule_attachment_batch_flush") as mock_schedule,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
+            mock_sm.has_pending_fast_input.return_value = False
+            mock_sm.send_to_window_fast_unverified = AsyncMock()
+            mock_tmux.find_window_by_id = AsyncMock(return_value=window)
+            mock_tmux.capture_pane = AsyncMock(return_value="OpenAI Codex\n› ready")
+
+            await bot_mod.text_handler(update, context)
+
+        mock_receipt.assert_not_awaited()
+        mock_sm.send_to_window_fast_unverified.assert_not_awaited()
+        assert len(bot_mod._attachment_batcher.keys()) == 1
+        mock_schedule.assert_called_once()
+
     def test_audio_video_sticker_voice_do_not_use_attachment_batcher(self):
         for handler in (
             bot_mod.audio_handler,
@@ -4629,6 +4770,128 @@ class TestTelegramDelivery:
 
         mock_open_turn.assert_called_once_with(1, 42)
         mock_status.assert_not_awaited()
+        mock_content.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_new_message_suppresses_fast_receipt_duplicate_after_opening_turn(self):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="ping",
+            is_complete=True,
+            content_type="text",
+            role="user",
+            event_kind="user_message",
+            runtime_kind="codex",
+        )
+        proof = FastRuntimeInputProof(
+            proof_id="proof-1",
+            user_id=1,
+            chat_id=100,
+            thread_id=42,
+            surface_key="t:42",
+            window_id="@7",
+            runtime_kind="codex",
+            runtime_thread_id="thread-1",
+            text_hash="",
+            text_len=4,
+            text_preview="ping",
+            rollout_file="/tmp/rollout.jsonl",
+            start_byte=0,
+            created_at_monotonic=0.0,
+            ack_confirmed_at_monotonic=1.0,
+            status="ack_confirmed",
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.current_turn_generation", return_value=0),
+            patch(
+                "ccbot.bot.open_new_turn_generation", return_value=1
+            ) as mock_open_turn,
+            patch(
+                "ccbot.bot.flush_terminal_artifacts_before_new_turn",
+                new_callable=AsyncMock,
+            ) as mock_flush,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+            mock_sm.match_fast_user_echo_proof.return_value = proof
+            mock_sm.resolve_chat_id.return_value = 100
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_sm.match_fast_user_echo_proof.assert_called_once_with(
+            window_id="@7",
+            thread_id=42,
+            runtime_thread_id="thread-1",
+            text="ping",
+            include_pending=True,
+        )
+        mock_flush.assert_awaited_once_with(bot, 1, 42)
+        mock_open_turn.assert_called_once_with(1, 42)
+        mock_sm.mark_fast_user_echo_represented.assert_called_once_with("proof-1")
+        mock_content.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_handle_new_message_supersedes_pending_receipt_when_replay_echo_wins_race(self):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="ping",
+            is_complete=True,
+            content_type="text",
+            role="user",
+            event_kind="user_message",
+            runtime_kind="codex",
+        )
+        proof = FastRuntimeInputProof(
+            proof_id="proof-race",
+            user_id=1,
+            chat_id=100,
+            thread_id=42,
+            surface_key="t:42",
+            window_id="@7",
+            runtime_kind="codex",
+            runtime_thread_id="thread-1",
+            text_hash="",
+            text_len=4,
+            text_preview="ping",
+            rollout_file="/tmp/rollout.jsonl",
+            start_byte=0,
+            created_at_monotonic=1.0,
+            status="pending",
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.current_turn_generation", return_value=0),
+            patch("ccbot.bot.open_new_turn_generation", return_value=1),
+            patch(
+                "ccbot.bot.flush_terminal_artifacts_before_new_turn",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "ccbot.bot.enqueue_ingress_receipt", new_callable=AsyncMock
+            ) as mock_receipt,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+            mock_sm.match_fast_user_echo_proof.return_value = proof
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_sm.mark_fast_user_echo_represented.assert_called_once_with("proof-race")
+        mock_receipt.assert_awaited_once()
+        assert mock_receipt.await_args.kwargs["receipt_status"] == "superseded"
         mock_content.assert_awaited_once()
 
     @pytest.mark.asyncio

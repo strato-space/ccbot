@@ -50,6 +50,7 @@ import re
 import shutil
 import subprocess  # nosec B404 - ffmpeg is invoked with fixed argv and no shell
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,7 @@ from telegram.ext import (
 )
 
 from .config import config
+from .delivery_audit import log_telegram_delivery
 from .attachment_batching import (
     AttachmentBatcher,
     AttachmentBatchFailure,
@@ -145,6 +147,7 @@ from .handlers.message_queue import (
     current_turn_generation,
     enqueue_commentary_update,
     enqueue_content_message,
+    enqueue_ingress_receipt,
     enqueue_plan_update,
     enqueue_status_update,
     flush_terminal_artifacts_before_new_turn,
@@ -175,6 +178,10 @@ from .handlers.response_builder import (
     build_status_text,
 )
 from .handlers.status_polling import mark_runtime_presence_active, status_poll_loop
+from .input_safety import (
+    get_window_input_safety_snapshot,
+    update_window_input_safety_snapshot,
+)
 from .runtime_discontinuity import is_codex_termination_summary_text
 from .runtime_types import (
     ASSISTANT_FINAL_SEMANTIC_KIND,
@@ -190,7 +197,12 @@ from .state_schema import (
     BINDING_STATE_NONE,
     TOPIC_POLICY_MANUAL_BIND_REQUIRED,
 )
-from .session import BLOCKED_PROMPT_SEND_MESSAGE, PendingSurfaceSlot, session_manager
+from .session import (
+    BLOCKED_PROMPT_SEND_MESSAGE,
+    FastRuntimeInputProof,
+    PendingSurfaceSlot,
+    session_manager,
+)
 from .session_monitor import NewMessage, SessionMonitor
 from .telegram_delivery_policy import apply_telegram_delivery_policy
 from .telegram_delivery_policy import is_non_turn_user_notification
@@ -1102,6 +1114,70 @@ def _get_window_runtime_kind(window_id: str) -> str | None:
     if isinstance(runtime_kind, str) and runtime_kind:
         return runtime_kind
     return None
+
+
+_ATTACHMENT_INTENT_RE = re.compile(
+    r"\b(?:install this|analy[sz]e this|look at this file|attached file)\b|"
+    r"(?:вот\s+файл|посмотри\s+файл|прикреплю|прикрепил|прикрепила|этот\s+файл)",
+    re.IGNORECASE,
+)
+
+
+def _is_simple_text_fast_path_candidate(text: str) -> bool:
+    """Return True for v1 fast-path one-line text that cannot join media."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    if "\n" in stripped or "\r" in stripped:
+        return False
+    if stripped.startswith("!"):
+        return False
+    if _ATTACHMENT_INTENT_RE.search(stripped):
+        return False
+    return True
+
+
+async def _safe_send_typing(
+    chat: object,
+    *,
+    user_id: int,
+    thread_id: int | None,
+    window_id: str | None = None,
+) -> None:
+    try:
+        await chat.send_action(ChatAction.TYPING)
+        log_telegram_delivery(
+            action="runtime_input_latency",
+            user_id=user_id,
+            chat_id=getattr(chat, "id", None),
+            thread_id=thread_id,
+            window_id=window_id,
+            task_type="telegram_transport",
+            content_type="chat_action",
+            semantic_kind="typing_sent",
+            text="typing",
+        )
+    except Exception:
+        logger.debug("Failed to send early typing indicator", exc_info=True)
+
+
+async def _handle_fast_input_proof_complete(
+    bot: Bot,
+    proof: object,
+) -> None:
+    proof_id = getattr(proof, "proof_id")
+    if session_manager.is_fast_user_echo_represented(proof_id):
+        return
+    status = "confirmed" if getattr(proof, "status", "") == "ack_confirmed" else "failed"
+    await enqueue_ingress_receipt(
+        bot,
+        getattr(proof, "user_id"),
+        getattr(proof, "window_id"),
+        getattr(proof, "text_preview", ""),
+        proof_id=proof_id,
+        receipt_status=status,
+        thread_id=getattr(proof, "thread_id"),
+    )
 
 
 def _is_non_bindable_codex_helper_window(window_id: str) -> bool:
@@ -4110,6 +4186,22 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         session_manager.set_group_chat_id(user.id, thread_id, chat.id)
 
     text = update.message.text
+    if chat is not None:
+        log_telegram_delivery(
+            action="runtime_input_latency",
+            user_id=user.id,
+            chat_id=getattr(chat, "id", None),
+            thread_id=thread_id,
+            task_type="telegram_update",
+            content_type="runtime_input_stage",
+            semantic_kind="telegram_update_accepted",
+            text=text,
+        )
+        await _safe_send_typing(
+            update.message.chat,
+            user_id=user.id,
+            thread_id=thread_id,
+        )
 
     # Ignore text in window picker mode (only for the same thread)
     if context.user_data and context.user_data.get(STATE_KEY) == STATE_SELECTING_WINDOW:
@@ -4274,7 +4366,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
         return
 
-    await update.message.chat.send_action(ChatAction.TYPING)
     await enqueue_status_update(
         context.bot,
         user.id,
@@ -4290,6 +4381,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # This catches UIs (permission prompts, etc.) that status polling might have missed.
     pane_text = await tmux_manager.capture_pane(w.window_id)
     input_surface = classify_input_surface(pane_text) if pane_text else None
+    if input_surface is not None:
+        update_window_input_safety_snapshot(
+            window_id=w.window_id,
+            input_surface_kind=input_surface.kind,
+            active_question_state="unknown",
+            source="targeted_capture",
+        )
     if input_surface and input_surface.kind == "blocked_prompt":
         logger.info(
             "Detected blocked prompt before sending text (user=%d, thread=%s)",
@@ -4306,6 +4404,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     record = await find_answerable_omx_question_for_window(w)
+    if input_surface is not None:
+        update_window_input_safety_snapshot(
+            window_id=w.window_id,
+            input_surface_kind=input_surface.kind,
+            active_question_state="active" if record is not None else "none",
+            allow_other=bool(getattr(record, "allow_other", False)) if record else None,
+            source="question_record_scan",
+        )
     if record is not None and bool(getattr(record, "allow_other", False)) and text.strip():
         answer = await answer_omx_question_other(record, text, window_id=wid)
         await clear_omx_question_msg(
@@ -4360,6 +4466,60 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             binding_generation=binding_generation,
         )
         key = IngressBatchKey.from_target(captured, media_group_id=None)
+        safety = get_window_input_safety_snapshot(w.window_id)
+        if (
+            safety is not None
+            and safety.permits_fast_input()
+            and _is_simple_text_fast_path_candidate(text)
+            and _get_window_runtime_kind(wid) == "codex"
+            and not _attachment_batcher.has_open_batch_for_target(captured)
+            and not session_manager.has_pending_fast_input(wid)
+        ):
+            proof_id = uuid.uuid4().hex
+            await enqueue_ingress_receipt(
+                context.bot,
+                user.id,
+                wid,
+                text,
+                proof_id=proof_id,
+                thread_id=surface.message_thread_id,
+            )
+            success, message, proof = await session_manager.send_to_window_fast_unverified(
+                wid,
+                text,
+                proof_id=proof_id,
+                user_id=user.id,
+                chat_id=chat.id,
+                thread_id=surface.message_thread_id,
+                surface_key=surface.surface_key,
+                on_complete=lambda completed: _handle_fast_input_proof_complete(
+                    context.bot,
+                    completed,
+                ),
+            )
+            if success:
+                mark_runtime_presence_active(user.id, surface.message_thread_id, wid)
+                return
+            await enqueue_ingress_receipt(
+                context.bot,
+                user.id,
+                wid,
+                text,
+                proof_id=proof_id,
+                receipt_status="failed",
+                thread_id=surface.message_thread_id,
+            )
+            if message == BLOCKED_PROMPT_SEND_MESSAGE:
+                await _surface_blocked_prompt_state(
+                    context.bot,
+                    user.id,
+                    wid,
+                    surface.message_thread_id,
+                    reply_message=update.message,
+                )
+                return
+            await safe_reply(update.message, f"❌ {message}")
+            return
         _attachment_batcher.add_text(
             key,
             captured,
@@ -5385,6 +5545,53 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
             user_id, thread_id
         ):
             turn_generation = open_new_turn_generation(user_id, thread_id)
+
+        if opens_new_turn:
+            fast_proof = session_manager.match_fast_user_echo_proof(
+                window_id=wid,
+                thread_id=thread_id,
+                runtime_thread_id=msg.session_id,
+                text=msg.text,
+                include_pending=True,
+            )
+            if isinstance(fast_proof, FastRuntimeInputProof):
+                session_manager.mark_fast_user_echo_represented(fast_proof.proof_id)
+                if fast_proof.status == "pending":
+                    await enqueue_ingress_receipt(
+                        bot,
+                        user_id,
+                        wid,
+                        msg.text,
+                        proof_id=fast_proof.proof_id,
+                        receipt_status="superseded",
+                        thread_id=thread_id,
+                    )
+                else:
+                    log_telegram_delivery(
+                        action="suppress",
+                        user_id=user_id,
+                        chat_id=session_manager.resolve_chat_id(user_id, thread_id),
+                        thread_id=thread_id,
+                        window_id=wid,
+                        task_type="content",
+                        content_type=msg.content_type,
+                        semantic_kind=msg.semantic_kind,
+                        text=msg.text,
+                        reason=f"fast_receipt_promoted:{fast_proof.proof_id}",
+                        turn_generation=turn_generation,
+                    )
+                    session = await session_manager.resolve_session_for_window(wid)
+                    if session and session.file_path:
+                        try:
+                            file_size = Path(session.file_path).stat().st_size
+                            session_manager.update_user_window_offset(
+                                user_id,
+                                wid,
+                                file_size,
+                            )
+                        except OSError:
+                            pass
+                    continue
 
         if not msg.dispatch_to_telegram:
             logger.debug(

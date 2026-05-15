@@ -46,6 +46,13 @@ The default Telegram surface is `compact`, not `verbose`.
   ordinary chat content
 - ordinary user echo remains visible in compact mode unless it matches an
   explicit internal payload shape
+- Telegram ingress receipts for eligible simple Codex text are current-update
+  acknowledgements only: before replay ACK they are not `user_echo`, not runtime
+  proof, and not turn openers; ACK success or the later replay-backed user echo
+  opens the runtime turn exactly once, while ACK failure edits/pairs the receipt
+  with explicit failure
+- `send_chat_action("typing")` is a transient Telegram transport signal, not an
+  artifact in compact ordering and not runtime proof
 - placeholder reasoning such as `[reasoning]` is suppressed
 - raw tool payloads, giant command stdout dumps, and full file bodies must be summarized before they reach Telegram
 - repeated identical warnings on one control surface deduplicate into one latest warning
@@ -106,6 +113,9 @@ The delivery pipeline keeps:
   current assistant turn; opening a new user turn drops the old tracking pointer
   so a new plan appears at the chat tail rather than editing history up-thread
 - one mutable pending-input artifact per `(user_id, control surface)`
+- one mutable Telegram ingress receipt per pending fast-path proof, distinct
+  from the pending-input artifact unless the input is actually queued behind an
+  active turn
 - one mutable interactive question artifact per `(user_id, control surface)`
   when the runtime exposes a durable blocking question record
 - one ordered content queue per user
@@ -158,6 +168,9 @@ Ordering guarantees:
     reclosing the newer turn's visible or status surface
 17. this ordering contract applies to the whole `pre-final visible artifact`
     class, not only to commentary
+18. a Telegram ingress receipt may pass stale technical status churn but must
+    not pass an already queued terminal assistant-final artifact for the same
+    control surface
 18. if an already-started multipart content send becomes stale mid-flight, the
     remaining parts and trailing image/document/status sends must abort rather than
     surfacing below a newer turn or below the terminal turn artifact

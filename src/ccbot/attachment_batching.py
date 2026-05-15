@@ -167,6 +167,22 @@ class AttachmentBatcher:
     def keys(self) -> list[IngressBatchKey]:
         return list(self._batches)
 
+    def has_open_batch_for_target(self, target: CapturedBindingTarget) -> bool:
+        """Return True when any same-surface batch could still accept text."""
+        for batch in self._batches.values():
+            existing = batch.target
+            if (
+                existing.requesting_user_id == target.requesting_user_id
+                and existing.surface_key == target.surface_key
+                and existing.chat_id == target.chat_id
+                and existing.message_thread_id == target.message_thread_id
+                and existing.binding_owner_user_id == target.binding_owner_user_id
+                and existing.binding_kind == target.binding_kind
+                and existing.window_id == target.window_id
+            ):
+                return True
+        return False
+
     def pop(self, key: IngressBatchKey) -> PendingAttachmentBatch | None:
         return self._batches.pop(key, None)
 

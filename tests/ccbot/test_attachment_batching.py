@@ -63,6 +63,27 @@ def test_media_group_waits_for_idle_without_total_count():
     assert batcher.is_due(key, now=11.5)
 
 
+def test_open_batch_lookup_matches_same_control_surface_target():
+    batcher = AttachmentBatcher()
+    target = _target()
+    key = IngressBatchKey.from_target(target, media_group_id="album-1")
+    batcher.add_attachment(
+        key,
+        target,
+        AttachmentBatchItem(
+            kind="document",
+            path=Path("/tmp/a.txt"),
+            display_name="a.txt",
+            downloaded_size=1,
+            order=1,
+        ),
+        now=10.0,
+    )
+
+    assert batcher.has_open_batch_for_target(_target())
+    assert not batcher.has_open_batch_for_target(_target(window_id="@8"))
+
+
 def test_media_group_caption_does_not_flush_before_idle_window():
     batcher = AttachmentBatcher()
     key = _key("album-with-caption")

@@ -39,6 +39,7 @@ from ..runtime_discontinuity import (
 from ..runtime_types import WARNING_SEMANTIC_KIND
 from ..runtime_types import runtime_capability_registry
 from ..session import session_manager
+from ..input_safety import update_window_input_safety_snapshot
 from ..terminal_parser import classify_input_surface, extract_pending_input_preview
 from ..tmux_manager import tmux_manager
 from .interactive_ui import (
@@ -521,6 +522,12 @@ async def update_status_message(
         return
     _last_pane_text[window_id] = pane_text
     surface = classify_input_surface(pane_text)
+    update_window_input_safety_snapshot(
+        window_id=window_id,
+        input_surface_kind=surface.kind,
+        active_question_state="unknown",
+        source="status_poll",
+    )
     pending_input_text = _build_pending_input_text(pane_text)
     await enqueue_pending_input_update(
         bot,
@@ -557,7 +564,19 @@ async def update_status_message(
     )
 
     if await handle_omx_question_ui(bot, user_id, window_id, thread_id):
+        update_window_input_safety_snapshot(
+            window_id=window_id,
+            input_surface_kind=surface.kind,
+            active_question_state="active",
+            source="question_record_scan",
+        )
         return
+    update_window_input_safety_snapshot(
+        window_id=window_id,
+        input_surface_kind=surface.kind,
+        active_question_state="none",
+        source="question_record_scan",
+    )
 
     interactive_window = get_interactive_window(user_id, thread_id)
     should_check_new_ui = True

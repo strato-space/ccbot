@@ -22,9 +22,12 @@ from ccbot.handlers.message_queue import (
     _process_pending_input_clear_task,
     _process_plan_update_task,
     _warning_msg_info,
+    _ingress_receipt_msg_info,
+    _ingress_receipt_superseded,
     clear_commentary_lane_state,
     current_turn_generation,
     enqueue_pending_input_update,
+    enqueue_ingress_receipt,
     enqueue_plan_update,
     flush_terminal_artifacts_before_new_turn,
     get_message_queue,
@@ -97,6 +100,179 @@ def test_can_merge_tasks_rejects_command_execution_identity_collapse():
     )
 
     assert _can_merge_tasks(base, candidate) is False
+
+
+@pytest.mark.asyncio
+async def test_ingress_receipt_priority_passes_status_but_not_final() -> None:
+    sent: list[tuple[str, str]] = []
+    bot = AsyncMock()
+
+    async def _fake_process_content(_bot, _user_id, task):
+        sent.append(("content", task.semantic_kind))
+
+    async def _fake_process_status(_bot, _user_id, task):
+        sent.append(("status", task.text or ""))
+
+    async def _fake_process_receipt(_bot, _user_id, task):
+        sent.append(("receipt", task.receipt_status))
+
+    await mq.shutdown_workers()
+    with (
+        patch("ccbot.handlers.message_queue._process_content_task", side_effect=_fake_process_content),
+        patch("ccbot.handlers.message_queue._process_status_update_task", side_effect=_fake_process_status),
+        patch("ccbot.handlers.message_queue._process_ingress_receipt_task", side_effect=_fake_process_receipt),
+    ):
+        await mq.enqueue_content_message(
+            bot,
+            100,
+            "@1",
+            ["final"],
+            semantic_kind="assistant_final",
+            thread_id=42,
+        )
+        await mq.enqueue_status_update(bot, 100, "@1", "Working", thread_id=42)
+        await enqueue_ingress_receipt(
+            bot,
+            100,
+            "@1",
+            "hello",
+            proof_id="proof-1",
+            thread_id=42,
+        )
+        queue = mq.get_message_queue(100)
+        assert queue is not None
+        await queue.join()
+
+    assert sent == [
+        ("content", "assistant_final"),
+        ("receipt", "pending"),
+        ("status", "Working"),
+    ]
+    await mq.shutdown_workers()
+
+
+@pytest.mark.asyncio
+async def test_ingress_receipt_priority_passes_status_clear() -> None:
+    sent: list[tuple[str, str]] = []
+    bot = AsyncMock()
+
+    async def _fake_clear(_bot, _user_id, _thread_id_or_0):
+        sent.append(("status_clear", ""))
+
+    async def _fake_process_receipt(_bot, _user_id, task):
+        sent.append(("receipt", task.receipt_status))
+
+    await mq.shutdown_workers()
+    with (
+        patch("ccbot.handlers.message_queue._do_clear_status_message", side_effect=_fake_clear),
+        patch("ccbot.handlers.message_queue._process_ingress_receipt_task", side_effect=_fake_process_receipt),
+    ):
+        queue = mq.get_or_create_queue(bot, 100)
+        queue.put_nowait(MessageTask(task_type="status_clear", thread_id=42))
+        await enqueue_ingress_receipt(
+            bot,
+            100,
+            "@1",
+            "hello",
+            proof_id="proof-1",
+            thread_id=42,
+        )
+        await queue.join()
+
+    assert sent == [("receipt", "pending"), ("status_clear", "")]
+    await mq.shutdown_workers()
+
+
+@pytest.mark.asyncio
+async def test_ingress_receipt_does_not_cross_later_final_barrier() -> None:
+    sent: list[tuple[str, str]] = []
+    bot = AsyncMock()
+
+    async def _fake_process_content(_bot, _user_id, task):
+        sent.append(("content", task.semantic_kind))
+
+    async def _fake_process_status(_bot, _user_id, task):
+        sent.append(("status", task.text or ""))
+
+    async def _fake_process_receipt(_bot, _user_id, task):
+        sent.append(("receipt", task.receipt_status))
+
+    await mq.shutdown_workers()
+    with (
+        patch("ccbot.handlers.message_queue._process_content_task", side_effect=_fake_process_content),
+        patch("ccbot.handlers.message_queue._process_status_update_task", side_effect=_fake_process_status),
+        patch("ccbot.handlers.message_queue._process_ingress_receipt_task", side_effect=_fake_process_receipt),
+    ):
+        await mq.enqueue_status_update(bot, 100, "@1", "Working", thread_id=42)
+        await mq.enqueue_content_message(
+            bot,
+            100,
+            "@1",
+            ["final"],
+            semantic_kind="assistant_final",
+            thread_id=42,
+        )
+        await enqueue_ingress_receipt(
+            bot,
+            100,
+            "@1",
+            "hello",
+            proof_id="proof-1",
+            thread_id=42,
+        )
+        queue = mq.get_message_queue(100)
+        assert queue is not None
+        await queue.join()
+
+    assert sent == [
+        ("status", "Working"),
+        ("content", "assistant_final"),
+        ("receipt", "pending"),
+    ]
+    await mq.shutdown_workers()
+
+
+@pytest.mark.asyncio
+async def test_ingress_receipt_superseded_deletes_existing_and_blocks_late_pending() -> None:
+    bot = AsyncMock()
+    _ingress_receipt_msg_info[(100, 42, "proof-race")] = (77, "@1", "pending")
+    _ingress_receipt_superseded.discard((100, 42, "proof-race"))
+
+    with patch("ccbot.handlers.message_queue.session_manager") as mock_sm:
+        mock_sm.is_external_binding_window_id.return_value = False
+        mock_sm.get_window_for_thread.return_value = "@1"
+        mock_sm.get_topic_binding_state.return_value = "bound"
+        mock_sm.resolve_chat_id.return_value = -100
+        with patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux:
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            await mq._process_ingress_receipt_task(
+                bot,
+                100,
+                MessageTask(
+                    task_type="ingress_receipt",
+                    text="ping",
+                    window_id="@1",
+                    thread_id=42,
+                    proof_id="proof-race",
+                    receipt_status="superseded",
+                ),
+            )
+            await mq._process_ingress_receipt_task(
+                bot,
+                100,
+                MessageTask(
+                    task_type="ingress_receipt",
+                    text="ping",
+                    window_id="@1",
+                    thread_id=42,
+                    proof_id="proof-race",
+                    receipt_status="pending",
+                ),
+            )
+
+    bot.delete_message.assert_awaited_once_with(chat_id=-100, message_id=77)
+    bot.send_message.assert_not_awaited()
+    bot.edit_message_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio

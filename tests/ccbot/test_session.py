@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from ccbot.codex_threads import CodexThreadCatalog
-from ccbot.session import PendingSurfaceSlot, SessionManager
+from ccbot.session import FastRuntimeInputProof, PendingSurfaceSlot, SessionManager
 from ccbot.runtime_types import LiveProcessDescriptor, ThreadLocator
 from ccbot.state_schema import (
     BINDING_STATE_BIND_FLOW,
@@ -1091,6 +1091,354 @@ class TestRuntimeInputDriverIntegration:
             runtime_kind="codex",
         )
         mock_ack.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fast_codex_send_returns_before_async_ack(
+        self,
+        mgr: SessionManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        rollout = tmp_path / "thread-1.jsonl"
+        rollout.write_text("", encoding="utf-8")
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+        mgr.resolve_thread_for_window = AsyncMock(
+            return_value=ThreadLocator(
+                thread_id="thread-1",
+                summary="Thread One",
+                message_count=1,
+                file_path=str(rollout),
+                runtime_kind="codex",
+                cwd="/tmp/project",
+            )
+        )
+        monkeypatch.setattr("ccbot.session.FAST_CODEX_ACK_POLL_SECONDS", 0.001)
+        monkeypatch.setattr("ccbot.session.FAST_CODEX_ACK_TIMEOUT_SECONDS", 0.05)
+        done = asyncio.Event()
+
+        async def on_complete(proof):
+            done.set()
+
+        async def submit_and_append_ack(*args, **kwargs):
+            with rollout.open("a", encoding="utf-8") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "type": "response_item",
+                            "payload": {
+                                "type": "message",
+                                "role": "user",
+                                "content": [
+                                    {"type": "input_text", "text": "hello"}
+                                ],
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+            return True, "Submitted text to @1"
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+            )
+            mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
+            mock_driver.send_multiline_submit_key = AsyncMock(
+                side_effect=submit_and_append_ack
+            )
+
+            success, message, proof = await mgr.send_to_window_fast_unverified(
+                "@1",
+                "hello",
+                proof_id="proof-1",
+                user_id=100,
+                chat_id=-100,
+                thread_id=42,
+                surface_key="t:42",
+                on_complete=on_complete,
+            )
+
+        assert success is True
+        assert message == "Sent text to @1"
+        assert proof is not None
+        assert proof.status == "pending"
+        assert mgr.has_pending_fast_input("@1") is True
+        await asyncio.wait_for(done.wait(), timeout=1)
+        assert proof.status == "ack_confirmed"
+        assert mgr.has_pending_fast_input("@1") is False
+        mock_driver.send_text.assert_awaited_once_with(
+            "@1",
+            "hello",
+            runtime_kind="codex",
+            submit=False,
+        )
+        mock_driver.send_multiline_submit_key.assert_awaited_once_with(
+            "@1",
+            runtime_kind="codex",
+        )
+
+    @pytest.mark.asyncio
+    async def test_fast_codex_ack_rejects_bare_turn_context_and_does_not_retry(
+        self,
+        mgr: SessionManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        rollout = tmp_path / "thread-1.jsonl"
+        rollout.write_text("", encoding="utf-8")
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+        mgr.resolve_thread_for_window = AsyncMock(
+            return_value=ThreadLocator(
+                thread_id="thread-1",
+                summary="Thread One",
+                message_count=1,
+                file_path=str(rollout),
+                runtime_kind="codex",
+                cwd="/tmp/project",
+            )
+        )
+        monkeypatch.setattr("ccbot.session.FAST_CODEX_ACK_POLL_SECONDS", 0.001)
+        monkeypatch.setattr("ccbot.session.FAST_CODEX_ACK_TIMEOUT_SECONDS", 0.005)
+        done = asyncio.Event()
+
+        async def on_complete(proof):
+            done.set()
+
+        async def submit_and_append_turn_context(*args, **kwargs):
+            with rollout.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"type": "turn_context"}) + "\n")
+            return True, "Submitted text to @1"
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+            )
+            mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
+            mock_driver.send_multiline_submit_key = AsyncMock(
+                side_effect=submit_and_append_turn_context
+            )
+
+            success, _, proof = await mgr.send_to_window_fast_unverified(
+                "@1",
+                "hello",
+                proof_id="proof-2",
+                user_id=100,
+                chat_id=-100,
+                thread_id=42,
+                surface_key="t:42",
+                on_complete=on_complete,
+            )
+
+        assert success is True
+        assert proof is not None
+        await asyncio.wait_for(done.wait(), timeout=1)
+        assert proof.status == "ack_failed"
+        mock_driver.send_multiline_submit_key.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_fast_codex_ack_rejects_unrelated_superstring_user_message(
+        self,
+        mgr: SessionManager,
+        tmp_path: Path,
+    ):
+        rollout = tmp_path / "thread-1.jsonl"
+        rollout.write_text(
+            json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "please do ping now"}
+                        ],
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        confirmed, byte_offset = await mgr._codex_rollout_has_strict_user_ack(
+            file_path=rollout,
+            start_byte=0,
+            expected_text="ping",
+        )
+
+        assert confirmed is False
+        assert byte_offset is None
+
+    @pytest.mark.asyncio
+    async def test_fast_codex_second_input_does_not_overlap_pending_proof(
+        self,
+        mgr: SessionManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        rollout = tmp_path / "thread-1.jsonl"
+        rollout.write_text("", encoding="utf-8")
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+        mgr.resolve_thread_for_window = AsyncMock(
+            return_value=ThreadLocator(
+                thread_id="thread-1",
+                summary="Thread One",
+                message_count=1,
+                file_path=str(rollout),
+                runtime_kind="codex",
+                cwd="/tmp/project",
+            )
+        )
+        monkeypatch.setattr("ccbot.session.FAST_CODEX_ACK_POLL_SECONDS", 0.01)
+        monkeypatch.setattr("ccbot.session.FAST_CODEX_ACK_TIMEOUT_SECONDS", 0.05)
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+            )
+            mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
+            mock_driver.send_multiline_submit_key = AsyncMock(
+                return_value=(True, "Submitted text to @1")
+            )
+
+            first = await mgr.send_to_window_fast_unverified(
+                "@1",
+                "first",
+                proof_id="proof-3",
+                user_id=100,
+                chat_id=-100,
+                thread_id=42,
+                surface_key="t:42",
+            )
+            second = await mgr.send_to_window_fast_unverified(
+                "@1",
+                "second",
+                proof_id="proof-4",
+                user_id=100,
+                chat_id=-100,
+                thread_id=42,
+                surface_key="t:42",
+            )
+
+        assert first[0] is True
+        assert second[0] is False
+        assert "waiting for Codex replay ACK" in second[1]
+        assert mock_driver.send_text.await_count == 1
+
+    def test_fast_user_echo_match_requires_runtime_thread_recent_ack_and_pending_race(
+        self,
+        mgr: SessionManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        now = 1_000.0
+        monkeypatch.setattr("ccbot.session.time.monotonic", lambda: now)
+        stale = FastRuntimeInputProof(
+            proof_id="old",
+            user_id=100,
+            chat_id=-100,
+            thread_id=42,
+            surface_key="t:42",
+            window_id="@1",
+            runtime_kind="codex",
+            runtime_thread_id="thread-1",
+            text_hash="",
+            text_len=5,
+            text_preview="hello",
+            rollout_file="/tmp/rollout.jsonl",
+            start_byte=0,
+            created_at_monotonic=0.0,
+            status="ack_confirmed",
+            ack_confirmed_at_monotonic=now - 300.0,
+        )
+        current = FastRuntimeInputProof(
+            proof_id="current",
+            user_id=100,
+            chat_id=-100,
+            thread_id=42,
+            surface_key="t:42",
+            window_id="@1",
+            runtime_kind="codex",
+            runtime_thread_id="thread-1",
+            text_hash="",
+            text_len=5,
+            text_preview="hello",
+            rollout_file="/tmp/rollout.jsonl",
+            start_byte=20,
+            created_at_monotonic=now - 1.0,
+            status="ack_confirmed",
+            ack_confirmed_at_monotonic=now - 1.0,
+        )
+        pending = FastRuntimeInputProof(
+            proof_id="pending",
+            user_id=100,
+            chat_id=-100,
+            thread_id=42,
+            surface_key="t:42",
+            window_id="@1",
+            runtime_kind="codex",
+            runtime_thread_id="thread-1",
+            text_hash="",
+            text_len=5,
+            text_preview="hello",
+            rollout_file="/tmp/rollout.jsonl",
+            start_byte=40,
+            created_at_monotonic=now - 0.5,
+            status="pending",
+        )
+        stale.text_hash = current.text_hash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        pending.text_hash = current.text_hash
+        mgr.fast_input_proofs = {"old": stale, "current": current, "pending": pending}
+
+        assert (
+            mgr.match_fast_user_echo_proof(
+                window_id="@1",
+                thread_id=42,
+                runtime_thread_id="other-thread",
+                text="hello",
+            )
+            is None
+        )
+        assert (
+            mgr.match_fast_user_echo_proof(
+                window_id="@1",
+                thread_id=42,
+                runtime_thread_id="thread-1",
+                text="hello",
+                include_pending=True,
+            )
+            is None
+        )
+        mgr._fast_input_represented_proofs.add("current")
+        assert (
+            mgr.match_fast_user_echo_proof(
+                window_id="@1",
+                thread_id=42,
+                runtime_thread_id="thread-1",
+                text="hello",
+                include_pending=True,
+            )
+            is pending
+        )
 
     @pytest.mark.asyncio
     async def test_codex_turn_context_ack_requires_guard_flag(

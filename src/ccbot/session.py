@@ -20,7 +20,7 @@ import shlex
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 
 import aiofiles
@@ -32,6 +32,7 @@ from .codex_threads import (
     CodexThreadCatalog,
     CodexThreadResolution,
 )
+from .delivery_audit import log_telegram_delivery
 from .fast_agent_sessions import (
     FastAgentSessionCatalog,
     FastAgentSessionResolution,
@@ -92,6 +93,8 @@ CODEX_MULTILINE_ACK_TIMEOUT_SECONDS = 6.5
 CODEX_MULTILINE_ACK_POLL_SECONDS = 0.1
 CODEX_MULTILINE_ACK_RETRY_SECONDS = 2.0
 CODEX_MULTILINE_ACK_MAX_ATTEMPTS = 3
+FAST_CODEX_ACK_TIMEOUT_SECONDS = CODEX_MULTILINE_ACK_TIMEOUT_SECONDS
+FAST_CODEX_ACK_POLL_SECONDS = CODEX_MULTILINE_ACK_POLL_SECONDS
 _SHELL_COMMAND_NAMES = {"bash", "dash", "fish", "sh", "zsh"}
 
 SURFACE_BINDINGS_KEY = "surface_bindings"
@@ -256,6 +259,12 @@ def _codex_text_matches_expected(observed: str, expected: str) -> bool:
     )
 
 
+def _codex_text_matches_expected_exact(observed: str, expected: str) -> bool:
+    observed_norm = observed.replace("\r\n", "\n").replace("\r", "\n").strip()
+    expected_norm = expected.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return bool(observed_norm and expected_norm and observed_norm == expected_norm)
+
+
 def _codex_record_confirms_submit(
     record: dict[str, Any],
     expected_text: str,
@@ -285,6 +294,94 @@ def _codex_record_confirms_submit(
             expected_text,
         )
     return False
+
+
+def _codex_record_confirms_strict_user_submit(
+    record: dict[str, Any],
+    expected_text: str,
+) -> bool:
+    record_type = str(record.get("type") or "").strip()
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    payload_type = str(payload.get("type") or "").strip()
+    if record_type == "response_item" and payload_type == "message":
+        if str(payload.get("role") or "").strip() != "user":
+            return False
+        return _codex_text_matches_expected_exact(
+            _codex_content_text(payload.get("content")),
+            expected_text,
+        )
+    if record_type == "event_msg" and payload_type == "user_message":
+        return _codex_text_matches_expected_exact(
+            _codex_content_text(
+                payload.get("message") or payload.get("content") or payload.get("text")
+            ),
+            expected_text,
+        )
+    return False
+
+
+def _stable_text_hash(text: str) -> str:
+    import hashlib
+
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return hashlib.sha256(normalized.encode("utf-8", "replace")).hexdigest()
+
+
+@dataclass
+class FastRuntimeInputProof:
+    """In-memory proof state for an optimistic Codex input attempt."""
+
+    proof_id: str
+    user_id: int
+    chat_id: int | None
+    thread_id: int | None
+    surface_key: str | None
+    window_id: str
+    runtime_kind: str
+    runtime_thread_id: str
+    text_hash: str
+    text_len: int
+    text_preview: str
+    rollout_file: str
+    start_byte: int
+    created_at_monotonic: float
+    status: str = "pending"
+    failure_reason: str | None = None
+    confirmed_byte: int | None = None
+    ack_confirmed_at_monotonic: float | None = None
+    turn_generation_status: str = "not_opened"
+    receipt_message_id: int | None = None
+
+    def matches_user_echo(
+        self,
+        *,
+        window_id: str,
+        thread_id: int | None,
+        runtime_thread_id: str,
+        text: str,
+        now: float,
+        max_ack_age_seconds: float = 15.0,
+        include_pending: bool = False,
+    ) -> bool:
+        if self.status == "ack_confirmed":
+            if self.ack_confirmed_at_monotonic is None:
+                return False
+            if now - self.ack_confirmed_at_monotonic > max_ack_age_seconds:
+                return False
+        elif include_pending and self.status == "pending":
+            if now - self.created_at_monotonic > max_ack_age_seconds:
+                return False
+        else:
+            return False
+        return (
+            self.window_id == window_id
+            and self.thread_id == thread_id
+            and self.runtime_thread_id == runtime_thread_id
+            and (self.status == "ack_confirmed" or include_pending)
+            and self.text_hash == _stable_text_hash(text)
+        )
 
 
 @dataclass
@@ -338,6 +435,11 @@ class SessionManager:
     # See: https://core.telegram.org/bots/api#sendmessage
     # History: originally added in 5afc111, erroneously removed in 26cb81f,
     # restored in PR #23.
+    # Fast-path input proof state is intentionally process-local. Replay/audit
+    # evidence remains the durable source of truth after controller restarts.
+    fast_input_proofs: dict[str, FastRuntimeInputProof] = field(default_factory=dict)
+    _fast_input_pending_by_window: dict[str, str] = field(default_factory=dict)
+    _fast_input_represented_proofs: set[str] = field(default_factory=set)
     group_chat_ids: dict[str, int] = field(default_factory=dict)
     codex_thread_catalog: CodexThreadCatalog | None = field(default=None, repr=False)
     fast_agent_session_catalog: FastAgentSessionCatalog | None = field(
@@ -2875,6 +2977,300 @@ class SessionManager:
         except OSError as exc:
             logger.warning("codex_submit_ack: failed to read %s: %s", file_path, exc)
         return False
+
+    async def _codex_rollout_has_strict_user_ack(
+        self,
+        *,
+        file_path: Path,
+        start_byte: int,
+        expected_text: str,
+    ) -> tuple[bool, int | None]:
+        """Return strict persisted user-message ACK evidence after ``start_byte``.
+
+        Fast-path ACK is intentionally stricter than the legacy synchronous
+        submit path: ``turn_context`` is supporting evidence only and never
+        sufficient for proof promotion.
+        """
+        if not file_path.exists():
+            return False, None
+        try:
+            with file_path.open("rb") as f:
+                f.seek(start_byte)
+                while True:
+                    line_start = f.tell()
+                    raw_line = f.readline()
+                    if not raw_line:
+                        break
+                    if not raw_line.strip():
+                        continue
+                    try:
+                        record = json.loads(raw_line.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        continue
+                    if isinstance(record, dict) and _codex_record_confirms_strict_user_submit(
+                        record,
+                        expected_text,
+                    ):
+                        return True, line_start
+        except OSError as exc:
+            logger.warning("fast_codex_ack: failed to read %s: %s", file_path, exc)
+        return False, None
+
+    def has_pending_fast_input(self, window_id: str) -> bool:
+        proof_id = self._fast_input_pending_by_window.get(window_id)
+        if not proof_id:
+            return False
+        proof = self.fast_input_proofs.get(proof_id)
+        return bool(proof and proof.status == "pending")
+
+    def match_fast_user_echo_proof(
+        self,
+        *,
+        window_id: str,
+        thread_id: int | None,
+        runtime_thread_id: str,
+        text: str,
+        include_pending: bool = False,
+    ) -> FastRuntimeInputProof | None:
+        now = time.monotonic()
+        matches: list[FastRuntimeInputProof] = []
+        for proof in self.fast_input_proofs.values():
+            if proof.proof_id in self._fast_input_represented_proofs:
+                continue
+            if proof.matches_user_echo(
+                window_id=window_id,
+                thread_id=thread_id,
+                runtime_thread_id=runtime_thread_id,
+                text=text,
+                now=now,
+                include_pending=include_pending,
+            ):
+                matches.append(proof)
+        if len(matches) != 1:
+            if matches:
+                logger.info(
+                    "fast_user_echo_match: refusing ambiguous duplicate match "
+                    "window=%s thread=%s runtime_thread=%s candidates=%s",
+                    window_id,
+                    thread_id,
+                    runtime_thread_id,
+                    [proof.proof_id for proof in matches],
+                )
+            return None
+        return matches[0]
+
+    def is_fast_user_echo_represented(self, proof_id: str) -> bool:
+        return proof_id in self._fast_input_represented_proofs
+
+    def mark_fast_user_echo_represented(self, proof_id: str) -> None:
+        proof = self.fast_input_proofs.get(proof_id)
+        if proof is not None:
+            proof.turn_generation_status = "suppressed_duplicate"
+        self._fast_input_represented_proofs.add(proof_id)
+
+    def update_fast_proof_receipt_message_id(
+        self,
+        proof_id: str,
+        message_id: int | None,
+    ) -> None:
+        proof = self.fast_input_proofs.get(proof_id)
+        if proof is not None:
+            proof.receipt_message_id = message_id
+
+    def _log_fast_input_stage(
+        self,
+        proof: FastRuntimeInputProof,
+        stage: str,
+        *,
+        success: bool = True,
+        error: str | None = None,
+    ) -> None:
+        log_telegram_delivery(
+            action="runtime_input_latency",
+            user_id=proof.user_id,
+            chat_id=proof.chat_id,
+            thread_id=proof.thread_id,
+            window_id=proof.window_id,
+            task_type="runtime_input_fast_path",
+            content_type="runtime_input_stage",
+            semantic_kind=stage,
+            text=proof.text_preview,
+            success=success,
+            error=error,
+            reason=f"proof:{proof.proof_id}:hash:{proof.text_hash[:16]}",
+        )
+
+    async def _monitor_fast_codex_ack(
+        self,
+        proof_id: str,
+        expected_text: str,
+        on_complete: Callable[[FastRuntimeInputProof], Awaitable[None]] | None,
+    ) -> None:
+        proof = self.fast_input_proofs[proof_id]
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + FAST_CODEX_ACK_TIMEOUT_SECONDS
+        file_path = Path(proof.rollout_file)
+        try:
+            while loop.time() < deadline:
+                confirmed, byte_offset = await self._codex_rollout_has_strict_user_ack(
+                    file_path=file_path,
+                    start_byte=proof.start_byte,
+                    expected_text=expected_text,
+                )
+                if confirmed:
+                    proof.status = "ack_confirmed"
+                    proof.confirmed_byte = byte_offset
+                    proof.ack_confirmed_at_monotonic = time.monotonic()
+                    self._log_fast_input_stage(proof, "runtime_ack_confirmed")
+                    return
+                await asyncio.sleep(FAST_CODEX_ACK_POLL_SECONDS)
+            proof.status = "ack_failed"
+            proof.failure_reason = (
+                "Codex did not persist a matching user message after fast submit"
+            )
+            self._log_fast_input_stage(
+                proof,
+                "runtime_ack_failed",
+                success=False,
+                error=proof.failure_reason,
+            )
+        finally:
+            self._fast_input_pending_by_window.pop(proof.window_id, None)
+            lock = self._codex_ack_lock(proof.window_id)
+            if lock.locked():
+                lock.release()
+            if on_complete is not None:
+                try:
+                    await on_complete(proof)
+                except Exception as exc:
+                    logger.warning(
+                        "fast_codex_ack: completion callback failed for %s: %s",
+                        proof_id,
+                        exc,
+                    )
+
+    async def send_to_window_fast_unverified(
+        self,
+        window_id: str,
+        text: str,
+        *,
+        proof_id: str,
+        user_id: int,
+        chat_id: int | None,
+        thread_id: int | None,
+        surface_key: str | None,
+        on_complete: Callable[[FastRuntimeInputProof], Awaitable[None]] | None = None,
+    ) -> tuple[bool, str, FastRuntimeInputProof | None]:
+        """Start an eligible Codex input attempt and verify proof asynchronously."""
+        if self.is_external_binding_window_id(window_id):
+            return False, EXTERNAL_BINDING_READ_ONLY_MESSAGE, None
+        if self.has_pending_fast_input(window_id):
+            return (
+                False,
+                "Another Telegram input is still waiting for Codex replay ACK",
+                None,
+            )
+        window = await tmux_manager.find_window_by_id(window_id)
+        if not window:
+            return False, "Window not found (may have been closed)", None
+        runtime_kind = (
+            self.window_states[window_id].runtime_kind
+            if window_id in self.window_states
+            else config.default_runtime_kind
+        )
+        if runtime_kind != "codex":
+            return False, "Fast input proof is only supported for Codex windows", None
+
+        lock = self._codex_ack_lock(window.window_id)
+        if lock.locked():
+            return (
+                False,
+                "Another Codex input is still waiting for replay ACK",
+                None,
+            )
+        await lock.acquire()
+        proof: FastRuntimeInputProof | None = None
+        try:
+            session = await self.resolve_thread_for_window(window_id)
+            if not self._codex_thread_locator_matches_live_identity(
+                window_id=window_id,
+                locator=session,
+            ):
+                return (
+                    False,
+                    "Cannot verify Codex submit: missing or mismatched persisted "
+                    "rollout evidence for the live runtime identity",
+                    None,
+                )
+            assert session is not None
+            rollout_file = Path(session.file_path)
+            start_byte = _codex_rollout_file_size(rollout_file)
+            proof = FastRuntimeInputProof(
+                proof_id=proof_id,
+                user_id=user_id,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                surface_key=surface_key,
+                window_id=window.window_id,
+                runtime_kind="codex",
+                runtime_thread_id=str(session.thread_id),
+                text_hash=_stable_text_hash(text),
+                text_len=len(text),
+                text_preview=text[:160],
+                rollout_file=str(rollout_file),
+                start_byte=start_byte,
+                created_at_monotonic=time.monotonic(),
+            )
+            self.fast_input_proofs[proof_id] = proof
+            self._fast_input_pending_by_window[window.window_id] = proof_id
+            self._log_fast_input_stage(proof, "runtime_injection_attempt_started")
+
+            success, message = await runtime_input_driver.send_text(
+                window.window_id,
+                text,
+                runtime_kind="codex",
+                submit=False,
+            )
+            if not success:
+                proof.status = "ack_failed"
+                proof.failure_reason = message
+                self._log_fast_input_stage(
+                    proof,
+                    "runtime_ack_failed",
+                    success=False,
+                    error=message,
+                )
+                return False, message, proof
+            self._log_fast_input_stage(proof, "tmux_payload_delivered")
+            success, message = await runtime_input_driver.send_multiline_submit_key(
+                window.window_id,
+                runtime_kind="codex",
+            )
+            if not success:
+                proof.status = "ack_failed"
+                proof.failure_reason = message
+                self._log_fast_input_stage(
+                    proof,
+                    "runtime_ack_failed",
+                    success=False,
+                    error=message,
+                )
+                return False, message, proof
+            self._log_fast_input_stage(proof, "submit_key_sent")
+            asyncio.create_task(
+                self._monitor_fast_codex_ack(proof_id, text, on_complete)
+            )
+            return True, f"Sent text to {window.window_id}", proof
+        except Exception:
+            if proof is not None:
+                proof.status = "ack_failed"
+                proof.failure_reason = "fast input send raised unexpectedly"
+            raise
+        finally:
+            if proof is None or proof.status == "ack_failed":
+                self._fast_input_pending_by_window.pop(window.window_id, None)
+                if lock.locked():
+                    lock.release()
 
     def _codex_ack_lock(self, window_id: str) -> asyncio.Lock:
         """Return the per-window guard for Codex conversational input ACKs."""

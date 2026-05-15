@@ -81,6 +81,25 @@ control surface at a time.
   - this artifact is not part of the current turn's visible output ordering
     contract and is not itself a user turn opener
 
+- **Telegram ingress receipt**
+  - immediate mutable acknowledgement for the current Telegram update on a
+    bound writable surface
+  - current example: `↗ Получил, отправляю в runtime…` for eligible simple
+    Codex text while asynchronous replay proof is pending
+  - not a replay-backed runtime user echo before ACK, not runtime proof, not a
+    pending-input artifact unless the input is actually queued behind an active
+    turn, and not an assistant-final artifact
+  - may pass stale technical-status churn in the queue, but must not leapfrog an
+    already queued terminal assistant-final artifact for the same control
+    surface
+  - on replay ACK success it may be edited/promoted into a confirmed user-input
+    display and the later duplicate replay user echo is suppressed only after
+    ordinary user-turn reopening side effects run
+  - on ACK failure it is edited or paired with an explicit failure so it never
+    remains indistinguishable from a successful runtime user echo
+  - `send_chat_action("typing")` is only a transient Telegram transport signal:
+    it is not this receipt, not a turn artifact, and not runtime proof
+
 - **Interactive question artifact**
   - mutable Telegram projection of a runtime-owned blocking question
   - current source:
@@ -176,6 +195,9 @@ In addition:
 - latest Codex plan update stays visible as a separate mutable artifact and is
   updated only by newer `plan_update` events
 - latest pending input preview may stay visible as a separate mutable artifact
+- current-update Telegram ingress receipts may stay visible until their
+  runtime-input proof confirms or fails; they remain distinct from pending
+  input previews unless the input is genuinely queued for a future turn
 - active runtime-owned questions stay visible as separate interactive question
   artifacts rather than being collapsed into the technical status artifact
 - technical execution classes stay out of permanent bubbles by default

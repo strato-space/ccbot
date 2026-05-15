@@ -84,6 +84,7 @@ class MessageTask:
         "commentary_clear",
         "pending_input_update",
         "pending_input_clear",
+        "ingress_receipt",
         "plan_update",
         "plan_clear",
         "commentary_close",
@@ -101,6 +102,8 @@ class MessageTask:
     image_data: list[tuple[str, bytes]] | None = None  # From tool_result images
     document_data: list[tuple[str, str, bytes]] | None = None
     turn_generation: int = 0
+    proof_id: str | None = None
+    receipt_status: str = "pending"
 
 
 # Per-user message queues and worker tasks
@@ -124,6 +127,11 @@ _commentary_extra_msg_ids: dict[tuple[int, int], tuple[int, ...]] = {}
 _pending_input_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
 # Last enqueued pending-input state per topic for queue-side dedupe.
 _pending_input_enqueued: dict[tuple[int, int], tuple[str, str | None]] = {}
+
+# Telegram ingress receipt tracking:
+#   (user_id, thread_id_or_0, proof_id) -> (message_id, window_id, last_text)
+_ingress_receipt_msg_info: dict[tuple[int, int, str], tuple[int, str, str]] = {}
+_ingress_receipt_superseded: set[tuple[int, int, str]] = set()
 
 # Plan update artifact tracking: (user_id, thread_id_or_0) -> (message_id, window_id, last_text)
 _plan_update_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
@@ -162,6 +170,14 @@ _flood_until: dict[int, float] = {}
 
 # Max seconds to wait for flood control before dropping tasks
 FLOOD_CONTROL_MAX_WAIT = 10
+_TECHNICAL_CHURN_TASK_TYPES = {
+    "status_update",
+    "status_clear",
+    "pending_input_update",
+    "pending_input_clear",
+    "commentary_clear",
+    "plan_clear",
+}
 
 
 def _clear_warning_tracking_for_topic(
@@ -338,6 +354,7 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                             "content",
                             "commentary_update",
                             "plan_update",
+                            "ingress_receipt",
                         }:
                             # Status is ephemeral — safe to drop
                             if task.task_type in {
@@ -375,6 +392,8 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                     await _process_commentary_update_task(bot, user_id, task)
                 elif task.task_type == "pending_input_update":
                     await _process_pending_input_update_task(bot, user_id, task)
+                elif task.task_type == "ingress_receipt":
+                    await _process_ingress_receipt_task(bot, user_id, task)
                 elif task.task_type == "plan_update":
                     await _process_plan_update_task(bot, user_id, task)
                 elif task.task_type == "plan_clear":
@@ -1826,6 +1845,146 @@ async def _process_pending_input_update_task(
     await _do_send_pending_input_message(bot, user_id, tid, wid, pending_text)
 
 
+def _render_ingress_receipt_text(text: str, status: str) -> str:
+    compact = " ".join((text or "").split())
+    if len(compact) > 120:
+        compact = compact[:119].rstrip() + "…"
+    if status == "confirmed":
+        return f"✅ Runtime accepted input:\n{compact}"
+    if status == "failed":
+        return f"❌ Runtime input was not confirmed:\n{compact}"
+    return f"↗ Получил, отправляю в runtime…\n{compact}"
+
+
+async def _process_ingress_receipt_task(
+    bot: Bot,
+    user_id: int,
+    task: MessageTask,
+) -> None:
+    """Send/edit a current-update receipt that is not pre-ACK user echo."""
+    wid = task.window_id or ""
+    tid = task.thread_id or 0
+    proof_id = task.proof_id or ""
+    if not proof_id:
+        return
+    if not await _is_task_binding_active(user_id, wid, task.thread_id):
+        _audit_task_delivery(
+            action="suppress",
+            user_id=user_id,
+            chat_id=session_manager.resolve_chat_id(user_id, task.thread_id),
+            task=task,
+            text=task.text or "",
+            content_type="ingress_receipt",
+            semantic_kind="telegram_ingress_receipt",
+            reason="stale_binding",
+        )
+        return
+
+    text = _render_ingress_receipt_text(task.text or "", task.receipt_status)
+    rkey = (user_id, tid, proof_id)
+    current = _ingress_receipt_msg_info.get(rkey)
+    chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
+    if task.receipt_status == "superseded":
+        _ingress_receipt_superseded.add(rkey)
+        if current:
+            msg_id, stored_wid, _ = current
+            _ingress_receipt_msg_info.pop(rkey, None)
+            if stored_wid == wid:
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                    _audit_task_delivery(
+                        action="delete",
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        task=task,
+                        text=task.text or "",
+                        message_id=msg_id,
+                        content_type="ingress_receipt",
+                        semantic_kind="telegram_ingress_receipt",
+                        reason="replay_user_echo_delivered_first",
+                    )
+                except Exception:
+                    logger.debug("Failed to delete superseded ingress receipt")
+        return
+
+    if rkey in _ingress_receipt_superseded:
+        _audit_task_delivery(
+            action="suppress",
+            user_id=user_id,
+            chat_id=chat_id,
+            task=task,
+            text=task.text or "",
+            content_type="ingress_receipt",
+            semantic_kind="telegram_ingress_receipt",
+            reason="replay_user_echo_delivered_first",
+        )
+        return
+    if current:
+        msg_id, stored_wid, last_text = current
+        if stored_wid == wid and last_text == text:
+            return
+        if stored_wid == wid:
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=_ensure_formatted(text),
+                    parse_mode=PARSE_MODE,
+                    link_preview_options=NO_LINK_PREVIEW,
+                )
+                _ingress_receipt_msg_info[rkey] = (msg_id, wid, text)
+                session_manager.update_fast_proof_receipt_message_id(proof_id, msg_id)
+                _audit_task_delivery(
+                    action="edit",
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    task=task,
+                    text=text,
+                    message_id=msg_id,
+                    content_type="ingress_receipt",
+                    semantic_kind="telegram_ingress_receipt",
+                )
+                return
+            except RetryAfter:
+                raise
+            except Exception:
+                _ingress_receipt_msg_info.pop(rkey, None)
+
+    sent = await send_with_fallback(
+        bot,
+        chat_id,
+        text,
+        **_send_kwargs(task.thread_id),  # type: ignore[arg-type]
+    )
+    _audit_task_delivery(
+        action="send",
+        user_id=user_id,
+        chat_id=chat_id,
+        task=task,
+        text=text,
+        message_id=(sent.message_id if sent else None),
+        success=sent is not None,
+        content_type="ingress_receipt",
+        semantic_kind="telegram_ingress_receipt",
+    )
+    if sent:
+        _ingress_receipt_msg_info[rkey] = (sent.message_id, wid, text)
+        session_manager.update_fast_proof_receipt_message_id(proof_id, sent.message_id)
+        log_telegram_delivery(
+            action="runtime_input_latency",
+            user_id=user_id,
+            chat_id=chat_id,
+            thread_id=task.thread_id,
+            message_id=sent.message_id,
+            window_id=wid,
+            task_type="ingress_receipt",
+            content_type="runtime_input_stage",
+            semantic_kind="ingress_receipt_api_success",
+            text=task.text or "",
+            reason=f"proof:{proof_id}",
+        )
+
+
 async def _process_pending_input_clear_task(
     bot: Bot,
     user_id: int,
@@ -2140,6 +2299,65 @@ async def enqueue_status_update(
         task = MessageTask(task_type="status_clear", thread_id=thread_id)
 
     queue.put_nowait(task)
+
+
+async def enqueue_ingress_receipt(
+    bot: Bot,
+    user_id: int,
+    window_id: str,
+    text: str,
+    *,
+    proof_id: str,
+    receipt_status: str = "pending",
+    thread_id: int | None = None,
+) -> None:
+    """Enqueue a high-priority Telegram ingress receipt/update.
+
+    The task is allowed to pass stale technical status churn but not already
+    queued terminal assistant-final content for the same topic.
+    """
+    queue = get_or_create_queue(bot, user_id)
+    task = MessageTask(
+        task_type="ingress_receipt",
+        text=text,
+        window_id=window_id,
+        thread_id=thread_id,
+        proof_id=proof_id,
+        receipt_status=receipt_status,
+        turn_generation=current_turn_generation(user_id, thread_id),
+    )
+    lock = _queue_locks[user_id]
+    tid = thread_id or 0
+    async with lock:
+        items = _inspect_queue(queue)
+        last_terminal_index = -1
+        for index, item in enumerate(items):
+            if (
+                (item.thread_id or 0) == tid
+                and item.task_type == "content"
+                and item.semantic_kind == ASSISTANT_FINAL_SEMANTIC_KIND
+            ):
+                last_terminal_index = index
+
+        prefix = items[: last_terminal_index + 1]
+        suffix = items[last_terminal_index + 1 :]
+        reordered = list(prefix)
+        placed = False
+        for item in suffix:
+            if (
+                not placed
+                and (item.thread_id or 0) == tid
+                and item.task_type in _TECHNICAL_CHURN_TASK_TYPES
+            ):
+                reordered.append(task)
+                placed = True
+            reordered.append(item)
+        if not placed:
+            reordered.append(task)
+        for item in reordered:
+            queue.put_nowait(item)
+            if item is not task:
+                queue.task_done()
 
 
 async def enqueue_commentary_update(
