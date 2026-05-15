@@ -108,8 +108,10 @@ control surface at a time.
     window to restore the local operator view; this does not create a new
     control surface
   - answering writes the durable question record to terminal state
-    `answered`, then best-effort bridges the answer back to the recorded tmux
-    or session-state tmux return pane and closes the temporary question pane
+    `answered`, closes the temporary question pane, then best-effort bridges
+    the answer through the bound runtime input path when a bound window is
+    known (so runtime submit/ACK semantics apply), with recorded/session-state
+    tmux return-pane send only as a fallback
   - while the durable record is active or recoverable, ordinary Telegram input
     to the same bound tmux window fails closed and must not bypass the question
     artifact

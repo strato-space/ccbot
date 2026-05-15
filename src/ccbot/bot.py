@@ -4307,7 +4307,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     record = await find_answerable_omx_question_for_window(w)
     if record is not None and bool(getattr(record, "allow_other", False)) and text.strip():
-        answer = await answer_omx_question_other(record, text)
+        answer = await answer_omx_question_other(record, text, window_id=wid)
         await clear_omx_question_msg(
             user.id,
             context.bot,

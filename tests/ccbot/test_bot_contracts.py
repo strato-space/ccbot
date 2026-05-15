@@ -4016,7 +4016,11 @@ class TestRuntimeInputRouting:
 
             await bot_mod.text_handler(update, context)
 
-        mock_answer.assert_awaited_once_with(record, "All external deliverables")
+        mock_answer.assert_awaited_once_with(
+            record,
+            "All external deliverables",
+            window_id="@7",
+        )
         mock_clear.assert_awaited_once()
         mock_sm.send_to_window.assert_not_called()
         mock_reply.assert_awaited_once()

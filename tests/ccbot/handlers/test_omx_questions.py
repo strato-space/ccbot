@@ -610,8 +610,12 @@ async def test_omx_question_callback_answers_current_record(
         "_callback_window_authorized",
         lambda *args, **kwargs: True,
     )
-    monkeypatch.setattr(omx_questions, "_tmux_send_line", AsyncMock())
-    monkeypatch.setattr(omx_questions, "_tmux_kill_pane", AsyncMock())
+    send_to_window = AsyncMock(return_value=(True, "ok"))
+    kill_pane = AsyncMock(return_value=True)
+    raw_send = AsyncMock()
+    monkeypatch.setattr(omx_questions.session_manager, "send_to_window", send_to_window)
+    monkeypatch.setattr(omx_questions, "_tmux_send_line", raw_send)
+    monkeypatch.setattr(omx_questions, "_tmux_kill_pane", kill_pane)
     query = SimpleNamespace(
         data=f"{CB_OMX_QUESTION_SELECT}:1:a1b2c3d4:@7",
         message=SimpleNamespace(message_thread_id=42),
@@ -629,6 +633,9 @@ async def test_omx_question_callback_answers_current_record(
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["status"] == "answered"
     assert payload["answer"]["value"] == "revise"
+    kill_pane.assert_awaited_once_with("%207", return_target="%0")
+    send_to_window.assert_awaited_once_with("@7", "[omx question answered] revise")
+    raw_send.assert_not_awaited()
     query.edit_message_text.assert_awaited_once()
     query.answer.assert_awaited_once_with("Answered")
 
@@ -761,10 +768,12 @@ async def test_omx_question_callback_answers_recoverable_timeout_error_record(
         "_capture_renderer_pane",
         AsyncMock(return_value="Pick a path\n\n› [x] 1. Proceed\n  [ ] 2. Revise\n"),
     )
-    send = AsyncMock(return_value=True)
+    raw_send = AsyncMock(return_value=True)
     kill = AsyncMock(return_value=True)
-    monkeypatch.setattr(omx_questions, "_tmux_send_line", send)
+    send_to_window = AsyncMock(return_value=(True, "ok"))
+    monkeypatch.setattr(omx_questions, "_tmux_send_line", raw_send)
     monkeypatch.setattr(omx_questions, "_tmux_kill_pane", kill)
+    monkeypatch.setattr(omx_questions.session_manager, "send_to_window", send_to_window)
     query = SimpleNamespace(
         data=f"{CB_OMX_QUESTION_SELECT}:0:91cbac1d:@4",
         message=SimpleNamespace(message_thread_id=555, chat_id=-1003685295814),
@@ -782,8 +791,9 @@ async def test_omx_question_callback_answers_recoverable_timeout_error_record(
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["status"] == "answered"
     assert payload["answer"]["value"] == "proceed"
-    send.assert_awaited_once_with("%5", "[omx question answered] proceed")
     kill.assert_awaited_once_with("%12", return_target="%5")
+    send_to_window.assert_awaited_once_with("@4", "[omx question answered] proceed")
+    raw_send.assert_not_awaited()
     query.answer.assert_awaited_once_with("Answered")
 
 

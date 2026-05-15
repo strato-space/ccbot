@@ -1001,8 +1001,70 @@ async def _tmux_kill_pane(target: str, *, return_target: str = "") -> bool:
     return proc.returncode == 0
 
 
+async def _close_renderer_pane(record: OmxQuestionRecord, *, return_target: str = "") -> None:
+    renderer_target = _safe_str(record.renderer.get("target")).strip()
+    if (
+        _safe_str(record.renderer.get("renderer")).strip() == "tmux-pane"
+        and renderer_target
+    ):
+        killed = await _tmux_kill_pane(renderer_target, return_target=return_target)
+        if not killed:
+            logger.debug(
+                "OMX question renderer pane was not killed: question_id=%s target=%s return_target=%s",
+                record.question_id,
+                renderer_target,
+                return_target,
+            )
+
+
+async def _bridge_answer_to_runtime(
+    record: OmxQuestionRecord,
+    answer: dict[str, Any],
+    *,
+    window_id: str = "",
+    warning_context: str = "",
+) -> None:
+    transport = _safe_str(record.renderer.get("return_transport")).strip()
+    return_target = _safe_str(record.renderer.get("return_target")).strip()
+    if transport != "tmux-send-keys" or not return_target:
+        await _close_renderer_pane(record, return_target=return_target)
+        return
+
+    injection = _injection_text(answer)
+    if window_id:
+        # The local question pane can be the active pane while the Telegram callback
+        # is handled. Close it before using the normal runtime input path so Codex
+        # receives a real submit/ACK flow in the return pane instead of a raw
+        # tmux paste that can remain stuck in the composer.
+        await _close_renderer_pane(record, return_target=return_target)
+        sent, message = await session_manager.send_to_window(window_id, injection)
+        if not sent:
+            logger.warning(
+                "Failed to submit OMX question %sanswer via runtime input: "
+                "question_id=%s window_id=%s message=%s",
+                f"{warning_context} " if warning_context else "",
+                record.question_id,
+                window_id,
+                message,
+            )
+        return
+
+    injected = await _tmux_send_line(return_target, injection)
+    if not injected:
+        logger.warning(
+            "Failed to inject OMX question %sanswer: question_id=%s return_target=%s",
+            f"{warning_context} " if warning_context else "",
+            record.question_id,
+            return_target,
+        )
+    await _close_renderer_pane(record, return_target=return_target)
+
+
 async def answer_omx_question(
-    record: OmxQuestionRecord, selected_indices: list[int]
+    record: OmxQuestionRecord,
+    selected_indices: list[int],
+    *,
+    window_id: str = "",
 ) -> dict[str, Any]:
     if not selected_indices:
         raise ValueError("No OMX question option selected")
@@ -1019,36 +1081,15 @@ async def answer_omx_question(
     payload.pop("error", None)
     _write_json_object(record.path, payload)
 
-    transport = _safe_str(record.renderer.get("return_transport")).strip()
-    return_target = _safe_str(record.renderer.get("return_target")).strip()
-    if transport == "tmux-send-keys" and return_target:
-        injected = await _tmux_send_line(return_target, _injection_text(answer))
-        if not injected:
-            logger.warning(
-                "Failed to inject OMX question answer: question_id=%s return_target=%s",
-                record.question_id,
-                return_target,
-            )
-
-    renderer_target = _safe_str(record.renderer.get("target")).strip()
-    if (
-        _safe_str(record.renderer.get("renderer")).strip() == "tmux-pane"
-        and renderer_target
-    ):
-        killed = await _tmux_kill_pane(renderer_target, return_target=return_target)
-        if not killed:
-            logger.debug(
-                "OMX question renderer pane was not killed: question_id=%s target=%s return_target=%s",
-                record.question_id,
-                renderer_target,
-                return_target,
-            )
+    await _bridge_answer_to_runtime(record, answer, window_id=window_id)
     return answer
 
 
 async def answer_omx_question_other(
     record: OmxQuestionRecord,
     text: str,
+    *,
+    window_id: str = "",
 ) -> dict[str, Any]:
     """Answer an active OMX question with free-form Telegram text as Other."""
     value = " ".join(text.split())
@@ -1065,30 +1106,12 @@ async def answer_omx_question_other(
     payload.pop("error", None)
     _write_json_object(record.path, payload)
 
-    transport = _safe_str(record.renderer.get("return_transport")).strip()
-    return_target = _safe_str(record.renderer.get("return_target")).strip()
-    if transport == "tmux-send-keys" and return_target:
-        injected = await _tmux_send_line(return_target, _injection_text(answer))
-        if not injected:
-            logger.warning(
-                "Failed to inject OMX question Other answer: question_id=%s return_target=%s",
-                record.question_id,
-                return_target,
-            )
-
-    renderer_target = _safe_str(record.renderer.get("target")).strip()
-    if (
-        _safe_str(record.renderer.get("renderer")).strip() == "tmux-pane"
-        and renderer_target
-    ):
-        killed = await _tmux_kill_pane(renderer_target, return_target=return_target)
-        if not killed:
-            logger.debug(
-                "OMX question renderer pane was not killed after Other answer: question_id=%s target=%s return_target=%s",
-                record.question_id,
-                renderer_target,
-                return_target,
-            )
+    await _bridge_answer_to_runtime(
+        record,
+        answer,
+        window_id=window_id,
+        warning_context="Other",
+    )
     return answer
 
 
@@ -1571,7 +1594,7 @@ async def handle_omx_question_callback(
             return True
         selected = [index]
 
-    answer = await answer_omx_question(record, selected)
+    answer = await answer_omx_question(record, selected, window_id=window_id)
     selected_labels = answer.get("selected_labels")
     if isinstance(selected_labels, list):
         label_text = ", ".join(str(label) for label in selected_labels)

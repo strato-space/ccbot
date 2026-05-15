@@ -116,9 +116,11 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   separate mutable Telegram artifact with inline option buttons. The temporary
   renderer pane belongs to the bound tmux window; it is not promoted to a
   bindable control surface or delivery source. Choosing an option writes the
-  durable record as `answered`, best-effort bridges the normal
-  `[omx question answered] ...` continuation line to the recorded tmux return
-  pane, and closes the temporary question pane. If the record allows `Other`,
+  durable record as `answered`, closes the temporary question pane, and
+  best-effort bridges the normal `[omx question answered] ...` continuation
+  line through the bound runtime input path when a bound window is known (so
+  Codex submit/ACK handling applies) or to the recorded tmux return pane as a
+  fallback. If the record allows `Other`,
   a free-text Telegram reply to the same bound thread is recorded as the
   `Other` answer and follows the same return-pane bridge. If the record times
   out with an error while the same-window renderer pane is still alive and

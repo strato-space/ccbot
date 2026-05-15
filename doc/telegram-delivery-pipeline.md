@@ -177,9 +177,11 @@ same message while the question remains active, and answers by writing the
 durable record to terminal status `answered`. The OMX renderer may be a
 temporary tmux split pane, but that pane inherits the parent bound tmux window;
 it is never promoted to a Telegram control surface or delivery source. When
-the OMX record provides a tmux return bridge, the bot best-effort sends the
-normal `[omx question answered] ...` continuation line back to the return pane
-and closes the temporary question pane. While the record is active, ordinary
+the OMX record provides a tmux return bridge, the bot closes the temporary
+question pane and best-effort sends the normal `[omx question answered] ...`
+continuation line through the bound runtime input path when a bound window is
+known, so Codex submit/ACK handling applies. Pane-level tmux send remains only
+a fallback when no bound window is available. While the record is active, ordinary
 Telegram text/media input to the same bound window fails closed so it cannot
 bypass the blocking control question. If the OMX record allows `Other`, a
 free-text Telegram reply in the same bound thread is consumed as the `Other`
