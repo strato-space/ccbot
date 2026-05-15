@@ -110,6 +110,15 @@ If this note conflicts with any explanatory note in `doc/`, this note wins.
   - if helper telemetry is ever exposed to Telegram, it must be projected as
     parent orchestration milestones, not as a separately writable topic binding
 
+- **HUD/helper pane**
+  - a pane-level operator telemetry or helper surface inside a parent tmux
+    window, including an OMX HUD pane
+  - it inherits the parent window's control context but is not itself a
+    control surface, delivery source, runtime conversation identity, or
+    bindable work-runtime pane
+  - on the `str` recovery surfaces, the HUD should remain a small bottom pane
+    and must never be selected as the restored binding target
+
 ## Canonical Model
 
 `Telegram control surface --governed by surface policy--> may or may not enter bind flow`

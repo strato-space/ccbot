@@ -95,9 +95,29 @@ Prefer explicit non-interactive Codex policy in that command when your host poli
 - For Codex restore, set `CODEX_HOME` in the controller service env so replay
   ACK/catalog lookup uses the intended root, and set `OMX_AUTO_UPDATE=0` so an
   OMX update prompt cannot block non-interactive startup.
+- Autonomous controller restarts on `str` are scoped to exactly two
+  bot-controller/tmux surfaces:
+  - ComfyCodexBot: `ccbot.service`, `CCBOT_DIR=/data/iqdoctor/.ccbot`,
+    tmux `comfy:comfy-agent`, user/surface `3045664/t:555`, chat
+    `-1003685295814`, runtime cwd `/home/tools/server/comfy`,
+    `CODEX_HOME=/data/iqdoctor/.codex`.
+  - ImmArenaBot: `imm_arena_bot.service`,
+    `CCBOT_DIR=/data/iqdoctor/.ccbot-imm_arena_bot`, tmux
+    `imm_arena_bot:imm`, user/surface `3045664/t:3`, chat
+    `-1003974721114`, runtime cwd `/home/tools/imm`,
+    `CODEX_HOME=/home/tools/imm/.codex`.
+- Both controller services now have the tmux-preserving user-systemd drop-in
+  `tmux-preserve.conf` with `KillMode=process`.  Treat that as a blast
+  radius mitigation, not as proof: before and after an approved controller
+  restart, record the tmux server PID and `tmux list-sessions` output.
 - Do not blindly restart `imm_arena_bot.service` or kill tmux to self-heal:
-  on `str`, a shared tmux server may live under that service cgroup.  Ambiguous
-  live layers fail closed for manual inspection.
+  on `str`, a shared tmux server has been observed under that service cgroup.
+  Ambiguous live layers fail closed for manual inspection.  Non-target tmux
+  sessions/windows/panes must not be restarted or killed as part of this
+  recovery path.
+- OMX HUD/helper panes are not bindable work-runtime panes.  The HUD is allowed
+  only as a small bottom pane in the parent window; it is operator telemetry,
+  not a restored binding target.
 - Validate restored writability with `ccbot runtime-input` and same-runtime
   replay-evidence ACK, not with `ccbot send` and not with ad-hoc tmux paste/key
   commands.

@@ -41,6 +41,7 @@ More precisely:
 - `surface_key -> local product key, not a global identity`
 - `control surface -> governed by surface policy and binding state`
 - `binding_scope=tmux -> tmux window -> runtime process`
+- `bot-controller service process -> inventories/repairs only its whitelisted autonomous recovery target`
 - `binding_scope=external -> runtime conversation identity -> replay evidence`
 - `runtime process -> semantic emitter / supervisor`
 - `semantic emitter / supervisor -> live semantic stream`
@@ -69,3 +70,23 @@ flat "session" idea:
 That collapse caused real implementation bugs before. This folder exists so the
 project keeps one explicit ontology surface that code, tests, specs, and docs
 can all point to.
+
+## Current `str` recovery target boundary
+
+Autonomous service recovery is not a general tmux recovery permission.  The
+current whitelisted controller/tmux targets are exactly:
+
+- ComfyCodexBot: `ccbot.service`, `CCBOT_DIR=/data/iqdoctor/.ccbot`, tmux
+  `comfy:comfy-agent`, control surface `3045664/t:555`, runtime cwd
+  `/home/tools/server/comfy`, `CODEX_HOME=/data/iqdoctor/.codex`.
+- ImmArenaBot: `imm_arena_bot.service`,
+  `CCBOT_DIR=/data/iqdoctor/.ccbot-imm_arena_bot`, tmux
+  `imm_arena_bot:imm`, control surface `3045664/t:3`, runtime cwd
+  `/home/tools/imm`, `CODEX_HOME=/home/tools/imm/.codex`.
+
+Both whitelisted controller services now carry `tmux-preserve.conf` with
+`KillMode=process`, but that drop-in is only a blast-radius guard.  Recovery
+still must verify tmux server PID and session list before/after a controller
+restart, and it must not restart or kill non-target tmux sessions/windows/panes.
+OMX HUD/helper panes are pane-level telemetry and never restored binding
+targets.

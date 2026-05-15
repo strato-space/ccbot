@@ -75,6 +75,13 @@ This note defines the core runtime nouns for `ccbot`.
     answer should be returned
   - panes are topology inside a window, not Telegram control surfaces
 
+- **OMX HUD pane**
+  - operator telemetry pane owned by the parent tmux window
+  - allowed shape for the current `str` recovery surfaces is a small bottom
+    pane
+  - not a work-runtime pane, not a runtime conversation identity, and never a
+    restored Telegram binding target
+
 - **Question renderer pane**
   - temporary operator-layer pane used by a runtime wrapper to present a
     blocking question, such as an OMX `omx.question/v1` prompt
@@ -139,6 +146,38 @@ This note defines the core runtime nouns for `ccbot`.
     as `turn_context` or a matching user-message record
   - pane reaction is diagnostic only; it is not authoritative success
 
+- **Bot-controller service process**
+  - the systemd user service process that runs one `ccbot` controller instance
+  - distinct from the tmux server, tmux session, tmux window, runtime process,
+    runtime conversation identity, and Telegram control surface
+  - restarting it is not equivalent to restarting tmux or the runtime process
+
+- **Autonomous recovery target**
+  - a whitelisted bot-controller/tmux surface for which the `str` recovery
+    runbook may perform an approved controller-service restart
+  - current allowed instances are exactly:
+    - ComfyCodexBot: `ccbot.service`, `CCBOT_DIR=/data/iqdoctor/.ccbot`, tmux
+      `comfy:comfy-agent`, control surface `3045664/t:555`, chat
+      `-1003685295814`, cwd `/home/tools/server/comfy`, Codex home
+      `/data/iqdoctor/.codex`
+    - ImmArenaBot: `imm_arena_bot.service`,
+      `CCBOT_DIR=/data/iqdoctor/.ccbot-imm_arena_bot`, tmux
+      `imm_arena_bot:imm`, control surface `3045664/t:3`, chat
+      `-1003974721114`, cwd `/home/tools/imm`, Codex home
+      `/home/tools/imm/.codex`
+  - non-target tmux sessions/windows/panes are outside this recovery target and
+    must not be restarted or killed by this path
+
+- **tmux-preserving controller restart**
+  - a controller-service restart performed with the service drop-in
+    `tmux-preserve.conf` / `KillMode=process`
+  - current `str` fact: both whitelisted controller services now carry this
+    drop-in
+  - this is a process-lifecycle safety guard, not a binding proof and not proof
+    that tmux survived
+  - the tmux server PID and `tmux list-sessions` must be checked before and
+    after any approved controller restart
+
 
 ## Canonical Model
 
@@ -146,9 +185,11 @@ This note defines the core runtime nouns for `ccbot`.
 
 `binding -> delivery source`
 
+`bot-controller service process -> inventories/repairs only its autonomous recovery target`
+
 `binding_scope=tmux -> tmux window -> runtime process`
 
-`tmux window -> tmux pane(s), including any temporary question renderer pane`
+`tmux window -> tmux pane(s), including HUD/question/helper panes that inherit the window and are not binding targets`
 
 `binding_scope=external -> runtime conversation identity -> persisted replay evidence`
 
@@ -197,6 +238,8 @@ Raw operator control is different:
 - a tmux window may host at most one active runtime process at a time
 - tmux panes inherit their parent tmux window's binding; temporary renderer
   panes must not be promoted to separate bindings or delivery sources
+- OMX HUD/helper panes inherit their parent tmux window's context and must not
+  be promoted to restored binding targets
 - a live process may be associated with at most one primary runtime
   conversation identity at a time
 - a runtime conversation identity may have multiple historical replay artifacts
@@ -225,3 +268,9 @@ Raw operator control is different:
   the next user instruction, not a read-only decision prompt
 - if no live input injection plane exists, Telegram text/keys must fail closed
   as read-only rather than pretending to send into tmux
+- on `str`, autonomous recovery may restart only ComfyCodexBot
+  (`ccbot.service` / tmux `comfy:comfy-agent`) and ImmArenaBot
+  (`imm_arena_bot.service` / tmux `imm_arena_bot:imm`) controller services;
+  non-target tmux sessions/windows/panes are not part of the recovery target
+- `tmux-preserve.conf` with `KillMode=process` narrows controller restart blast
+  radius but does not replace before/after tmux PID and session-list checks

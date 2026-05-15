@@ -405,6 +405,24 @@ The service startup path does not inject a smoke message automatically; its
 bind-time gate stops at `LiveRuntimeProof`, while the operator live-ops gate
 must prove `ccbot runtime-input` replay ACK for both configured bots.
 
+On `str`, autonomous controller restart scope is limited to the two known bot
+controller/tmux surfaces below.  Both controller services now carry the
+tmux-preserving systemd drop-in `tmux-preserve.conf` with
+`KillMode=process`; that drop-in reduces restart blast radius, but it is not
+itself proof that tmux survived.  Before and after any approved controller
+restart, operators/automation must record the tmux server PID and `tmux
+list-sessions` output.  Non-target tmux sessions/windows/panes must not be
+restarted or killed by this recovery path.
+
+| Bot controller | systemd user service | `CCBOT_DIR` | tmux session/window | Telegram identity/routing | runtime cwd | `CODEX_HOME` |
+| --- | --- | --- | --- | --- | --- | --- |
+| ComfyCodexBot | `ccbot.service` | `/data/iqdoctor/.ccbot` | `comfy` / `comfy-agent` | user `3045664`, surface `t:555`, chat `-1003685295814` | `/home/tools/server/comfy` | `/data/iqdoctor/.codex` |
+| ImmArenaBot | `imm_arena_bot.service` | `/data/iqdoctor/.ccbot-imm_arena_bot` | `imm_arena_bot` / `imm` | user `3045664`, surface `t:3`, chat `-1003974721114` | `/home/tools/imm` | `/home/tools/imm/.codex` |
+
+OMX HUD/helper panes are operator telemetry, not work-runtime panes.  A HUD
+should remain a small bottom pane in its parent window and must never be chosen
+as the restored Telegram binding target.
+
 **Creating a new session:**
 
 1. Create a new topic in the Telegram group, or use the main chat in a group where topics are disabled

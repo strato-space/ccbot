@@ -48,6 +48,19 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "do not use\n`ccbot send` or copied `tmux paste-buffer`" in readme
     assert "does not inject a smoke message automatically" in readme
     assert "bind-time gate stops at `LiveRuntimeProof`" in readme
+    assert "ComfyCodexBot" in readme
+    assert "`ccbot.service`" in readme
+    assert "`comfy` / `comfy-agent`" in readme
+    assert "ImmArenaBot" in readme
+    assert "`imm_arena_bot.service`" in readme
+    assert "`imm_arena_bot` / `imm`" in readme
+    assert "Telegram identity/routing" in readme
+    assert "Both controller services now carry" in readme
+    assert "`tmux-preserve.conf` with\n`KillMode=process`" in readme
+    assert "tmux server PID and `tmux\nlist-sessions` output" in readme
+    assert "Non-target tmux sessions/windows/panes must not be\nrestarted or killed" in readme
+    assert "HUD\nshould remain a small bottom pane" in readme
+    assert "must never be chosen\nas the restored Telegram binding target" in readme
     assert "Command handlers persist group routing metadata" in readme
     assert "shared group topics" in readme
     assert "queue" in readme
@@ -109,6 +122,15 @@ def test_strato_ops_runbook_captures_cutover_and_rollback_contract() -> None:
     assert "CODEX_HOME" in runbook
     assert "OMX_AUTO_UPDATE=0" in runbook
     assert "Do not blindly restart `imm_arena_bot.service`" in runbook
+    assert "ComfyCodexBot: `ccbot.service`" in runbook
+    assert "tmux `comfy:comfy-agent`" in runbook
+    assert "ImmArenaBot: `imm_arena_bot.service`" in runbook
+    assert "tmux\n    `imm_arena_bot:imm`" in runbook
+    assert "Both controller services now have" in runbook
+    assert "`tmux-preserve.conf` with `KillMode=process`" in runbook
+    assert "tmux server PID and `tmux list-sessions` output" in runbook
+    assert "Non-target tmux\n  sessions/windows/panes must not be restarted or killed" in runbook
+    assert "HUD is allowed\n  only as a small bottom pane" in runbook
     assert "ccbot runtime-input" in runbook
     assert "replay-evidence ACK" in runbook
     assert "does not inject its own smoke message" in runbook
@@ -178,9 +200,24 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "control surface -> control-surface identity" in index
     assert "control-surface identity -> (user_id, surface_key)" in index
     assert "surface_key -> local product key, not a global identity" in index
+    assert "whitelisted autonomous recovery target" in index
+    assert "Current `str` recovery target boundary" in index
+    assert "ComfyCodexBot: `ccbot.service`" in index
+    assert "ImmArenaBot: `imm_arena_bot.service`" in index
+    assert "`tmux-preserve.conf` with\n`KillMode=process`" in index
+    assert "must not restart or kill non-target tmux sessions/windows/panes" in index
     assert "semantic emitter / supervisor" in runtime
     assert "runtime conversation identity" in runtime
     assert "persisted replay evidence" in runtime
+    assert "Bot-controller service process" in runtime
+    assert "Autonomous recovery target" in runtime
+    assert "ComfyCodexBot: `ccbot.service`" in runtime
+    assert "ImmArenaBot: `imm_arena_bot.service`" in runtime
+    assert "tmux-preserving controller restart" in runtime
+    assert "current `str` fact: both whitelisted controller services now carry this" in runtime
+    assert "tmux server PID and `tmux list-sessions` must be checked" in runtime
+    assert "OMX HUD pane" in runtime
+    assert "never a\n    restored Telegram binding target" in runtime
     assert "binding_scope=external" in runtime
     assert "Telegram control surface" in runtime
     assert "Surface key" in runtime
@@ -198,6 +235,9 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "group_chat_ids[user_id:thread_id] -> Telegram group chat_id" in topic_control
     assert "command-only entry must not depend on prior text, mention, or callback input" in topic_control
     assert "photo/document/sticker/audio/video ingress is not an addressed entry" in topic_control
+    assert "HUD/helper pane" in topic_control
+    assert "not itself a\n    control surface, delivery source, runtime conversation identity" in topic_control
+    assert "must never be selected as the restored binding target" in topic_control
     assert "pending slot" in topic_control
     assert "no-topics main-chat control surface" in topic_control
     assert "legacy `topic_*` maps are compatibility mirrors" in topic_control
