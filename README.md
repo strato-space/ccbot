@@ -118,10 +118,11 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   bindable control surface or delivery source. Choosing an option writes the
   durable record as `answered`, best-effort bridges the normal
   `[omx question answered] ...` continuation line to the recorded tmux return
-  pane, and closes the temporary question pane; free-text `Other` answers stay
-  on the live tmux UI for now. While a question is active, ordinary Telegram
-  input to that window fails closed and points the operator back to the
-  question artifact.
+  pane, and closes the temporary question pane. If the record allows `Other`,
+  a free-text Telegram reply to the same bound thread is recorded as the
+  `Other` answer and follows the same return-pane bridge. While a question is
+  active, ordinary Telegram input to that window fails closed unless it is
+  consumed as an allowed `Other` answer.
 - **Heads-up warnings stay visible without breaking turn closure** — Operator
   warning notices remain visible in Telegram while assistant-final semantics
   and post-final artifact closure remain intact. Repeated identical warning

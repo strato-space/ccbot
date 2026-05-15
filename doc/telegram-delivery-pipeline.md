@@ -181,8 +181,11 @@ the OMX record provides a tmux return bridge, the bot best-effort sends the
 normal `[omx question answered] ...` continuation line back to the return pane
 and closes the temporary question pane. While the record is active, ordinary
 Telegram text/media input to the same bound window fails closed so it cannot
-bypass the blocking control question. This artifact is not a technical status
-artifact, not a user turn opener, and not a terminal assistant answer.
+bypass the blocking control question. If the OMX record allows `Other`, a
+free-text Telegram reply in the same bound thread is consumed as the `Other`
+answer, written to the durable record, bridged back to the recorded return pane,
+and the temporary question pane is closed. This artifact is not a technical
+status artifact, not a user turn opener, and not a terminal assistant answer.
 
 This preserves the upstream Claude shape:
 

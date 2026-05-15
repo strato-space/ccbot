@@ -188,6 +188,55 @@ async def test_answer_omx_question_marks_record_and_bridges_to_return_pane(
 
 
 @pytest.mark.asyncio
+async def test_answer_omx_question_other_uses_free_text_and_return_pane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _write_question(tmp_path, allow_other=True, target="%12", return_target="%5")
+    window = TmuxWindow(
+        window_id="@4",
+        window_name="comfy-agent",
+        cwd=str(tmp_path),
+        pane_current_command="node",
+        pane_id="%5",
+        pane_ids=("%5", "%12"),
+    )
+    record = omx_questions.find_active_omx_question(window)
+    assert record is not None
+    sent: list[tuple[str, str]] = []
+    killed: list[tuple[str, str]] = []
+
+    async def fake_send(target: str, text: str) -> bool:
+        sent.append((target, text))
+        return True
+
+    async def fake_kill(target: str, *, return_target: str = "") -> bool:
+        killed.append((target, return_target))
+        return True
+
+    monkeypatch.setattr(omx_questions, "_tmux_send_line", fake_send)
+    monkeypatch.setattr(omx_questions, "_tmux_kill_pane", fake_kill)
+
+    answer = await omx_questions.answer_omx_question_other(
+        record,
+        "  apply the gate to all external deliverables  ",
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["status"] == "answered"
+    assert payload["answer"] == {
+        "kind": "other",
+        "value": "apply the gate to all external deliverables",
+        "selected_labels": ["Other"],
+        "selected_values": ["apply the gate to all external deliverables"],
+    }
+    assert answer["kind"] == "other"
+    assert sent == [
+        ("%5", "[omx question answered] apply the gate to all external deliverables")
+    ]
+    assert killed == [("%12", "%5")]
+
+
+@pytest.mark.asyncio
 async def test_handle_omx_question_ui_sends_once_then_reuses_existing_message(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

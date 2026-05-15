@@ -162,6 +162,8 @@ from .handlers.message_sender import (
     send_with_fallback,
 )
 from .handlers.omx_questions import (
+    answer_omx_question_other,
+    clear_omx_question_msg,
     find_active_omx_question_for_window,
     handle_omx_question_callback,
     handle_omx_question_ui,
@@ -4300,6 +4302,23 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             wid,
             surface.message_thread_id,
             reply_message=update.message,
+        )
+        return
+
+    record = await find_active_omx_question_for_window(w)
+    if record is not None and record.allow_other and text.strip():
+        answer = await answer_omx_question_other(record, text)
+        await clear_omx_question_msg(
+            user.id,
+            context.bot,
+            surface.message_thread_id,
+            chat_id=chat.id if chat and chat.id is not None else None,
+            window_id=wid,
+        )
+        await safe_reply(
+            update.message,
+            "✅ OMX question answered as Other:\n"
+            f"{answer.get('value', '').strip()}",
         )
         return
 

@@ -452,6 +452,16 @@ def _answer_payload(
     }
 
 
+def _other_answer_payload(record: OmxQuestionRecord, text: str) -> dict[str, Any]:
+    value = " ".join(text.split())
+    return {
+        "kind": "other",
+        "value": value,
+        "selected_labels": [record.other_label],
+        "selected_values": [value],
+    }
+
+
 def _read_json_object(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -567,6 +577,52 @@ async def answer_omx_question(
     return answer
 
 
+async def answer_omx_question_other(
+    record: OmxQuestionRecord,
+    text: str,
+) -> dict[str, Any]:
+    """Answer an active OMX question with free-form Telegram text as Other."""
+    value = " ".join(text.split())
+    if not value:
+        raise ValueError("Other OMX question answer cannot be empty")
+    if not record.allow_other:
+        raise ValueError("OMX question does not allow Other answers")
+
+    answer = _other_answer_payload(record, value)
+    payload = _read_json_object(record.path)
+    payload["status"] = "answered"
+    payload["updated_at"] = _now_iso()
+    payload["answer"] = answer
+    payload.pop("error", None)
+    _write_json_object(record.path, payload)
+
+    transport = _safe_str(record.renderer.get("return_transport")).strip()
+    return_target = _safe_str(record.renderer.get("return_target")).strip()
+    if transport == "tmux-send-keys" and return_target:
+        injected = await _tmux_send_line(return_target, _injection_text(answer))
+        if not injected:
+            logger.warning(
+                "Failed to inject OMX question Other answer: question_id=%s return_target=%s",
+                record.question_id,
+                return_target,
+            )
+
+    renderer_target = _safe_str(record.renderer.get("target")).strip()
+    if (
+        _safe_str(record.renderer.get("renderer")).strip() == "tmux-pane"
+        and renderer_target
+    ):
+        killed = await _tmux_kill_pane(renderer_target, return_target=return_target)
+        if not killed:
+            logger.debug(
+                "OMX question renderer pane was not killed after Other answer: question_id=%s target=%s return_target=%s",
+                record.question_id,
+                renderer_target,
+                return_target,
+            )
+    return answer
+
+
 def _build_question_text(
     record: OmxQuestionRecord, selected: set[int] | None = None
 ) -> str:
@@ -585,7 +641,10 @@ def _build_question_text(
                 lines.append(f"   {option.description}")
     if record.allow_other:
         lines.append("")
-        lines.append(f"Other is available in the tmux UI as: {record.other_label}")
+        lines.append(
+            f"Other is available as: {record.other_label}. "
+            "Reply with text in this Telegram thread to answer as Other."
+        )
     if record.multi_select:
         lines.append("")
         lines.append("Select one or more options, then tap Submit.")

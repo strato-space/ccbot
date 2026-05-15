@@ -96,13 +96,14 @@ control surface at a time.
     source, and not a separate turn source
   - uses Telegram inline buttons for predefined options and updates in place
     until answered or no longer active
+  - if the record allows `Other`, a free-text Telegram reply on the same bound
+    surface is consumed as the `Other` answer instead of ordinary runtime input
   - answering writes the durable question record to terminal state
     `answered`, then best-effort bridges the answer back to the recorded tmux
     return pane and closes the temporary question pane
   - while the durable record is active, ordinary Telegram input to the same
     bound tmux window fails closed and must not bypass the question artifact
-  - unsupported free-text `Other` answers remain available in the tmux UI until
-    a Telegram free-text answer lane is explicitly designed
+    unless it is consumed through the allowed `Other` lane
 
 - **Warning artifact**
   - durable system notice
