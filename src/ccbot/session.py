@@ -204,6 +204,18 @@ def _codex_has_live_input_plane(
     return bool(command_name)
 
 
+def _codex_composer_completion_popup_open(pane_text: str | None) -> bool:
+    """Return True when Codex composer autocomplete is intercepting Enter."""
+    text = " ".join((pane_text or "").split()).casefold()
+    if not text:
+        return False
+    return (
+        "no matches" in text
+        and "press enter to insert" in text
+        and "esc to close" in text
+    )
+
+
 def _codex_content_text(content: Any) -> str:
     if content is None:
         return ""
@@ -2955,6 +2967,28 @@ class SessionManager:
                         attempts,
                     )
                     return True, f"Sent text to {window_id}"
+                await asyncio.sleep(CODEX_MULTILINE_ACK_POLL_SECONDS)
+
+            pane_text = await tmux_manager.capture_pane(window_id)
+            if _codex_composer_completion_popup_open(pane_text):
+                logger.info(
+                    "codex_submit_ack: closing composer completion popup "
+                    "before retrying submit to %s",
+                    window_id,
+                )
+                escaped, escape_message = await runtime_input_driver.send_special_key(
+                    window_id,
+                    "Escape",
+                    runtime_kind="codex",
+                )
+                if not escaped:
+                    logger.warning(
+                        "codex_submit_ack: failed to close composer completion "
+                        "popup before retrying submit to %s: %s",
+                        window_id,
+                        escape_message,
+                    )
+                    return False, escape_message
                 await asyncio.sleep(CODEX_MULTILINE_ACK_POLL_SECONDS)
 
         if await self._codex_rollout_has_submit_ack(

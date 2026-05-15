@@ -806,6 +806,83 @@ class TestRuntimeInputDriverIntegration:
         )
 
     @pytest.mark.asyncio
+    async def test_send_to_window_codex_closes_completion_popup_before_ack_retry(
+        self,
+        mgr: SessionManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        rollout = tmp_path / "thread-1.jsonl"
+        rollout.write_text("", encoding="utf-8")
+        text = (
+            "и еще, проанализируй диалог за сутки, нужен план улучшений. "
+            "$deep-interview"
+        )
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+        mgr.resolve_thread_for_window = AsyncMock(
+            return_value=ThreadLocator(
+                thread_id="thread-1",
+                summary="Thread One",
+                message_count=1,
+                file_path=str(rollout),
+                runtime_kind="codex",
+                cwd="/tmp/project",
+            )
+        )
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_RETRY_SECONDS", 0.001)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_POLL_SECONDS", 0.001)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_MAX_ATTEMPTS", 2)
+        submit_attempts = 0
+
+        async def submit_and_ack_on_second_attempt(*args, **kwargs):
+            nonlocal submit_attempts
+            submit_attempts += 1
+            if submit_attempts == 2:
+                with rollout.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps({"type": "turn_context"}) + "\n")
+            return True, "Submitted text to @1"
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+            )
+            mock_tmux.capture_pane = AsyncMock(
+                side_effect=[
+                    "",
+                    (
+                        "› и еще, проанализируй диалог за сутки. $deep-interview\n\n"
+                        "  no matches\n\n"
+                        "  Press enter to insert or esc to close"
+                    ),
+                ]
+            )
+            mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
+            mock_driver.send_multiline_submit_key = AsyncMock(
+                side_effect=submit_and_ack_on_second_attempt
+            )
+            mock_driver.send_special_key = AsyncMock(return_value=(True, "Sent Escape"))
+
+            success, message = await mgr.send_to_window("@1", text)
+
+        assert success is True
+        assert message == "Sent to @1"
+        assert mock_driver.send_multiline_submit_key.await_count == 2
+        mock_driver.send_special_key.assert_awaited_once_with(
+            "@1",
+            "Escape",
+            runtime_kind="codex",
+        )
+
+    @pytest.mark.asyncio
     async def test_send_to_window_codex_multiline_waits_for_rollout_ack(
         self,
         mgr: SessionManager,
