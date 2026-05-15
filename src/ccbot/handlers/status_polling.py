@@ -563,7 +563,13 @@ async def update_status_message(
         pane_text=pane_text,
     )
 
-    if await handle_omx_question_ui(bot, user_id, window_id, thread_id):
+    if await handle_omx_question_ui(
+        bot,
+        user_id,
+        window_id,
+        thread_id,
+        send_if_missing=not skip_status,
+    ):
         update_window_input_safety_snapshot(
             window_id=window_id,
             input_surface_kind=surface.kind,

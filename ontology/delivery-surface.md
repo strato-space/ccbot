@@ -115,6 +115,10 @@ control surface at a time.
     source, and not a separate turn source
   - uses Telegram inline buttons for predefined options and updates in place
     until answered or no longer active
+  - the first visible prompt must not jump ahead of already queued
+    informational/commentary content for the same user; status-poll discovery
+    may defer creating a new question artifact until that queue drains, while
+    edits to an existing question artifact may proceed in place
   - if the record allows `Other`, a free-text Telegram reply on the same bound
     surface is consumed as the `Other` answer instead of ordinary runtime input
   - a timeout/error record with a same-window renderer pane that is still alive

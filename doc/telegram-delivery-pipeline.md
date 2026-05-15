@@ -190,6 +190,11 @@ same message while the question remains active, and answers by writing the
 durable record to terminal status `answered`. The OMX renderer may be a
 temporary tmux split pane, but that pane inherits the parent bound tmux window;
 it is never promoted to a Telegram control surface or delivery source. When
+status polling discovers a new question while earlier informational/commentary
+content is still queued for the same user, the initial question prompt is
+deferred until that queue drains so the human sees the explanatory message
+before the questionnaire. Edits to an already visible question artifact remain
+allowed because they do not create a new out-of-order prompt. When
 the OMX record provides a tmux return bridge, the bot closes the temporary
 question pane and best-effort sends the normal `[omx question answered] ...`
 continuation line through the bound runtime input path when a bound window is

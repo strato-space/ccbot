@@ -165,7 +165,13 @@ class TestStatusPollerSettingsDetection:
         mock_tmux.capture_pane.assert_awaited_once_with(window_id)
         mock_pending.assert_awaited_once()
         mock_runtime_warning.assert_awaited_once()
-        mock_omx_question.assert_awaited_once_with(mock_bot, 1, window_id, 42)
+        mock_omx_question.assert_awaited_once_with(
+            mock_bot,
+            1,
+            window_id,
+            42,
+            send_if_missing=True,
+        )
         mock_status.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -272,6 +278,98 @@ class TestStatusPollerSettingsDetection:
         mock_bot.send_message.assert_awaited_once()
         assert "❓ OMX Question" in mock_bot.send_message.await_args.kwargs["text"]
         assert "pre-delivery self-test gate" in mock_bot.send_message.await_args.kwargs["text"]
+        mock_status.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_omx_question_prompt_defers_behind_queued_informational_content(
+        self,
+        mock_bot: AsyncMock,
+        tmp_path: Path,
+    ):
+        from ccbot.handlers import omx_questions
+
+        runtime_cwd = tmp_path / "runtime"
+        runtime_cwd.mkdir()
+        question_path = (
+            runtime_cwd
+            / ".omx/state/sessions/s1/questions"
+            / "question-2026-05-15T16-50-00-000Z-round4.json"
+        )
+        question_path.parent.mkdir(parents=True)
+        question_path.write_text(
+            json.dumps(
+                {
+                    "kind": "omx.question/v1",
+                    "question_id": "question-2026-05-15T16-50-00-000Z-round4",
+                    "updated_at": datetime.now(UTC)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                    "status": "prompting",
+                    "question": "Round 4 choice?",
+                    "options": [{"label": "Proceed", "value": "proceed"}],
+                    "allow_other": True,
+                    "type": "single-answerable",
+                    "source": "deep-interview",
+                    "renderer": {
+                        "renderer": "tmux-pane",
+                        "target": "%12",
+                        "return_target": "%5",
+                        "return_transport": "tmux-send-keys",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        window_id = "@4"
+        window = TmuxWindow(
+            window_id=window_id,
+            window_name="comfy-agent",
+            cwd=str(runtime_cwd),
+            pane_current_command="node",
+            pane_id="%5",
+            pane_ids=("%5", "%12"),
+        )
+
+        with (
+            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux_poll,
+            patch(
+                "ccbot.handlers.status_polling.enqueue_pending_input_update",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "ccbot.handlers.status_polling._maybe_enqueue_runtime_exit_warning",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "ccbot.handlers.status_polling.enqueue_status_update",
+                new_callable=AsyncMock,
+            ) as mock_status,
+            patch(
+                "ccbot.handlers.omx_questions.tmux_manager.find_window_by_id",
+                new_callable=AsyncMock,
+                return_value=window,
+            ),
+            patch(
+                "ccbot.handlers.omx_questions.session_manager.resolve_chat_id",
+                return_value=-1003685295814,
+            ),
+        ):
+            omx_questions._question_msgs.pop((3045664, "t:555"), None)
+            omx_questions._question_render_state.pop((3045664, "t:555"), None)
+            mock_tmux_poll.find_window_by_id = AsyncMock(return_value=window)
+            mock_tmux_poll.capture_pane = AsyncMock(return_value="OpenAI Codex\n› ready")
+
+            await update_status_message(
+                mock_bot,
+                user_id=3045664,
+                window_id=window_id,
+                thread_id=555,
+                skip_status=True,
+            )
+
+        mock_bot.send_message.assert_not_awaited()
+        mock_bot.edit_message_text.assert_not_awaited()
         mock_status.assert_not_awaited()
 
     @pytest.mark.asyncio

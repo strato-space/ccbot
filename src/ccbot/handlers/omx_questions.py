@@ -1417,6 +1417,7 @@ async def handle_omx_question_ui(
     *,
     record: OmxQuestionRecord | None = None,
     chat_id: int | None = None,
+    send_if_missing: bool = True,
 ) -> bool:
     """Send/update an OMX question prompt for the bound window, if active."""
     window = await tmux_manager.find_window_by_id(window_id)
@@ -1494,6 +1495,16 @@ async def handle_omx_question_ui(
         if edit_result == "failed":
             return False
         _question_msgs.pop(key, None)
+    if not send_if_missing:
+        logger.debug(
+            "Deferring new OMX question artifact while earlier Telegram artifacts drain: "
+            "user=%d window=%s thread=%s question_id=%s",
+            user_id,
+            window_id,
+            thread_id,
+            record.question_id,
+        )
+        return True
     try:
         sent = await bot.send_message(
             chat_id=resolved_chat_id,
