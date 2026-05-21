@@ -27,6 +27,43 @@ SENSITIVE_ENV_VARS = {
     "OPENAI_API_KEY",
 }
 
+VOICE_STT_PROVIDERS = {"openai", "local_command", "auto", "disabled"}
+
+
+def _bounded_int_env(
+    name: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %d", name, value, default)
+        return default
+    if parsed < minimum:
+        logger.warning(
+            "%s=%d below minimum %d; using %d", name, parsed, minimum, minimum
+        )
+        return minimum
+    if parsed > maximum:
+        logger.warning(
+            "%s=%d above maximum %d; using %d", name, parsed, maximum, maximum
+        )
+        return maximum
+    return parsed
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name, "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on"}
+
 
 def resolve_ccbot_command(environ: dict[str, str] | None = None) -> str:
     """Resolve the configured runtime launcher command.
@@ -141,6 +178,37 @@ class Config:
         self.openai_base_url: str = os.getenv(
             "OPENAI_BASE_URL", "https://api.openai.com/v1"
         )
+        voice_stt_provider = (
+            os.getenv("CCBOT_VOICE_STT_PROVIDER", "openai").strip().lower()
+        )
+        if voice_stt_provider not in VOICE_STT_PROVIDERS:
+            logger.warning(
+                "Unknown CCBOT_VOICE_STT_PROVIDER=%s, falling back to openai",
+                voice_stt_provider,
+            )
+            voice_stt_provider = "openai"
+        self.voice_stt_provider = voice_stt_provider
+        self.local_stt_command = os.getenv("CCBOT_LOCAL_STT_COMMAND", "").strip()
+        self.local_stt_model = os.getenv(
+            "CCBOT_LOCAL_STT_MODEL",
+            "antony66/whisper-large-v3-russian",
+        ).strip()
+        self.local_stt_language = (
+            os.getenv("CCBOT_LOCAL_STT_LANGUAGE", "ru").strip() or "ru"
+        )
+        self.local_stt_timeout_seconds = _bounded_int_env(
+            "CCBOT_LOCAL_STT_TIMEOUT_SECONDS",
+            300,
+            minimum=1,
+            maximum=3600,
+        )
+        self.local_stt_max_concurrency = _bounded_int_env(
+            "CCBOT_LOCAL_STT_MAX_CONCURRENCY",
+            1,
+            minimum=1,
+            maximum=8,
+        )
+        self.local_stt_keep_artifacts = _bool_env("CCBOT_LOCAL_STT_KEEP_ARTIFACTS")
 
         # Scrub sensitive vars from os.environ so child processes never inherit them.
         # Values are already captured in Config attributes above.

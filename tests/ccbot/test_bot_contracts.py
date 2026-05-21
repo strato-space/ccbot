@@ -3967,6 +3967,7 @@ class TestMediaForwarding:
 
         with (
             patch.object(bot_mod.config, "openai_api_key", ""),
+            patch.object(bot_mod.config, "voice_stt_provider", "openai"),
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.tmux_manager") as mock_tmux,
@@ -3991,6 +3992,7 @@ class TestMediaForwarding:
 
         with (
             patch.object(bot_mod.config, "openai_api_key", ""),
+            patch.object(bot_mod.config, "voice_stt_provider", "openai"),
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot._get_thread_id", return_value=42),
             patch("ccbot.bot.session_manager") as mock_sm,
@@ -4010,6 +4012,29 @@ class TestMediaForwarding:
         mock_tx.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_unwritable_voice_target_stops_before_stt_config_or_download(self):
+        update = _make_topic_update()
+        context = _make_context()
+        update.message.voice = MagicMock()
+        update.message.voice.get_file = AsyncMock()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch(
+                "ccbot.bot._resolve_attachment_input_target",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("ccbot.bot.voice_transcription_config_error") as mock_config_error,
+            patch("ccbot.bot.transcribe_voice", new_callable=AsyncMock) as mock_tx,
+        ):
+            await bot_mod.voice_handler(update, context)
+
+        mock_config_error.assert_not_called()
+        update.message.voice.get_file.assert_not_called()
+        mock_tx.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_voice_handler_transcribes_and_sends_text(self):
         update = _make_topic_update()
         context = _make_context()
@@ -4020,6 +4045,7 @@ class TestMediaForwarding:
 
         with (
             patch.object(bot_mod.config, "openai_api_key", "sk-test"),
+            patch.object(bot_mod.config, "voice_stt_provider", "openai"),
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.tmux_manager") as mock_tmux,
@@ -4039,6 +4065,100 @@ class TestMediaForwarding:
             await bot_mod.voice_handler(update, context)
 
             mock_sm.send_to_window.assert_called_once_with("@7", "Hello from voice")
+
+    @pytest.mark.asyncio
+    async def test_voice_handler_local_command_does_not_require_openai_key(self):
+        update = _make_topic_update()
+        context = _make_context()
+        update.message.voice = MagicMock()
+        voice_file = MagicMock()
+        voice_file.download_as_bytearray = AsyncMock(return_value=bytearray(b"ogg"))
+        update.message.voice.get_file = AsyncMock(return_value=voice_file)
+
+        with (
+            patch.object(bot_mod.config, "openai_api_key", ""),
+            patch.object(bot_mod.config, "voice_stt_provider", "local_command"),
+            patch.object(
+                bot_mod.config,
+                "local_stt_command",
+                "/bin/stt --input_path {input_path} --output_dir {output_dir}",
+            ),
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch(
+                "ccbot.bot.transcribe_voice",
+                new_callable=AsyncMock,
+                return_value="Локальная расшифровка",
+            ),
+            patch("ccbot.bot.clear_status_msg_info"),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await bot_mod.voice_handler(update, context)
+
+            mock_sm.send_to_window.assert_called_once_with("@7", "Локальная расшифровка")
+
+    @pytest.mark.asyncio
+    async def test_voice_handler_disabled_provider_does_not_download(self):
+        update = _make_topic_update()
+        context = _make_context()
+        update.message.voice = MagicMock()
+        update.message.voice.get_file = AsyncMock()
+
+        with (
+            patch.object(bot_mod.config, "voice_stt_provider", "disabled"),
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+            patch("ccbot.bot.transcribe_voice", new_callable=AsyncMock) as mock_tx,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+
+            await bot_mod.voice_handler(update, context)
+
+        update.message.voice.get_file.assert_not_called()
+        mock_tx.assert_not_called()
+        mock_reply.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_voice_handler_hides_unexpected_transcription_exception_detail(self):
+        update = _make_topic_update()
+        context = _make_context()
+        update.message.voice = MagicMock()
+        voice_file = MagicMock()
+        voice_file.download_as_bytearray = AsyncMock(return_value=bytearray(b"ogg"))
+        update.message.voice.get_file = AsyncMock(return_value=voice_file)
+
+        with (
+            patch.object(bot_mod.config, "openai_api_key", "sk-test"),
+            patch.object(bot_mod.config, "voice_stt_provider", "openai"),
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch(
+                "ccbot.bot.transcribe_voice",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("token=secret stderr payload"),
+            ),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock())
+
+            await bot_mod.voice_handler(update, context)
+
+        mock_reply.assert_awaited_once()
+        reply_text = mock_reply.await_args.args[1]
+        assert reply_text == "⚠ Transcription failed."
 
 
 class TestRuntimeInputRouting:

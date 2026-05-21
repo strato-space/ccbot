@@ -210,7 +210,7 @@ from .telegram_delivery_policy import is_non_turn_user_notification
 from .terminal_parser import classify_input_surface, extract_bash_output
 from .tmux_manager import tmux_manager
 from .transcribe import close_client as close_transcribe_client
-from .transcribe import transcribe_voice
+from .transcribe import transcribe_voice, voice_transcription_config_error
 from .utils import ccbot_dir
 
 logger = logging.getLogger(__name__)
@@ -3951,7 +3951,7 @@ async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle voice messages: transcribe via OpenAI and forward text to Codex."""
+    """Handle voice messages: transcribe and forward text to Codex."""
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
         if update.message:
@@ -3969,12 +3969,14 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if target is None:
         return
 
-    if not config.openai_api_key:
-        await safe_reply(
-            update.message,
-            "⚠ Voice transcription requires an OpenAI API key.\n"
-            "Set `OPENAI_API_KEY` in your `.env` file and restart the bot.",
-        )
+    config_error = voice_transcription_config_error()
+    if config_error:
+        if "OpenAI API key" in config_error:
+            config_error = (
+                "Voice transcription requires an OpenAI API key.\n"
+                "Set `OPENAI_API_KEY` in your `.env` file and restart the bot."
+            )
+        await safe_reply(update.message, f"⚠ {config_error}")
         return
 
     voice_file = await update.message.voice.get_file()
@@ -3987,8 +3989,8 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await safe_reply(update.message, f"⚠ {e}")
         return
     except Exception as e:
-        logger.error("Voice transcription failed: %s", e)
-        await safe_reply(update.message, f"⚠ Transcription failed: {e}")
+        logger.error("Voice transcription failed: %s", e.__class__.__name__)
+        await safe_reply(update.message, "⚠ Transcription failed.")
         return
 
     await update.message.chat.send_action(ChatAction.TYPING)

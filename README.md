@@ -153,7 +153,8 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   render as `node` processes with unclassified footers are treated as live, so
   status polling does not turn ordinary footer churn into repeated screenshots.
 - **Prompt-safe control lane** — Detect `input ready`, `busy`, and `blocked prompt` terminal states before sending input
-- **Voice messages** — Voice messages are transcribed via OpenAI and forwarded as text
+- **Voice messages** — Voice messages are transcribed through a configurable
+  STT provider (OpenAI by default, or a host-local command) and forwarded as text
 - **Audio/video messages** — Telegram audio/video files within the configured Telegram bot download cap are saved under `$CCBOT_DIR/media` and forwarded artifact-first to the runtime as local paths plus metadata; transcription is optional future enrichment
 - **Photo/document messages** — Telegram photos and documents/files such as `tar.gz` archives are downloaded and forwarded to the runtime as local file paths; Telegram media groups and same-surface orphan attachment bursts are batched into one runtime input when safe
 - **Sticker messages** — Telegram stickers are normalized to image attachments for the runtime; animated/video stickers use their Telegram thumbnail when available
@@ -234,8 +235,15 @@ ALLOWED_USERS=your_telegram_user_id
 | `CLAUDE_COMMAND`        | `claude`   | Legacy fallback used only when `CCBOT_COMMAND` is unset |
 | `MONITOR_POLL_INTERVAL` | `2.0`      | Polling interval in seconds                      |
 | `CCBOT_SHOW_HIDDEN_DIRS` | `false` | Show hidden (dot) directories in directory browser |
-| `OPENAI_API_KEY` | _(none)_ | OpenAI API key for voice message transcription |
+| `OPENAI_API_KEY` | _(none)_ | OpenAI API key for voice message transcription when using `openai` or `auto` fallback |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI API base URL (for proxies or compatible APIs) |
+| `CCBOT_VOICE_STT_PROVIDER` | `openai` | Voice STT provider: `openai`, `local_command`, `auto`, or `disabled` |
+| `CCBOT_LOCAL_STT_COMMAND` | _(none)_ | Local STT command template for `local_command`/`auto`; placeholders: `{input_path}`, `{output_dir}`, `{model}`, `{language}`, `{run_id}` |
+| `CCBOT_LOCAL_STT_MODEL` | `antony66/whisper-large-v3-russian` | Local STT model identifier passed to the command template |
+| `CCBOT_LOCAL_STT_LANGUAGE` | `ru` | Local STT language passed to the command template |
+| `CCBOT_LOCAL_STT_TIMEOUT_SECONDS` | `300` | Timeout for one local STT command invocation |
+| `CCBOT_LOCAL_STT_MAX_CONCURRENCY` | `1` | Max concurrent local STT command invocations |
+| `CCBOT_LOCAL_STT_KEEP_ARTIFACTS` | `false` | Keep generated local STT run directories under `$CCBOT_DIR/media/stt` for debugging |
 | `CCBOT_MAX_AUDIO_BYTES` | `52428800` | Maximum inbound Telegram audio artifact size before refusing download/forward |
 | `CCBOT_MAX_VIDEO_BYTES` | `104857600` | Maximum inbound Telegram video artifact size before refusing download/forward |
 | `CCBOT_MAX_TELEGRAM_DOWNLOAD_BYTES` | `20971520` | Maximum Bot API `getFile`/download size for inbound media; effective audio/video preflight uses the lower of this cap and the media-specific cap |
@@ -492,7 +500,9 @@ routing warm-up in shared group surfaces.
 Once a topic is bound to a live tmux window, plain text, voice, photo,
 document, sticker, audio, and video messages are forwarded to the active
 runtime for every allowed participant in that bound surface. Voice is
-transcribed first. Photos are downloaded under
+transcribed first through `CCBOT_VOICE_STT_PROVIDER` (`openai` by default,
+`local_command` for host-local ASR, `auto` for local-first/cloud-fallback, or
+`disabled`). Photos are downloaded under
 `$CCBOT_DIR/images`; documents are downloaded under `$CCBOT_DIR/documents`; photo/document media groups and orphan attachment bursts are coalesced into one runtime input with an `Attachments:` list when the same surface/binding proof remains valid;
 simple one-line Codex text with no attachment intent, no active/recoverable OMX
 question, no blocked prompt, no open attachment batch, and a fresh writable
@@ -511,9 +521,10 @@ GIF sibling when `ffmpeg` is available; `.tgs` stickers keep the original
 `.tgs` artifact without pretending it is an image/GIF. For regular videos, a
 Telegram thumbnail or `ffmpeg` frame preview is attached when available; if no
 preview can be produced, the video artifact path is still delivered with
-`Preview unavailable`. Audio/video transcription is not attempted in the MVP
-when OpenAI credentials are unavailable; local OSS ASR/diarization is future
-optional enrichment. The default remote Telegram Bot API download cap is
+`Preview unavailable`. Audio/video artifact transcription is not attempted in
+the MVP; voice-message STT can use OpenAI or a host-local command and is
+configured independently from audio/video artifact ingress. The default remote
+Telegram Bot API download cap is
 `CCBOT_MAX_TELEGRAM_DOWNLOAD_BYTES=20971520`; audio/video files above the
 effective cap fail before download with a clear “too large for Telegram bot
 download” warning rather than a generic artifact failure.
@@ -686,7 +697,7 @@ src/ccbot/
 ├── terminal_parser.py     # Terminal pane parsing (interactive UI + status line)
 ├── html_converter.py      # Markdown → Telegram HTML conversion + HTML-aware splitting
 ├── screenshot.py          # Terminal text → PNG image with ANSI color support
-├── transcribe.py          # Voice-to-text transcription via OpenAI API
+├── transcribe.py          # Voice-to-text transcription via OpenAI/local STT providers
 ├── utils.py               # Shared utilities (atomic JSON writes, JSONL helpers)
 ├── tmux_manager.py        # Tmux window management (list, create, send keys, kill)
 ├── fonts/                 # Bundled fonts for screenshot rendering

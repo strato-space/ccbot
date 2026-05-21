@@ -59,6 +59,13 @@ the local artifact path to the runtime. That artifact-first ingress is not
 outbound `ccbot send`, and optional transcript/preview enrichment must not
 become a gate for delivering the original artifact path.
 
+Inbound Telegram voice-message STT is separate from artifact-first audio/video
+ingress. Voice messages still require a writable runtime binding before the bot
+downloads or transcribes anything. The selected STT provider is a runtime-local
+ingress detail (`openai`, `local_command`, `auto`, or `disabled`), and local
+ASR runs out-of-process through a configured command rather than becoming a
+torch/transformers dependency inside the Telegram bot.
+
 ## Replay Evidence Write Ownership
 
 Replay evidence is written by:
