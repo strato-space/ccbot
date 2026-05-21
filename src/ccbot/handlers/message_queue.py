@@ -178,6 +178,20 @@ _TECHNICAL_CHURN_TASK_TYPES = {
     "commentary_clear",
     "plan_clear",
 }
+_TAIL_REEMIT_COMMENTARY_RE = re.compile(
+    r"\b(?:both\s+)?reviewer\s+lanes\b"
+    r"|\breview\s+lanes\b"
+    r"|оба\s+reviewer\s+lanes"
+    r"|жду\s+до\s+\d+\s+минут"
+    r"|не\s+обрыва\w+"
+    r"|\bwaiting\s+(?:up\s+to\s+)?\d+\s+(?:minutes?|mins?)\b",
+    re.IGNORECASE,
+)
+
+
+def _should_reemit_commentary_at_tail(text: str) -> bool:
+    """Return True when editing an old commentary bubble would look invisible."""
+    return bool(_TAIL_REEMIT_COMMENTARY_RE.search(text or ""))
 
 
 def _clear_warning_tracking_for_topic(
@@ -1530,6 +1544,7 @@ async def _process_commentary_update_task(
             and latest_kind == "commentary"
             and len(commentary_parts) == 1
             and not extra_ids
+            and not _should_reemit_commentary_at_tail(commentary_text)
         ):
             chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
             try:

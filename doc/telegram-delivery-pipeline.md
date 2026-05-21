@@ -376,6 +376,11 @@ must not reappear below the final answer unless a new user turn has begun.
 Commentary is not clipped by the internal status-helper ceiling; if one
 Telegram message is insufficient, it may span multiple Telegram messages while
 remaining one logical commentary artifact.
+For long-wait reviewer/progress commentary where an in-place Telegram edit
+would leave the update hidden above the chat tail, the bot may delete the old
+latest commentary artifact and re-send the replacement at the tail. This still
+preserves one logical latest-only commentary artifact rather than accumulating
+a commentary stack.
 If a complete commentary or orchestration event arrives after that closure
 point, the bot must drop it instead of reopening the closed pre-final lane.
 

@@ -398,6 +398,60 @@ async def test_process_commentary_task_replaces_previous_visible_commentary() ->
 
 
 @pytest.mark.asyncio
+async def test_process_commentary_task_reemits_reviewer_wait_at_tail() -> None:
+    clear_commentary_lane_state(1, 42)
+    first = MessageTask(
+        task_type="commentary_update",
+        window_id="@7",
+        thread_id=42,
+        text="ℹ Commentary\nПроверяю план перед запуском reviewers",
+    )
+    second = MessageTask(
+        task_type="commentary_update",
+        window_id="@7",
+        thread_id=42,
+        text=(
+            "ℹ Commentary\n"
+            "Запущены оба reviewer lanes. Жду до 15 минут, не обрываю рано."
+        ),
+    )
+
+    bot = AsyncMock()
+    sent_first = AsyncMock()
+    sent_first.message_id = 101
+    sent_second = AsyncMock()
+    sent_second.message_id = 102
+
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                side_effect=[sent_first, sent_second],
+            ) as mock_send,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+
+            await _process_commentary_update_task(bot, 1, first)
+            await _process_commentary_update_task(bot, 1, second)
+
+        assert mock_send.await_count == 2
+        bot.edit_message_text.assert_not_awaited()
+        deleted_ids = {
+            call.kwargs["message_id"] for call in bot.delete_message.await_args_list
+        }
+        assert 101 in deleted_ids
+        assert "reviewer lanes" in mock_send.await_args_list[1].args[2]
+    finally:
+        clear_commentary_lane_state(1, 42)
+
+
+@pytest.mark.asyncio
 async def test_process_commentary_task_sends_multi_part_commentary_losslessly() -> None:
     task = MessageTask(
         task_type="commentary_update",

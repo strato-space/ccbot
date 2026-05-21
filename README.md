@@ -93,6 +93,9 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   or late technical status may leak below the terminal assistant bubble.
   When compactness and semantic clarity conflict, the delivery surface prefers
   visibility-first edit-in-place updates over ambiguous silence.
+  Long-wait reviewer/progress commentary may be re-sent at the chat tail while
+  replacing the previous commentary artifact, because editing an old Telegram
+  bubble can make the update effectively invisible to the operator.
   If a new turn starts via hidden opener scaffolding, lifecycle `turn_started`
   can reopen the delivery lanes idempotently without creating a duplicate
   visible user-opener bubble; targeted Stop-hook/Ralph continuation prompts

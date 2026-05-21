@@ -209,6 +209,10 @@ In addition:
 - latest commentary stays visible as a dedicated artifact
 - one logical commentary artifact may be serialized into multiple Telegram
   messages when needed to preserve the full text
+- long-wait reviewer/progress commentary may re-emit the latest commentary
+  artifact at the chat tail instead of editing an older Telegram message in
+  place, because Telegram edits do not make an old bubble visibly current; this
+  remains one latest-only commentary artifact, not a stack
 - latest Codex plan update stays visible as a separate mutable artifact and is
   updated only by newer `plan_update` events
 - latest pending input preview may stay visible as a separate mutable artifact
