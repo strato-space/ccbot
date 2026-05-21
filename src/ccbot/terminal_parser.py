@@ -344,7 +344,7 @@ def classify_input_surface(pane_text: str) -> InputSurface:
 # ── Status line parsing ─────────────────────────────────────────────────
 
 # Spinner characters Claude Code uses in its status line
-STATUS_SPINNERS = frozenset(["·", "✻", "✽", "✶", "✳", "✢"])
+STATUS_SPINNERS = frozenset(["·", "•", "✻", "✽", "✶", "✳", "✢"])
 
 
 def parse_status_line(pane_text: str) -> str | None:

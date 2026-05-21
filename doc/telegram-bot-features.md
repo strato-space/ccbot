@@ -131,7 +131,7 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 |---------|--------|-------|
 | **HTML formatting** | ✅ | Messages render via `chatgpt-md-converter`; MarkdownV2 is no longer the active runtime formatter |
 | **send_chat_action("typing")** | ✅ | Shown while processing user messages and during long operations |
-| **Telegram ingress receipt** | ✅ | Eligible simple Codex text sends a distinct current-update receipt before replay ACK; it is edited to confirmed or failed and is not a runtime user echo before proof |
+| **Telegram ingress receipt** | ✅ | Eligible simple Codex text sends a distinct current-update receipt before replay ACK; it is edited to confirmed, delivered-but-unconfirmed, or failed and is not a runtime user echo before proof |
 | **InlineKeyboardMarkup** | ✅ | Used extensively: thread picker, history pagination, directory browser, prompt snapshots, screenshot refresh |
 | **callback_query.answer()** | ✅ | Instant feedback on all callback button clicks |
 | **editMessageText** | ✅ | Status-to-content conversion in compact mode, plus verbose/fallback `tool_result` editing into `tool_use` messages |
@@ -147,7 +147,7 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | **sendDocument** | ✅ | Screenshots and runtime document/file attachments sent as Telegram documents |
 | **Sticker ingress** | ✅ | Inbound Telegram stickers are normalized to runtime image attachments; animated/video stickers use Telegram thumbnails as visual input and preserve original animation artifacts for direct result delivery |
 | **Photo/document batching** | ✅ | Inbound Telegram photo/document media groups and same-surface orphan attachment bursts are saved under `$CCBOT_DIR/images` / `$CCBOT_DIR/documents` and coalesced into one runtime input with an `Attachments:` list when binding proof still revalidates |
-| **Simple text fast path** | ✅ | One-line Codex text without attachment intent, shell-command prefix, active question, blocked prompt, stale safety cache, or open attachment batch bypasses the 0.75s text lead-hold and waits for replay ACK asynchronously |
+| **Simple text fast path** | ✅ | One-line Codex text without attachment intent, shell-command prefix, active question, blocked prompt, stale safety cache, or open attachment batch bypasses the 0.75s text lead-hold and waits for replay ACK asynchronously; a short ACK miss is shown as delivered-but-unconfirmed rather than a hard input failure |
 | **Audio/video ingress** | ✅ | Inbound Telegram audio/video messages are artifact-first runtime inputs: originals within the effective Telegram bot download cap are saved under `$CCBOT_DIR/media`, audio/video paths and metadata are sent to the bound runtime, video previews are best-effort, and transcription is optional future enrichment rather than an OpenAI gate |
 | **ccbot send file delivery** | ✅ | Local `ccbot send --file-path --file-type photo\|animation\|audio\|video` returns generated artifacts to the Telegram surface without using runtime-input/TUI injection |
 | **Polling liveness guard** | ✅ | Telegram long polling uses explicit getUpdates pool/timeouts and a pending-update watchdog so service-alive-but-polling-dead processes exit for systemd restart instead of silently accumulating updates |

@@ -95,8 +95,10 @@ control surface at a time.
   - on replay ACK success it may be edited/promoted into a confirmed user-input
     display and the later duplicate replay user echo is suppressed only after
     ordinary user-turn reopening side effects run
-  - on ACK failure it is edited or paired with an explicit failure so it never
-    remains indistinguishable from a successful runtime user echo
+  - on a short ACK miss after payload/submit delivery it is edited or paired
+    with a delivered-but-unconfirmed state; on hard delivery failure it is
+    edited or paired with an explicit failure so it never remains
+    indistinguishable from a successful runtime user echo
   - `send_chat_action("typing")` is only a transient Telegram transport signal:
     it is not this receipt, not a turn artifact, and not runtime proof
 

@@ -1851,6 +1851,14 @@ def _render_ingress_receipt_text(text: str, status: str) -> str:
         compact = compact[:119].rstrip() + "…"
     if status == "confirmed":
         return f"✅ Runtime accepted input:\n{compact}"
+    if status in {"delayed_runtime", "delivered_no_ack"}:
+        return f"⏳ Delivered to tmux; waiting for Codex replay ACK:\n{compact}"
+    if status == "expired_without_ack":
+        return f"⚠️ Delivered to tmux, but Codex replay ACK did not arrive:\n{compact}"
+    if status == "queued_after_tool":
+        return f"⏭ Queued in Codex after the current tool call:\n{compact}"
+    if status == "composer_staged":
+        return f"📝 Staged in Codex composer; not yet persisted:\n{compact}"
     if status == "failed":
         return f"❌ Runtime input was not confirmed:\n{compact}"
     return f"↗ Получил, отправляю в runtime…\n{compact}"

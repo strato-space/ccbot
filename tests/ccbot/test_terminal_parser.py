@@ -23,6 +23,7 @@ class TestParseStatusLine:
         ("spinner", "rest", "expected"),
         [
             ("·", "Working on task", "Working on task"),
+            ("•", " Working on task", "Working on task"),
             ("✻", "  Reading file  ", "Reading file"),
             ("✽", "Thinking deeply", "Thinking deeply"),
             ("✶", "Analyzing code", "Analyzing code"),

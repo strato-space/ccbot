@@ -23,7 +23,7 @@ from ccbot.input_safety import (
 )
 from ccbot.handlers.callback_data import append_bind_flow_token
 from ccbot.runtime_types import NormalizedEvent
-from ccbot.session import FastRuntimeInputProof
+from ccbot.session import CODEX_DELIVERED_NO_ACK_MESSAGE, FastRuntimeInputProof
 from ccbot.telegram_delivery_policy import apply_telegram_delivery_policy
 from ccbot.state_schema import (
     BINDING_STATE_NONE,
@@ -2913,14 +2913,10 @@ class TestMediaForwarding:
         mock_sm.send_to_window.assert_awaited_once_with("@7", "hello")
 
     @pytest.mark.asyncio
-    async def test_text_flush_failed_codex_ack_surfaces_warning_reply(self):
+    async def test_text_flush_delivered_without_short_ack_does_not_error_reply(self):
         update = _make_topic_update(text="hello")
         context = _make_context()
         clock = {"monotonic": 0.0}
-        warning = (
-            "Codex did not persist a new turn after submit; "
-            "the draft may still be waiting in the terminal composer"
-        )
 
         with (
             patch("ccbot.bot.is_user_allowed", return_value=True),
@@ -2936,15 +2932,15 @@ class TestMediaForwarding:
             mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
             mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
             mock_tmux.capture_pane = AsyncMock(return_value="")
-            mock_sm.send_to_window = AsyncMock(return_value=(False, warning))
+            mock_sm.send_to_window = AsyncMock(
+                return_value=(True, CODEX_DELIVERED_NO_ACK_MESSAGE)
+            )
 
             await bot_mod.text_handler(update, context)
             await bot_mod._flush_due_attachment_batches(now=0.75)
 
         mock_sm.send_to_window.assert_awaited_once_with("@7", "hello")
-        mock_reply.assert_awaited_once()
-        assert mock_reply.await_args.args[0] is update.message
-        assert mock_reply.await_args.args[1] == f"❌ {warning}"
+        mock_reply.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_bang_text_command_keeps_direct_bash_capture_path(self):
@@ -3018,6 +3014,39 @@ class TestMediaForwarding:
         mock_sm.send_to_window_fast_unverified.assert_awaited_once()
         mock_sm.send_to_window.assert_not_called()
         assert bot_mod._attachment_batcher.keys() == []
+
+    @pytest.mark.asyncio
+    async def test_delivered_no_ack_fast_proof_updates_receipt_as_delayed(self):
+        proof = FastRuntimeInputProof(
+            proof_id="proof-delayed",
+            user_id=1,
+            chat_id=100,
+            thread_id=42,
+            surface_key="t:42",
+            window_id="@7",
+            runtime_kind="codex",
+            runtime_thread_id="thread-1",
+            text_hash="",
+            text_len=4,
+            text_preview="ping",
+            rollout_file="/tmp/rollout.jsonl",
+            start_byte=0,
+            created_at_monotonic=0.0,
+            status="delivered_no_ack",
+        )
+
+        with (
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch(
+                "ccbot.bot.enqueue_ingress_receipt", new_callable=AsyncMock
+            ) as mock_receipt,
+        ):
+            mock_sm.is_fast_user_echo_represented.return_value = False
+
+            await bot_mod._handle_fast_input_proof_complete(AsyncMock(), proof)
+
+        mock_receipt.assert_awaited_once()
+        assert mock_receipt.await_args.kwargs["receipt_status"] == "delayed_runtime"
 
     @pytest.mark.asyncio
     async def test_allowed_text_sends_typing_before_window_lookup(self):

@@ -159,7 +159,8 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
 - **Simple text fast path** — eligible one-line Codex text gets an immediate
   Telegram ingress receipt and starts a runtime injection attempt before the
   replay ACK finishes; the receipt is visibly not a runtime user echo until
-  Codex/OMX replay later confirms or fails the turn
+  Codex/OMX replay later confirms, remains delayed/unconfirmed, or fails the
+  turn
 - **Codex command forwarding** — Forward raw Codex slash commands, with a small supported menu surface for `/clear`, `/compact`, `/diff`, `/exit`, `/init`, `/review`, and `/status`
 - **Create new conversations** — Start Codex conversations from Telegram via directory browser
 - **Resume conversations** — Pick up where you left off by resuming an existing Codex identity in a directory
@@ -492,9 +493,10 @@ simple one-line Codex text with no attachment intent, no active/recoverable OMX
 question, no blocked prompt, no open attachment batch, and a fresh writable
 binding proof may bypass the attachment text lead-hold and synchronous ACK wait.
 That path sends a Telegram ingress receipt (`↗ Получил, отправляю в runtime…`)
-as current-update acknowledgement, then updates it to confirmed or failed after
-Codex replay evidence appears; before ACK it is not replay-backed `user_echo`
-and does not open the runtime turn.
+as current-update acknowledgement, then updates it to confirmed, delayed
+(`⏳ Delivered to tmux; waiting for Codex replay ACK`), or failed after the
+bounded ACK window; before ACK it is not replay-backed `user_echo` and does not
+open the runtime turn.
 audio/video originals are downloaded under `$CCBOT_DIR/media` and forwarded
 artifact-first as local paths plus metadata. Static stickers are normalized to
 PNG image attachments. Animated/video stickers use their Telegram thumbnail as
@@ -524,12 +526,13 @@ Routing note:
 - Raw terminal control in tmux remains a separate operator layer and is never modeled as an ordinary queued message.
 - Text sent to a writable live tmux runtime is delivered as payload plus
   a separate runtime submit key; payload/key success is not considered
-  successful message delivery. For Codex conversational input (single-line and
-  multiline), Telegram reports success only after same-runtime-identity
-  persisted JSONL turn event / replay evidence proves a new turn. Multiline
-  Codex payloads are still bracketed-pasted before bare `Enter`; if no
-  persisted ACK appears within the bounded retry window, ccbot fails closed
-  with a composer-draft warning instead of claiming the message was sent.
+  replay-confirmed message delivery. For Codex conversational input
+  (single-line and multiline), same-runtime-identity persisted JSONL turn event
+  / replay evidence is the durable ACK that proves a new turn. Multiline Codex
+  payloads are still bracketed-pasted before bare `Enter`; if tmux payload and
+  submit-key delivery succeed but no persisted ACK appears within the bounded
+  retry window, ccbot surfaces an explicit delivered-but-unconfirmed state
+  instead of a hard failure or silent success.
 - A Codex-bound tmux window that has fallen back to a shell prompt is read as a
   dead input plane; Telegram input fails closed instead of being pasted into
   `bash`.

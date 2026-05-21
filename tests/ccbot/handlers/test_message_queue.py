@@ -21,6 +21,7 @@ from ccbot.handlers.message_queue import (
     _plan_update_msg_info,
     _process_pending_input_clear_task,
     _process_plan_update_task,
+    _render_ingress_receipt_text,
     _warning_msg_info,
     _ingress_receipt_msg_info,
     _ingress_receipt_superseded,
@@ -58,6 +59,14 @@ def test_can_merge_tasks_rejects_mixed_content_types():
     )
 
     assert _can_merge_tasks(base, candidate) is False
+
+
+def test_ingress_receipt_render_distinguishes_delivered_no_ack() -> None:
+    text = _render_ingress_receipt_text("hello", "delayed_runtime")
+
+    assert text.startswith("⏳ Delivered to tmux")
+    assert "waiting for Codex replay ACK" in text
+    assert "❌" not in text
 
 
 def test_can_merge_tasks_rejects_different_topics_for_same_window():

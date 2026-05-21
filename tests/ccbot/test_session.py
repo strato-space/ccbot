@@ -10,7 +10,15 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from ccbot.codex_threads import CodexThreadCatalog
-from ccbot.session import FastRuntimeInputProof, PendingSurfaceSlot, SessionManager
+from ccbot.session import (
+    CODEX_DELIVERED_NO_ACK_MESSAGE,
+    CODEX_DELIVERED_NO_ACK_STATUS,
+    FastRuntimeInputProof,
+    PendingSurfaceSlot,
+    SessionManager,
+    _codex_text_matches_expected_exact,
+    _stable_text_hash,
+)
 from ccbot.runtime_types import LiveProcessDescriptor, ThreadLocator
 from ccbot.state_schema import (
     BINDING_STATE_BIND_FLOW,
@@ -751,7 +759,7 @@ class TestRuntimeInputDriverIntegration:
         mock_driver.send_raw_slash_command.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_send_to_window_single_line_codex_fails_without_ack(
+    async def test_send_to_window_single_line_codex_reports_delivered_without_short_ack(
         self,
         mgr: SessionManager,
         tmp_path: Path,
@@ -795,9 +803,8 @@ class TestRuntimeInputDriverIntegration:
 
             success, message = await mgr.send_to_window("@1", "hello")
 
-        assert success is False
-        assert "did not persist a new turn" in message
-        assert "draft may still be waiting" in message
+        assert success is True
+        assert message == CODEX_DELIVERED_NO_ACK_MESSAGE
         mock_driver.send_text.assert_awaited_once_with(
             "@1",
             "hello",
@@ -1320,8 +1327,18 @@ class TestRuntimeInputDriverIntegration:
         assert success is True
         assert proof is not None
         await asyncio.wait_for(done.wait(), timeout=1)
-        assert proof.status == "ack_failed"
+        assert proof.status == CODEX_DELIVERED_NO_ACK_STATUS
         mock_driver.send_multiline_submit_key.assert_awaited_once()
+
+    def test_codex_ack_text_match_tolerates_trailing_line_spaces_only(self) -> None:
+        assert _codex_text_matches_expected_exact(
+            "first line   \n\nsecond line \n",
+            "first line\n\nsecond line",
+        )
+        assert not _codex_text_matches_expected_exact(
+            "prefix first line\n\nsecond line suffix",
+            "first line\n\nsecond line",
+        )
 
     @pytest.mark.asyncio
     async def test_fast_codex_input_confirms_workflow_autocomplete_alias(
@@ -1506,6 +1523,44 @@ class TestRuntimeInputDriverIntegration:
         assert second[0] is False
         assert "waiting for Codex replay ACK" in second[1]
         assert mock_driver.send_text.await_count == 1
+
+    def test_fast_user_echo_match_allows_delivered_no_ack_delayed_replay(
+        self,
+        mgr: SessionManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        now = 1_000.0
+        monkeypatch.setattr("ccbot.session.time.monotonic", lambda: now)
+        proof = FastRuntimeInputProof(
+            proof_id="delayed",
+            user_id=100,
+            chat_id=-100,
+            thread_id=42,
+            surface_key="t:42",
+            window_id="@1",
+            runtime_kind="codex",
+            runtime_thread_id="thread-1",
+            text_hash="",
+            text_len=11,
+            text_preview="hello world",
+            rollout_file="/tmp/rollout.jsonl",
+            start_byte=40,
+            created_at_monotonic=now - 300.0,
+            status=CODEX_DELIVERED_NO_ACK_STATUS,
+        )
+        proof.text_hash = _stable_text_hash("hello world")
+        mgr.fast_input_proofs = {"delayed": proof}
+
+        assert (
+            mgr.match_fast_user_echo_proof(
+                window_id="@1",
+                thread_id=42,
+                runtime_thread_id="thread-1",
+                text="hello world",
+                include_pending=True,
+            )
+            is proof
+        )
 
     def test_fast_user_echo_match_requires_runtime_thread_recent_ack_and_pending_race(
         self,

@@ -95,6 +95,12 @@ CODEX_MULTILINE_ACK_RETRY_SECONDS = 2.0
 CODEX_MULTILINE_ACK_MAX_ATTEMPTS = 3
 FAST_CODEX_ACK_TIMEOUT_SECONDS = CODEX_MULTILINE_ACK_TIMEOUT_SECONDS
 FAST_CODEX_ACK_POLL_SECONDS = CODEX_MULTILINE_ACK_POLL_SECONDS
+CODEX_DELIVERED_NO_ACK_STATUS = "delivered_no_ack"
+CODEX_EXPIRED_WITHOUT_ACK_STATUS = "expired_without_ack"
+CODEX_DELIVERED_NO_ACK_MESSAGE = (
+    "Codex input was delivered to tmux; waiting for persisted replay ACK"
+)
+CODEX_DELIVERED_NO_ACK_MATCH_SECONDS = 10 * 60
 _SHELL_COMMAND_NAMES = {"bash", "dash", "fish", "sh", "zsh"}
 
 SURFACE_BINDINGS_KEY = "surface_bindings"
@@ -281,9 +287,14 @@ def _codex_content_text(content: Any) -> str:
     return str(content)
 
 
+def _canonical_codex_ack_text(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return "\n".join(line.rstrip() for line in normalized.split("\n")).strip()
+
+
 def _codex_text_matches_expected(observed: str, expected: str) -> bool:
-    observed_norm = observed.replace("\r\n", "\n").replace("\r", "\n").strip()
-    expected_norm = expected.replace("\r\n", "\n").replace("\r", "\n").strip()
+    observed_norm = _canonical_codex_ack_text(observed)
+    expected_norm = _canonical_codex_ack_text(expected)
     return bool(
         observed_norm
         and expected_norm
@@ -292,8 +303,8 @@ def _codex_text_matches_expected(observed: str, expected: str) -> bool:
 
 
 def _codex_text_matches_expected_exact(observed: str, expected: str) -> bool:
-    observed_norm = observed.replace("\r\n", "\n").replace("\r", "\n").strip()
-    expected_norm = expected.replace("\r\n", "\n").replace("\r", "\n").strip()
+    observed_norm = _canonical_codex_ack_text(observed)
+    expected_norm = _canonical_codex_ack_text(expected)
     return bool(observed_norm and expected_norm and observed_norm == expected_norm)
 
 
@@ -357,7 +368,7 @@ def _codex_record_confirms_strict_user_submit(
 def _stable_text_hash(text: str) -> str:
     import hashlib
 
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    normalized = _canonical_codex_ack_text(text)
     return hashlib.sha256(normalized.encode("utf-8", "replace")).hexdigest()
 
 
@@ -402,8 +413,16 @@ class FastRuntimeInputProof:
                 return False
             if now - self.ack_confirmed_at_monotonic > max_ack_age_seconds:
                 return False
-        elif include_pending and self.status == "pending":
-            if now - self.created_at_monotonic > max_ack_age_seconds:
+        elif include_pending and self.status in (
+            "pending",
+            CODEX_DELIVERED_NO_ACK_STATUS,
+        ):
+            max_age = (
+                CODEX_DELIVERED_NO_ACK_MATCH_SECONDS
+                if self.status == CODEX_DELIVERED_NO_ACK_STATUS
+                else max_ack_age_seconds
+            )
+            if now - self.created_at_monotonic > max_age:
                 return False
         else:
             return False
@@ -3156,14 +3175,14 @@ class SessionManager:
                     self._log_fast_input_stage(proof, "runtime_ack_confirmed")
                     return
                 await asyncio.sleep(FAST_CODEX_ACK_POLL_SECONDS)
-            proof.status = "ack_failed"
+            proof.status = CODEX_DELIVERED_NO_ACK_STATUS
             proof.failure_reason = (
-                "Codex did not persist a matching user message after fast submit"
+                "Codex did not persist a matching user message within the short ACK window"
             )
             self._log_fast_input_stage(
                 proof,
-                "runtime_ack_failed",
-                success=False,
+                "runtime_ack_delayed",
+                success=True,
                 error=proof.failure_reason,
             )
         finally:
@@ -3469,11 +3488,7 @@ class SessionManager:
             CODEX_MULTILINE_ACK_TIMEOUT_SECONDS,
             attempts,
         )
-        return (
-            False,
-            "Codex did not persist a new turn after submit; "
-            "the draft may still be waiting in the terminal composer",
-        )
+        return True, CODEX_DELIVERED_NO_ACK_MESSAGE
 
     async def _submit_codex_multiline_with_rollout_ack(
         self,
@@ -3581,6 +3596,8 @@ class SessionManager:
                 runtime_kind=runtime_kind,
             )
         if success:
+            if message == CODEX_DELIVERED_NO_ACK_MESSAGE:
+                return True, message
             return True, f"Sent to {display}"
         return False, message
 

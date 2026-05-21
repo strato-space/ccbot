@@ -1169,7 +1169,13 @@ async def _handle_fast_input_proof_complete(
     proof_id = getattr(proof, "proof_id")
     if session_manager.is_fast_user_echo_represented(proof_id):
         return
-    status = "confirmed" if getattr(proof, "status", "") == "ack_confirmed" else "failed"
+    proof_status = getattr(proof, "status", "")
+    if proof_status == "ack_confirmed":
+        status = "confirmed"
+    elif proof_status == "delivered_no_ack":
+        status = "delayed_runtime"
+    else:
+        status = "failed"
     await enqueue_ingress_receipt(
         bot,
         getattr(proof, "user_id"),

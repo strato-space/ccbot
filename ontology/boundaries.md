@@ -33,9 +33,10 @@ and operator control outrank protocol purity for the live execution surface.
 
 Telegram text injection into a writable live tmux binding is a two-step
 operator-layer act: deliver the payload, then deliver the runtime submit key.
-Raw paste/key success alone is not a message-layer turn opener. Paste failure,
-submit failure, or missing runtime acknowledgement must surface as explicit
-delivery failure rather than as a successful queued message. For Codex
+Raw paste/key success alone is not a message-layer turn opener. Paste failure or
+submit failure must surface as explicit delivery failure; missing runtime
+acknowledgement after successful paste/submit must surface as explicit
+delivered-but-unconfirmed state rather than as a successful queued message. For Codex
 conversational payloads, single-line and multiline alike, field evidence shows
 that tmux submit-key success can leave the payload in the composer; authoritative
 success is same-runtime-identity replay acknowledgement, not the key event. The

@@ -70,15 +70,15 @@ Codex conversational input is a two-step tmux operation: deliver the payload,
 then send the runtime-native submit key. Single-line payloads use literal text;
 multiline payloads use bracketed paste followed by bare `Enter`. The initial
 post-payload delay is deliberately tiny; it is only a readiness gap, not proof
-of delivery. ccbot reports success for Codex conversational input only after
-the same-runtime-identity rollout JSONL appends a turn-acceptance record. A
-matching user message is the strongest ACK; bare `turn_context` can count only
-inside the per-window ACK guard after the submit key has been sent. If the
-visible Codex surface is still busy, ccbot does not inject Telegram input; it
-fails closed because immediate JSONL ACK cannot be proven. If no persisted ACK
+of delivery. ccbot treats the same-runtime-identity rollout JSONL append as the
+durable turn-acceptance proof. A matching user message is the strongest ACK;
+bare `turn_context` can count only inside the per-window ACK guard after the
+submit key has been sent. If the visible Codex surface is still busy, ccbot does
+not inject Telegram input; it fails closed because immediate JSONL ACK cannot
+be proven. If payload and submit-key delivery succeed but no persisted ACK
 appears within the bounded retry window on an input-ready pane, the send path
-fails closed and warns that the draft may still be waiting in the terminal
-composer.
+surfaces an explicit delivered-but-unconfirmed state and continues matching a
+later delayed replay user echo.
 
 Local service automation that needs to submit Codex input must enter through
 `ccbot runtime-input`, not through `ccbot send` and not through copied tmux

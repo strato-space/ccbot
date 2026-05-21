@@ -49,8 +49,9 @@ The default Telegram surface is `compact`, not `verbose`.
 - Telegram ingress receipts for eligible simple Codex text are current-update
   acknowledgements only: before replay ACK they are not `user_echo`, not runtime
   proof, and not turn openers; ACK success or the later replay-backed user echo
-  opens the runtime turn exactly once, while ACK failure edits/pairs the receipt
-  with explicit failure
+  opens the runtime turn exactly once, while a short ACK miss edits/pairs the
+  receipt with explicit delivered-but-unconfirmed state rather than a hard
+  failure
 - `send_chat_action("typing")` is a transient Telegram transport signal, not an
   artifact in compact ordering and not runtime proof
 - placeholder reasoning such as `[reasoning]` is suppressed
@@ -495,8 +496,8 @@ surface as an injection operation with distinct phases:
 - runtime acknowledgement from same-runtime-identity replay evidence
 
 Payload/key success is not a turn opener. For Codex conversational input,
-single-line and multiline alike, ccbot reports success only after the currently
-attached Codex runtime identity appends replay evidence proving that a new turn
+single-line and multiline alike, ccbot treats the currently attached Codex
+runtime identity's appended replay evidence as the durable proof that a new turn
 opened. A matching user-message record is the strongest ACK; a bare
 `turn_context` may count only inside the per-window ACK guard after the submit
 key has been sent.
@@ -509,8 +510,10 @@ text in the composer. Live `str` evidence on 2026-04-30 also showed that
 submitting too soon after paste can leave the same draft visible until a later
 manual Enter, so Codex multiline submit includes a short post-paste readiness
 delay before sending `Enter`. If payload delivery, submit-key delivery, or
-replay ACK fails, the bot must return an explicit delivery failure instead of
-reporting the message as sent.
+identity matching fails, the bot must return an explicit delivery failure. If
+payload and submit-key delivery succeed but replay ACK does not arrive within
+the bounded window, the bot must surface an explicit delivered-but-unconfirmed
+state instead of a hard failure or silent success.
 
 A Codex-bound tmux window is writable only while it still exposes a live Codex
 input plane. If the window has fallen back to a shell prompt, Telegram input
