@@ -5521,6 +5521,46 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 # --- Streaming response / notifications ---
 
 
+_OPERATOR_PROMPT_TURN_OPENER_MARKERS = (
+    "omx ralph is still active",
+    "ralph completion audit",
+    "continue the task",
+    "continue verification",
+)
+
+
+def _is_operator_prompt_turn_opener(msg: NewMessage) -> bool:
+    """Return True for hidden operator prompts that start runtime continuation."""
+    if msg.event_kind != "operator_prompt":
+        return False
+    text = " ".join((msg.text or "").casefold().split())
+    return any(marker in text for marker in _OPERATOR_PROMPT_TURN_OPENER_MARKERS)
+
+
+def _audit_post_final_pre_final_suppression(
+    msg: NewMessage,
+    *,
+    user_id: int,
+    window_id: str,
+    thread_id: int | None,
+    turn_generation: int,
+) -> None:
+    """Record intentional compact-mode suppression after the turn barrier."""
+    log_telegram_delivery(
+        action="suppress",
+        user_id=user_id,
+        chat_id=session_manager.resolve_chat_id(user_id, thread_id),
+        thread_id=thread_id,
+        window_id=window_id,
+        task_type="pre_final_visible",
+        content_type=msg.content_type,
+        semantic_kind=msg.semantic_kind,
+        text=msg.text,
+        reason="post_final_pre_final_visible_lane_closed",
+        turn_generation=turn_generation,
+    )
+
+
 async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
     """Handle a new assistant message — enqueue for sequential processing.
 
@@ -5540,6 +5580,7 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         msg.semantic_kind == LIFECYCLE_SEMANTIC_KIND
         and msg.text.strip() == "turn_started"
     )
+    is_operator_turn_opener = _is_operator_prompt_turn_opener(msg)
 
     status = "complete" if msg.is_complete else "streaming"
     logger.info(
@@ -5575,9 +5616,9 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         if opens_new_turn:
             await flush_terminal_artifacts_before_new_turn(bot, user_id, thread_id)
             turn_generation = open_new_turn_generation(user_id, thread_id)
-        elif is_turn_started_lifecycle and is_pre_final_visible_lane_closed(
-            user_id, thread_id
-        ):
+        elif (
+            is_turn_started_lifecycle or is_operator_turn_opener
+        ) and is_pre_final_visible_lane_closed(user_id, thread_id):
             turn_generation = open_new_turn_generation(user_id, thread_id)
 
         if opens_new_turn:
@@ -5703,6 +5744,13 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                     user_id,
                     thread_id,
                 )
+                _audit_post_final_pre_final_suppression(
+                    msg,
+                    user_id=user_id,
+                    window_id=wid,
+                    thread_id=thread_id,
+                    turn_generation=turn_generation,
+                )
                 continue
             await enqueue_plan_update(
                 bot,
@@ -5733,6 +5781,13 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                     user_id,
                     thread_id,
                     msg.content_type,
+                )
+                _audit_post_final_pre_final_suppression(
+                    msg,
+                    user_id=user_id,
+                    window_id=wid,
+                    thread_id=thread_id,
+                    turn_generation=turn_generation,
                 )
                 continue
             commentary_parts = build_commentary_parts(

@@ -167,6 +167,10 @@ control surface at a time.
   - if the opener is hidden and the turn boundary would otherwise be missed by
     delivery, lifecycle `turn_started` may reopen the lanes idempotently, but
     only while the lanes are still closed
+  - targeted Stop-hook/Ralph operator prompts that instruct the runtime to
+    continue after a terminal answer are hidden opener scaffolds for ordering
+    purposes only; they still render as warning-family operator prompts and
+    never as ordinary user echo
 
 - **Turn generation**
   - per-control-surface ordering generation used to prevent stale close tasks
@@ -259,6 +263,9 @@ tool results rather than being forced into command execution.
 - lifecycle markers are not visible content by default, but `turn_started`
   may act as a lane-reopen fallback when hidden opener scaffolding already
   started a real turn and the pre-final/status lanes remained closed
+- targeted Stop-hook/Ralph operator prompts may also reopen the lanes exactly
+  once when the runtime continuation is the hidden opener; generic operator
+  warnings do not reopen turn generation
 - if an already-started multipart send becomes stale mid-flight, the remaining
   parts and trailing attachment payloads must abort rather than leaking below
   the new boundary
@@ -309,6 +316,9 @@ Additional artifact rules:
     system/operator notices, not user messages
   - they must not be echoed as `👤 ...`
   - they render as warning-family artifacts with the hook body, not the raw XML
+  - targeted Stop-hook/Ralph continuation prompts may additionally carry a
+    hidden turn-opener side effect; this does not make the warning itself a
+    user message
 - **State update artifact**
   - OMX state writes render as a short semantic state transition such as
     `state_write: ralph`, phase, active flag, iteration, task summary, and

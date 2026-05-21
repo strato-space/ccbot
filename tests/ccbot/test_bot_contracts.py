@@ -5507,6 +5507,93 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_handle_new_message_reopens_turn_on_stop_hook_operator_prompt_when_lane_closed(
+        self,
+    ):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text=(
+                "⚠ Operator prompt\n\n"
+                "OMX Ralph is still active (phase: starting); "
+                "continue the task and gather fresh verification evidence before stopping."
+            ),
+            is_complete=True,
+            content_type="warning",
+            role="system",
+            event_kind="operator_prompt",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.current_turn_generation", return_value=6),
+            patch("ccbot.bot.is_pre_final_visible_lane_closed", return_value=True),
+            patch(
+                "ccbot.bot.open_new_turn_generation", return_value=7
+            ) as mock_open_turn,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_commentary_update", new_callable=AsyncMock
+            ) as mock_commentary,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
+            patch("ccbot.bot.get_interactive_msg_id", return_value=None),
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_open_turn.assert_called_once_with(1, 42)
+        mock_status.assert_not_awaited()
+        mock_commentary.assert_not_awaited()
+        mock_content.assert_awaited_once()
+        assert mock_content.await_args.kwargs["turn_generation"] == 7
+        assert mock_content.await_args.kwargs["content_type"] == "warning"
+
+    @pytest.mark.asyncio
+    async def test_handle_new_message_does_not_reopen_turn_for_generic_operator_warning(
+        self,
+    ):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="⚠ Operator prompt\n\nThis is an informational operator notice.",
+            is_complete=True,
+            content_type="warning",
+            role="system",
+            event_kind="operator_prompt",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.current_turn_generation", return_value=6),
+            patch("ccbot.bot.is_pre_final_visible_lane_closed", return_value=True),
+            patch(
+                "ccbot.bot.open_new_turn_generation", return_value=7
+            ) as mock_open_turn,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
+            patch("ccbot.bot.get_interactive_msg_id", return_value=None),
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_open_turn.assert_not_called()
+        mock_content.assert_awaited_once()
+        assert mock_content.await_args.kwargs["turn_generation"] == 6
+
+    @pytest.mark.asyncio
     async def test_handle_new_message_reopens_pre_final_lane_for_ordinary_user_echo(
         self,
     ):
@@ -5582,15 +5669,23 @@ class TestTelegramDelivery:
                 "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
             ) as mock_content,
             patch("ccbot.bot.get_interactive_msg_id", return_value=None),
+            patch("ccbot.bot.log_telegram_delivery") as mock_audit,
         ):
             mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
             mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
+            mock_sm.resolve_chat_id.return_value = 100
 
             await bot_mod.handle_new_message(msg, bot)
 
         mock_status.assert_not_awaited()
         mock_commentary.assert_not_awaited()
         mock_content.assert_not_awaited()
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args.kwargs["action"] == "suppress"
+        assert (
+            mock_audit.call_args.kwargs["reason"]
+            == "post_final_pre_final_visible_lane_closed"
+        )
 
     @pytest.mark.asyncio
     async def test_handle_new_message_does_not_reopen_pre_final_lane_for_subagent_notification(

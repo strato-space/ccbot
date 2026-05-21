@@ -95,7 +95,9 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   visibility-first edit-in-place updates over ambiguous silence.
   If a new turn starts via hidden opener scaffolding, lifecycle `turn_started`
   can reopen the delivery lanes idempotently without creating a duplicate
-  visible user-opener bubble.
+  visible user-opener bubble; targeted Stop-hook/Ralph continuation prompts
+  may do the same hidden reopen while still rendering only as operator
+  warnings, never as ordinary user echo.
   Ordinary user echo remains visible; only explicit internal payload shapes
   such as `<subagent_notification>` or tagged command scaffolds stay hidden and
   non-turn-opening.

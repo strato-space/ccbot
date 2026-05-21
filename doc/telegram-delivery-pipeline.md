@@ -303,6 +303,11 @@ The reopen side of the contract is semantic, not merely visual:
 - if that hidden opener was suppressed for Telegram visibility and the lanes
   remain closed, lifecycle `turn_started` is allowed to reopen turn generation
   as an idempotent fallback
+- targeted Stop-hook/Ralph `<hook_prompt>` continuations are also hidden
+  opener scaffolds when they instruct the runtime to continue work after a
+  terminal answer; they may reopen generation without creating a visible user
+  echo, while still rendering the operator prompt itself as warning-family
+  content
 - hidden notifications such as `<subagent_notification>` or
   `<turn_aborted>` are not user turn openers and must not reopen the surface
 - hidden internal technical payloads such as `<bash-stdout>`,
@@ -320,6 +325,8 @@ The reopen side of the contract is semantic, not merely visual:
 This fallback is intentionally narrow:
 
 - it is keyed to lifecycle event `turn_started`
+- or to a targeted Stop-hook/Ralph continuation prompt that actually starts a
+  runtime continuation
 - it must not create a visible duplicate user-opener bubble
 - it must not advance generation again if the lanes are already open
 
@@ -558,7 +565,9 @@ Compact rendering uses these projections:
   as command output instead of showing `Chunk ID` / `Wall time` / token counts.
 - `omx_state.state_write`: show the state transition (`mode`, `phase`,
   `active`, `iteration`, task summary, snapshot) rather than the raw JSON.
-- `<hook_prompt>`: deliver as an operator warning artifact, never as user echo.
+- `<hook_prompt>`: deliver as an operator warning artifact, never as user echo;
+  only targeted Stop-hook/Ralph continuation prompts also carry a hidden
+  turn-opener side effect.
 - file-change events: show file paths plus available preview lines in `sh`.
 - `update_plan`: update the dedicated plan artifact with the actual plan body,
   not merely a `Plan updated` label.
@@ -568,7 +577,9 @@ For self-improvement, every Telegram delivery lifecycle decision is appended to
 schema-versioned and records both positive and negative lifecycle events.
 `send`, `edit`, and `delete` rows describe Telegram API attempts; `suppress`
 rows explain intentional non-delivery such as stale turn output or a poll-only
-`write_stdin` update arriving when no mutable status artifact exists. Rows
+`write_stdin` update arriving when no mutable status artifact exists, including
+post-final pre-final artifacts dropped because the same turn's lane is already
+closed. Rows
 include action, control surface, task/content/semantic class, message id when
 available, success flag, reason/error, turn generation and tool-use correlation
 where available, text length/hash, and a compact preview. It deliberately omits
