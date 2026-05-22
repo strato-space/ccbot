@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -11,6 +12,7 @@ from ccbot.transcript_parser import TranscriptParser
 
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "codex" / "rollouts"
+_PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 
 
 def _load_jsonl(name: str) -> list[dict]:
@@ -23,6 +25,83 @@ def _load_many(*names: str) -> list[dict]:
     for name in names:
         records.extend(_load_jsonl(name))
     return records
+
+
+def test_codex_rollout_image_generation_end_is_terminal_media_result(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    codex_home = tmp_path / ".codex"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    record = {
+        "timestamp": "2026-05-22T08:30:06.540Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "image_generation_end",
+            "call_id": "ig_test",
+            "status": "generating",
+            "revised_prompt": "\n".join(
+                [
+                    "Use case: illustration-story",
+                    "Asset type: canonical avatar first-frame reference",
+                    "Primary request: Create one epic portrait.",
+                    "Subject: mature Roman emperor-philosopher.",
+                ]
+            ),
+            "result": base64.b64encode(_PNG_BYTES).decode("ascii"),
+        },
+    }
+
+    events = CodexRolloutNormalizer.normalize_records(
+        [record],
+        thread_id="thread-1",
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.content_type == "generated_image_preview"
+    assert event.semantic_kind == "assistant_final"
+    assert event.dispatch_to_telegram is True
+    assert event.status_message_eligible is False
+    assert event.image_data == [("image/png", _PNG_BYTES)]
+    assert event.image_caption
+    assert "Create one epic portrait." in event.image_caption
+    assert (
+        "file://"
+        in event.text
+        and "/generated_images/thread-1/ig_test.png" in event.text
+    )
+
+
+def test_codex_rollout_image_generation_end_invalid_media_falls_back_to_saved_path(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    record = {
+        "timestamp": "2026-05-22T08:30:06.540Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "image_generation_end",
+            "call_id": "ig_bad",
+            "revised_prompt": "Primary request: Create one epic portrait.",
+            "result": base64.b64encode(b"not an image").decode("ascii"),
+        },
+    }
+
+    events = CodexRolloutNormalizer.normalize_records(
+        [record],
+        thread_id="thread-1",
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.content_type == "tool_result"
+    assert event.event_kind == "tool_output"
+    assert event.tool_name == "image_gen.imagegen"
+    assert event.image_data is None
+    assert "Generated Image" in event.text
+    assert "/generated_images/thread-1/ig_bad.png" in event.text
 
 
 def test_codex_rollout_preserves_event_taxonomy() -> None:

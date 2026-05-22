@@ -31,9 +31,10 @@ control surface at a time.
 - **Terminal media result artifact**
   - `assistant_final` result whose primary user-facing payload is media rather
     than standalone text
-  - current example: generated-image success output with a safely validated
-    local generated-image file is delivered as one Telegram photo bubble with a
-    caption in compact mode
+  - current example: generated-image success output or Codex
+    `image_generation_end` replay event with a safely validated generated-image
+    payload is delivered as one Telegram photo bubble with a caption in compact
+    mode
   - closes the same turn exactly like a final assistant text artifact, but only
     after media send acknowledgement or a terminal text fallback path completes
   - if path validation, file reading, or Telegram media send fails, the saved

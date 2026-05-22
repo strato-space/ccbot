@@ -14,18 +14,25 @@ preserving the semantic distinctions needed by the bot layer.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import shlex
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime
+from pathlib import Path
 import re
 import time
 from typing import Any, Iterable
 
 from .config import config
-from .runtime_types import NormalizedEvent
+from .runtime_types import (
+    ASSISTANT_FINAL_SEMANTIC_KIND,
+    GENERATED_IMAGE_PREVIEW_CONTENT_TYPE,
+    NormalizedEvent,
+)
 
 CODEX_ROLLOUT_TYPES = {
     "session_meta",
@@ -62,6 +69,8 @@ _REDUNDANT_OUTPUT_FOOTER_RE = re.compile(
     r"^(?:[a-z ]*·\s*)?output\s+\d+\s+line\(s\)$",
     re.IGNORECASE,
 )
+_GENERATED_IMAGE_MAX_BYTES = 10 * 1024 * 1024
+_IMAGE_GENERATION_FIELD_RE = re.compile(r"^\s*([^:\n]+):\s*(.*)$")
 
 
 def _as_text(value: Any) -> str:
@@ -153,6 +162,12 @@ def _nonempty_lines(text: str) -> list[str]:
 
 def _compact_inline(text: str, *, max_chars: int = 160) -> str:
     text = reflow_whitespace(text).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
+
+
+def _clip_text(text: str, *, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[: max_chars - 1].rstrip() + "…"
@@ -1759,6 +1774,167 @@ def _tool_output_event(
     )
 
 
+def _generated_image_media_type(raw_bytes: bytes) -> str | None:
+    if raw_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if (
+        len(raw_bytes) >= 12
+        and raw_bytes.startswith(b"RIFF")
+        and raw_bytes[8:12] == b"WEBP"
+    ):
+        return "image/webp"
+    return None
+
+
+def _decode_generated_image_payload(payload: dict[str, Any]) -> tuple[str, bytes] | None:
+    encoded = _as_text(payload.get("result")).strip()
+    if not encoded:
+        return None
+    max_encoded = ((_GENERATED_IMAGE_MAX_BYTES + 2) // 3) * 4 + 16
+    if len(encoded) > max_encoded:
+        return None
+    try:
+        raw_bytes = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if not raw_bytes or len(raw_bytes) > _GENERATED_IMAGE_MAX_BYTES:
+        return None
+    media_type = _generated_image_media_type(raw_bytes)
+    if media_type is None:
+        return None
+    return media_type, raw_bytes
+
+
+def _codex_generated_image_url(thread_id: str, call_id: str) -> str:
+    if not thread_id or not call_id:
+        return ""
+    codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+    image_path = codex_home / "generated_images" / thread_id / f"{call_id}.png"
+    try:
+        return image_path.as_uri()
+    except ValueError:
+        return ""
+
+
+def _generated_image_fields(revised_prompt: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    current_key = ""
+    for raw_line in revised_prompt.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = _IMAGE_GENERATION_FIELD_RE.match(line)
+        if match:
+            current_key = match.group(1).strip().lower()
+            value = match.group(2).strip()
+            if current_key and value:
+                fields[current_key] = value
+            continue
+        if current_key and line:
+            fields[current_key] = " ".join(
+                part for part in (fields.get(current_key, ""), line) if part
+            )
+    return fields
+
+
+def _generated_image_rendered_text(
+    *,
+    revised_prompt: str,
+    saved_url: str,
+) -> str:
+    lines = ["• Generated Image:"]
+    for raw_line in revised_prompt.splitlines():
+        line = raw_line.strip()
+        if line:
+            lines.append(f"  └ {line}")
+    if saved_url:
+        lines.append(f"  └ Saved to: {saved_url}")
+    return "\n".join(lines)
+
+
+def _generated_image_caption(
+    *,
+    revised_prompt: str,
+    saved_url: str,
+) -> str:
+    fields = _generated_image_fields(revised_prompt)
+    lines = ["🖼 Generated Image"]
+    for label, key, limit in (
+        ("Use case", "use case", 120),
+        ("Asset", "asset type", 160),
+        ("Request", "primary request", 360),
+    ):
+        value = fields.get(key, "").strip()
+        if value:
+            lines.append(f"{label}: {_compact_inline(value, max_chars=limit)}")
+    if saved_url:
+        basename = Path(saved_url).name
+        if basename:
+            lines.append(f"File: {_compact_inline(basename, max_chars=120)}")
+    return _clip_text("\n".join(lines), max_chars=900)
+
+
+def _generated_image_event(
+    *,
+    thread_id: str,
+    payload: dict[str, Any],
+    timestamp: str | None,
+    runtime_kind: str = "codex",
+) -> NormalizedEvent | None:
+    call_id = _as_text(payload.get("call_id") or payload.get("id")).strip()
+    revised_prompt = _as_text(
+        payload.get("revised_prompt")
+        or payload.get("prompt")
+        or payload.get("message")
+        or payload.get("text")
+    ).strip()
+    saved_url = _codex_generated_image_url(thread_id, call_id)
+    text = _generated_image_rendered_text(
+        revised_prompt=revised_prompt,
+        saved_url=saved_url,
+    )
+    image_payload = _decode_generated_image_payload(payload)
+    if image_payload is None:
+        if not revised_prompt and not saved_url:
+            return None
+        return NormalizedEvent(
+            thread_id=thread_id,
+            text=text,
+            is_complete=True,
+            content_type="tool_result",
+            role="assistant",
+            timestamp=timestamp,
+            runtime_kind=runtime_kind,
+            event_kind="tool_output",
+            tool_name="image_gen.imagegen",
+            tool_use_id=call_id or None,
+        )
+    media_type, raw_bytes = image_payload
+    return NormalizedEvent(
+        thread_id=thread_id,
+        text=text,
+        is_complete=True,
+        content_type=GENERATED_IMAGE_PREVIEW_CONTENT_TYPE,
+        role="assistant",
+        timestamp=timestamp,
+        runtime_kind=runtime_kind,
+        event_kind="assistant_message",
+        semantic_kind=ASSISTANT_FINAL_SEMANTIC_KIND,
+        include_in_history=True,
+        dispatch_to_telegram=True,
+        status_message_eligible=False,
+        image_data=[(media_type, raw_bytes)],
+        image_caption=_generated_image_caption(
+            revised_prompt=revised_prompt,
+            saved_url=saved_url,
+        ),
+        tool_name="image_gen.imagegen",
+        tool_use_id=call_id or None,
+    )
+
+
 def _normalize_thread_item(
     *,
     thread_id: str,
@@ -1963,6 +2139,16 @@ def _normalize_event_msg_payload(
                 runtime_kind=runtime_kind,
             )
         ]
+
+    if payload_type == "image_generation_end":
+        event = _generated_image_event(
+            thread_id=thread_id,
+            payload=payload,
+            timestamp=timestamp,
+            runtime_kind=runtime_kind,
+        )
+        if event is not None:
+            return [event]
 
     if payload_type in {"patch_apply_begin", "patch_apply_end"}:
         if payload_type.endswith("_begin"):

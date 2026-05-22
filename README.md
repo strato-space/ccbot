@@ -159,10 +159,10 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
 - **Photo/document messages** — Telegram photos and documents/files such as `tar.gz` archives are downloaded and forwarded to the runtime as local file paths; Telegram media groups and same-surface orphan attachment bursts are batched into one runtime input when safe
 - **Sticker messages** — Telegram stickers are normalized to image attachments for the runtime; animated/video stickers use their Telegram thumbnail when available
 - **Generated-image terminal media result** — successful image-generation tool
-  output that reports a safely validated local generated-image file is delivered
-  in compact mode as one terminal Telegram photo bubble with a caption; if
-  validation, reading, or media send fails, the saved-path text remains the
-  terminal fallback
+  output or Codex `image_generation_end` replay event that carries or reports a
+  safely validated generated-image artifact is delivered in compact mode as one
+  terminal Telegram photo bubble with a caption; if validation, reading, or
+  media send fails, the saved-path text remains the terminal fallback
 - **Send messages** — Forward text to Codex via tmux keystrokes
 - **Simple text fast path** — eligible one-line Codex text gets an immediate
   Telegram ingress receipt and starts a runtime injection attempt before the
