@@ -530,6 +530,67 @@ class TestWindowState:
         assert state.thread_id == new_thread_id
         assert state.cwd == "/tmp/new-project"
 
+    def test_reconcile_live_tmux_window_adopts_same_cwd_with_fd_proof(
+        self, mgr: SessionManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        new_thread_id = "019e4e71-1499-7d11-991b-2de6af8aa0ce"
+        mgr.window_states["@8"] = LiveProcessDescriptor(
+            thread_id="019d6825-88ba-7f10-948e-eaaf162ea2a9",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+            window_name="comfy-agent",
+        )
+        monkeypatch.setattr(
+            mgr,
+            "_resolve_live_codex_rollout_from_pane_pid",
+            lambda *, pane_pid, cwd: SimpleNamespace(
+                thread_id=new_thread_id,
+                cwd="/tmp/project",
+                mtime=100.0,
+                ordering_timestamp=100.0,
+            ),
+        )
+
+        changed = mgr.reconcile_live_tmux_window(
+            window_id="@8",
+            cwd="/tmp/project",
+            window_name="comfy-agent",
+            pane_current_command="node",
+            pane_pid="1234",
+        )
+
+        assert changed is True
+        state = mgr.window_states["@8"]
+        assert state.thread_id == new_thread_id
+        assert state.cwd == "/tmp/project"
+
+    def test_reconcile_live_tmux_window_same_cwd_without_fd_proof_keeps_binding(
+        self, mgr: SessionManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        old_thread_id = "019d6825-88ba-7f10-948e-eaaf162ea2a9"
+        mgr.window_states["@8"] = LiveProcessDescriptor(
+            thread_id=old_thread_id,
+            cwd="/tmp/project",
+            runtime_kind="codex",
+            window_name="comfy-agent",
+        )
+        monkeypatch.setattr(
+            mgr,
+            "_resolve_live_codex_rollout_from_pane_pid",
+            lambda *, pane_pid, cwd: None,
+        )
+
+        changed = mgr.reconcile_live_tmux_window(
+            window_id="@8",
+            cwd="/tmp/project",
+            window_name="comfy-agent",
+            pane_current_command="node",
+            pane_pid="1234",
+        )
+
+        assert changed is False
+        assert mgr.window_states["@8"].thread_id == old_thread_id
+
 
 class TestResolveWindowForThread:
     def test_none_thread_id_returns_none(self, mgr: SessionManager) -> None:

@@ -563,6 +563,7 @@ class SessionMonitor:
                 pane_current_command=str(
                     getattr(live_window, "pane_current_command", "") or ""
                 ),
+                pane_pid=str(getattr(live_window, "pane_pid", "") or ""),
             )
         session_manager.cleanup_helper_window_bindings()
         live_window_ids = set(live_windows)

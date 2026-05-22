@@ -14,6 +14,7 @@ is migrated task by task.
 import asyncio
 import json
 import logging
+import os
 import re
 import secrets
 import shlex
@@ -103,6 +104,10 @@ CODEX_DELIVERED_NO_ACK_MESSAGE = (
 )
 CODEX_DELIVERED_NO_ACK_MATCH_SECONDS = 10 * 60
 _SHELL_COMMAND_NAMES = {"bash", "dash", "fish", "sh", "zsh"}
+_CODEX_ROLLOUT_THREAD_RE = re.compile(
+    r"rollout-[^/]*?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\\.jsonl$",
+    re.IGNORECASE,
+)
 
 SURFACE_BINDINGS_KEY = "surface_bindings"
 EXTERNAL_SURFACE_BINDINGS_KEY = "external_surface_bindings"
@@ -1652,13 +1657,14 @@ class SessionManager:
         cwd: str,
         window_name: str = "",
         pane_current_command: str = "",
+        pane_pid: str = "",
     ) -> bool:
         """Refresh a bound tmux descriptor from live tmux topology.
 
-        This is intentionally conservative: it only adopts a new Codex thread
-        when the live tmux pane reports a different cwd than the persisted
-        descriptor. A same-cwd restart remains a manual resume/bind operation
-        because helper/reviewer Codex threads can share the same cwd.
+        Same-cwd Codex restarts require direct live-process proof: a descendant
+        of the bound tmux pane must have the target rollout JSONL open. Without
+        that proof, only cwd drift is auto-adopted; helper/reviewer threads can
+        share cwd and must not be selected just because they are newer.
         """
         if not window_id:
             return False
@@ -1677,6 +1683,33 @@ class SessionManager:
             changed = True
 
         live_cwd = cwd.strip()
+        live_codex_candidate = self._resolve_live_codex_rollout_from_pane_pid(
+            pane_pid=pane_pid,
+            cwd=live_cwd or state.cwd,
+        )
+        if (
+            live_codex_candidate is not None
+            and state.thread_id != live_codex_candidate.thread_id
+        ):
+            old_thread_id = state.thread_id
+            old_cwd = state.cwd
+            state.thread_id = live_codex_candidate.thread_id
+            state.cwd = live_codex_candidate.cwd
+            if not state.runtime_kind:
+                state.runtime_kind = "codex"
+            state.registered_at = time.time()
+            logger.info(
+                "Adopted live Codex thread for window %s from process fd proof: "
+                "%s (%s) -> %s (%s)",
+                window_id,
+                old_thread_id or "<none>",
+                old_cwd or "<none>",
+                live_codex_candidate.thread_id,
+                live_codex_candidate.cwd,
+            )
+            self._save_state()
+            return True
+
         cwd_changed = bool(live_cwd) and normalize_cwd(live_cwd) != normalize_cwd(
             state.cwd
         )
@@ -1745,6 +1778,92 @@ class SessionManager:
 
         self._save_state()
         return changed
+
+    def _resolve_live_codex_rollout_from_pane_pid(
+        self,
+        *,
+        pane_pid: str,
+        cwd: str,
+    ) -> CodexThreadCandidate | None:
+        """Return the Codex rollout currently open under a tmux pane process."""
+        if self.codex_thread_catalog is None:
+            return None
+        try:
+            root_pid = int(str(pane_pid).strip())
+        except (TypeError, ValueError):
+            return None
+        if root_pid <= 0:
+            return None
+
+        candidates: list[CodexThreadCandidate] = []
+        normalized_cwd = normalize_cwd(cwd)
+        for rollout_path in self._iter_open_rollout_paths_under_pid(root_pid):
+            match = _CODEX_ROLLOUT_THREAD_RE.search(str(rollout_path))
+            if match is None:
+                continue
+            thread_id = match.group(1)
+            candidate = self.codex_thread_catalog.get_candidate_fast(thread_id)
+            if candidate is None:
+                continue
+            if normalized_cwd and candidate.normalized_cwd != normalized_cwd:
+                continue
+            try:
+                if candidate.rollout_file.resolve() != rollout_path.resolve():
+                    continue
+            except OSError:
+                continue
+            candidates.append(candidate)
+
+        if not candidates:
+            return None
+        return max(
+            candidates,
+            key=lambda candidate: (
+                candidate.mtime,
+                candidate.ordering_timestamp,
+                candidate.thread_id,
+            ),
+        )
+
+    @staticmethod
+    def _iter_open_rollout_paths_under_pid(root_pid: int) -> Iterator[Path]:
+        """Yield open Codex rollout files for root_pid and descendants."""
+        children_by_parent: dict[int, list[int]] = {}
+        for proc_dir in Path("/proc").iterdir():
+            if not proc_dir.name.isdigit():
+                continue
+            try:
+                stat_text = (proc_dir / "stat").read_text(encoding="utf-8")
+                after_name = stat_text.rsplit(")", 1)[1].strip().split()
+                ppid = int(after_name[1])
+                pid = int(proc_dir.name)
+            except (OSError, IndexError, ValueError):
+                continue
+            children_by_parent.setdefault(ppid, []).append(pid)
+
+        stack = [root_pid]
+        seen: set[int] = set()
+        while stack:
+            pid = stack.pop()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            stack.extend(children_by_parent.get(pid, ()))
+            fd_dir = Path("/proc") / str(pid) / "fd"
+            try:
+                fd_entries = tuple(fd_dir.iterdir())
+            except OSError:
+                continue
+            for fd in fd_entries:
+                try:
+                    target = os.readlink(fd)
+                except OSError:
+                    continue
+                if "/sessions/" not in target or "rollout-" not in target:
+                    continue
+                path = Path(target)
+                if path.suffix == ".jsonl":
+                    yield path
 
     def clear_window_binding(self, window_id: str) -> None:
         """Clear the persisted identity binding for a live window."""

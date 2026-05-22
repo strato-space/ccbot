@@ -41,6 +41,7 @@ class TmuxWindow:
     cwd: str  # Current working directory
     pane_current_command: str = ""  # Process running in active pane
     pane_id: str = ""  # Active pane id (e.g. "%0")
+    pane_pid: str = ""  # Active pane root process id
     pane_ids: tuple[str, ...] = ()  # All pane ids in this window
 
 
@@ -152,10 +153,12 @@ class TmuxManager:
                         cwd = pane.pane_current_path or ""
                         pane_cmd = pane.pane_current_command or ""
                         pane_id = pane.pane_id or ""
+                        pane_pid = str(getattr(pane, "pane_pid", "") or "")
                     else:
                         cwd = ""
                         pane_cmd = ""
                         pane_id = ""
+                        pane_pid = ""
 
                     windows.append(
                         TmuxWindow(
@@ -164,6 +167,7 @@ class TmuxManager:
                             cwd=cwd,
                             pane_current_command=pane_cmd,
                             pane_id=pane_id,
+                            pane_pid=pane_pid,
                             pane_ids=pane_ids,
                         )
                     )
