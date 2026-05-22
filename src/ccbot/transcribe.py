@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
+import signal
 import shlex
 import shutil
 import time
@@ -28,6 +30,7 @@ _client: httpx.AsyncClient | None = None
 _local_stt_semaphore: asyncio.Semaphore | None = None
 _local_stt_semaphore_size: int | None = None
 _OK_PATH_RE = re.compile(r"^OK:\s*(?P<path>.+?)\s*$", re.MULTILINE)
+_LOCAL_STT_KILL_WAIT_SECONDS = 2.0
 
 
 class TranscriptionConfigError(ValueError):
@@ -172,6 +175,20 @@ def _discover_transcript_path(stdout: str, input_path: Path, output_dir: Path) -
     )
 
 
+def _kill_local_stt_process_group(proc: asyncio.subprocess.Process) -> None:
+    """Terminate a local STT command and its descendants."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except Exception:
+        logger.debug("Falling back to killing local STT process only", exc_info=True)
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+
+
 async def transcribe_voice_openai(ogg_data: bytes) -> str:
     """Transcribe OGG voice data via OpenAI API."""
     start = time.monotonic()
@@ -234,6 +251,7 @@ async def transcribe_voice_local_command(ogg_data: bytes) -> str:
                 *argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
             try:
                 stdout_bytes, _stderr_bytes = await asyncio.wait_for(
@@ -241,8 +259,18 @@ async def transcribe_voice_local_command(ogg_data: bytes) -> str:
                     timeout=timeout,
                 )
             except TimeoutError as exc:
-                proc.kill()
-                await proc.communicate()
+                _kill_local_stt_process_group(proc)
+                try:
+                    await asyncio.wait_for(
+                        proc.communicate(),
+                        timeout=_LOCAL_STT_KILL_WAIT_SECONDS,
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        "Local STT process group did not exit after timeout "
+                        "(run_id=%s)",
+                        run_id,
+                    )
                 raise TimeoutError(
                     f"Local STT command timed out after {timeout}s (run_id={run_id})."
                 ) from exc

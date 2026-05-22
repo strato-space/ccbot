@@ -123,10 +123,12 @@ class _FakeProcess:
         stdout: bytes = b"",
         stderr: bytes = b"",
         returncode: int = 0,
+        pid: int = 1234,
     ) -> None:
         self._stdout = stdout
         self._stderr = stderr
         self.returncode = returncode
+        self.pid = pid
         self.killed = False
 
     async def communicate(self):
@@ -185,6 +187,7 @@ class TestLocalCommandTranscribe:
         argv = mock_exec.await_args.args
         assert argv[0] == "/bin/stt"
         assert any("config with spaces" in arg for arg in argv)
+        assert mock_exec.await_args.kwargs["start_new_session"] is True
 
     @pytest.mark.asyncio
     async def test_local_command_rejects_missing_command(self, mock_config, tmp_path):
@@ -288,11 +291,16 @@ class TestLocalCommandTranscribe:
                 new_callable=AsyncMock,
                 return_value=_SlowProcess(),
             ),
+            patch("ccbot.transcribe._LOCAL_STT_KILL_WAIT_SECONDS", 0.01),
+            patch("ccbot.transcribe.os.getpgid", return_value=4321) as mock_getpgid,
+            patch("ccbot.transcribe.os.killpg") as mock_killpg,
             patch("ccbot.transcribe.log_telegram_delivery") as mock_audit,
         ):
             with pytest.raises(TimeoutError):
                 await transcribe.transcribe_voice(b"ogg")
 
+        mock_getpgid.assert_called_once_with(1234)
+        mock_killpg.assert_called_once()
         assert any(
             "timeout=true" in call.kwargs["text"] for call in mock_audit.call_args_list
         )
