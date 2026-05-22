@@ -91,8 +91,9 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "no pre-final visible artifact" in readme
     assert "late technical status" in readme
     assert "lifecycle `turn_started`" in readme
-    assert "Generated-image result text" in readme
-    assert "does not automatically attach that generated image" in readme
+    assert "Generated-image terminal media result" in readme
+    assert "terminal Telegram photo bubble with a caption" in readme
+    assert "saved-path text remains the" in readme
     assert "photo, document, sticker, audio, or video media arrives before the topic" in readme
     assert "CCBOT_MAX_TELEGRAM_DOWNLOAD_BYTES" in readme
     assert "too large for Telegram bot" in readme
@@ -265,13 +266,14 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "repeat counter only when `N > 2`" in delivery
     assert "visibility-first mutable" in delivery
     assert "must drop rather than reopen the lane" in delivery
-    assert "generated-image success text with a saved artifact path" in delivery
+    assert "terminal media result artifacts" in delivery
+    assert "generated-image preview/photo bubbles" in delivery
     assert "Inbound media artifact path" in delivery
     assert "Telegram Bot API download guardrails pass" in delivery
     assert "Audio artifact: /path" in delivery
     assert "Video artifact: /path" in delivery
-    assert "automatic image" in delivery
-    assert "attachment claim" in delivery
+    assert "Telegram photo bubble with a" in delivery
+    assert "terminal fallback" in delivery
     assert "queue-empty, binding-stale, or explicit clear" in delivery
     assert "lifecycle `turn_started` may reopen the lanes idempotently" in delivery
     assert "ACP-protocol" in boundaries
@@ -437,7 +439,8 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "`tool_result` summaries" in doc
     assert "when tool lifecycle is materialized as content, `tool_result` may edit the earlier `tool_use` message in place" in doc
     assert "generated-image success output with a saved artifact" in doc
-    assert "no generated image is automatically attached" in doc
+    assert "terminal media result artifact" in doc
+    assert "terminal saved-path text" in doc
     assert "pre-final visible surface" in doc
     assert "Telegram/history prefers the canonical copy." in doc
     assert "lightweight copy may be buffered briefly" in doc

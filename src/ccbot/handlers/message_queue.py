@@ -33,6 +33,7 @@ from ..markdown_v2 import convert_markdown
 from ..session import session_manager
 from ..runtime_types import (
     ASSISTANT_FINAL_SEMANTIC_KIND,
+    GENERATED_IMAGE_PREVIEW_CONTENT_TYPE,
     USER_ECHO_SEMANTIC_KIND,
     WARNING_SEMANTIC_KIND,
     is_pre_final_visible_semantic_kind,
@@ -100,6 +101,7 @@ class MessageTask:
     warning_key: str | None = None
     thread_id: int | None = None  # Telegram topic thread_id for targeted send
     image_data: list[tuple[str, bytes]] | None = None  # From tool_result images
+    image_caption: str | None = None
     document_data: list[tuple[str, str, bytes]] | None = None
     turn_generation: int = 0
     proof_id: str | None = None
@@ -700,21 +702,23 @@ def _normalize_technical_status_text(text: str) -> str:
     return text
 
 
-async def _send_task_images(bot: Bot, chat_id: int, task: MessageTask) -> None:
+async def _send_task_images(bot: Bot, chat_id: int, task: MessageTask) -> bool:
     """Send images attached to a task, if any."""
     if not task.image_data:
-        return
+        return True
     logger.info(
         "Sending %d image(s) in thread %s",
         len(task.image_data),
         task.thread_id,
     )
-    await send_photo(
+    sent = await send_photo(
         bot,
         chat_id,
         task.image_data,
+        caption=task.image_caption,
         **_send_kwargs(task.thread_id),  # type: ignore[arg-type]
     )
+    return sent is not None
 
 
 async def _send_task_documents(bot: Bot, chat_id: int, task: MessageTask) -> None:
@@ -842,6 +846,48 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         )
         return
     chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
+
+    is_generated_image_terminal_preview = (
+        is_terminal_artifact
+        and task.content_type == GENERATED_IMAGE_PREVIEW_CONTENT_TYPE
+        and bool(task.image_data)
+    )
+
+    if is_generated_image_terminal_preview:
+        media_sent = await _send_task_images(bot, chat_id, task)
+        if media_sent:
+            _audit_task_delivery(
+                action="send",
+                user_id=user_id,
+                chat_id=chat_id,
+                task=task,
+                text=task.image_caption or task.text or "",
+                success=True,
+            )
+            _mark_pre_final_visible_closed(user_id, task.thread_id)
+            _mark_technical_status_closed(user_id, task.thread_id)
+            await _do_clear_status_message(bot, user_id, tid)
+            return
+
+        logger.warning(
+            "Generated-image preview media send failed; falling back to terminal text: "
+            "user=%d thread=%s",
+            user_id,
+            task.thread_id,
+        )
+        _audit_task_delivery(
+            action="send",
+            user_id=user_id,
+            chat_id=chat_id,
+            task=task,
+            text=task.image_caption or task.text or "",
+            reason="generated_image_preview_media_send_failed",
+            success=False,
+        )
+        if task.text and not task.parts:
+            task.parts = [task.text]
+        task.image_data = None
+        task.image_caption = None
 
     # 1. Handle tool/command result editing (merged parts are edited together)
     if task.content_type in {"tool_result", "command_execution"} and task.tool_use_id:
@@ -1028,13 +1074,16 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             task.semantic_kind,
         )
         return
-    await _send_task_images(bot, chat_id, task)
+    images_sent = await _send_task_images(bot, chat_id, task)
     await _send_task_documents(bot, chat_id, task)
 
     if delivered_parts > 0 and is_pre_final_visible_semantic_kind(task.semantic_kind):
         _latest_pre_final_visible_kind[(user_id, tid)] = task.semantic_kind
 
-    final_delivery_complete = expected_parts == 0 or delivered_parts == expected_parts
+    final_delivery_complete = (
+        (expected_parts == 0 and (not task.image_data or images_sent))
+        or delivered_parts == expected_parts
+    )
 
     if is_terminal_artifact and last_msg_id is not None and final_delivery_complete:
         # Terminal ordering closes only after a final artifact has actually
@@ -2253,6 +2302,7 @@ async def enqueue_content_message(
     text: str | None = None,
     thread_id: int | None = None,
     image_data: list[tuple[str, bytes]] | None = None,
+    image_caption: str | None = None,
     document_data: list[tuple[str, str, bytes]] | None = None,
     turn_generation: int = 0,
     warning_key: str | None = None,
@@ -2277,6 +2327,7 @@ async def enqueue_content_message(
         warning_key=warning_key,
         thread_id=thread_id,
         image_data=image_data,
+        image_caption=image_caption,
         document_data=document_data,
         turn_generation=turn_generation,
     )

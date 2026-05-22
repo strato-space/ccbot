@@ -94,8 +94,9 @@ async def send_photo(
     bot: Bot,
     chat_id: int,
     image_data: list[tuple[str, bytes]],
+    caption: str | None = None,
     **kwargs: Any,
-) -> None:
+) -> Message | tuple[Message, ...] | None:
     """Send photo(s) to chat. Sends as media group if multiple images.
 
     Rate limiting is handled globally by AIORateLimiter on the Application.
@@ -107,29 +108,69 @@ async def send_photo(
         **kwargs: Extra kwargs passed to send_photo/send_media_group
     """
     if not image_data:
-        return
+        return None
+    caption_kwargs: dict[str, Any] = {}
+    if caption:
+        caption_kwargs = {"caption": _ensure_formatted(caption), "parse_mode": PARSE_MODE}
     try:
         if len(image_data) == 1:
             _media_type, raw_bytes = image_data[0]
-            await bot.send_photo(
+            return await bot.send_photo(
                 chat_id=chat_id,
                 photo=io.BytesIO(raw_bytes),
+                **caption_kwargs,
                 **kwargs,
             )
-        else:
-            media = [
-                InputMediaPhoto(media=io.BytesIO(raw_bytes))
-                for _media_type, raw_bytes in image_data
-            ]
-            await bot.send_media_group(
+        media = []
+        for index, (_media_type, raw_bytes) in enumerate(image_data):
+            media_kwargs = caption_kwargs if index == 0 else {}
+            media.append(
+                InputMediaPhoto(media=io.BytesIO(raw_bytes), **media_kwargs)
+            )
+        return await bot.send_media_group(
+            chat_id=chat_id,
+            media=media,
+            **kwargs,
+        )
+    except RetryAfter:
+        raise
+    except Exception as formatted_error:
+        if not caption:
+            logger.error("Failed to send photo to %d: %s", chat_id, formatted_error)
+            return None
+        # Fall back to an unformatted caption. This preserves terminal media
+        # delivery if MarkdownV2 conversion or Telegram parsing rejects the
+        # formatted caption while still returning observable success/failure.
+        try:
+            if len(image_data) == 1:
+                _media_type, raw_bytes = image_data[0]
+                return await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=io.BytesIO(raw_bytes),
+                    caption=strip_sentinels(caption),
+                    **kwargs,
+                )
+            media = []
+            for index, (_media_type, raw_bytes) in enumerate(image_data):
+                media_kwargs = (
+                    {"caption": strip_sentinels(caption)} if index == 0 else {}
+                )
+                media.append(InputMediaPhoto(media=io.BytesIO(raw_bytes), **media_kwargs))
+            return await bot.send_media_group(
                 chat_id=chat_id,
                 media=media,
                 **kwargs,
             )
-    except RetryAfter:
-        raise
-    except Exception as e:
-        logger.error("Failed to send photo to %d: %s", chat_id, e)
+        except RetryAfter:
+            raise
+        except Exception as plain_error:
+            logger.error(
+                "Failed to send photo to %d: formatted=%s plain=%s",
+                chat_id,
+                formatted_error,
+                plain_error,
+            )
+            return None
 
 
 def _named_bytes_io(raw_bytes: bytes, filename: str) -> io.BytesIO:

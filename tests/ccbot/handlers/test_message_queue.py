@@ -1821,6 +1821,133 @@ async def test_successful_final_closes_pre_final_visible_lane() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generated_image_terminal_preview_sends_single_photo_and_closes_lane() -> None:
+    final_task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=[],
+        text="Generated Image:\n  └ Saved to: file:///tmp/ig.png",
+        content_type="generated_image_preview",
+        semantic_kind="assistant_final",
+        image_data=[("image/png", b"png-bytes")],
+        image_caption="🖼 Generated Image\nRequest: frame",
+        turn_generation=1,
+    )
+    commentary_task = MessageTask(
+        task_type="commentary_update",
+        window_id="@7",
+        thread_id=42,
+        text="Late commentary after terminal media",
+        turn_generation=1,
+    )
+    sent_photo = AsyncMock()
+    sent_photo.message_id = 901
+
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.current_turn_generation",
+                return_value=1,
+            ),
+            patch(
+                "ccbot.handlers.message_queue.send_photo",
+                new_callable=AsyncMock,
+                return_value=sent_photo,
+            ) as mock_photo,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+            ) as mock_send,
+            patch(
+                "ccbot.handlers.message_queue._check_and_send_status",
+                new_callable=AsyncMock,
+            ) as mock_status,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+
+            bot = AsyncMock()
+            await _process_content_task(bot, 1, final_task)
+            await _process_commentary_update_task(bot, 1, commentary_task)
+
+        mock_photo.assert_awaited_once()
+        assert mock_photo.await_args.kwargs["caption"] == final_task.image_caption
+        mock_send.assert_not_awaited()
+        mock_status.assert_not_awaited()
+    finally:
+        clear_commentary_lane_state(1, 42)
+
+
+@pytest.mark.asyncio
+async def test_generated_image_terminal_preview_photo_failure_falls_back_to_text() -> None:
+    final_task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=[],
+        text="Generated Image:\n  └ Saved to: file:///tmp/ig.png",
+        content_type="generated_image_preview",
+        semantic_kind="assistant_final",
+        image_data=[("image/png", b"png-bytes")],
+        image_caption="🖼 Generated Image\nRequest: frame",
+        turn_generation=1,
+    )
+    commentary_task = MessageTask(
+        task_type="commentary_update",
+        window_id="@7",
+        thread_id=42,
+        text="Late commentary after fallback terminal text",
+        turn_generation=1,
+    )
+    sent_text = AsyncMock()
+    sent_text.message_id = 902
+
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.current_turn_generation",
+                return_value=1,
+            ),
+            patch(
+                "ccbot.handlers.message_queue.send_photo",
+                new_callable=AsyncMock,
+                return_value=None,
+            ) as mock_photo,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                return_value=sent_text,
+            ) as mock_send,
+            patch(
+                "ccbot.handlers.message_queue._check_and_send_status",
+                new_callable=AsyncMock,
+            ) as mock_status,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+
+            bot = AsyncMock()
+            await _process_content_task(bot, 1, final_task)
+            await _process_commentary_update_task(bot, 1, commentary_task)
+
+        mock_photo.assert_awaited_once()
+        mock_send.assert_awaited_once()
+        assert mock_send.await_args.args[2] == final_task.text
+        mock_status.assert_not_awaited()
+    finally:
+        clear_commentary_lane_state(1, 42)
+
+
+@pytest.mark.asyncio
 async def test_successful_final_keeps_existing_commentary_visible_above_final() -> None:
     final_task = MessageTask(
         task_type="content",

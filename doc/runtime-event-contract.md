@@ -56,6 +56,8 @@ Two higher-order ontological classes matter at delivery time:
 
 - `terminal turn artifact`
   - currently `assistant_final`
+  - may be final text or a terminal media result artifact, such as a
+    generated-image preview/photo bubble with caption
 - `pre-final visible artifact`
   - visible assistant-side artifacts that may appear before the terminal turn
     artifact, but never below it for the same turn
@@ -140,6 +142,9 @@ At the contract level:
     collapse them into compact status delivery
 - `assistant_final`
   - is the terminal turn artifact
+  - may be standalone final text or a terminal media result artifact
+  - generated-image terminal media results close the turn after media send
+    acknowledgement, or after terminal saved-path text fallback completes
 - `user_echo`
   - may act as the user turn opener
   - ordinary user-visible user echo remains eligible for compact Telegram

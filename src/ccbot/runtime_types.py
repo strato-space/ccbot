@@ -29,6 +29,7 @@ TOOL_RESULT_SEMANTIC_KIND = "tool_result"
 COMMAND_EXECUTION_SEMANTIC_KIND = "command_execution"
 FILE_CHANGE_SEMANTIC_KIND = "file_change"
 ASSISTANT_FINAL_SEMANTIC_KIND = "assistant_final"
+GENERATED_IMAGE_PREVIEW_CONTENT_TYPE = "generated_image_preview"
 
 DELIVERY_CLASS_HISTORY = "history"
 DELIVERY_CLASS_PROGRESS = "progress"
@@ -219,6 +220,7 @@ class NormalizedEvent:
     role: str = "assistant"
     tool_name: str | None = None
     image_data: list[tuple[str, bytes]] | None = None
+    image_caption: str | None = None
     document_data: list[tuple[str, str, bytes]] | None = None
     timestamp: str | None = None
     runtime_kind: str = "claude"

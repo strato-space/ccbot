@@ -122,9 +122,10 @@ The delivery pipeline keeps:
 - one ordered content queue per user
 - one current turn generation per `(user_id, control surface)`
 - one terminal turn artifact: `assistant_final`
-  - generated-image tool success text with a saved local artifact path may be
-    promoted to this terminal text artifact; this does not imply automatic
-    Telegram media attachment
+  - generated-image tool success with a safely validated local artifact path may
+    be promoted to a terminal media result artifact: one Telegram photo bubble
+    with caption; if validation, read, or media send fails, the saved-path text
+    remains the terminal fallback
 - one broader pre-final visible surface:
   - commentary
   - orchestration milestones
@@ -235,9 +236,11 @@ earlier `tool_use` message in place when the runtime and delivery mode expose
 tool lifecycle as ordinary content. In the default `compact` mode, that same
 tool lifecycle is typically collapsed into the mutable status artifact instead.
 The narrow exception is generated-image success output with a saved artifact
-path: compact delivery promotes that text to the terminal assistant bubble so
-the originating Telegram thread receives the success/result/path message even
-though no generated image is automatically attached.
+path: compact delivery promotes a safely validated local generated-image file
+to a terminal media result artifact, sent as one Telegram photo bubble with a
+caption. If validation, file read, or media send fails, compact delivery falls
+back to the terminal saved-path text so the originating Telegram thread still
+receives the result.
 
 ## Progress Routing
 

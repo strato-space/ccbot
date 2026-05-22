@@ -28,6 +28,19 @@ control surface at a time.
     - command execution progress
     - file-change churn
 
+- **Terminal media result artifact**
+  - `assistant_final` result whose primary user-facing payload is media rather
+    than standalone text
+  - current example: generated-image success output with a safely validated
+    local generated-image file is delivered as one Telegram photo bubble with a
+    caption in compact mode
+  - closes the same turn exactly like a final assistant text artifact, but only
+    after media send acknowledgement or a terminal text fallback path completes
+  - if path validation, file reading, or Telegram media send fails, the saved
+    artifact path text remains the terminal fallback so the result is not lost
+  - must be derived from replay evidence and must not become arbitrary local
+    file disclosure
+
 - **Content attachment payload**
   - file payload attached to a content task rather than a standalone control
     artifact
@@ -200,9 +213,9 @@ Durable bubbles in `compact` mode are intentionally narrow:
 - orchestration milestones
 - warning artifacts
 - final assistant text
-- generated-image success text with a saved artifact path, when it substitutes
-  for the absent final assistant text; this is not an automatic image
-  attachment claim
+- terminal media result artifacts such as generated-image preview/photo bubbles
+  with captions, when a safely validated local generated artifact substitutes
+  for absent final assistant text
 
 In addition:
 

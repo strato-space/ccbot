@@ -18,8 +18,12 @@ chat mode.
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 from dataclasses import replace
+from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from .runtime_types import (
     ASSISTANT_FINAL_SEMANTIC_KIND,
@@ -27,6 +31,7 @@ from .runtime_types import (
     COMMENTARY_SEMANTIC_KIND,
     DELIVERY_CLASS_HISTORY,
     FILE_CHANGE_SEMANTIC_KIND,
+    GENERATED_IMAGE_PREVIEW_CONTENT_TYPE,
     ORCHESTRATION_SEMANTIC_KIND,
     PLAN_UPDATE_SEMANTIC_KIND,
     REASONING_SEMANTIC_KIND,
@@ -61,6 +66,16 @@ _GENERATED_IMAGE_TOOL_NAMES = {
     "imagegen",
     "media-gen",
     "media_gen",
+}
+_GENERATED_IMAGE_SAVED_TO_RE = re.compile(r"saved\s+to:\s*(file://\S+)", re.IGNORECASE)
+_GENERATED_IMAGE_FIELD_RE = re.compile(r"^\s*(?:[•*-]\s*)?└\s*([^:]+):\s*(.*)$")
+_GENERATED_IMAGE_MAX_BYTES = 10 * 1024 * 1024
+_GENERATED_IMAGE_CAPTION_LIMIT = 900
+_IMAGE_SIGNATURES: dict[str, tuple[str, bytes]] = {
+    ".png": ("image/png", b"\x89PNG\r\n\x1a\n"),
+    ".jpg": ("image/jpeg", b"\xff\xd8\xff"),
+    ".jpeg": ("image/jpeg", b"\xff\xd8\xff"),
+    ".webp": ("image/webp", b"RIFF"),
 }
 
 
@@ -178,6 +193,159 @@ def _compact_single_block(text: str, *, max_chars: int = _COMPACT_STATUS_LIMIT) 
     return text[: max_chars - 1].rstrip() + "…"
 
 
+def _strip_outer_text_fence(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if len(lines) >= 3 and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return stripped
+
+
+def _generated_image_roots() -> list[Path]:
+    roots = [
+        Path.home() / ".codex" / "generated_images",
+        Path("/data/iqdoctor/.codex/generated_images"),
+    ]
+    extra = os.environ.get("CCBOT_GENERATED_ARTIFACT_ROOTS", "")
+    for raw in extra.split(os.pathsep):
+        raw = raw.strip()
+        if raw:
+            roots.append(Path(raw).expanduser())
+    resolved: list[Path] = []
+    for root in roots:
+        try:
+            resolved.append(root.resolve(strict=False))
+        except OSError:
+            continue
+    return resolved
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _path_under_generated_root(path: Path) -> bool:
+    return any(_is_relative_to(path, root) for root in _generated_image_roots())
+
+
+def _media_type_for_image(path: Path, header: bytes) -> str | None:
+    suffix = path.suffix.lower()
+    signature = _IMAGE_SIGNATURES.get(suffix)
+    if signature is None:
+        return None
+    media_type, prefix = signature
+    if suffix == ".webp":
+        if len(header) >= 12 and header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+            return media_type
+        return None
+    if header.startswith(prefix):
+        return media_type
+    return None
+
+
+def _load_generated_image_bytes(file_url: str) -> tuple[str, bytes] | None:
+    parsed = urlparse(file_url)
+    if parsed.scheme != "file":
+        return None
+    if parsed.netloc not in {"", "localhost"}:
+        return None
+    decoded_path = unquote(parsed.path)
+    if "\x00" in decoded_path:
+        return None
+    candidate = Path(decoded_path)
+    if not candidate.is_absolute():
+        return None
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError:
+        return None
+    if not _path_under_generated_root(resolved):
+        return None
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd: int | None = None
+    try:
+        fd = os.open(resolved, flags)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        if st.st_size <= 0 or st.st_size > _GENERATED_IMAGE_MAX_BYTES:
+            return None
+        try:
+            opened_path = Path(f"/proc/self/fd/{fd}").resolve(strict=True)
+            if not _path_under_generated_root(opened_path):
+                return None
+        except OSError:
+            # /proc may be unavailable in some test sandboxes; pre-open resolve
+            # and O_NOFOLLOW still preserve the main disclosure boundary.
+            pass
+        with os.fdopen(fd, "rb") as handle:
+            fd = None
+            header = handle.read(16)
+            media_type = _media_type_for_image(resolved, header)
+            if media_type is None:
+                return None
+            return media_type, header + handle.read()
+    except OSError:
+        return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _extract_generated_image_fields(text: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    current_key = ""
+    for line in _strip_outer_text_fence(text).splitlines():
+        match = _GENERATED_IMAGE_FIELD_RE.match(line)
+        if match:
+            current_key = " ".join(match.group(1).strip().casefold().split())
+            fields[current_key] = match.group(2).strip()
+            continue
+        if current_key and line.startswith(("    ", "      ")) and line.strip():
+            fields[current_key] = f"{fields[current_key]} {line.strip()}".strip()
+    return fields
+
+
+def _generated_image_caption(text: str, file_url: str) -> str:
+    fields = _extract_generated_image_fields(text)
+    parsed = urlparse(file_url)
+    basename = Path(unquote(parsed.path)).name
+    lines = ["🖼 Generated Image"]
+    for label, key, limit in (
+        ("Use case", "use case", 120),
+        ("Asset", "asset type", 160),
+        ("Request", "primary request", 360),
+    ):
+        value = fields.get(key, "").strip()
+        if value:
+            lines.append(f"{label}: {_clip_inline(value, max_chars=limit)}")
+    if basename:
+        lines.append(f"File: {_clip_inline(basename, max_chars=120)}")
+    caption = "\n".join(lines)
+    return _clip_inline(caption, max_chars=_GENERATED_IMAGE_CAPTION_LIMIT)
+
+
+def _generated_image_preview_payload(text: str) -> tuple[list[tuple[str, bytes]], str] | None:
+    match = _GENERATED_IMAGE_SAVED_TO_RE.search(_strip_outer_text_fence(text))
+    if not match:
+        return None
+    file_url = match.group(1).rstrip("`'\".,)")
+    loaded = _load_generated_image_bytes(file_url)
+    if loaded is None:
+        return None
+    media_type, raw_bytes = loaded
+    return [(media_type, raw_bytes)], _generated_image_caption(text, file_url)
+
+
 def is_generated_image_success_text(text: str, tool_name: str | None = None) -> bool:
     """Return True for image-generation success text that substitutes for final."""
     lowered = text.lower()
@@ -263,7 +431,14 @@ def apply_telegram_delivery_policy(
         text,
         projected.tool_name,
     ):
-        projected.content_type = "text"
+        preview_payload = _generated_image_preview_payload(text)
+        if preview_payload is not None:
+            image_data, image_caption = preview_payload
+            projected.content_type = GENERATED_IMAGE_PREVIEW_CONTENT_TYPE
+            projected.image_data = image_data
+            projected.image_caption = image_caption
+        else:
+            projected.content_type = "text"
         projected.semantic_kind = ASSISTANT_FINAL_SEMANTIC_KIND
         projected.delivery_class = DELIVERY_CLASS_HISTORY
         projected.include_in_history = True

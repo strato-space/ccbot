@@ -31,6 +31,8 @@ from ccbot.state_schema import (
     TOPIC_POLICY_MANUAL_BIND_REQUIRED,
 )
 
+_PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
 
 def _make_topic_update(
     *,
@@ -5376,6 +5378,65 @@ class TestTelegramDelivery:
         assert kwargs["content_type"] == "text"
         assert kwargs["semantic_kind"] == "assistant_final"
         assert kwargs["text"] == generated_text
+        assert kwargs["image_data"] is None
+
+    @pytest.mark.asyncio
+    async def test_handle_new_message_delivers_safe_generated_image_as_terminal_preview(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        bot = AsyncMock()
+        image_root = tmp_path / "generated_images"
+        image_path = image_root / "run" / "ig.png"
+        image_path.parent.mkdir(parents=True)
+        image_path.write_bytes(_PNG_BYTES)
+        monkeypatch.setenv("CCBOT_GENERATED_ARTIFACT_ROOTS", str(image_root))
+        generated_text = (
+            "• Generated Image:\n"
+            "  └ Use case: illustration-story\n"
+            "  └ Primary request: Generate frame B03_sky_inside_gourd\n"
+            f"  └ Saved to: {image_path.as_uri()}"
+        )
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text=generated_text,
+            is_complete=True,
+            content_type="tool_result",
+            tool_use_id="toolu_image",
+            role="assistant",
+            event_kind="tool_output",
+            runtime_kind="codex",
+            tool_name="image_gen.imagegen",
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch(
+                "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
+            ) as mock_status,
+            patch(
+                "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_content,
+            patch("ccbot.bot.get_interactive_msg_id", return_value=None),
+            patch("ccbot.bot.get_message_queue", return_value=None),
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_status.assert_not_awaited()
+        mock_content.assert_awaited_once()
+        kwargs = mock_content.await_args.kwargs
+        assert kwargs["parts"] == []
+        assert kwargs["content_type"] == "generated_image_preview"
+        assert kwargs["semantic_kind"] == "assistant_final"
+        assert kwargs["text"] == generated_text
+        assert kwargs["image_data"] == [("image/png", _PNG_BYTES)]
+        assert kwargs["image_caption"]
+        assert "B03_sky_inside_gourd" in kwargs["image_caption"]
 
     @pytest.mark.asyncio
     async def test_handle_new_message_compact_mode_routes_orchestration_to_latest_visible_artifact(
@@ -5998,6 +6059,200 @@ class TestTelegramDelivery:
         assert projected.delivery_class == "history"
         assert projected.dispatch_to_telegram is True
         assert projected.status_message_eligible is False
+        assert projected.image_data is None
+
+    def test_compact_policy_promotes_safe_generated_image_to_terminal_preview(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        image_root = tmp_path / "generated_images"
+        image_path = image_root / "run" / "ig.png"
+        image_path.parent.mkdir(parents=True)
+        image_path.write_bytes(_PNG_BYTES)
+        monkeypatch.setenv("CCBOT_GENERATED_ARTIFACT_ROOTS", str(image_root))
+        event = NormalizedEvent(
+            thread_id="thread-1",
+            text=(
+                "• Generated Image:\n"
+                "  └ Use case: illustration-story\n"
+                "  └ Asset type: local-only cinematic short first-frame PNG\n"
+                "  └ Primary request: Generate frame B03_sky_inside_gourd\n"
+                f"  └ Saved to: {image_path.as_uri()}"
+            ),
+            is_complete=True,
+            content_type="tool_result",
+            role="assistant",
+            event_kind="tool_output",
+            tool_name="image_gen.imagegen",
+        )
+
+        projected = apply_telegram_delivery_policy(event, mode="compact")
+
+        assert projected.content_type == "generated_image_preview"
+        assert projected.semantic_kind == "assistant_final"
+        assert projected.delivery_class == "history"
+        assert projected.dispatch_to_telegram is True
+        assert projected.status_message_eligible is False
+        assert projected.image_data == [("image/png", _PNG_BYTES)]
+        assert projected.image_caption
+        assert "Generated Image" in projected.image_caption
+        assert "B03_sky_inside_gourd" in projected.image_caption
+
+    def test_compact_policy_rejects_generated_image_outside_allowed_roots(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        allowed_root = tmp_path / "allowed"
+        unsafe_path = tmp_path / "elsewhere" / "ig.png"
+        unsafe_path.parent.mkdir(parents=True)
+        unsafe_path.write_bytes(_PNG_BYTES)
+        monkeypatch.setenv("CCBOT_GENERATED_ARTIFACT_ROOTS", str(allowed_root))
+        event = NormalizedEvent(
+            thread_id="thread-1",
+            text=(
+                "Generated Image:\n"
+                "  └ Primary request: Generate frame\n"
+                f"  └ Saved to: {unsafe_path.as_uri()}"
+            ),
+            is_complete=True,
+            content_type="tool_result",
+            role="assistant",
+            event_kind="tool_output",
+            tool_name="imagegen",
+        )
+
+        projected = apply_telegram_delivery_policy(event, mode="compact")
+
+        assert projected.content_type == "text"
+        assert projected.semantic_kind == "assistant_final"
+        assert projected.image_data is None
+        assert projected.image_caption is None
+
+    def test_compact_policy_accepts_generated_image_file_url_localhost(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        image_root = tmp_path / "generated_images"
+        image_path = image_root / "run" / "ig.png"
+        image_path.parent.mkdir(parents=True)
+        image_path.write_bytes(_PNG_BYTES)
+        monkeypatch.setenv("CCBOT_GENERATED_ARTIFACT_ROOTS", str(image_root))
+        event = NormalizedEvent(
+            thread_id="thread-1",
+            text=(
+                "Generated Image:\n"
+                "  └ Primary request: Generate frame\n"
+                f"  └ Saved to: file://localhost{image_path}"
+            ),
+            is_complete=True,
+            content_type="tool_result",
+            role="assistant",
+            event_kind="tool_output",
+            tool_name="imagegen",
+        )
+
+        projected = apply_telegram_delivery_policy(event, mode="compact")
+
+        assert projected.content_type == "generated_image_preview"
+        assert projected.image_data == [("image/png", _PNG_BYTES)]
+
+    def test_compact_policy_rejects_encoded_traversal_generated_image_path(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        image_root = tmp_path / "generated_images"
+        outside = tmp_path / "outside" / "ig.png"
+        image_root.mkdir(parents=True)
+        outside.parent.mkdir(parents=True)
+        outside.write_bytes(_PNG_BYTES)
+        monkeypatch.setenv("CCBOT_GENERATED_ARTIFACT_ROOTS", str(image_root))
+        traversal_url = f"file://{image_root}/%2e%2e/outside/ig.png"
+        event = NormalizedEvent(
+            thread_id="thread-1",
+            text=(
+                "Generated Image:\n"
+                "  └ Primary request: Generate frame\n"
+                f"  └ Saved to: {traversal_url}"
+            ),
+            is_complete=True,
+            content_type="tool_result",
+            role="assistant",
+            event_kind="tool_output",
+            tool_name="imagegen",
+        )
+
+        projected = apply_telegram_delivery_policy(event, mode="compact")
+
+        assert projected.content_type == "text"
+        assert projected.image_data is None
+
+    def test_compact_policy_rejects_symlink_escape_generated_image_path(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        image_root = tmp_path / "generated_images"
+        outside = tmp_path / "outside" / "ig.png"
+        image_root.mkdir(parents=True)
+        outside.parent.mkdir(parents=True)
+        outside.write_bytes(_PNG_BYTES)
+        symlink_path = image_root / "linked.png"
+        symlink_path.symlink_to(outside)
+        monkeypatch.setenv("CCBOT_GENERATED_ARTIFACT_ROOTS", str(image_root))
+        event = NormalizedEvent(
+            thread_id="thread-1",
+            text=(
+                "Generated Image:\n"
+                "  └ Primary request: Generate frame\n"
+                f"  └ Saved to: {symlink_path.as_uri()}"
+            ),
+            is_complete=True,
+            content_type="tool_result",
+            role="assistant",
+            event_kind="tool_output",
+            tool_name="imagegen",
+        )
+
+        projected = apply_telegram_delivery_policy(event, mode="compact")
+
+        assert projected.content_type == "text"
+        assert projected.image_data is None
+
+    def test_compact_policy_rejects_oversized_generated_image_path(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        image_root = tmp_path / "generated_images"
+        image_path = image_root / "run" / "huge.png"
+        image_path.parent.mkdir(parents=True)
+        with image_path.open("wb") as handle:
+            handle.write(_PNG_BYTES)
+            handle.seek((10 * 1024 * 1024) + 1)
+            handle.write(b"0")
+        monkeypatch.setenv("CCBOT_GENERATED_ARTIFACT_ROOTS", str(image_root))
+        event = NormalizedEvent(
+            thread_id="thread-1",
+            text=(
+                "Generated Image:\n"
+                "  └ Primary request: Generate frame\n"
+                f"  └ Saved to: {image_path.as_uri()}"
+            ),
+            is_complete=True,
+            content_type="tool_result",
+            role="assistant",
+            event_kind="tool_output",
+            tool_name="imagegen",
+        )
+
+        projected = apply_telegram_delivery_policy(event, mode="compact")
+
+        assert projected.content_type == "text"
+        assert projected.image_data is None
 
     def test_compact_policy_forces_dispatch_for_ordinary_user_echo(self):
         event = NormalizedEvent(

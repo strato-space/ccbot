@@ -186,6 +186,7 @@ from .input_safety import (
 from .runtime_discontinuity import is_codex_termination_summary_text
 from .runtime_types import (
     ASSISTANT_FINAL_SEMANTIC_KIND,
+    GENERATED_IMAGE_PREVIEW_CONTENT_TYPE,
     LIFECYCLE_SEMANTIC_KIND,
     PLAN_UPDATE_SEMANTIC_KIND,
     USER_ECHO_SEMANTIC_KIND,
@@ -5823,6 +5824,12 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
             msg.content_type,
             msg.role,
         )
+        if (
+            msg.is_complete
+            and msg.content_type == GENERATED_IMAGE_PREVIEW_CONTENT_TYPE
+            and msg.image_data
+        ):
+            parts = []
 
         if msg.is_complete:
             # Enqueue content message task
@@ -5839,6 +5846,7 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 text=msg.text,
                 thread_id=thread_id,
                 image_data=msg.image_data,
+                image_caption=msg.image_caption,
                 document_data=msg.document_data,
                 turn_generation=turn_generation,
             )

@@ -109,6 +109,7 @@ class SessionMonitor:
             role=entry.role,
             tool_name=entry.tool_name,
             image_data=entry.image_data,
+            image_caption=entry.image_caption,
             document_data=entry.document_data,
             timestamp=entry.timestamp,
             runtime_kind=entry.runtime_kind,
