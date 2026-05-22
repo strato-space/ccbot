@@ -120,7 +120,7 @@ def test_codex_rollout_view_image_rejects_mismatched_media_signature() -> None:
     assert base64.b64encode(_JPEG_BYTES).decode("ascii") not in fallback.text
 
 
-def test_codex_rollout_image_generation_end_is_terminal_media_result(
+def test_codex_rollout_image_generation_end_is_pre_final_media_preview(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -161,7 +161,7 @@ def test_codex_rollout_image_generation_end_is_terminal_media_result(
     assert len(events) == 1
     event = events[0]
     assert event.content_type == "generated_image_preview"
-    assert event.semantic_kind == "assistant_final"
+    assert event.semantic_kind == "image_preview"
     assert event.dispatch_to_telegram is True
     assert event.status_message_eligible is False
     assert event.image_data == [("image/png", _PNG_BYTES)]
@@ -233,7 +233,7 @@ def test_codex_rollout_image_generation_end_accepts_jpeg_and_webp(
         )[0]
 
         assert event.content_type == "generated_image_preview"
-        assert event.semantic_kind == "assistant_final"
+        assert event.semantic_kind == "image_preview"
         assert event.image_data == [(media_type, image_bytes)]
         assert saved_path in event.text
 

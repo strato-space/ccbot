@@ -32,10 +32,10 @@ control surface at a time.
 - **Terminal media result artifact**
   - `assistant_final` result whose primary user-facing payload is media rather
     than standalone text
-  - current example: generated-image success output or Codex
-    `image_generation_end` replay event with a safely validated generated-image
-    payload is delivered as one Telegram photo bubble with a caption in compact
-    mode
+  - current example: textual generated-image success output with a safely
+    validated generated-image payload may be delivered as one Telegram photo bubble with a
+    caption in compact mode when it substitutes for absent final
+    assistant text
   - closes the same turn exactly like a final assistant text artifact, but only
     after media send acknowledgement or a terminal text fallback path completes
   - if path validation, file reading, or Telegram media send fails, the saved
@@ -45,7 +45,8 @@ control surface at a time.
 
 - **Runtime image preview artifact**
   - pre-final visible artifact whose primary payload is image media from runtime
-    visual inspection, such as Codex `view_image` / `Viewed Image` output
+    visual progress or inspection, such as Codex `image_generation_end` or
+    `view_image` / `Viewed Image` output
   - sourced only from paired replay-embedded image bytes in the MVP; local path
     arguments are sanitized provenance, not authorization to read files
   - represents authorized replay-proven disclosure to the active bound control
@@ -228,9 +229,9 @@ Durable bubbles in `compact` mode are intentionally narrow:
 - terminal media result artifacts such as generated-image preview/photo bubbles
   with captions, when a safely validated local generated artifact substitutes
   for absent final assistant text
-- runtime image preview artifacts such as Codex `Viewed Image` preview/photo
-  bubbles, when paired replay-embedded image bytes are available for the active
-  bound control surface
+- runtime image preview artifacts such as Codex `image_generation_end` and
+  `Viewed Image` preview/photo bubbles, when paired replay-embedded image bytes
+  are available for the active bound control surface
 
 In addition:
 

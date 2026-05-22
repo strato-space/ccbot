@@ -158,16 +158,16 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
 - **Audio/video messages** — Telegram audio/video files within the configured Telegram bot download cap are saved under `$CCBOT_DIR/media` and forwarded artifact-first to the runtime as local paths plus metadata; transcription is optional future enrichment
 - **Photo/document messages** — Telegram photos and documents/files such as `tar.gz` archives are downloaded and forwarded to the runtime as local file paths; Telegram media groups and same-surface orphan attachment bursts are batched into one runtime input when safe
 - **Sticker messages** — Telegram stickers are normalized to image attachments for the runtime; animated/video stickers use their Telegram thumbnail when available
-- **Generated-image terminal media result** — successful image-generation tool
-  output or Codex `image_generation_end` replay event that carries or reports a
-  safely validated generated-image artifact is delivered in compact mode as one
-  terminal Telegram photo bubble with a caption; if validation, reading, or
-  media send fails, the saved-path text remains the terminal fallback
-- **Runtime image preview artifact** — Codex `view_image` / `Viewed Image`
-  replay output with paired embedded image bytes is delivered as a pre-final
-  Telegram photo bubble with a sanitized caption; it is authorized replay-proven
-  disclosure to the active bound control surface, never a local-path file read,
-  and it does not close the assistant turn
+- **Generated-image terminal media result** — successful textual image-generation
+  tool output with a safely validated generated-image artifact may be delivered
+  in compact mode as one terminal Telegram photo bubble with a caption; if
+  validation, reading, or media send fails, the saved-path text remains the
+  terminal fallback
+- **Runtime image preview artifact** — Codex `image_generation_end` and
+  `view_image` / `Viewed Image` replay output with paired embedded image bytes
+  is delivered as a pre-final Telegram photo bubble with a sanitized caption;
+  it is authorized replay-proven disclosure to the active bound control surface,
+  never a local-path file read, and it does not close the assistant turn
 - **Send messages** — Forward text to Codex via tmux keystrokes
 - **Simple text fast path** — eligible one-line Codex text gets an immediate
   Telegram ingress receipt and starts a runtime injection attempt before the

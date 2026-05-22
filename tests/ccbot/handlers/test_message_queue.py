@@ -1948,14 +1948,20 @@ async def test_generated_image_terminal_preview_photo_failure_falls_back_to_text
 
 
 @pytest.mark.asyncio
-async def test_image_preview_sends_single_photo_without_closing_final_lanes() -> None:
+@pytest.mark.parametrize(
+    "content_type",
+    ["viewed_image_preview", "generated_image_preview"],
+)
+async def test_image_preview_sends_single_photo_without_closing_final_lanes(
+    content_type: str,
+) -> None:
     preview_task = MessageTask(
         task_type="content",
         window_id="@7",
         thread_id=42,
         parts=[],
         text="• Viewed Image:\n  └ contact_sheet.png",
-        content_type="viewed_image_preview",
+        content_type=content_type,
         semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
         image_data=[("image/png", b"png-bytes")],
         image_caption="🖼 Viewed Image\nFile: contact_sheet.png",

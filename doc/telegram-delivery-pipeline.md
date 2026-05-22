@@ -122,10 +122,10 @@ The delivery pipeline keeps:
 - one ordered content queue per user
 - one current turn generation per `(user_id, control surface)`
 - one terminal turn artifact: `assistant_final`
-  - generated-image tool success with a safely validated local artifact path may
-    be promoted to a terminal media result artifact; Codex
-    `image_generation_end` replay events that carry generated-image bytes use
-    the same terminal media result path
+  - textual generated-image tool success with a safely validated local artifact
+    path may be promoted to a terminal media result artifact when it substitutes
+    for absent final assistant text; Codex `image_generation_end` replay events
+    with embedded bytes are pre-final runtime image preview artifacts instead
   - the terminal media result is one Telegram photo bubble with caption; if
     validation, read, or media send fails, the saved-path text remains the
     terminal fallback
@@ -133,9 +133,9 @@ The delivery pipeline keeps:
   - commentary
   - orchestration milestones
   - plan updates
-  - runtime image preview artifacts, including Codex `view_image` /
-    `Viewed Image` preview/photo bubbles sourced from paired replay-embedded
-    image bytes
+  - runtime image preview artifacts, including Codex `image_generation_end` and
+    `view_image` / `Viewed Image` preview/photo bubbles sourced from paired
+    replay-embedded image bytes
   - any future human-facing preview bubble that the product chooses to surface
 - one latest-warning artifact with warning-dedup state per `(user_id, control surface)`
   for ordinary warnings; runtime-discontinuity warnings may use a distinct
@@ -241,17 +241,17 @@ This pipeline keeps the upstream-style rule that `tool_result` may edit the
 earlier `tool_use` message in place when the runtime and delivery mode expose
 tool lifecycle as ordinary content. In the default `compact` mode, that same
 tool lifecycle is typically collapsed into the mutable status artifact instead.
-The narrow exception is generated-image success output with a saved artifact
-path, plus Codex `image_generation_end` replay events that carry generated
-image bytes. Compact delivery promotes those safely validated generated-image
-payloads to a terminal media result artifact, sent as one Telegram photo bubble
-with a caption. If validation, file read, or media send fails, compact delivery
-falls back to the terminal saved-path text so the originating Telegram thread
-still receives the result. Separately, Codex `view_image` / `Viewed Image`
-outputs are pre-final runtime image preview artifacts when the paired replay
-output embeds `input_image` bytes. They are authorized replay-proven disclosure
-to the active bound control surface, use sanitized provenance captions, never read local path arguments
-for media bytes in the MVP, and do not close the assistant turn.
+The narrow terminal exception is generated-image success output with a saved artifact
+path: textual generated-image success output when it substitutes for absent final
+assistant text. Compact
+delivery can promote that safely validated text result to a terminal media result
+artifact, sent as one Telegram photo bubble with a caption; validation, file
+read, or media send failure falls back to terminal saved-path text. Separately,
+Codex `image_generation_end` and `view_image` / `Viewed Image` outputs are
+pre-final runtime image preview artifacts when paired replay output embeds image
+bytes. They are authorized replay-proven disclosure to the active bound control
+surface, use sanitized provenance captions, never read local path arguments for
+media bytes in the MVP, and do not close the assistant turn.
 
 ## Progress Routing
 

@@ -95,7 +95,8 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "terminal Telegram photo bubble with a caption" in readme
     assert "saved-path text remains the" in readme
     assert "Runtime image preview artifact" in readme
-    assert "Codex `view_image` / `Viewed Image`" in readme
+    assert "Codex `image_generation_end`" in readme
+    assert "`view_image` / `Viewed Image`" in readme
     assert "authorized replay-proven" in readme
     assert "does not close the assistant turn" in readme
     assert "photo, document, sticker, audio, or video media arrives before the topic" in readme
@@ -448,7 +449,8 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "generated-image success output with a saved artifact" in doc
     assert "terminal media result artifact" in doc
     assert "terminal saved-path text" in doc
-    assert "Codex `view_image` / `Viewed Image`" in doc
+    assert "Codex `image_generation_end`" in doc
+    assert "`view_image` / `Viewed Image`" in doc
     assert "pre-final runtime image preview artifacts" in doc
     assert "never read local path arguments" in doc
     assert "pre-final visible surface" in doc

@@ -2715,8 +2715,11 @@ def clear_commentary_lane_state(
     user_id: int,
     thread_id: int | None = None,
 ) -> None:
-    """Backward-compatible alias for pre-final artifact lane cleanup."""
+    """Backward-compatible cleanup for commentary/pre-final lane test state."""
+    key = (user_id, thread_id or 0)
     clear_pre_final_visible_lane_state(user_id, thread_id)
+    _commentary_msg_info.pop(key, None)
+    _commentary_extra_msg_ids.pop(key, None)
 
 
 def clear_status_msg_info(user_id: int, thread_id: int | None = None) -> None:

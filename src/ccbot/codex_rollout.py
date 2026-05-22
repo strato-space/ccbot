@@ -30,7 +30,6 @@ from urllib.parse import unquote, urlparse
 
 from .config import config
 from .runtime_types import (
-    ASSISTANT_FINAL_SEMANTIC_KIND,
     GENERATED_IMAGE_PREVIEW_CONTENT_TYPE,
     IMAGE_PREVIEW_SEMANTIC_KIND,
     NormalizedEvent,
@@ -2155,8 +2154,8 @@ def _generated_image_event(
         role="assistant",
         timestamp=timestamp,
         runtime_kind=runtime_kind,
-        event_kind="assistant_message",
-        semantic_kind=ASSISTANT_FINAL_SEMANTIC_KIND,
+        event_kind="tool_output",
+        semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
         include_in_history=True,
         dispatch_to_telegram=True,
         status_message_eligible=False,
