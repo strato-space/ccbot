@@ -547,10 +547,25 @@ class SessionMonitor:
         from .session import session_manager
 
         await session_manager.load_session_map()
-        session_manager.cleanup_helper_window_bindings()
-        live_window_ids = {
-            window.window_id for window in await tmux_manager.list_windows()
+        live_windows = {
+            window.window_id: window for window in await tmux_manager.list_windows()
         }
+        for binding in session_manager.iter_topic_bindings():
+            if binding.binding_scope != "tmux":
+                continue
+            live_window = live_windows.get(binding.window_id)
+            if live_window is None:
+                continue
+            session_manager.reconcile_live_tmux_window(
+                window_id=binding.window_id,
+                cwd=str(getattr(live_window, "cwd", "") or ""),
+                window_name=str(getattr(live_window, "window_name", "") or ""),
+                pane_current_command=str(
+                    getattr(live_window, "pane_current_command", "") or ""
+                ),
+            )
+        session_manager.cleanup_helper_window_bindings()
+        live_window_ids = set(live_windows)
         window_to_session: dict[str, str] = {}
         active_rollout_sources: dict[str, RolloutSource] = {}
 

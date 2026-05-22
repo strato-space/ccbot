@@ -483,6 +483,53 @@ class TestWindowState:
         mgr.clear_window_session("@1")
         assert mgr.get_window_state("@1").session_id == ""
 
+    def test_reconcile_live_tmux_window_adopts_codex_after_cwd_drift(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        codex_home = tmp_path / ".codex"
+        sessions_root = codex_home / "sessions" / "2026" / "05" / "22"
+        sessions_root.mkdir(parents=True)
+        new_thread_id = "019e4e71-1499-7d11-991b-2de6af8aa0ce"
+        rollout = sessions_root / f"rollout-2026-05-22T06-48-14-{new_thread_id}.jsonl"
+        rollout.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-05-22T06:48:14Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": new_thread_id,
+                        "cwd": "/tmp/new-project",
+                        "originator": "codex_cli",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+        monkeypatch.setattr(SessionManager, "_save_state", lambda self: None)
+        manager = SessionManager(
+            codex_thread_catalog=CodexThreadCatalog(codex_home=codex_home)
+        )
+        manager.window_states["@8"] = LiveProcessDescriptor(
+            thread_id="019d6825-88ba-7f10-948e-eaaf162ea2a9",
+            cwd="/tmp/old-project",
+            runtime_kind="codex",
+            window_name="comfy-agent",
+        )
+
+        changed = manager.reconcile_live_tmux_window(
+            window_id="@8",
+            cwd="/tmp/new-project",
+            window_name="comfy-agent",
+            pane_current_command="node",
+        )
+
+        assert changed is True
+        state = manager.window_states["@8"]
+        assert state.thread_id == new_thread_id
+        assert state.cwd == "/tmp/new-project"
+
 
 class TestResolveWindowForThread:
     def test_none_thread_id_returns_none(self, mgr: SessionManager) -> None:

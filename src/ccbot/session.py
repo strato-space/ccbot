@@ -31,6 +31,7 @@ from .codex_threads import (
     CodexThreadCandidate,
     CodexThreadCatalog,
     CodexThreadResolution,
+    normalize_cwd,
 )
 from .delivery_audit import log_telegram_delivery
 from .fast_agent_sessions import (
@@ -1643,6 +1644,107 @@ class SessionManager:
         state.thread_id = thread_id
         self._save_state()
         return state
+
+    def reconcile_live_tmux_window(
+        self,
+        *,
+        window_id: str,
+        cwd: str,
+        window_name: str = "",
+        pane_current_command: str = "",
+    ) -> bool:
+        """Refresh a bound tmux descriptor from live tmux topology.
+
+        This is intentionally conservative: it only adopts a new Codex thread
+        when the live tmux pane reports a different cwd than the persisted
+        descriptor. A same-cwd restart remains a manual resume/bind operation
+        because helper/reviewer Codex threads can share the same cwd.
+        """
+        if not window_id:
+            return False
+        state = self.get_or_create_process_descriptor(window_id)
+        changed = False
+
+        inferred_runtime = runtime_capability_registry.known_runtime_kind_from_command(
+            pane_current_command
+        )
+        if not state.runtime_kind and inferred_runtime:
+            state.runtime_kind = inferred_runtime
+            changed = True
+
+        if window_name and state.window_name != window_name:
+            state.window_name = window_name
+            changed = True
+
+        live_cwd = cwd.strip()
+        cwd_changed = bool(live_cwd) and normalize_cwd(live_cwd) != normalize_cwd(
+            state.cwd
+        )
+        if not cwd_changed:
+            if changed:
+                self._save_state()
+            return changed
+
+        old_thread_id = state.thread_id
+        old_cwd = state.cwd
+        state.cwd = live_cwd
+        state.registered_at = time.time()
+        changed = True
+
+        if state.runtime_kind == "codex" and self.codex_thread_catalog is not None:
+            try:
+                self.codex_thread_catalog.refresh()
+                candidates = sorted(
+                    self.codex_thread_catalog.list_candidates_for_cwd(live_cwd),
+                    key=lambda candidate: (
+                        candidate.mtime,
+                        candidate.ordering_timestamp,
+                        candidate.thread_id,
+                    ),
+                    reverse=True,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Unable to resolve live Codex thread for cwd drift on %s: %s",
+                    window_id,
+                    exc,
+                )
+                candidates = []
+            if candidates:
+                selected = candidates[0]
+                state.thread_id = selected.thread_id
+                logger.info(
+                    "Adopted live Codex thread for window %s after cwd drift: "
+                    "%s (%s) -> %s (%s)",
+                    window_id,
+                    old_thread_id or "<none>",
+                    old_cwd or "<none>",
+                    selected.thread_id,
+                    live_cwd,
+                )
+            else:
+                state.thread_id = ""
+                logger.info(
+                    "Cleared thread for window %s after cwd drift without "
+                    "matching Codex rollout: %s (%s) -> <none> (%s)",
+                    window_id,
+                    old_thread_id or "<none>",
+                    old_cwd or "<none>",
+                    live_cwd,
+                )
+        elif old_thread_id:
+            state.thread_id = ""
+            logger.info(
+                "Cleared thread for window %s after runtime cwd drift: "
+                "%s (%s) -> <none> (%s)",
+                window_id,
+                old_thread_id,
+                old_cwd or "<none>",
+                live_cwd,
+            )
+
+        self._save_state()
+        return changed
 
     def clear_window_binding(self, window_id: str) -> None:
         """Clear the persisted identity binding for a live window."""
