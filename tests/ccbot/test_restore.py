@@ -8,9 +8,11 @@ from ccbot.restore import (
     RestoreIntent,
     RestoreIntentError,
     RestorePaneKind,
+    StartupRestoreResult,
     bind_restored_surface,
     classify_restore_pane,
     inspect_configured_startup_target,
+    is_startup_restore_retryable,
     parse_restore_intent,
     restore_configured_startup_target,
     validate_restore_env_contract,
@@ -61,6 +63,33 @@ def _intent(**overrides) -> RestoreIntent:
     payload.update(overrides)
     return RestoreIntent(**payload)
 
+
+
+def test_startup_restore_retryable_only_for_transient_reboot_surfaces() -> None:
+    assert is_startup_restore_retryable(
+        StartupRestoreResult(
+            "failed",
+            classification=RestoreClassification.FULL_LOSS_MISSING_TMUX_WINDOW,
+        )
+    )
+    assert is_startup_restore_retryable(
+        StartupRestoreResult(
+            "failed",
+            classification=RestoreClassification.EXISTING_SHELL_OR_EMPTY_WINDOW,
+        )
+    )
+    assert not is_startup_restore_retryable(
+        StartupRestoreResult(
+            "failed",
+            classification=RestoreClassification.EXISTING_IDENTITY_MISMATCH,
+        )
+    )
+    assert not is_startup_restore_retryable(
+        StartupRestoreResult(
+            "already_restored",
+            classification=RestoreClassification.EXISTING_VALID_RUNTIME,
+        )
+    )
 
 def test_parse_restore_intent_requires_full_surface_identity_and_group_chat() -> None:
     intent = parse_restore_intent(

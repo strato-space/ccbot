@@ -207,6 +207,26 @@ class StartupRestoreResult:
         return data
 
 
+_RETRYABLE_RESTORE_CLASSIFICATIONS = {
+    RestoreClassification.FULL_LOSS_MISSING_TMUX_WINDOW,
+    RestoreClassification.EXISTING_SHELL_OR_EMPTY_WINDOW,
+}
+
+
+def is_startup_restore_retryable(result: StartupRestoreResult) -> bool:
+    """Return True when a later retry may safely recover the restore target.
+
+    Reboots can start the Telegram controller before the tmux runtime has
+    finished recreating or resuming its live Codex pane. Those cases are
+    transient only for a missing target window or a shell/empty placeholder;
+    identity, cwd, helper, env, or ambiguity failures must remain fail-closed.
+    """
+    return (
+        result.status == "failed"
+        and result.classification in _RETRYABLE_RESTORE_CLASSIFICATIONS
+    )
+
+
 def _truthy(value: str | None) -> bool:
     return str(value or "").strip().casefold() in _TRUE_VALUES
 

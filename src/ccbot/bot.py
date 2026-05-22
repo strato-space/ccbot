@@ -224,6 +224,7 @@ _status_poll_task: asyncio.Task | None = None
 
 # Telegram polling liveness watchdog task
 _polling_health_task: asyncio.Task | None = None
+_startup_restore_retry_task: asyncio.Task | None = None
 _last_telegram_update_monotonic: float | None = None
 _attachment_batcher = AttachmentBatcher()
 _attachment_flush_tasks: dict[IngressBatchKey, asyncio.Task] = {}
@@ -5869,9 +5870,49 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
 
 # --- App lifecycle ---
 
+_RESTORE_RETRY_INTERVAL_SECONDS = 15.0
+_RESTORE_RETRY_TIMEOUT_SECONDS = 30 * 60.0
+
+
+async def _startup_restore_retry_loop() -> None:
+    """Retry configured startup restore while rebooted runtimes come online."""
+    from .restore import is_startup_restore_retryable, restore_configured_startup_target
+
+    deadline = time.monotonic() + _env_float(
+        "CCBOT_RESTORE_RETRY_TIMEOUT_SECONDS",
+        _RESTORE_RETRY_TIMEOUT_SECONDS,
+    )
+    interval = _env_float(
+        "CCBOT_RESTORE_RETRY_INTERVAL_SECONDS",
+        _RESTORE_RETRY_INTERVAL_SECONDS,
+    )
+    attempt = 0
+    while time.monotonic() < deadline:
+        await asyncio.sleep(max(1.0, interval))
+        attempt += 1
+        result = await restore_configured_startup_target(
+            session_manager,
+            tmux_manager,
+        )
+        if result.status != "skipped":
+            logger.info(
+                "Startup restore retry %d result: status=%s window_id=%s "
+                "classification=%s message=%s",
+                attempt,
+                result.status,
+                result.window_id,
+                result.classification,
+                result.message,
+            )
+        if result.status in {"restored", "already_restored", "skipped"}:
+            return
+        if not is_startup_restore_retryable(result):
+            return
+    logger.warning("Startup restore retry window expired without recovery")
+
 
 async def post_init(application: Application) -> None:
-    global session_monitor, _status_poll_task, _polling_health_task
+    global session_monitor, _status_poll_task, _polling_health_task, _startup_restore_retry_task
 
     await application.bot.delete_my_commands()
     await application.bot.set_my_commands(build_bot_commands())
@@ -5879,7 +5920,7 @@ async def post_init(application: Application) -> None:
 
     # Re-resolve stale window IDs from persisted state against live tmux windows
     await session_manager.resolve_stale_ids()
-    from .restore import restore_configured_startup_target
+    from .restore import is_startup_restore_retryable, restore_configured_startup_target
 
     restore_result = await restore_configured_startup_target(
         session_manager,
@@ -5892,6 +5933,9 @@ async def post_init(application: Application) -> None:
             restore_result.window_id,
             restore_result.message,
         )
+    if is_startup_restore_retryable(restore_result):
+        _startup_restore_retry_task = asyncio.create_task(_startup_restore_retry_loop())
+        logger.info("Startup restore retry task started")
 
     # Pre-fill global rate limiter bucket on restart.
     # AsyncLimiter starts at _level=0 (full burst capacity), but Telegram's
@@ -5926,9 +5970,16 @@ async def post_init(application: Application) -> None:
 
 
 async def post_shutdown(application: Application) -> None:
-    global _status_poll_task, _polling_health_task
+    global _status_poll_task, _polling_health_task, _startup_restore_retry_task
 
     await _cancel_attachment_batch_tasks()
+
+    if _startup_restore_retry_task:
+        _startup_restore_retry_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _startup_restore_retry_task
+        _startup_restore_retry_task = None
+        logger.info("Startup restore retry task stopped")
 
     if _polling_health_task:
         _polling_health_task.cancel()
