@@ -26,6 +26,7 @@ from pathlib import Path
 import re
 import time
 from typing import Any, Iterable
+from urllib.parse import unquote, urlparse
 
 from .config import config
 from .runtime_types import (
@@ -71,6 +72,7 @@ _REDUNDANT_OUTPUT_FOOTER_RE = re.compile(
 )
 _GENERATED_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 _IMAGE_GENERATION_FIELD_RE = re.compile(r"^\s*([^:\n]+):\s*(.*)$")
+_GENERATED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 
 
 def _as_text(value: Any) -> str:
@@ -1807,11 +1809,70 @@ def _decode_generated_image_payload(payload: dict[str, Any]) -> tuple[str, bytes
     return media_type, raw_bytes
 
 
+def _saved_image_file_url_from_path(
+    raw_path: str,
+    *,
+    thread_id: str,
+    call_id: str,
+) -> str:
+    raw_path = raw_path.strip()
+    if not raw_path or "\x00" in raw_path:
+        return ""
+    if raw_path.startswith("file://"):
+        parsed = urlparse(raw_path)
+        if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
+            return ""
+        raw_path = unquote(parsed.path)
+    path = Path(raw_path)
+    if not path.is_absolute():
+        return ""
+    suffix = path.suffix.lower()
+    if suffix not in _GENERATED_IMAGE_SUFFIXES:
+        return ""
+    if call_id and not path.name.startswith(call_id):
+        return ""
+    parts = set(path.parts)
+    if "generated_images" not in parts:
+        return ""
+    if thread_id and thread_id not in parts:
+        return ""
+    try:
+        return path.resolve(strict=False).as_uri()
+    except (OSError, ValueError):
+        return ""
+
+
+def _replay_saved_image_url(
+    payload: dict[str, Any],
+    *,
+    thread_id: str,
+    call_id: str,
+) -> str:
+    for key in ("saved_path", "path", "output_path"):
+        saved_url = _saved_image_file_url_from_path(
+            _as_text(payload.get(key)),
+            thread_id=thread_id,
+            call_id=call_id,
+        )
+        if saved_url:
+            return saved_url
+    return ""
+
+
 def _codex_generated_image_url(thread_id: str, call_id: str) -> str:
     if not thread_id or not call_id:
         return ""
     codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
     image_path = codex_home / "generated_images" / thread_id / f"{call_id}.png"
+    if not image_path.is_file():
+        return ""
+    try:
+        with image_path.open("rb") as handle:
+            header = handle.read(12)
+    except OSError:
+        return ""
+    if _generated_image_media_type(header) is None:
+        return ""
     try:
         return image_path.as_uri()
     except ValueError:
@@ -1890,7 +1951,11 @@ def _generated_image_event(
         or payload.get("message")
         or payload.get("text")
     ).strip()
-    saved_url = _codex_generated_image_url(thread_id, call_id)
+    saved_url = _replay_saved_image_url(
+        payload,
+        thread_id=thread_id,
+        call_id=call_id,
+    )
     text = _generated_image_rendered_text(
         revised_prompt=revised_prompt,
         saved_url=saved_url,
@@ -1910,6 +1975,12 @@ def _generated_image_event(
             event_kind="tool_output",
             tool_name="image_gen.imagegen",
             tool_use_id=call_id or None,
+        )
+    if not saved_url:
+        saved_url = _codex_generated_image_url(thread_id, call_id)
+        text = _generated_image_rendered_text(
+            revised_prompt=revised_prompt,
+            saved_url=saved_url,
         )
     media_type, raw_bytes = image_payload
     return NormalizedEvent(

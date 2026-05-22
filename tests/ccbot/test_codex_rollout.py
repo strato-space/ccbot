@@ -13,6 +13,8 @@ from ccbot.transcript_parser import TranscriptParser
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "codex" / "rollouts"
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+_JPEG_BYTES = b"\xff\xd8\xff" + b"\x00" * 16
+_WEBP_BYTES = b"RIFF" + (b"\x00" * 4) + b"WEBP" + b"\x00" * 8
 
 
 def _load_jsonl(name: str) -> list[dict]:
@@ -33,6 +35,13 @@ def test_codex_rollout_image_generation_end_is_terminal_media_result(
 ) -> None:
     codex_home = tmp_path / ".codex"
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    saved_path = (
+        tmp_path
+        / ".codex"
+        / "generated_images"
+        / "thread-1"
+        / "ig_test.png"
+    )
     record = {
         "timestamp": "2026-05-22T08:30:06.540Z",
         "type": "event_msg",
@@ -40,6 +49,7 @@ def test_codex_rollout_image_generation_end_is_terminal_media_result(
             "type": "image_generation_end",
             "call_id": "ig_test",
             "status": "generating",
+            "saved_path": str(saved_path),
             "revised_prompt": "\n".join(
                 [
                     "Use case: illustration-story",
@@ -73,17 +83,83 @@ def test_codex_rollout_image_generation_end_is_terminal_media_result(
     )
 
 
+def test_codex_rollout_image_generation_end_prefers_replay_saved_path(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "wrong-home"))
+    saved_path = "/data/iqdoctor/.codex/generated_images/thread-1/ig_replay.png"
+    record = {
+        "timestamp": "2026-05-22T08:30:06.540Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "image_generation_end",
+            "call_id": "ig_replay",
+            "saved_path": saved_path,
+            "revised_prompt": "Primary request: Create one epic portrait.",
+            "result": base64.b64encode(_PNG_BYTES).decode("ascii"),
+        },
+    }
+
+    event = CodexRolloutNormalizer.normalize_records(
+        [record],
+        thread_id="thread-1",
+    )[0]
+
+    assert saved_path in event.text
+    assert str(tmp_path / "wrong-home") not in event.text
+    assert "ig_replay.png" in (event.image_caption or "")
+
+
+def test_codex_rollout_image_generation_end_accepts_jpeg_and_webp(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    cases = [
+        ("ig_jpeg", "jpg", _JPEG_BYTES, "image/jpeg"),
+        ("ig_webp", "webp", _WEBP_BYTES, "image/webp"),
+    ]
+    for call_id, suffix, image_bytes, media_type in cases:
+        saved_path = (
+            f"/data/iqdoctor/.codex/generated_images/thread-1/{call_id}.{suffix}"
+        )
+        record = {
+            "timestamp": "2026-05-22T08:30:06.540Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "image_generation_end",
+                "call_id": call_id,
+                "saved_path": saved_path,
+                "revised_prompt": "Primary request: Create one epic portrait.",
+                "result": base64.b64encode(image_bytes).decode("ascii"),
+            },
+        }
+
+        event = CodexRolloutNormalizer.normalize_records(
+            [record],
+            thread_id="thread-1",
+        )[0]
+
+        assert event.content_type == "generated_image_preview"
+        assert event.semantic_kind == "assistant_final"
+        assert event.image_data == [(media_type, image_bytes)]
+        assert saved_path in event.text
+
+
 def test_codex_rollout_image_generation_end_invalid_media_falls_back_to_saved_path(
     monkeypatch,
     tmp_path,
 ) -> None:
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    saved_path = "/data/iqdoctor/.codex/generated_images/thread-1/ig_bad.png"
     record = {
         "timestamp": "2026-05-22T08:30:06.540Z",
         "type": "event_msg",
         "payload": {
             "type": "image_generation_end",
             "call_id": "ig_bad",
+            "saved_path": saved_path,
             "revised_prompt": "Primary request: Create one epic portrait.",
             "result": base64.b64encode(b"not an image").decode("ascii"),
         },
@@ -101,7 +177,33 @@ def test_codex_rollout_image_generation_end_invalid_media_falls_back_to_saved_pa
     assert event.tool_name == "image_gen.imagegen"
     assert event.image_data is None
     assert "Generated Image" in event.text
-    assert "/generated_images/thread-1/ig_bad.png" in event.text
+    assert saved_path in event.text
+
+
+def test_codex_rollout_image_generation_end_invalid_media_without_saved_path_does_not_claim_saved_to(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    record = {
+        "timestamp": "2026-05-22T08:30:06.540Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "image_generation_end",
+            "call_id": "ig_bad",
+            "revised_prompt": "Primary request: Create one epic portrait.",
+            "result": base64.b64encode(b"not an image").decode("ascii"),
+        },
+    }
+
+    event = CodexRolloutNormalizer.normalize_records(
+        [record],
+        thread_id="thread-1",
+    )[0]
+
+    assert event.content_type == "tool_result"
+    assert event.image_data is None
+    assert "Saved to:" not in event.text
 
 
 def test_codex_rollout_preserves_event_taxonomy() -> None:
