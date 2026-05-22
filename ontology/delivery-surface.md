@@ -46,6 +46,9 @@ control surface at a time.
   - pre-final visible artifact whose primary payload is image media from runtime
     visual progress or inspection, such as Codex `image_generation_end` or
     `view_image` / `Viewed Image` output
+  - latest-only mutable Telegram media artifact in compact mode: the first
+    same-turn preview sends the photo bubble and later previews edit the media
+    in place instead of stacking additional preview bubbles
   - sourced only from paired replay-embedded image bytes in the MVP; local path
     arguments are sanitized provenance, not authorization to read files
   - represents authorized replay-proven disclosure to the active bound control
@@ -229,8 +232,8 @@ Durable bubbles in `compact` mode are intentionally narrow:
   with captions, when a safely validated local generated artifact substitutes
   for absent final assistant text
 - runtime image preview artifacts such as Codex `image_generation_end` and
-  `Viewed Image` preview/photo bubbles, when paired replay-embedded image bytes
-  are available for the active bound control surface
+  `Viewed Image` latest-only mutable preview/photo bubbles, when paired
+  replay-embedded image bytes are available for the active bound control surface
 
 In addition:
 

@@ -97,6 +97,8 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "Runtime image preview artifact" in readme
     assert "Codex `image_generation_end`" in readme
     assert "`view_image` / `Viewed Image`" in readme
+    assert "latest-only pre-final mutable Telegram photo bubble" in readme
+    assert "later same-turn\n  previews edit that media in place" in readme
     assert "authorized replay-proven" in readme
     assert "does not close the assistant turn" in readme
     assert "photo, document, sticker, audio, or video media arrives before the topic" in readme
@@ -274,6 +276,8 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "terminal media result artifacts" in delivery
     assert "generated-image preview/photo bubbles" in delivery
     assert "Runtime image preview artifact" in delivery
+    assert "latest-only mutable Telegram media artifact" in delivery
+    assert "edit the media\n    in place instead of stacking additional preview bubbles" in delivery
     assert "paired replay-embedded image bytes" in delivery
     assert "local path" in delivery and "not authorization to read files" in delivery
     assert "Inbound media artifact path" in delivery
@@ -452,6 +456,8 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "Codex `image_generation_end`" in doc
     assert "`view_image` / `Viewed Image`" in doc
     assert "pre-final runtime image preview artifacts" in doc
+    assert "latest-only mutable Telegram media artifact" in doc
+    assert "later same-turn previews edit that\nmedia in place" in doc
     assert "never read local path arguments" in doc
     assert "pre-final visible surface" in doc
     assert "Telegram/history prefers the canonical copy." in doc

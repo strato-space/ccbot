@@ -65,6 +65,9 @@ Two higher-order ontological classes matter at delivery time:
     - `commentary`
     - `orchestration`
     - `plan_update`
+    - latest-only mutable runtime image preview media, including paired
+      replay-embedded Codex `image_generation_end` and `view_image` /
+      `Viewed Image` bytes
     - any future surfaced preview bubble the product chooses to expose
 - `technical status artifact`
   - mutable progress/status surface for ephemeral execution detail
@@ -210,6 +213,12 @@ At the default product-facing `compact` Telegram surface:
 - `reasoning`, `tool_start`, `tool_result`, `command_execution`, `file_change`
   - are typically projected into the mutable status artifact or suppressed when
     they are placeholder-only / raw-payload-only
+- runtime image preview media
+  - remains pre-final progress, not a terminal result
+  - is latest-only mutable in compact mode: first same-turn preview sends a
+    photo bubble, later same-turn previews edit that media in place
+  - never reads local path arguments as media sources; those paths are only
+    sanitized provenance unless paired replay-embedded bytes authorize display
 
 When compactness conflicts with semantic clarity, the product projection prefers
 visibility-first mutable updates over ambiguous suppression.

@@ -18,6 +18,8 @@ Key components:
 """
 
 import asyncio
+import hashlib
+import io
 import json
 import logging
 import re
@@ -25,7 +27,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Literal
 
-from telegram import Bot
+from telegram import Bot, InputMediaPhoto
 from telegram.constants import ChatAction
 from telegram.error import BadRequest, RetryAfter
 
@@ -138,6 +140,24 @@ _ingress_receipt_superseded: set[tuple[int, int, str]] = set()
 
 # Plan update artifact tracking: (user_id, thread_id_or_0) -> (message_id, window_id, last_text)
 _plan_update_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
+
+
+@dataclass(frozen=True)
+class ImagePreviewMessageInfo:
+    """Tracked mutable image-preview progress bubble for one topic turn."""
+
+    message_id: int
+    window_id: str
+    turn_generation: int
+    media_signature: str
+    caption_signature: str
+
+
+# Image-preview progress tracking: (user_id, thread_id_or_0) -> mutable media info.
+# Runtime image previews are pre-final progress, not durable final results, so compact
+# mode keeps only the latest preview bubble for the live topic turn.
+_image_preview_msg_info: dict[tuple[int, int], ImagePreviewMessageInfo] = {}
+
 # Warning tracking:
 #   (user_id, thread_id_or_0, warning_key) -> (message_id, window_id, warning_text, repeat_count)
 # Ordinary warnings keep the default "latest-warning" key so the durable
@@ -451,6 +471,9 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                     await _do_clear_plan_update_message(
                         bot, user_id, task.thread_id or 0
                     )
+                    await _do_clear_image_preview_message(
+                        bot, user_id, task.thread_id or 0
+                    )
                     await _do_clear_status_message(bot, user_id, task.thread_id or 0)
             except RetryAfter as e:
                 retry_secs = (
@@ -722,6 +745,304 @@ async def _send_task_images(bot: Bot, chat_id: int, task: MessageTask) -> bool:
     return sent is not None
 
 
+def _image_preview_signature(media_type: str, raw_bytes: bytes) -> str:
+    """Build a stable signature for preview-media dedupe/audit state."""
+    digest = hashlib.sha256()
+    digest.update(media_type.encode("utf-8", errors="replace"))
+    digest.update(b"\0")
+    digest.update(raw_bytes)
+    return digest.hexdigest()
+
+
+def _caption_signature(caption: str | None) -> str:
+    """Build a stable signature for preview-caption dedupe/audit state."""
+    return hashlib.sha256((caption or "").encode("utf-8")).hexdigest()
+
+
+def _input_media_photo(
+    raw_bytes: bytes,
+    caption: str | None,
+    *,
+    formatted: bool,
+) -> InputMediaPhoto:
+    """Create a Telegram photo-media payload for image-preview edits."""
+    kwargs: dict[str, str] = {}
+    if caption:
+        if formatted:
+            kwargs = {"caption": _ensure_formatted(caption), "parse_mode": PARSE_MODE}
+        else:
+            kwargs = {"caption": strip_sentinels(caption)}
+    return InputMediaPhoto(media=io.BytesIO(raw_bytes), **kwargs)
+
+
+async def _edit_image_preview_media(
+    bot: Bot,
+    *,
+    chat_id: int,
+    message_id: int,
+    raw_bytes: bytes,
+    caption: str | None,
+) -> str:
+    """Edit an existing preview media bubble.
+
+    Returns the render mode used for a successful edit. Re-raises Telegram
+    edit no-op errors so the caller can audit them distinctly.
+    """
+    try:
+        await bot.edit_message_media(
+            chat_id=chat_id,
+            message_id=message_id,
+            media=_input_media_photo(raw_bytes, caption, formatted=True),
+        )
+        return "markdown"
+    except RetryAfter:
+        raise
+    except Exception as formatted_error:
+        if _is_message_not_modified_error(formatted_error):
+            raise
+        if not caption:
+            raise
+        try:
+            await bot.edit_message_media(
+                chat_id=chat_id,
+                message_id=message_id,
+                media=_input_media_photo(raw_bytes, caption, formatted=False),
+            )
+            return "plain"
+        except RetryAfter:
+            raise
+        except Exception as plain_error:
+            if _is_message_not_modified_error(plain_error):
+                raise plain_error
+            raise formatted_error
+
+
+async def _send_or_edit_image_preview(
+    bot: Bot,
+    *,
+    user_id: int,
+    chat_id: int,
+    task: MessageTask,
+    window_id: str,
+    thread_id_or_0: int,
+) -> bool:
+    """Send or edit the latest-only image-preview progress bubble.
+
+    Image previews are pre-final progress artifacts. They should update one
+    mutable Telegram media message inside the live topic/window/turn rather
+    than stacking a new image for every runtime preview event.
+    """
+    if not task.image_data:
+        return True
+
+    image_data = task.image_data
+    if len(image_data) > 1:
+        _audit_task_delivery(
+            action="truncate",
+            user_id=user_id,
+            chat_id=chat_id,
+            task=task,
+            text=task.image_caption or task.text or "",
+            reason="multi_image_preview_truncated",
+            part_index=0,
+            part_count=len(image_data),
+        )
+    media_type, raw_bytes = image_data[0]
+    caption = task.image_caption
+    media_signature = _image_preview_signature(media_type, raw_bytes)
+    caption_signature = _caption_signature(caption)
+    preview_key = (user_id, thread_id_or_0)
+    current_info = _image_preview_msg_info.get(preview_key)
+    text = caption or task.text or ""
+
+    can_edit = (
+        current_info is not None
+        and current_info.window_id == window_id
+        and current_info.turn_generation == task.turn_generation
+        and preview_key not in _pre_final_visible_closed
+    )
+    if can_edit and current_info is not None:
+        try:
+            render_mode = await _edit_image_preview_media(
+                bot,
+                chat_id=chat_id,
+                message_id=current_info.message_id,
+                raw_bytes=raw_bytes,
+                caption=caption,
+            )
+            _image_preview_msg_info[preview_key] = ImagePreviewMessageInfo(
+                message_id=current_info.message_id,
+                window_id=window_id,
+                turn_generation=task.turn_generation,
+                media_signature=media_signature,
+                caption_signature=caption_signature,
+            )
+            _audit_task_delivery(
+                action="edit",
+                user_id=user_id,
+                chat_id=chat_id,
+                task=task,
+                text=text,
+                message_id=current_info.message_id,
+                render_mode=render_mode,
+            )
+            return True
+        except RetryAfter:
+            raise
+        except Exception as edit_error:
+            if _is_message_not_modified_error(edit_error):
+                _image_preview_msg_info[preview_key] = ImagePreviewMessageInfo(
+                    message_id=current_info.message_id,
+                    window_id=window_id,
+                    turn_generation=task.turn_generation,
+                    media_signature=media_signature,
+                    caption_signature=caption_signature,
+                )
+                _audit_task_delivery(
+                    action="edit_noop",
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    task=task,
+                    text=text,
+                    message_id=current_info.message_id,
+                    reason="message_not_modified",
+                )
+                return True
+
+            _audit_task_delivery(
+                action="edit",
+                user_id=user_id,
+                chat_id=chat_id,
+                task=task,
+                text=text,
+                message_id=current_info.message_id,
+                success=False,
+                error=str(edit_error),
+                reason="image_preview_media_edit_failed",
+            )
+            try:
+                await bot.delete_message(
+                    chat_id=chat_id,
+                    message_id=current_info.message_id,
+                )
+                _image_preview_msg_info.pop(preview_key, None)
+                _audit_task_delivery(
+                    action="delete",
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    task=task,
+                    text=text,
+                    message_id=current_info.message_id,
+                    reason="image_preview_replace_after_edit_failed",
+                )
+            except RetryAfter:
+                raise
+            except Exception as delete_error:
+                # Fail closed against media stacking: keep the old tracked
+                # preview and suppress this replacement rather than sending a
+                # second media bubble below it.
+                _audit_task_delivery(
+                    action="delete",
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    task=task,
+                    text=text,
+                    message_id=current_info.message_id,
+                    success=False,
+                    error=str(delete_error),
+                    reason="image_preview_delete_before_replace_failed",
+                )
+                _audit_task_delivery(
+                    action="suppress",
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    task=task,
+                    text=text,
+                    message_id=current_info.message_id,
+                    reason="image_preview_no_stack_after_delete_failed",
+                )
+                return True
+
+    elif current_info is not None:
+        # A tracked preview from another window/turn cannot be edited safely.
+        # Delete it before opening a replacement bubble so stale preview state
+        # cannot stack below the new progress image.
+        try:
+            await bot.delete_message(
+                chat_id=chat_id,
+                message_id=current_info.message_id,
+            )
+            _audit_task_delivery(
+                action="delete",
+                user_id=user_id,
+                chat_id=chat_id,
+                task=task,
+                text=text,
+                message_id=current_info.message_id,
+                reason="image_preview_clear_stale_before_send",
+            )
+            _image_preview_msg_info.pop(preview_key, None)
+        except RetryAfter:
+            raise
+        except Exception as delete_error:
+            _audit_task_delivery(
+                action="delete",
+                user_id=user_id,
+                chat_id=chat_id,
+                task=task,
+                text=text,
+                message_id=current_info.message_id,
+                success=False,
+                error=str(delete_error),
+                reason="image_preview_stale_delete_failed",
+            )
+            _audit_task_delivery(
+                action="suppress",
+                user_id=user_id,
+                chat_id=chat_id,
+                task=task,
+                text=text,
+                message_id=current_info.message_id,
+                reason="image_preview_no_stack_after_stale_delete_failed",
+            )
+            return True
+
+    sent = await send_photo(
+        bot,
+        chat_id,
+        [(media_type, raw_bytes)],
+        caption=caption,
+        **_send_kwargs(task.thread_id),  # type: ignore[arg-type]
+    )
+    message_id = getattr(sent, "message_id", None)
+    _audit_task_delivery(
+        action="send",
+        user_id=user_id,
+        chat_id=chat_id,
+        task=task,
+        text=text,
+        message_id=message_id,
+        success=message_id is not None,
+        reason=(
+            "image_preview_first_send"
+            if current_info is None
+            else "image_preview_replacement_send"
+        ),
+    )
+    if message_id is None:
+        _image_preview_msg_info.pop(preview_key, None)
+        return False
+
+    _image_preview_msg_info[preview_key] = ImagePreviewMessageInfo(
+        message_id=message_id,
+        window_id=window_id,
+        turn_generation=task.turn_generation,
+        media_signature=media_signature,
+        caption_signature=caption_signature,
+    )
+    return True
+
+
 async def _send_task_documents(bot: Bot, chat_id: int, task: MessageTask) -> None:
     """Send documents attached to a task, if any."""
     if not task.document_data:
@@ -787,6 +1108,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         await _do_clear_commentary_message(bot, user_id, tid)
         await _do_clear_pending_input_message(bot, user_id, tid)
         await _do_clear_plan_update_message(bot, user_id, tid)
+        await _do_clear_image_preview_message(bot, user_id, tid)
         _clear_warning_tracking_for_topic(user_id, tid)
         clear_tool_msg_ids_for_topic(user_id, task.thread_id)
         _audit_task_delivery(
@@ -849,16 +1171,15 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
     chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
 
     if task.semantic_kind == IMAGE_PREVIEW_SEMANTIC_KIND and task.image_data:
-        media_sent = await _send_task_images(bot, chat_id, task)
+        media_sent = await _send_or_edit_image_preview(
+            bot,
+            user_id=user_id,
+            chat_id=chat_id,
+            task=task,
+            window_id=wid,
+            thread_id_or_0=tid,
+        )
         if media_sent:
-            _audit_task_delivery(
-                action="send",
-                user_id=user_id,
-                chat_id=chat_id,
-                task=task,
-                text=task.image_caption or task.text or "",
-                success=True,
-            )
             _latest_pre_final_visible_kind[(user_id, tid)] = task.semantic_kind
             await _check_and_send_status(
                 bot,
@@ -907,6 +1228,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             )
             _mark_pre_final_visible_closed(user_id, task.thread_id)
             _mark_technical_status_closed(user_id, task.thread_id)
+            await _do_clear_image_preview_message(bot, user_id, tid)
             await _do_clear_status_message(bot, user_id, tid)
             return
 
@@ -1133,6 +1455,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         # partway through a multipart delivery.
         _mark_pre_final_visible_closed(user_id, task.thread_id)
         _mark_technical_status_closed(user_id, task.thread_id)
+        await _do_clear_image_preview_message(bot, user_id, tid)
         await _do_clear_status_message(bot, user_id, tid)
         return
 
@@ -1332,6 +1655,7 @@ async def _process_status_update_task(
         await _do_clear_commentary_message(bot, user_id, tid)
         await _do_clear_pending_input_message(bot, user_id, tid)
         await _do_clear_plan_update_message(bot, user_id, tid)
+        await _do_clear_image_preview_message(bot, user_id, tid)
         _clear_warning_tracking_for_topic(user_id, tid)
         _audit_task_delivery(
             action="suppress",
@@ -2277,6 +2601,58 @@ async def _do_clear_plan_update_message(
         _latest_pre_final_visible_kind.pop(pkey, None)
 
 
+async def _do_clear_image_preview_message(
+    bot: Bot,
+    user_id: int,
+    thread_id_or_0: int = 0,
+) -> None:
+    """Delete and forget the tracked image-preview progress bubble."""
+    pkey = (user_id, thread_id_or_0)
+    info = _image_preview_msg_info.pop(pkey, None)
+    if _latest_pre_final_visible_kind.get(pkey) == IMAGE_PREVIEW_SEMANTIC_KIND:
+        _latest_pre_final_visible_kind.pop(pkey, None)
+    if not info:
+        return
+
+    chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=info.message_id)
+        log_telegram_delivery(
+            action="delete",
+            user_id=user_id,
+            chat_id=chat_id,
+            thread_id=thread_id_or_0 or None,
+            message_id=info.message_id,
+            window_id=info.window_id,
+            task_type="image_preview_clear",
+            content_type="image_preview",
+            semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
+            reason="clear_image_preview",
+        )
+    except RetryAfter:
+        raise
+    except Exception as e:
+        log_telegram_delivery(
+            action="delete",
+            user_id=user_id,
+            chat_id=chat_id,
+            thread_id=thread_id_or_0 or None,
+            message_id=info.message_id,
+            window_id=info.window_id,
+            task_type="image_preview_clear",
+            content_type="image_preview",
+            semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
+            success=False,
+            error=str(e),
+            reason="clear_image_preview_failed",
+        )
+        logger.debug(
+            "Failed to delete image-preview message %s: %s",
+            info.message_id,
+            e,
+        )
+
+
 async def _do_clear_pending_input_message(
     bot: Bot,
     user_id: int,
@@ -2652,6 +3028,7 @@ def reopen_pre_final_visible_lane(
     _pre_final_visible_closed.discard((user_id, thread_id or 0))
     _technical_status_closed.discard((user_id, thread_id or 0))
     _latest_pre_final_visible_kind.pop((user_id, thread_id or 0), None)
+    _image_preview_msg_info.pop((user_id, thread_id or 0), None)
 
 
 def reopen_commentary_lane(
@@ -2674,6 +3051,7 @@ def clear_pre_final_visible_lane_state(
     _latest_pre_final_visible_kind.pop(key, None)
     _pending_input_enqueued.pop(key, None)
     _plan_update_msg_info.pop(key, None)
+    _image_preview_msg_info.pop(key, None)
 
 
 def is_pre_final_visible_lane_closed(
@@ -2708,6 +3086,7 @@ def open_new_turn_generation(
     # edit. Drop only the pointer; the old message remains as historical
     # evidence and the next plan update opens a fresh visible bubble.
     _plan_update_msg_info.pop(key, None)
+    _image_preview_msg_info.pop(key, None)
     return generation
 
 
@@ -2765,6 +3144,18 @@ async def clear_plan_update_message(
     await _do_clear_plan_update_message(bot, user_id, thread_id or 0)
 
 
+async def clear_image_preview_message(
+    bot: Bot | None,
+    user_id: int,
+    thread_id: int | None = None,
+) -> None:
+    """Delete any tracked image-preview progress bubble when a bot handle exists."""
+    if bot is None:
+        _image_preview_msg_info.pop((user_id, thread_id or 0), None)
+        return
+    await _do_clear_image_preview_message(bot, user_id, thread_id or 0)
+
+
 async def clear_pending_input_message(
     bot: Bot | None,
     user_id: int,
@@ -2808,6 +3199,7 @@ async def shutdown_workers() -> None:
     _commentary_msg_info.clear()
     _commentary_extra_msg_ids.clear()
     _plan_update_msg_info.clear()
+    _image_preview_msg_info.clear()
     _pending_input_msg_info.clear()
     _pending_input_enqueued.clear()
     _warning_msg_info.clear()

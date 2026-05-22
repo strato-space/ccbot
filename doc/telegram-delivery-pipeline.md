@@ -119,6 +119,9 @@ The delivery pipeline keeps:
   active turn
 - one mutable interactive question artifact per `(user_id, control surface)`
   when the runtime exposes a durable blocking question record
+- one latest-only mutable runtime image-preview media artifact per
+  `(user_id, control surface, turn generation)`; the first same-turn preview
+  sends a Telegram photo bubble and later previews edit that media in place
 - one ordered content queue per user
 - one current turn generation per `(user_id, control surface)`
 - one terminal turn artifact: `assistant_final`
@@ -134,8 +137,8 @@ The delivery pipeline keeps:
   - orchestration milestones
   - plan updates
   - runtime image preview artifacts, including Codex `image_generation_end` and
-    `view_image` / `Viewed Image` preview/photo bubbles sourced from paired
-    replay-embedded image bytes
+    `view_image` / `Viewed Image` latest-only mutable preview/photo bubbles
+    sourced from paired replay-embedded image bytes
   - any future human-facing preview bubble that the product chooses to surface
 - one latest-warning artifact with warning-dedup state per `(user_id, control surface)`
   for ordinary warnings; runtime-discontinuity warnings may use a distinct
@@ -249,9 +252,12 @@ bubble with a caption; validation, file read, or media send failure falls back
 to terminal saved-path text. Separately,
 Codex `image_generation_end` and `view_image` / `Viewed Image` outputs are
 pre-final runtime image preview artifacts when paired replay output embeds image
-bytes. They are authorized replay-proven disclosure to the active bound control
-surface, use sanitized provenance captions, never read local path arguments for
-media bytes in the MVP, and do not close the assistant turn.
+bytes. In compact mode they are a latest-only mutable Telegram media artifact:
+the first preview sends a photo bubble and later same-turn previews edit that
+media in place. They are authorized replay-proven disclosure to the active bound
+control surface, use sanitized provenance captions, never read local path
+arguments for media bytes in the MVP, and do not close the assistant turn.
+They never read local path arguments as preview media sources.
 
 ## Progress Routing
 
