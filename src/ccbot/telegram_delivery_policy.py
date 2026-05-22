@@ -32,6 +32,7 @@ from .runtime_types import (
     DELIVERY_CLASS_HISTORY,
     FILE_CHANGE_SEMANTIC_KIND,
     GENERATED_IMAGE_PREVIEW_CONTENT_TYPE,
+    IMAGE_PREVIEW_SEMANTIC_KIND,
     ORCHESTRATION_SEMANTIC_KIND,
     PLAN_UPDATE_SEMANTIC_KIND,
     REASONING_SEMANTIC_KIND,
@@ -391,6 +392,13 @@ def apply_telegram_delivery_policy(
         return projected
 
     if projected.semantic_kind == WARNING_SEMANTIC_KIND:
+        projected.include_in_history = True
+        projected.dispatch_to_telegram = True
+        projected.status_message_eligible = False
+        projected.is_complete = True
+        return projected
+
+    if projected.semantic_kind == IMAGE_PREVIEW_SEMANTIC_KIND:
         projected.include_in_history = True
         projected.dispatch_to_telegram = True
         projected.status_message_eligible = False

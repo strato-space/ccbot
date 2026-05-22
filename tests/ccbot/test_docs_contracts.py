@@ -94,6 +94,10 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "Generated-image terminal media result" in readme
     assert "terminal Telegram photo bubble with a caption" in readme
     assert "saved-path text remains the" in readme
+    assert "Runtime image preview artifact" in readme
+    assert "Codex `view_image` / `Viewed Image`" in readme
+    assert "authorized replay-proven" in readme
+    assert "does not close the assistant turn" in readme
     assert "photo, document, sticker, audio, or video media arrives before the topic" in readme
     assert "CCBOT_MAX_TELEGRAM_DOWNLOAD_BYTES" in readme
     assert "too large for Telegram bot" in readme
@@ -268,6 +272,9 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "must drop rather than reopen the lane" in delivery
     assert "terminal media result artifacts" in delivery
     assert "generated-image preview/photo bubbles" in delivery
+    assert "Runtime image preview artifact" in delivery
+    assert "paired replay-embedded image bytes" in delivery
+    assert "local path" in delivery and "not authorization to read files" in delivery
     assert "Inbound media artifact path" in delivery
     assert "Telegram Bot API download guardrails pass" in delivery
     assert "Audio artifact: /path" in delivery
@@ -441,6 +448,9 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "generated-image success output with a saved artifact" in doc
     assert "terminal media result artifact" in doc
     assert "terminal saved-path text" in doc
+    assert "Codex `view_image` / `Viewed Image`" in doc
+    assert "pre-final runtime image preview artifacts" in doc
+    assert "never read local path arguments" in doc
     assert "pre-final visible surface" in doc
     assert "Telegram/history prefers the canonical copy." in doc
     assert "lightweight copy may be buffered briefly" in doc

@@ -39,7 +39,7 @@ from ccbot.handlers.message_queue import (
     _process_content_task,
     _process_status_update_task,
 )
-from ccbot.runtime_types import WARNING_SEMANTIC_KIND
+from ccbot.runtime_types import IMAGE_PREVIEW_SEMANTIC_KIND, WARNING_SEMANTIC_KIND
 
 
 def test_can_merge_tasks_rejects_mixed_content_types():
@@ -1943,6 +1943,138 @@ async def test_generated_image_terminal_preview_photo_failure_falls_back_to_text
         mock_send.assert_awaited_once()
         assert mock_send.await_args.args[2] == final_task.text
         mock_status.assert_not_awaited()
+    finally:
+        clear_commentary_lane_state(1, 42)
+
+
+@pytest.mark.asyncio
+async def test_image_preview_sends_single_photo_without_closing_final_lanes() -> None:
+    preview_task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=[],
+        text="• Viewed Image:\n  └ contact_sheet.png",
+        content_type="viewed_image_preview",
+        semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
+        image_data=[("image/png", b"png-bytes")],
+        image_caption="🖼 Viewed Image\nFile: contact_sheet.png",
+        turn_generation=1,
+    )
+    commentary_task = MessageTask(
+        task_type="commentary_update",
+        window_id="@7",
+        thread_id=42,
+        text="Commentary remains pre-final after image preview",
+        turn_generation=1,
+    )
+    sent_photo = AsyncMock()
+    sent_photo.message_id = 1901
+    sent_commentary = AsyncMock()
+    sent_commentary.message_id = 1902
+
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.current_turn_generation",
+                return_value=1,
+            ),
+            patch(
+                "ccbot.handlers.message_queue.send_photo",
+                new_callable=AsyncMock,
+                return_value=sent_photo,
+            ) as mock_photo,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                return_value=sent_commentary,
+            ) as mock_send,
+            patch(
+                "ccbot.handlers.message_queue._check_and_send_status",
+                new_callable=AsyncMock,
+            ) as mock_status,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+
+            bot = AsyncMock()
+            await _process_content_task(bot, 1, preview_task)
+            await _process_commentary_update_task(bot, 1, commentary_task)
+
+        mock_photo.assert_awaited_once()
+        assert mock_photo.await_args.kwargs["caption"] == preview_task.image_caption
+        mock_status.assert_awaited_once()
+        mock_send.assert_awaited_once()
+        assert "Commentary remains pre-final" in mock_send.await_args.args[2]
+    finally:
+        clear_commentary_lane_state(1, 42)
+
+
+@pytest.mark.asyncio
+async def test_image_preview_photo_failure_falls_back_to_text_without_closing_lanes() -> None:
+    preview_task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=[],
+        text="• Viewed Image:\n  └ contact_sheet.png",
+        content_type="viewed_image_preview",
+        semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
+        image_data=[("image/png", b"png-bytes")],
+        image_caption="🖼 Viewed Image\nFile: contact_sheet.png",
+        turn_generation=1,
+    )
+    commentary_task = MessageTask(
+        task_type="commentary_update",
+        window_id="@7",
+        thread_id=42,
+        text="Commentary after preview fallback",
+        turn_generation=1,
+    )
+    sent_text = AsyncMock()
+    sent_text.message_id = 1903
+
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.current_turn_generation",
+                return_value=1,
+            ),
+            patch(
+                "ccbot.handlers.message_queue.send_photo",
+                new_callable=AsyncMock,
+                return_value=None,
+            ) as mock_photo,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                return_value=sent_text,
+            ) as mock_send,
+            patch(
+                "ccbot.handlers.message_queue._check_and_send_status",
+                new_callable=AsyncMock,
+            ) as mock_status,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+
+            bot = AsyncMock()
+            await _process_content_task(bot, 1, preview_task)
+            await _process_commentary_update_task(bot, 1, commentary_task)
+
+        mock_photo.assert_awaited_once()
+        assert mock_send.await_count == 2
+        assert mock_send.await_args_list[0].args[2] == "• Viewed Image:\n  └ contact_sheet.png"
+        assert "Commentary after preview fallback" in mock_send.await_args_list[1].args[2]
+        mock_status.assert_awaited_once()
     finally:
         clear_commentary_lane_state(1, 42)
 

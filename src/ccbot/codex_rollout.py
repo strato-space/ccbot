@@ -32,7 +32,9 @@ from .config import config
 from .runtime_types import (
     ASSISTANT_FINAL_SEMANTIC_KIND,
     GENERATED_IMAGE_PREVIEW_CONTENT_TYPE,
+    IMAGE_PREVIEW_SEMANTIC_KIND,
     NormalizedEvent,
+    VIEWED_IMAGE_PREVIEW_CONTENT_TYPE,
 )
 
 CODEX_ROLLOUT_TYPES = {
@@ -73,6 +75,10 @@ _REDUNDANT_OUTPUT_FOOTER_RE = re.compile(
 _GENERATED_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 _IMAGE_GENERATION_FIELD_RE = re.compile(r"^\s*([^:\n]+):\s*(.*)$")
 _GENERATED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+_VIEWED_IMAGE_DATA_URL_RE = re.compile(
+    r"^data:(?P<media>image/(?:png|jpeg|webp));base64,(?P<data>[A-Za-z0-9+/=\s]+)$",
+    re.IGNORECASE,
+)
 
 
 def _as_text(value: Any) -> str:
@@ -257,6 +263,12 @@ class _PendingWait:
     generations: dict[str, int]
 
 
+@dataclass(frozen=True)
+class _ViewImageCall:
+    path: str = ""
+    detail: str = ""
+
+
 @dataclass
 class CodexRolloutState:
     """Per-thread incremental normalization state for poll-sliced rollout tails."""
@@ -278,6 +290,7 @@ class CodexRolloutState:
     ] = field(default_factory=dict)
     tool_names_by_call_id: dict[str, str] = field(default_factory=dict)
     exec_commands_by_call_id: dict[str, tuple[str, str]] = field(default_factory=dict)
+    view_images_by_call_id: dict[str, _ViewImageCall] = field(default_factory=dict)
     turn_generation: int = 0
     current_turn_key: str = ""
     active_turn_user_opened: bool = False
@@ -1790,6 +1803,73 @@ def _generated_image_media_type(raw_bytes: bytes) -> str | None:
     return None
 
 
+def _media_type_matches_signature(media_type: str, raw_bytes: bytes) -> bool:
+    detected = _generated_image_media_type(raw_bytes)
+    return detected == media_type
+
+
+def _decode_base64_image_bytes(
+    *,
+    media_type: str,
+    encoded: str,
+) -> tuple[str, bytes] | None:
+    normalized_media_type = media_type.strip().lower()
+    if normalized_media_type not in {"image/png", "image/jpeg", "image/webp"}:
+        return None
+    payload = "".join(encoded.split())
+    if not payload:
+        return None
+    max_encoded = ((_GENERATED_IMAGE_MAX_BYTES + 2) // 3) * 4 + 16
+    if len(payload) > max_encoded:
+        return None
+    try:
+        raw_bytes = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if not raw_bytes or len(raw_bytes) > _GENERATED_IMAGE_MAX_BYTES:
+        return None
+    if not _media_type_matches_signature(normalized_media_type, raw_bytes):
+        return None
+    return normalized_media_type, raw_bytes
+
+
+def _decode_data_url_image(data_url: str) -> tuple[str, bytes] | None:
+    match = _VIEWED_IMAGE_DATA_URL_RE.match(data_url.strip())
+    if not match:
+        return None
+    return _decode_base64_image_bytes(
+        media_type=match.group("media"),
+        encoded=match.group("data"),
+    )
+
+
+def _decode_viewed_image_payload(content: Any) -> tuple[str, bytes] | None:
+    if not isinstance(content, list):
+        return None
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        block_type = _as_text(item.get("type")).strip()
+        if block_type == "input_image":
+            image_url = _as_text(item.get("image_url")).strip()
+            decoded = _decode_data_url_image(image_url)
+            if decoded is not None:
+                return decoded
+        if block_type == "image":
+            source = item.get("source")
+            if not isinstance(source, dict):
+                continue
+            if _as_text(source.get("type")).strip() != "base64":
+                continue
+            decoded = _decode_base64_image_bytes(
+                media_type=_as_text(source.get("media_type")).strip() or "image/png",
+                encoded=_as_text(source.get("data")).strip(),
+            )
+            if decoded is not None:
+                return decoded
+    return None
+
+
 def _decode_generated_image_payload(payload: dict[str, Any]) -> tuple[str, bytes] | None:
     encoded = _as_text(payload.get("result")).strip()
     if not encoded:
@@ -1935,6 +2015,90 @@ def _generated_image_caption(
         if basename:
             lines.append(f"File: {_compact_inline(basename, max_chars=120)}")
     return _clip_text("\n".join(lines), max_chars=900)
+
+
+def _sanitized_viewed_image_display_path(path_text: str) -> str:
+    """Return non-sensitive viewed-image provenance for Telegram display.
+
+    The viewed-image MVP deliberately does not read local paths for media bytes.
+    The path is only provenance, so keep the default display to a basename and
+    avoid leaking raw absolute workspace paths such as ``/home/...``.
+    """
+    raw = path_text.strip().strip("`'\"")
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    candidate = unquote(parsed.path) if parsed.scheme == "file" else raw
+    name = Path(candidate).name
+    return _compact_inline(name or "viewed image", max_chars=120)
+
+
+def _viewed_image_rendered_text(view: _ViewImageCall | None) -> str:
+    lines = ["• Viewed Image:"]
+    display_path = _sanitized_viewed_image_display_path(view.path if view else "")
+    if display_path:
+        lines.append(f"  └ {display_path}")
+    return "\n".join(lines)
+
+
+def _viewed_image_caption(view: _ViewImageCall | None) -> str:
+    lines = ["🖼 Viewed Image"]
+    display_path = _sanitized_viewed_image_display_path(view.path if view else "")
+    if display_path:
+        lines.append(f"File: {display_path}")
+    if view and view.detail:
+        lines.append(f"Detail: {_compact_inline(view.detail, max_chars=80)}")
+    return _clip_text("\n".join(lines), max_chars=900)
+
+
+def _viewed_image_output_event(
+    *,
+    thread_id: str,
+    payload: dict[str, Any],
+    view: _ViewImageCall | None,
+    timestamp: str | None,
+    runtime_kind: str = "codex",
+) -> NormalizedEvent:
+    call_id = _as_text(payload.get("call_id") or payload.get("id") or "").strip()
+    content = (
+        payload.get("content")
+        or payload.get("output")
+        or payload.get("result")
+        or payload.get("data")
+    )
+    image_payload = _decode_viewed_image_payload(content)
+    if image_payload is None:
+        return NormalizedEvent(
+            thread_id=thread_id,
+            text=_viewed_image_rendered_text(view),
+            is_complete=True,
+            content_type="tool_result",
+            role="assistant",
+            timestamp=timestamp,
+            runtime_kind=runtime_kind,
+            event_kind="tool_output",
+            tool_name="view_image",
+            tool_use_id=call_id or None,
+        )
+    media_type, raw_bytes = image_payload
+    return NormalizedEvent(
+        thread_id=thread_id,
+        text=_viewed_image_rendered_text(view),
+        is_complete=True,
+        content_type=VIEWED_IMAGE_PREVIEW_CONTENT_TYPE,
+        role="assistant",
+        timestamp=timestamp,
+        runtime_kind=runtime_kind,
+        event_kind="tool_output",
+        semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
+        include_in_history=True,
+        dispatch_to_telegram=True,
+        status_message_eligible=False,
+        image_data=[(media_type, raw_bytes)],
+        image_caption=_viewed_image_caption(view),
+        tool_name="view_image",
+        tool_use_id=call_id or None,
+    )
 
 
 def _generated_image_event(
@@ -2413,6 +2577,15 @@ class CodexRolloutNormalizer:
                     if call_id and _tool_name_is(tool_name, "exec_command"):
                         command, cwd = _exec_invocation(arguments)
                         state.exec_commands_by_call_id[call_id] = (command, cwd)
+                    if (
+                        call_id
+                        and _tool_name_is(tool_name, "view_image")
+                        and isinstance(arguments, dict)
+                    ):
+                        state.view_images_by_call_id[call_id] = _ViewImageCall(
+                            path=_as_text(arguments.get("path")).strip(),
+                            detail=_as_text(arguments.get("detail")).strip(),
+                        )
                     if tool_name == "update_plan":
                         events = [
                             _plan_update_event(
@@ -2462,6 +2635,7 @@ class CodexRolloutNormalizer:
                     call_id = _as_text(payload.get("call_id")).strip()
                     remembered_tool_name = state.tool_names_by_call_id.pop(call_id, "")
                     command, cwd = state.exec_commands_by_call_id.pop(call_id, ("", ""))
+                    view_image_call = state.view_images_by_call_id.pop(call_id, None)
                     if _tool_name_is(
                         remembered_tool_name, "update_plan"
                     ) and not _tool_output_indicates_failure(payload):
@@ -2472,6 +2646,15 @@ class CodexRolloutNormalizer:
                                     payload={**payload, "name": remembered_tool_name},
                                     timestamp=timestamp,
                                 )
+                            )
+                        ]
+                    elif _tool_name_is(remembered_tool_name, "view_image"):
+                        events = [
+                            _viewed_image_output_event(
+                                thread_id=current_thread_id,
+                                payload={**payload, "name": remembered_tool_name},
+                                view=view_image_call,
+                                timestamp=timestamp,
                             )
                         ]
                     elif remembered_tool_name:

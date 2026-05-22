@@ -29,6 +29,97 @@ def _load_many(*names: str) -> list[dict]:
     return records
 
 
+def _image_data_url(media_type: str, raw_bytes: bytes) -> str:
+    return f"data:{media_type};base64,{base64.b64encode(raw_bytes).decode('ascii')}"
+
+
+def test_codex_rollout_view_image_output_is_pre_final_preview() -> None:
+    records = [
+        {
+            "timestamp": "2026-05-22T08:54:44.183Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "view_image",
+                "arguments": json.dumps(
+                    {
+                        "path": "/home/tools/mediagen-comfy/.omx/evidence/contact_sheet.png",
+                        "detail": "high",
+                    }
+                ),
+                "call_id": "call_view",
+            },
+        },
+        {
+            "timestamp": "2026-05-22T08:54:44.455Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_view",
+                "output": [
+                    {
+                        "type": "input_image",
+                        "image_url": _image_data_url("image/png", _PNG_BYTES),
+                    }
+                ],
+            },
+        },
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    preview = events[-1]
+    assert preview.content_type == "viewed_image_preview"
+    assert preview.semantic_kind == "image_preview"
+    assert preview.dispatch_to_telegram is True
+    assert preview.status_message_eligible is False
+    assert preview.image_data == [("image/png", _PNG_BYTES)]
+    assert preview.image_caption == "🖼 Viewed Image\nFile: contact_sheet.png\nDetail: high"
+    assert preview.text == "• Viewed Image:\n  └ contact_sheet.png"
+    assert "/home/tools" not in preview.text
+    assert "/home/tools" not in (preview.image_caption or "")
+    assert base64.b64encode(_PNG_BYTES).decode("ascii") not in preview.text
+
+
+def test_codex_rollout_view_image_rejects_mismatched_media_signature() -> None:
+    records = [
+        {
+            "timestamp": "2026-05-22T08:54:44.183Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "view_image",
+                "arguments": json.dumps({"path": "/home/tools/secret/contact_sheet.png"}),
+                "call_id": "call_bad_view",
+            },
+        },
+        {
+            "timestamp": "2026-05-22T08:54:44.455Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_bad_view",
+                "output": [
+                    {
+                        "type": "input_image",
+                        "image_url": _image_data_url("image/png", _JPEG_BYTES),
+                    }
+                ],
+            },
+        },
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    fallback = events[-1]
+    assert fallback.content_type == "tool_result"
+    assert fallback.semantic_kind == "tool_result"
+    assert fallback.image_data is None
+    assert fallback.text == "• Viewed Image:\n  └ contact_sheet.png"
+    assert "/home/tools" not in fallback.text
+    assert base64.b64encode(_JPEG_BYTES).decode("ascii") not in fallback.text
+
+
 def test_codex_rollout_image_generation_end_is_terminal_media_result(
     tmp_path,
     monkeypatch,

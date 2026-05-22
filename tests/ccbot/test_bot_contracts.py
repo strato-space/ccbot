@@ -6099,6 +6099,31 @@ class TestTelegramDelivery:
         assert "Generated Image" in projected.image_caption
         assert "B03_sky_inside_gourd" in projected.image_caption
 
+    def test_compact_policy_preserves_viewed_image_preview_as_pre_final_content(self):
+        event = NormalizedEvent(
+            thread_id="thread-1",
+            text="• Viewed Image:\n  └ contact_sheet.png",
+            is_complete=True,
+            content_type="viewed_image_preview",
+            role="assistant",
+            event_kind="tool_output",
+            semantic_kind="image_preview",
+            image_data=[("image/png", _PNG_BYTES)],
+            image_caption="🖼 Viewed Image\nFile: contact_sheet.png",
+            tool_name="view_image",
+        )
+
+        projected = apply_telegram_delivery_policy(event, mode="compact")
+
+        assert projected.content_type == "viewed_image_preview"
+        assert projected.semantic_kind == "image_preview"
+        assert projected.delivery_class == "history"
+        assert projected.dispatch_to_telegram is True
+        assert projected.status_message_eligible is False
+        assert projected.is_complete is True
+        assert projected.image_data == [("image/png", _PNG_BYTES)]
+        assert projected.image_caption == "🖼 Viewed Image\nFile: contact_sheet.png"
+
     def test_compact_policy_rejects_generated_image_outside_allowed_roots(
         self,
         tmp_path,

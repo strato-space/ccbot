@@ -18,6 +18,7 @@ control surface at a time.
     - `commentary`
     - `orchestration`
     - `plan_update`
+    - runtime image preview artifacts explicitly promoted by product policy
     - any future surfaced preview bubble explicitly promoted by product policy
 
 - **Technical status artifact**
@@ -41,6 +42,16 @@ control surface at a time.
     artifact path text remains the terminal fallback so the result is not lost
   - must be derived from replay evidence and must not become arbitrary local
     file disclosure
+
+- **Runtime image preview artifact**
+  - pre-final visible artifact whose primary payload is image media from runtime
+    visual inspection, such as Codex `view_image` / `Viewed Image` output
+  - sourced only from paired replay-embedded image bytes in the MVP; local path
+    arguments are sanitized provenance, not authorization to read files
+  - represents authorized replay-proven disclosure to the active bound control
+    surface and must obey stale-turn, stale-binding, and pre-final-closed guards
+  - does not close the assistant turn and must not be conflated with generated
+    image terminal media results
 
 - **Content attachment payload**
   - file payload attached to a content task rather than a standalone control
@@ -217,6 +228,9 @@ Durable bubbles in `compact` mode are intentionally narrow:
 - terminal media result artifacts such as generated-image preview/photo bubbles
   with captions, when a safely validated local generated artifact substitutes
   for absent final assistant text
+- runtime image preview artifacts such as Codex `Viewed Image` preview/photo
+  bubbles, when paired replay-embedded image bytes are available for the active
+  bound control surface
 
 In addition:
 

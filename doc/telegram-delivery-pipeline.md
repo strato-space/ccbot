@@ -133,6 +133,9 @@ The delivery pipeline keeps:
   - commentary
   - orchestration milestones
   - plan updates
+  - runtime image preview artifacts, including Codex `view_image` /
+    `Viewed Image` preview/photo bubbles sourced from paired replay-embedded
+    image bytes
   - any future human-facing preview bubble that the product chooses to surface
 - one latest-warning artifact with warning-dedup state per `(user_id, control surface)`
   for ordinary warnings; runtime-discontinuity warnings may use a distinct
@@ -244,7 +247,11 @@ image bytes. Compact delivery promotes those safely validated generated-image
 payloads to a terminal media result artifact, sent as one Telegram photo bubble
 with a caption. If validation, file read, or media send fails, compact delivery
 falls back to the terminal saved-path text so the originating Telegram thread
-still receives the result.
+still receives the result. Separately, Codex `view_image` / `Viewed Image`
+outputs are pre-final runtime image preview artifacts when the paired replay
+output embeds `input_image` bytes. They are authorized replay-proven disclosure
+to the active bound control surface, use sanitized provenance captions, never read local path arguments
+for media bytes in the MVP, and do not close the assistant turn.
 
 ## Progress Routing
 

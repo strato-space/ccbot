@@ -34,6 +34,7 @@ from ..session import session_manager
 from ..runtime_types import (
     ASSISTANT_FINAL_SEMANTIC_KIND,
     GENERATED_IMAGE_PREVIEW_CONTENT_TYPE,
+    IMAGE_PREVIEW_SEMANTIC_KIND,
     USER_ECHO_SEMANTIC_KIND,
     WARNING_SEMANTIC_KIND,
     is_pre_final_visible_semantic_kind,
@@ -846,6 +847,46 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         )
         return
     chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
+
+    if task.semantic_kind == IMAGE_PREVIEW_SEMANTIC_KIND and task.image_data:
+        media_sent = await _send_task_images(bot, chat_id, task)
+        if media_sent:
+            _audit_task_delivery(
+                action="send",
+                user_id=user_id,
+                chat_id=chat_id,
+                task=task,
+                text=task.image_caption or task.text or "",
+                success=True,
+            )
+            _latest_pre_final_visible_kind[(user_id, tid)] = task.semantic_kind
+            await _check_and_send_status(
+                bot,
+                user_id,
+                wid,
+                task.thread_id,
+                expected_turn_generation=task.turn_generation,
+            )
+            return
+
+        logger.warning(
+            "Image preview media send failed; falling back to text: user=%d thread=%s",
+            user_id,
+            task.thread_id,
+        )
+        _audit_task_delivery(
+            action="send",
+            user_id=user_id,
+            chat_id=chat_id,
+            task=task,
+            text=task.image_caption or task.text or "",
+            reason="image_preview_media_send_failed",
+            success=False,
+        )
+        if task.text and not task.parts:
+            task.parts = [task.text]
+        task.image_data = None
+        task.image_caption = None
 
     is_generated_image_terminal_preview = (
         is_terminal_artifact

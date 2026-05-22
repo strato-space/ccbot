@@ -163,6 +163,11 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   safely validated generated-image artifact is delivered in compact mode as one
   terminal Telegram photo bubble with a caption; if validation, reading, or
   media send fails, the saved-path text remains the terminal fallback
+- **Runtime image preview artifact** — Codex `view_image` / `Viewed Image`
+  replay output with paired embedded image bytes is delivered as a pre-final
+  Telegram photo bubble with a sanitized caption; it is authorized replay-proven
+  disclosure to the active bound control surface, never a local-path file read,
+  and it does not close the assistant turn
 - **Send messages** — Forward text to Codex via tmux keystrokes
 - **Simple text fast path** — eligible one-line Codex text gets an immediate
   Telegram ingress receipt and starts a runtime injection attempt before the

@@ -153,6 +153,7 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | **ccbot send file delivery** | ✅ | Local `ccbot send --file-path --file-type photo\|animation\|audio\|video` returns generated artifacts to the Telegram surface without using runtime-input/TUI injection |
 | **Polling liveness guard** | ✅ | Telegram long polling uses explicit getUpdates pool/timeouts and a pending-update watchdog so service-alive-but-polling-dead processes exit for systemd restart instead of silently accumulating updates |
 | **Generated-image terminal media result** | ✅ | Image-generation tool output or Codex `image_generation_end` replay event that carries or reports a safely validated generated-image artifact is delivered as one compact terminal photo bubble with caption; validation/read/send failure falls back to terminal saved-path text |
+| **Runtime image preview artifact** | ✅ | Codex `view_image` / `Viewed Image` replay output with paired embedded image bytes is delivered as a pre-final Telegram photo bubble with sanitized caption; it is authorized replay-proven disclosure to the active bound control surface, never a local-path file read, and does not close the assistant turn |
 | **ReplyKeyboardRemove** | ✅ | Used when switching away from reply keyboard |
 | **Codex command forwarding** | ✅ | Raw `/command` input is forwarded to tmux; the documented menu only exposes the supported Codex subset |
 | **Message rate limiting** | ✅ | 1.1s minimum interval per user to avoid flood control |
