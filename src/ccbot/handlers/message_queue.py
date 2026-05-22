@@ -2715,7 +2715,7 @@ def clear_commentary_lane_state(
     user_id: int,
     thread_id: int | None = None,
 ) -> None:
-    """Backward-compatible cleanup for commentary/pre-final lane test state."""
+    """Clear tracked commentary plus the shared pre-final visible lane state."""
     key = (user_id, thread_id or 0)
     clear_pre_final_visible_lane_state(user_id, thread_id)
     _commentary_msg_info.pop(key, None)

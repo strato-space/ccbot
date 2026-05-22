@@ -243,10 +243,10 @@ tool lifecycle as ordinary content. In the default `compact` mode, that same
 tool lifecycle is typically collapsed into the mutable status artifact instead.
 The narrow terminal exception is generated-image success output with a saved artifact
 path: textual generated-image success output when it substitutes for absent final
-assistant text. Compact
-delivery can promote that safely validated text result to a terminal media result
-artifact, sent as one Telegram photo bubble with a caption; validation, file
-read, or media send failure falls back to terminal saved-path text. Separately,
+assistant text. Compact delivery can promote that safely validated
+text result to a terminal media result artifact, sent as one Telegram photo
+bubble with a caption; validation, file read, or media send failure falls back
+to terminal saved-path text. Separately,
 Codex `image_generation_end` and `view_image` / `Viewed Image` outputs are
 pre-final runtime image preview artifacts when paired replay output embeds image
 bytes. They are authorized replay-proven disclosure to the active bound control
