@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from telegram.error import BadRequest
 
 from ccbot.handlers.status_polling import update_status_message
 from ccbot.handlers import status_polling as status_polling_mod
@@ -43,11 +44,21 @@ def _clear_interactive_state():
 
 @pytest.fixture(autouse=True)
 def _clear_runtime_presence():
+    from ccbot.handlers import message_queue as mq
+
     status_polling_mod._runtime_presence.clear()
     status_polling_mod._last_pane_text.clear()
+    mq._latest_pre_final_visible_kind.clear()
+    mq._pre_final_visible_closed.clear()
+    mq._technical_status_closed.clear()
+    mq._turn_generations.clear()
     yield
     status_polling_mod._runtime_presence.clear()
     status_polling_mod._last_pane_text.clear()
+    mq._latest_pre_final_visible_kind.clear()
+    mq._pre_final_visible_closed.clear()
+    mq._technical_status_closed.clear()
+    mq._turn_generations.clear()
 
 
 @pytest.mark.usefixtures("_clear_interactive_state")
@@ -566,6 +577,56 @@ async def test_status_poll_loop_unbinds_stale_main_chat_surface_by_chat_id(
 
 
 @pytest.mark.asyncio
+async def test_status_poll_loop_probes_chat_qualified_topic_surface(
+    mock_bot: AsyncMock,
+):
+    binding = SimpleNamespace(
+        user_id=1,
+        thread_id=42,
+        window_id="@7",
+        surface_key="t:-100200300:42",
+        chat_id=-100200300,
+    )
+    window = MagicMock()
+    window.window_id = "@7"
+    with (
+        patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+        patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+        patch(
+            "ccbot.handlers.status_polling.clear_topic_state",
+            new_callable=AsyncMock,
+        ) as mock_clear,
+        patch(
+            "ccbot.handlers.status_polling.asyncio.sleep",
+            side_effect=asyncio.CancelledError,
+        ),
+    ):
+        mock_sm.iter_topic_bindings.side_effect = [[binding], []]
+        mock_sm.is_external_binding_window_id.return_value = False
+        mock_bot.unpin_all_forum_topic_messages = AsyncMock(
+            side_effect=BadRequest("Topic_id_invalid")
+        )
+        mock_tmux.find_window_by_id = AsyncMock(return_value=window)
+        mock_tmux.kill_window = AsyncMock()
+
+        with pytest.raises(asyncio.CancelledError):
+            await status_polling_mod.status_poll_loop(mock_bot)
+
+    mock_bot.unpin_all_forum_topic_messages.assert_awaited_once_with(
+        chat_id=-100200300,
+        message_thread_id=42,
+    )
+    mock_sm.resolve_chat_id.assert_not_called()
+    mock_tmux.kill_window.assert_awaited_once_with("@7")
+    mock_sm.unbind_surface.assert_called_once_with(
+        1,
+        surface_key="t:-100200300:42",
+    )
+    mock_sm.unbind_thread.assert_not_called()
+    mock_clear.assert_awaited_once_with(1, 42, mock_bot)
+
+
+@pytest.mark.asyncio
 async def test_update_status_message_emits_runtime_exit_warning_with_images_first(
     mock_bot: AsyncMock,
 ):
@@ -892,6 +953,47 @@ async def test_transition_missing_window_binding_chat_surface_rebinds_same_chat_
     mock_clear.assert_awaited_once_with(1, None, mock_bot)
     mock_content.assert_awaited_once()
     assert mock_content.await_args.kwargs["window_id"] == "external:codex:thread-chat-1"
+
+
+@pytest.mark.asyncio
+async def test_transition_missing_window_binding_topic_unbinds_surface_key(
+    mock_bot: AsyncMock,
+):
+    with (
+        patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.status_polling.clear_topic_state",
+            new_callable=AsyncMock,
+        ) as mock_clear,
+        patch(
+            "ccbot.handlers.status_polling.send_with_fallback",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "ccbot.handlers.status_polling.build_discontinuity_image_data",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        mock_sm.resolve_thread_for_window = AsyncMock(return_value=None)
+        mock_sm.resolve_chat_id.return_value = -100200300
+        mock_sm.get_display_name.return_value = "project"
+
+        await status_polling_mod._transition_missing_window_binding(
+            mock_bot,
+            user_id=1,
+            thread_id=42,
+            window_id="@14",
+            surface_key="t:-100200300:42",
+            chat_id=-100200300,
+        )
+
+    mock_sm.unbind_surface.assert_called_once_with(
+        1,
+        surface_key="t:-100200300:42",
+    )
+    mock_sm.unbind_thread.assert_not_called()
+    mock_clear.assert_awaited_once_with(1, 42, mock_bot)
 
 
 @pytest.mark.asyncio

@@ -247,8 +247,10 @@ async def _enqueue_discontinuity_warning(
     window_id: str,
     thread_id: int | None,
     text: str | None,
-    image_data: list[tuple[str, bytes]] | None = None,
     warning_key: str,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
+    image_data: list[tuple[str, bytes]] | None = None,
 ) -> None:
     parts = [text] if text else []
     await enqueue_content_message(
@@ -260,8 +262,15 @@ async def _enqueue_discontinuity_warning(
         semantic_kind=WARNING_SEMANTIC_KIND,
         text=text,
         thread_id=thread_id,
+        chat_id=chat_id,
+        surface_key=surface_key,
         image_data=image_data,
-        turn_generation=current_turn_generation(user_id, thread_id),
+        turn_generation=current_turn_generation(
+            user_id,
+            thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        ),
         warning_key=warning_key,
     )
 
@@ -274,6 +283,8 @@ async def _maybe_enqueue_runtime_exit_warning(
     thread_id: int | None,
     pane_command: str,
     pane_text: str,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> None:
     presence_key = (user_id, window_id)
     descriptor = session_manager.get_process_descriptor(window_id)
@@ -324,6 +335,8 @@ async def _maybe_enqueue_runtime_exit_warning(
         user_id=user_id,
         window_id=window_id,
         thread_id=thread_id,
+        chat_id=chat_id,
+        surface_key=surface_key,
         text=text,
         image_data=image_data,
         warning_key=f"runtime-discontinuity:exit:{window_id}",
@@ -394,6 +407,8 @@ async def _transition_missing_window_binding(
                 user_id=user_id,
                 window_id=rebound_window_id,
                 thread_id=thread_id,
+                chat_id=chat_id,
+                surface_key=surface_key,
                 text=raw_text,
                 image_data=image_data,
                 warning_key=f"runtime-discontinuity:window-loss:{window_id}",
@@ -403,6 +418,8 @@ async def _transition_missing_window_binding(
             user_id=user_id,
             window_id=rebound_window_id,
             thread_id=thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
             text=(
                 build_live_surface_loss_notice(
                     window_name=session_manager.get_display_name(window_id),
@@ -462,7 +479,10 @@ async def _transition_missing_window_binding(
                     window_id,
                 )
     else:
-        session_manager.unbind_thread(user_id, thread_id)
+        if surface_key is not None:
+            session_manager.unbind_surface(user_id, surface_key=surface_key)
+        else:
+            session_manager.unbind_thread(user_id, thread_id)
     await clear_topic_state(user_id, thread_id, bot)
     _clear_runtime_presence_for_window(user_id, window_id)
     logger.info(
@@ -478,6 +498,8 @@ async def update_status_message(
     user_id: int,
     window_id: str,
     thread_id: int | None = None,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
     skip_status: bool = False,
 ) -> None:
     """Poll terminal and check for interactive UIs and status updates.
@@ -489,7 +511,17 @@ async def update_status_message(
     Also detects permission prompt UIs (not triggered via JSONL) and enters
     interactive mode when found.
     """
-    turn_generation = current_turn_generation(user_id, thread_id)
+    turn_generation = current_turn_generation(
+        user_id,
+        thread_id,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
+    surface_identity_kwargs: dict[str, object] = {}
+    if chat_id is not None:
+        surface_identity_kwargs["chat_id"] = chat_id
+    if surface_key:
+        surface_identity_kwargs["surface_key"] = surface_key
     if session_manager.is_external_binding_window_id(window_id) is True:
         _clear_runtime_presence_for_window(user_id, window_id)
         if not skip_status:
@@ -499,6 +531,8 @@ async def update_status_message(
                 window_id,
                 None,
                 thread_id=thread_id,
+                chat_id=chat_id,
+                surface_key=surface_key,
                 turn_generation=turn_generation,
             )
         return
@@ -513,8 +547,10 @@ async def update_status_message(
                 window_id,
                 None,
                 thread_id=thread_id,
+                chat_id=chat_id,
+                surface_key=surface_key,
                 turn_generation=turn_generation,
-        )
+            )
         return
 
     pane_text = await tmux_manager.capture_pane(w.window_id)
@@ -536,11 +572,19 @@ async def update_status_message(
         window_id,
         pending_input_text,
         thread_id=thread_id,
+        chat_id=chat_id,
+        surface_key=surface_key,
     )
 
     usage_limit_notice = _extract_usage_limit_notice(pane_text)
     if usage_limit_notice:
-        await clear_interactive_msg(user_id, bot, thread_id)
+        await clear_interactive_msg(
+            user_id,
+            bot,
+            thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        )
         await enqueue_content_message(
             bot=bot,
             user_id=user_id,
@@ -550,6 +594,8 @@ async def update_status_message(
             semantic_kind=WARNING_SEMANTIC_KIND,
             text=usage_limit_notice,
             thread_id=thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
             turn_generation=turn_generation,
             warning_key=f"usage-limit:{window_id}",
         )
@@ -560,19 +606,33 @@ async def update_status_message(
         user_id=user_id,
         window_id=window_id,
         thread_id=thread_id,
+        chat_id=chat_id,
+        surface_key=surface_key,
         pane_command=getattr(w, "pane_current_command", ""),
         pane_text=pane_text,
     )
 
-    turn_generation = current_turn_generation(user_id, thread_id)
+    turn_generation = current_turn_generation(
+        user_id,
+        thread_id,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
     pre_final_lane_open = (
         turn_generation > 0
-        and not is_pre_final_visible_lane_closed(user_id, thread_id)
+        and not is_pre_final_visible_lane_closed(
+            user_id,
+            thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        )
     )
     send_missing_question = not skip_status and not pre_final_lane_open
     question_kwargs: dict[str, object] = {
         "send_if_missing": send_missing_question,
     }
+    if chat_id is not None:
+        question_kwargs["chat_id"] = chat_id
     if skip_status:
         question_kwargs["defer_reason"] = "queue_not_empty"
     elif pre_final_lane_open:
@@ -599,7 +659,12 @@ async def update_status_message(
         source="question_record_scan",
     )
 
-    interactive_window = get_interactive_window(user_id, thread_id)
+    interactive_window = get_interactive_window(
+        user_id,
+        thread_id,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
     should_check_new_ui = True
 
     if interactive_window == window_id:
@@ -609,12 +674,24 @@ async def update_status_message(
             return
         # Interactive UI gone — clear interactive mode, fall through to status check.
         # Don't re-check for new UI this cycle (the old one just disappeared).
-        await clear_interactive_msg(user_id, bot, thread_id)
+        await clear_interactive_msg(
+            user_id,
+            bot,
+            thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        )
         should_check_new_ui = False
     elif interactive_window is not None:
         # User is in interactive mode for a DIFFERENT window (window switched)
         # Clear stale interactive mode
-        await clear_interactive_msg(user_id, bot, thread_id)
+        await clear_interactive_msg(
+            user_id,
+            bot,
+            thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        )
 
     # Check for blocked prompt surfaces (interactive UI or prompt-visible errors).
     if should_check_new_ui and surface.kind == "blocked_prompt":
@@ -624,7 +701,13 @@ async def update_status_message(
             window_id,
             thread_id,
         )
-        await handle_interactive_ui(bot, user_id, window_id, thread_id)
+        await handle_interactive_ui(
+            bot,
+            user_id,
+            window_id,
+            thread_id,
+            **surface_identity_kwargs,
+        )
         return
 
     # Normal status line check — skip if queue is non-empty
@@ -638,6 +721,8 @@ async def update_status_message(
             window_id,
             surface.status_line,
             thread_id=thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
             turn_generation=turn_generation,
         )
     # If no status line, keep existing status message (don't clear on transient state)
@@ -653,12 +738,19 @@ async def status_poll_loop(bot: Bot) -> None:
             now = time.monotonic()
             if now - last_topic_check >= TOPIC_CHECK_INTERVAL:
                 last_topic_check = now
-                for user_id, thread_id, wid in list(session_manager.iter_thread_bindings()):
+                for binding in list(session_manager.iter_topic_bindings()):
+                    user_id = binding.user_id
+                    thread_id = binding.thread_id
+                    wid = binding.window_id
+                    surface_key = getattr(binding, "surface_key", "") or None
+                    chat_id = getattr(binding, "chat_id", None)
                     try:
                         if thread_id is None:
                             continue
                         await bot.unpin_all_forum_topic_messages(
-                            chat_id=session_manager.resolve_chat_id(user_id, thread_id),
+                            chat_id=chat_id
+                            if chat_id is not None
+                            else session_manager.resolve_chat_id(user_id, thread_id),
                             message_thread_id=thread_id,
                         )
                     except BadRequest as e:
@@ -667,7 +759,13 @@ async def status_poll_loop(bot: Bot) -> None:
                             w = await tmux_manager.find_window_by_id(wid)
                             if w:
                                 await tmux_manager.kill_window(w.window_id)
-                            session_manager.unbind_thread(user_id, thread_id)
+                            if surface_key is not None:
+                                session_manager.unbind_surface(
+                                    user_id,
+                                    surface_key=surface_key,
+                                )
+                            else:
+                                session_manager.unbind_thread(user_id, thread_id)
                             await clear_topic_state(user_id, thread_id, bot)
                             logger.info(
                                 "Topic deleted: killed window_id '%s' and "
@@ -693,6 +791,8 @@ async def status_poll_loop(bot: Bot) -> None:
                 user_id = binding.user_id
                 thread_id = binding.thread_id
                 wid = binding.window_id
+                surface_key = getattr(binding, "surface_key", None)
+                chat_id = getattr(binding, "chat_id", None)
                 try:
                     if session_manager.is_external_binding_window_id(wid) is True:
                         _clear_runtime_presence_for_window(user_id, wid)
@@ -700,7 +800,19 @@ async def status_poll_loop(bot: Bot) -> None:
                     # Clean up stale bindings (window no longer exists)
                     w = await tmux_manager.find_window_by_id(wid)
                     if not w:
-                        surface_key, chat_id, resolved_thread_id = session_manager.get_surface_coordinates_for_window(user_id, wid)
+                        if surface_key is None or chat_id is None:
+                            (
+                                resolved_surface_key,
+                                resolved_chat_id,
+                                resolved_thread_id,
+                            ) = session_manager.get_surface_coordinates_for_window(
+                                user_id,
+                                wid,
+                            )
+                            surface_key = surface_key or resolved_surface_key
+                            chat_id = chat_id if chat_id is not None else resolved_chat_id
+                        else:
+                            resolved_thread_id = None
                         await _transition_missing_window_binding(
                             bot,
                             user_id=user_id,
@@ -722,6 +834,8 @@ async def status_poll_loop(bot: Bot) -> None:
                         user_id,
                         wid,
                         thread_id=thread_id,
+                        chat_id=chat_id,
+                        surface_key=surface_key,
                         skip_status=skip_status,
                     )
                 except Exception as e:

@@ -47,6 +47,7 @@ STATE_SELECTING_WINDOW = "selecting_window"
 BROWSE_PATH_KEY = "browse_path"
 BROWSE_PAGE_KEY = "browse_page"
 BROWSE_DIRS_KEY = "browse_dirs"  # Cache of subdirs for current path
+BROWSE_SURFACE_SLOTS_KEY = "browse_surface_slots"
 UNBOUND_WINDOWS_KEY = "unbound_windows"  # Cache of (name, cwd) tuples
 STATE_SELECTING_THREAD = "selecting_thread"
 THREADS_KEY = "cached_threads"  # Cache of ThreadLocator list
@@ -63,6 +64,24 @@ def clear_browse_state(user_data: dict | None) -> None:
         user_data.pop(BROWSE_PATH_KEY, None)
         user_data.pop(BROWSE_PAGE_KEY, None)
         user_data.pop(BROWSE_DIRS_KEY, None)
+
+
+def default_browse_root() -> str:
+    """Return a cwd-neutral default root for the bind directory browser."""
+    for env_name in (
+        "CCBOT_BIND_DEFAULT_ROOT",
+        "CCBOT_WORKSPACE_ROOT",
+    ):
+        raw = os.environ.get(env_name, "").strip()
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        if path.exists() and path.is_dir():
+            return str(path.resolve())
+    home_tools = Path("/home/tools")
+    if home_tools.exists() and home_tools.is_dir():
+        return str(home_tools)
+    return str(Path.home())
 
 
 def clear_window_picker_state(user_data: dict | None) -> None:
@@ -168,7 +187,7 @@ def build_directory_browser(
     """
     path = Path(current_path).expanduser().resolve()
     if not path.exists() or not path.is_dir():
-        path = Path.cwd()
+        path = Path(default_browse_root())
 
     try:
         subdirs = sorted(
@@ -325,9 +344,7 @@ def build_thread_picker(
         )
         rel = _relative_time(thread.file_path)
         time_str = f" ({rel})" if rel else ""
-        lines.append(
-            f"{i + 1}. {summary} — {thread.message_count} messages{time_str}"
-        )
+        lines.append(f"{i + 1}. {summary} — {thread.message_count} messages{time_str}")
 
     buttons: list[list[InlineKeyboardButton]] = []
     for i in range(0, len(threads), 2):
@@ -335,7 +352,9 @@ def build_thread_picker(
         for j in range(min(2, len(threads) - i)):
             thread = threads[i + j]
             label = (
-                thread.summary[:14] + "…" if len(thread.summary) > 14 else thread.summary
+                thread.summary[:14] + "…"
+                if len(thread.summary) > 14
+                else thread.summary
             )
             row.append(
                 InlineKeyboardButton(

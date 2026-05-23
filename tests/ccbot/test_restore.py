@@ -123,6 +123,27 @@ def test_parse_restore_intent_requires_full_surface_identity_and_group_chat() ->
         )
 
 
+def test_parse_restore_intent_accepts_chat_qualified_topic_key() -> None:
+    intent = parse_restore_intent(
+        _intent_env(
+            CCBOT_RESTORE_SURFACE_KEY="t:-1004242:42",
+            CCBOT_RESTORE_CHAT_ID="",
+        )
+    )
+
+    assert intent is not None
+    assert intent.surface_key == "t:-1004242:42"
+    assert intent.group_chat_id == -1004242
+
+    with pytest.raises(RestoreIntentError, match="chat_id does not match"):
+        parse_restore_intent(
+            _intent_env(
+                CCBOT_RESTORE_SURFACE_KEY="t:-1004242:42",
+                CCBOT_RESTORE_CHAT_ID="-1009999",
+            )
+        )
+
+
 def test_parse_restore_intent_is_absent_when_no_restore_env() -> None:
     assert parse_restore_intent({}) is None
     assert parse_restore_intent({"CCBOT_RESTORE_ENABLED": "0"}) is None

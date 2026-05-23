@@ -14,7 +14,7 @@ Key components:
   - get_or_create_queue: Get or create queue and worker for a user
   - Message queue worker: Background task processing user's queue
   - Content task processing with tool_use/tool_result handling
-  - Status message tracking and conversion (keyed by (user_id, thread_id))
+  - Mutable artifact tracking and conversion (keyed by delivery surface)
 """
 
 from __future__ import annotations
@@ -57,6 +57,7 @@ from .message_sender import (
 )
 
 logger = logging.getLogger(__name__)
+_STATE_CHAT_UNSET = object()
 
 
 def _ensure_formatted(text: str) -> str:
@@ -95,9 +96,20 @@ def _image_preview_retry_key(
     user_id: int,
     thread_id_or_0: int,
     info: ImagePreviewMessageInfo,
-) -> tuple[int, int, int]:
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
+) -> tuple[int, int | str, int]:
     """Return the retry-debt key for one concrete Telegram preview message."""
-    return (user_id, thread_id_or_0, info.message_id)
+    return (
+        user_id,
+        _topic_state_token(
+            thread_id_or_0,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        ),
+        info.message_id,
+    )
 
 
 def _image_preview_info_matches(
@@ -129,13 +141,20 @@ def _discard_image_preview_retry_tasks_for_topic(
     user_id: int,
     thread_id_or_0: int,
     *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
     cancel: bool = True,
 ) -> None:
     """Forget all retry debt associated with a topic."""
+    token = _topic_state_token(
+        thread_id_or_0,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
     stale_keys = [
         key
         for key in _image_preview_delete_retry_tasks
-        if key[0] == user_id and key[1] == thread_id_or_0
+        if key[0] == user_id and key[1] == token
     ]
     for key in stale_keys:
         _discard_image_preview_retry_task(key, cancel=cancel)
@@ -172,6 +191,8 @@ class MessageTask:
     semantic_kind: str = ""
     warning_key: str | None = None
     thread_id: int | None = None  # Telegram topic thread_id for targeted send
+    chat_id: int | None = None
+    surface_key: str | None = None
     image_data: list[tuple[str, bytes]] | None = None  # From tool_result images
     image_caption: str | None = None
     document_data: list[tuple[str, str, bytes]] | None = None
@@ -189,26 +210,29 @@ _queue_locks: dict[int, asyncio.Lock] = {}  # Protect drain/refill operations
 # for editing tool_use messages with results
 _tool_msg_ids: dict[tuple[str, int, int], int] = {}
 
-# Status message tracking: (user_id, thread_id_or_0) -> (message_id, window_id, last_text)
-_status_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
+TopicStateKey = tuple[int, int | str]
 
-# Commentary message tracking: (user_id, thread_id_or_0) -> (message_id, window_id, last_text)
-_commentary_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
+
+# Status message tracking: delivery surface -> (message_id, window_id, last_text)
+_status_msg_info: dict[TopicStateKey, tuple[int, str, str]] = {}
+
+# Commentary message tracking: delivery surface -> (message_id, window_id, last_text)
+_commentary_msg_info: dict[TopicStateKey, tuple[int, str, str]] = {}
 # Extra commentary message ids for multi-part commentary artifacts.
-_commentary_extra_msg_ids: dict[tuple[int, int], tuple[int, ...]] = {}
+_commentary_extra_msg_ids: dict[TopicStateKey, tuple[int, ...]] = {}
 
-# Pending input preview tracking: (user_id, thread_id_or_0) -> (message_id, window_id, last_text)
-_pending_input_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
+# Pending input preview tracking: delivery surface -> (message_id, window_id, last_text)
+_pending_input_msg_info: dict[TopicStateKey, tuple[int, str, str]] = {}
 # Last enqueued pending-input state per topic for queue-side dedupe.
-_pending_input_enqueued: dict[tuple[int, int], tuple[str, str | None]] = {}
+_pending_input_enqueued: dict[TopicStateKey, tuple[str, str | None]] = {}
 
 # Telegram ingress receipt tracking:
-#   (user_id, thread_id_or_0, proof_id) -> (message_id, window_id, last_text)
-_ingress_receipt_msg_info: dict[tuple[int, int, str], tuple[int, str, str]] = {}
-_ingress_receipt_superseded: set[tuple[int, int, str]] = set()
+#   (user_id, delivery_surface_token, proof_id) -> (message_id, window_id, last_text)
+_ingress_receipt_msg_info: dict[tuple[int, int | str, str], tuple[int, str, str]] = {}
+_ingress_receipt_superseded: set[tuple[int, int | str, str]] = set()
 
-# Plan update artifact tracking: (user_id, thread_id_or_0) -> (message_id, window_id, last_text)
-_plan_update_msg_info: dict[tuple[int, int], tuple[int, str, str]] = {}
+# Plan update artifact tracking: delivery surface -> (message_id, window_id, last_text)
+_plan_update_msg_info: dict[TopicStateKey, tuple[int, str, str]] = {}
 
 
 @dataclass(frozen=True)
@@ -222,45 +246,140 @@ class ImagePreviewMessageInfo:
     caption_signature: str
 
 
-# Image-preview progress tracking: (user_id, thread_id_or_0) -> mutable media info.
+# Image-preview progress tracking: delivery surface -> mutable media info.
 # Runtime image previews are pre-final progress, not durable final results, so compact
 # mode keeps only the latest preview bubble for the live topic turn.
-_image_preview_msg_info: dict[tuple[int, int], ImagePreviewMessageInfo] = {}
+_image_preview_msg_info: dict[TopicStateKey, ImagePreviewMessageInfo] = {}
 # Retry debt for failed Telegram deletes of preview bubbles. Keyed by concrete
 # message id so an old preview cleanup retry cannot erase a newer preview pointer.
-_image_preview_delete_retry_tasks: dict[tuple[int, int, int], asyncio.Task[None]] = {}
+_image_preview_delete_retry_tasks: dict[tuple[int, int | str, int], asyncio.Task[None]] = {}
 _IMAGE_PREVIEW_DELETE_RETRY_MAX_ATTEMPTS = 3
 _IMAGE_PREVIEW_DELETE_RETRY_MAX_DELAY_SECONDS = 10
 
 # Warning tracking:
-#   (user_id, thread_id_or_0, warning_key) -> (message_id, window_id, warning_text, repeat_count)
+#   (user_id, delivery_surface_token, warning_key) -> (message_id, window_id, warning_text, repeat_count)
 # Ordinary warnings keep the default "latest-warning" key so the durable
 # latest-warning bubble semantics remain unchanged. Special families such as
 # runtime discontinuities can opt into distinct keys to avoid collapsing
 # separate events that happen to share the same text.
-_warning_msg_info: dict[tuple[int, int, str], tuple[int, str, str, int]] = {}
+_warning_msg_info: dict[tuple[int, int | str, str], tuple[int, str, str, int]] = {}
 
-# Latest visible pre-final artifact kind per topic. This keeps latest-only
+
+def _session_has_method(name: str) -> bool:
+    return callable(getattr(type(session_manager), name, None))
+
+
+def _task_chat_id(user_id: int, task: MessageTask) -> int:
+    if task.chat_id is not None:
+        return task.chat_id
+    return session_manager.resolve_chat_id(user_id, task.thread_id)
+
+
+def _topic_state_token(
+    thread_id_or_0: int,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
+) -> int | str:
+    """Return a stable mutable-artifact namespace for one delivery surface.
+
+    Telegram topic ids are scoped by chat, not global.  A bare ``thread_id``
+    key therefore conflates unrelated topics across chats.  When a queue task
+    carries the canonical surface key or the resolved chat id, key mutable
+    bubbles and lane state by that surface.  The legacy token preserves old
+    no-surface call sites/tests until their callers are upgraded.
+    """
+    if surface_key:
+        return f"surface:{surface_key}"
+    if chat_id is not None:
+        if thread_id_or_0:
+            return f"topic:{chat_id}:{thread_id_or_0}"
+        return f"chat:{chat_id}"
+    return thread_id_or_0
+
+
+def _topic_state_key(
+    user_id: int,
+    thread_id_or_0: int,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
+) -> TopicStateKey:
+    return (
+        user_id,
+        _topic_state_token(
+            thread_id_or_0,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        ),
+    )
+
+
+def _task_state_key(user_id: int, task: MessageTask) -> TopicStateKey:
+    return _topic_state_key(
+        user_id,
+        task.thread_id or 0,
+        chat_id=task.chat_id,
+        surface_key=task.surface_key,
+    )
+
+
+def _task_matches_surface(
+    task: MessageTask,
+    thread_id_or_0: int,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
+) -> bool:
+    if (task.thread_id or 0) != thread_id_or_0:
+        return False
+    if surface_key is not None:
+        return task.surface_key == surface_key
+    if chat_id is not None:
+        return task.chat_id == chat_id
+    return True
+
+
+def _warning_state_key(
+    user_id: int,
+    thread_id_or_0: int,
+    warning_key: str,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
+) -> tuple[int, int | str, str]:
+    return (
+        user_id,
+        _topic_state_token(
+            thread_id_or_0,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        ),
+        warning_key,
+    )
+
+
+# Latest visible pre-final artifact kind per delivery surface. This keeps latest-only
 # commentary chronologically correct relative to durable orchestration milestones:
 # commentary may be edited in place only while it is still the latest visible
 # pre-final artifact. Once another visible pre-final artifact lands after it,
 # commentary updates must re-emit at the tail instead of rewriting history above it.
-_latest_pre_final_visible_kind: dict[tuple[int, int], str] = {}
+_latest_pre_final_visible_kind: dict[TopicStateKey, str] = {}
 
 # Pre-final visible artifact closure: once a final assistant bubble lands in
 # compact mode, no later visible pre-final artifact may surface below it until
 # the next user turn reopens the lane.
-_pre_final_visible_closed: set[tuple[int, int]] = set()
+_pre_final_visible_closed: set[TopicStateKey] = set()
 
 # Technical status closure: once a final assistant bubble lands in compact mode,
 # mutable status/progress artifacts must not reappear below that terminal turn
 # artifact until the next user turn reopens the status lane.
-_technical_status_closed: set[tuple[int, int]] = set()
+_technical_status_closed: set[TopicStateKey] = set()
 
 # Current per-topic turn generation. Incremented whenever a new user turn opens
 # the terminal surface. Queue tasks carry the generation they belong to so that
 # stale closes and stale pre-final/status artifacts cannot leak across turns.
-_turn_generations: dict[tuple[int, int], int] = {}
+_turn_generations: dict[TopicStateKey, int] = {}
 
 # Flood control: user_id -> monotonic time when ban expires
 _flood_until: dict[int, float] = {}
@@ -294,12 +413,20 @@ def _should_reemit_commentary_at_tail(text: str) -> bool:
 def _clear_warning_tracking_for_topic(
     user_id: int,
     thread_id_or_0: int,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> None:
     """Clear warning dedupe state for a topic."""
+    token = _topic_state_token(
+        thread_id_or_0,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
     stale_keys = [
         key
         for key in _warning_msg_info
-        if key[0] == user_id and key[1] == thread_id_or_0
+        if key[0] == user_id and key[1] == token
     ]
     for key in stale_keys:
         _warning_msg_info.pop(key, None)
@@ -350,6 +477,10 @@ def _can_merge_tasks(base: MessageTask, candidate: MessageTask) -> bool:
     if base.window_id != candidate.window_id:
         return False
     if base.thread_id != candidate.thread_id:
+        return False
+    if base.chat_id != candidate.chat_id:
+        return False
+    if base.surface_key != candidate.surface_key:
         return False
     if base.turn_generation != candidate.turn_generation:
         return False
@@ -440,6 +571,8 @@ async def _merge_content_tasks(
             semantic_kind=first.semantic_kind,
             warning_key=first.warning_key,
             thread_id=first.thread_id,
+            chat_id=first.chat_id,
+            surface_key=first.surface_key,
             turn_generation=first.turn_generation,
         ),
         merge_count,
@@ -473,7 +606,7 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                                 "pending_input_clear",
                             }:
                                 _pending_input_enqueued.pop(
-                                    (user_id, task.thread_id or 0),
+                                    _task_state_key(user_id, task),
                                     None,
                                 )
                             continue
@@ -509,21 +642,45 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                     await _process_plan_update_task(bot, user_id, task)
                 elif task.task_type == "plan_clear":
                     await _do_clear_plan_update_message(
-                        bot, user_id, task.thread_id or 0
+                        bot,
+                        user_id,
+                        task.thread_id or 0,
+                        chat_id=task.chat_id,
+                        surface_key=task.surface_key,
                     )
                 elif task.task_type == "status_update":
                     await _process_status_update_task(bot, user_id, task)
                 elif task.task_type == "status_clear":
-                    await _do_clear_status_message(bot, user_id, task.thread_id or 0)
+                    if task.chat_id is None and task.surface_key is None:
+                        await _do_clear_status_message(
+                            bot,
+                            user_id,
+                            task.thread_id or 0,
+                        )
+                    else:
+                        await _do_clear_status_message(
+                            bot,
+                            user_id,
+                            task.thread_id or 0,
+                            chat_id=task.chat_id,
+                            surface_key=task.surface_key,
+                        )
                 elif task.task_type == "commentary_clear":
                     await _do_clear_commentary_message(
-                        bot, user_id, task.thread_id or 0
+                        bot,
+                        user_id,
+                        task.thread_id or 0,
+                        chat_id=task.chat_id,
+                        surface_key=task.surface_key,
                     )
                 elif task.task_type == "pending_input_clear":
                     await _process_pending_input_clear_task(bot, user_id, task)
                 elif task.task_type in {"commentary_close", "pre_final_close"}:
                     current_generation = current_turn_generation(
-                        user_id, task.thread_id
+                        user_id,
+                        task.thread_id,
+                        chat_id=task.chat_id,
+                        surface_key=task.surface_key,
                     )
                     if _is_stale_turn_generation(
                         task.turn_generation,
@@ -537,18 +694,46 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                             current_generation,
                         )
                         continue
-                    _mark_pre_final_visible_closed(user_id, task.thread_id)
-                    _mark_technical_status_closed(user_id, task.thread_id)
+                    _mark_pre_final_visible_closed(
+                        user_id,
+                        task.thread_id,
+                        chat_id=task.chat_id,
+                        surface_key=task.surface_key,
+                    )
+                    _mark_technical_status_closed(
+                        user_id,
+                        task.thread_id,
+                        chat_id=task.chat_id,
+                        surface_key=task.surface_key,
+                    )
                     await _do_clear_commentary_message(
-                        bot, user_id, task.thread_id or 0
+                        bot,
+                        user_id,
+                        task.thread_id or 0,
+                        chat_id=task.chat_id,
+                        surface_key=task.surface_key,
                     )
                     await _do_clear_plan_update_message(
-                        bot, user_id, task.thread_id or 0
+                        bot,
+                        user_id,
+                        task.thread_id or 0,
+                        chat_id=task.chat_id,
+                        surface_key=task.surface_key,
                     )
                     await _do_clear_image_preview_message(
-                        bot, user_id, task.thread_id or 0
+                        bot,
+                        user_id,
+                        task.thread_id or 0,
+                        chat_id=task.chat_id,
+                        surface_key=task.surface_key,
                     )
-                    await _do_clear_status_message(bot, user_id, task.thread_id or 0)
+                    await _do_clear_status_message(
+                        bot,
+                        user_id,
+                        task.thread_id or 0,
+                        chat_id=task.chat_id,
+                        surface_key=task.surface_key,
+                    )
             except RetryAfter as e:
                 retry_secs = (
                     e.retry_after
@@ -585,6 +770,9 @@ async def flush_terminal_artifacts_before_new_turn(
     bot: Bot,
     user_id: int,
     thread_id: int | None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> int:
     """Deliver queued terminal artifacts before a new user turn advances generation.
 
@@ -610,7 +798,12 @@ async def flush_terminal_artifacts_before_new_turn(
         for task in items:
             if (
                 task.task_type == "content"
-                and (task.thread_id or 0) == tid
+                and _task_matches_surface(
+                    task,
+                    tid,
+                    chat_id=chat_id,
+                    surface_key=surface_key,
+                )
                 and task.semantic_kind == ASSISTANT_FINAL_SEMANTIC_KIND
             ):
                 terminal_tasks.append(task)
@@ -925,7 +1118,8 @@ async def _send_or_edit_image_preview(
     caption = task.image_caption
     media_signature = _image_preview_signature(media_type, raw_bytes)
     caption_signature = _caption_signature(caption)
-    preview_key = (user_id, thread_id_or_0)
+    state_key = _task_state_key(user_id, task)
+    preview_key = state_key
     current_info = _image_preview_msg_info.get(preview_key)
     text = caption or task.text or ""
 
@@ -933,7 +1127,7 @@ async def _send_or_edit_image_preview(
         current_info is not None
         and current_info.window_id == window_id
         and current_info.turn_generation == task.turn_generation
-        and preview_key not in _pre_final_visible_closed
+        and state_key not in _pre_final_visible_closed
     )
     if can_edit and current_info is not None:
         try:
@@ -1000,7 +1194,13 @@ async def _send_or_edit_image_preview(
                     message_id=current_info.message_id,
                 )
                 _discard_image_preview_retry_task(
-                    _image_preview_retry_key(user_id, thread_id_or_0, current_info),
+                    _image_preview_retry_key(
+                        user_id,
+                        thread_id_or_0,
+                        current_info,
+                        chat_id=task.chat_id,
+                        surface_key=task.surface_key,
+                    ),
                     cancel=True,
                 )
                 _image_preview_msg_info.pop(preview_key, None)
@@ -1051,7 +1251,13 @@ async def _send_or_edit_image_preview(
                 message_id=current_info.message_id,
             )
             _discard_image_preview_retry_task(
-                _image_preview_retry_key(user_id, thread_id_or_0, current_info),
+                _image_preview_retry_key(
+                    user_id,
+                    thread_id_or_0,
+                    current_info,
+                    chat_id=task.chat_id,
+                    surface_key=task.surface_key,
+                ),
                 cancel=True,
             )
             _audit_task_delivery(
@@ -1146,9 +1352,24 @@ async def _is_task_binding_active(
     user_id: int,
     window_id: str,
     thread_id: int | None,
+    surface_key: str | None = None,
 ) -> bool:
     """Check whether a queued task still targets the current live binding."""
     if session_manager.is_external_binding_window_id(window_id) is True:
+        if surface_key and _session_has_method("get_window_for_surface"):
+            current_window_id = session_manager.get_window_for_surface(
+                user_id,
+                surface_key=surface_key,
+            )
+            if current_window_id != window_id:
+                return False
+            return (
+                session_manager.get_surface_binding_state(
+                    user_id,
+                    surface_key=surface_key,
+                )
+                == BINDING_STATE_BOUND
+            )
         if thread_id is None:
             return True
         current_window_id = session_manager.get_window_for_thread(user_id, thread_id)
@@ -1161,6 +1382,20 @@ async def _is_task_binding_active(
 
     if await tmux_manager.find_window_by_id(window_id) is None:
         return False
+    if surface_key and _session_has_method("get_window_for_surface"):
+        current_window_id = session_manager.get_window_for_surface(
+            user_id,
+            surface_key=surface_key,
+        )
+        if current_window_id != window_id:
+            return False
+        return (
+            session_manager.get_surface_binding_state(
+                user_id,
+                surface_key=surface_key,
+            )
+            == BINDING_STATE_BOUND
+        )
     if thread_id is None:
         return True
     current_window_id = session_manager.get_window_for_thread(user_id, thread_id)
@@ -1176,9 +1411,15 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
     """Process a content message task."""
     wid = task.window_id or ""
     tid = task.thread_id or 0
+    state_key = _task_state_key(user_id, task)
     is_terminal_artifact = task.semantic_kind == ASSISTANT_FINAL_SEMANTIC_KIND
-    current_generation = current_turn_generation(user_id, task.thread_id)
-    if not await _is_task_binding_active(user_id, wid, task.thread_id):
+    current_generation = current_turn_generation(
+        user_id,
+        task.thread_id,
+        chat_id=task.chat_id,
+        surface_key=task.surface_key,
+    )
+    if not await _is_task_binding_active(user_id, wid, task.thread_id, task.surface_key):
         logger.debug(
             "Dropping stale content task: user=%d window=%s thread=%s type=%s",
             user_id,
@@ -1186,17 +1427,46 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             task.thread_id,
             task.content_type,
         )
-        await _do_clear_status_message(bot, user_id, tid)
-        await _do_clear_commentary_message(bot, user_id, tid)
+        await _do_clear_status_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
+        await _do_clear_commentary_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
         await _do_clear_pending_input_message(bot, user_id, tid)
-        await _do_clear_plan_update_message(bot, user_id, tid)
-        await _do_clear_image_preview_message(bot, user_id, tid)
-        _clear_warning_tracking_for_topic(user_id, tid)
+        await _do_clear_plan_update_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
+        await _do_clear_image_preview_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
+        _clear_warning_tracking_for_topic(
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
         clear_tool_msg_ids_for_topic(user_id, task.thread_id)
         _audit_task_delivery(
             action="suppress",
             user_id=user_id,
-            chat_id=session_manager.resolve_chat_id(user_id, task.thread_id),
+            chat_id=_task_chat_id(user_id, task),
             task=task,
             text=task.text or "\n\n".join(task.parts),
             reason="stale_binding",
@@ -1215,7 +1485,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         _audit_task_delivery(
             action="suppress",
             user_id=user_id,
-            chat_id=session_manager.resolve_chat_id(user_id, task.thread_id),
+            chat_id=_task_chat_id(user_id, task),
             task=task,
             text=task.text or "\n\n".join(task.parts),
             reason="stale_turn_generation",
@@ -1223,7 +1493,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         return
     if (
         is_pre_final_visible_semantic_kind(task.semantic_kind)
-        and (user_id, tid) in _pre_final_visible_closed
+        and state_key in _pre_final_visible_closed
     ):
         logger.debug(
             "Dropping pre-final content after terminal artifact: user=%d window=%s thread=%s semantic=%s",
@@ -1235,7 +1505,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         _audit_task_delivery(
             action="suppress",
             user_id=user_id,
-            chat_id=session_manager.resolve_chat_id(user_id, task.thread_id),
+            chat_id=_task_chat_id(user_id, task),
             task=task,
             text=task.text or "\n\n".join(task.parts),
             reason="pre_final_after_terminal",
@@ -1250,7 +1520,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             thread_id_or_0=tid,
         )
         return
-    chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
+    chat_id = _task_chat_id(user_id, task)
 
     if task.semantic_kind == IMAGE_PREVIEW_SEMANTIC_KIND and task.image_data:
         media_sent = await _send_or_edit_image_preview(
@@ -1262,12 +1532,14 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             thread_id_or_0=tid,
         )
         if media_sent:
-            _latest_pre_final_visible_kind[(user_id, tid)] = task.semantic_kind
+            _latest_pre_final_visible_kind[state_key] = task.semantic_kind
             await _check_and_send_status(
                 bot,
                 user_id,
                 wid,
                 task.thread_id,
+                chat_id=task.chat_id,
+                surface_key=task.surface_key,
                 expected_turn_generation=task.turn_generation,
             )
             return
@@ -1308,10 +1580,32 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                 text=task.image_caption or task.text or "",
                 success=True,
             )
-            _mark_pre_final_visible_closed(user_id, task.thread_id)
-            _mark_technical_status_closed(user_id, task.thread_id)
-            await _do_clear_image_preview_message(bot, user_id, tid)
-            await _do_clear_status_message(bot, user_id, tid)
+            _mark_pre_final_visible_closed(
+                user_id,
+                task.thread_id,
+                chat_id=task.chat_id,
+                surface_key=task.surface_key,
+            )
+            _mark_technical_status_closed(
+                user_id,
+                task.thread_id,
+                chat_id=task.chat_id,
+                surface_key=task.surface_key,
+            )
+            await _do_clear_image_preview_message(
+                bot,
+                user_id,
+                tid,
+                chat_id=task.chat_id,
+                surface_key=task.surface_key,
+            )
+            await _do_clear_status_message(
+                bot,
+                user_id,
+                tid,
+                chat_id=task.chat_id,
+                surface_key=task.surface_key,
+            )
             return
 
         logger.warning(
@@ -1340,7 +1634,13 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         edit_msg_id = _tool_msg_ids.pop(_tkey, None)
         if edit_msg_id is not None:
             # Clear status message first
-            await _do_clear_status_message(bot, user_id, tid)
+            await _do_clear_status_message(
+                bot,
+                user_id,
+                tid,
+                chat_id=task.chat_id,
+                surface_key=task.surface_key,
+            )
             # Join all parts for editing (merged content goes together)
             full_text = "\n\n".join(task.parts)
             try:
@@ -1366,6 +1666,8 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                     user_id,
                     wid,
                     task.thread_id,
+                    chat_id=task.chat_id,
+                    surface_key=task.surface_key,
                     expected_turn_generation=task.turn_generation,
                 )
                 return
@@ -1403,7 +1705,12 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
     delivered_parts = 0
     expected_parts = len(task.parts)
     for part in task.parts:
-        current_generation = current_turn_generation(user_id, task.thread_id)
+        current_generation = current_turn_generation(
+            user_id,
+            task.thread_id,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
         if _is_stale_turn_generation(task.turn_generation, current_generation):
             logger.debug(
                 "Aborting in-flight stale-turn content task: user=%d window=%s thread=%s semantic=%s generation=%d current=%d",
@@ -1415,7 +1722,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                 current_generation,
             )
             return
-        if not await _is_task_binding_active(user_id, wid, task.thread_id):
+        if not await _is_task_binding_active(user_id, wid, task.thread_id, task.surface_key):
             logger.debug(
                 "Aborting in-flight stale binding content task: user=%d window=%s thread=%s semantic=%s",
                 user_id,
@@ -1426,7 +1733,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             return
         if (
             is_pre_final_visible_semantic_kind(task.semantic_kind)
-            and (user_id, tid) in _pre_final_visible_closed
+            and state_key in _pre_final_visible_closed
         ):
             logger.debug(
                 "Aborting in-flight pre-final content after terminal artifact: user=%d window=%s thread=%s semantic=%s",
@@ -1451,6 +1758,9 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                 tid,
                 wid,
                 part,
+                chat_id=chat_id,
+                state_chat_id=task.chat_id,
+                surface_key=task.surface_key,
             )
             if converted_msg_id is not None:
                 last_msg_id = converted_msg_id
@@ -1486,7 +1796,12 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         _tool_msg_ids[(task.tool_use_id, user_id, tid)] = last_msg_id
 
     # 4. Send images if present (from tool_result with base64 image blocks)
-    current_generation = current_turn_generation(user_id, task.thread_id)
+    current_generation = current_turn_generation(
+        user_id,
+        task.thread_id,
+        chat_id=task.chat_id,
+        surface_key=task.surface_key,
+    )
     if _is_stale_turn_generation(task.turn_generation, current_generation):
         logger.debug(
             "Skipping stale-turn content images/status tail: user=%d window=%s thread=%s semantic=%s generation=%d current=%d",
@@ -1498,7 +1813,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             current_generation,
         )
         return
-    if not await _is_task_binding_active(user_id, wid, task.thread_id):
+    if not await _is_task_binding_active(user_id, wid, task.thread_id, task.surface_key):
         logger.debug(
             "Skipping stale binding content images/status tail: user=%d window=%s thread=%s semantic=%s",
             user_id,
@@ -1509,7 +1824,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         return
     if (
         is_pre_final_visible_semantic_kind(task.semantic_kind)
-        and (user_id, tid) in _pre_final_visible_closed
+        and state_key in _pre_final_visible_closed
     ):
         logger.debug(
             "Skipping late pre-final content images/status tail: user=%d window=%s thread=%s semantic=%s",
@@ -1523,7 +1838,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
     await _send_task_documents(bot, chat_id, task)
 
     if delivered_parts > 0 and is_pre_final_visible_semantic_kind(task.semantic_kind):
-        _latest_pre_final_visible_kind[(user_id, tid)] = task.semantic_kind
+        _latest_pre_final_visible_kind[state_key] = task.semantic_kind
 
     final_delivery_complete = (
         (expected_parts == 0 and (not task.image_data or images_sent))
@@ -1535,10 +1850,32 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         # been delivered in full. Closing earlier can hide commentary/status
         # without surfacing the complete final answer if Telegram send fails
         # partway through a multipart delivery.
-        _mark_pre_final_visible_closed(user_id, task.thread_id)
-        _mark_technical_status_closed(user_id, task.thread_id)
-        await _do_clear_image_preview_message(bot, user_id, tid)
-        await _do_clear_status_message(bot, user_id, tid)
+        _mark_pre_final_visible_closed(
+            user_id,
+            task.thread_id,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
+        _mark_technical_status_closed(
+            user_id,
+            task.thread_id,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
+        await _do_clear_image_preview_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
+        await _do_clear_status_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
         return
 
     # 5. After content, check and send status
@@ -1547,6 +1884,8 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
         user_id,
         wid,
         task.thread_id,
+        chat_id=task.chat_id,
+        surface_key=task.surface_key,
         expected_turn_generation=task.turn_generation,
     )
 
@@ -1557,18 +1896,28 @@ async def _convert_status_to_content(
     thread_id_or_0: int,
     window_id: str,
     content_text: str,
+    *,
+    chat_id: int | None = None,
+    state_chat_id: int | None | object = _STATE_CHAT_UNSET,
+    surface_key: str | None = None,
 ) -> int | None:
     """Convert status message to content message by editing it.
 
     Returns the message_id if converted successfully, None otherwise.
     """
-    skey = (user_id, thread_id_or_0)
+    skey = _topic_state_key(
+        user_id,
+        thread_id_or_0,
+        chat_id=chat_id if state_chat_id is _STATE_CHAT_UNSET else state_chat_id,
+        surface_key=surface_key,
+    )
     info = _status_msg_info.pop(skey, None)
     if not info:
         return None
 
     msg_id, stored_wid, _ = info
-    chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
+    if chat_id is None:
+        chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
     if stored_wid != window_id:
         # Different window, just delete the old status
         try:
@@ -1639,9 +1988,15 @@ async def _process_warning_content_task(
         return
 
     thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
-    chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+    chat_id = _task_chat_id(user_id, task)
     warning_key = task.warning_key or "latest-warning"
-    wkey = (user_id, thread_id_or_0, warning_key)
+    wkey = _warning_state_key(
+        user_id,
+        thread_id_or_0,
+        warning_key,
+        chat_id=task.chat_id,
+        surface_key=task.surface_key,
+    )
     current = _warning_msg_info.get(wkey)
     same_warning = (
         current is not None and text and current[1] == window_id and current[2] == text
@@ -1725,24 +2080,59 @@ async def _process_status_update_task(
     """Process a status update task."""
     wid = task.window_id or ""
     tid = task.thread_id or 0
-    current_generation = current_turn_generation(user_id, task.thread_id)
-    if not await _is_task_binding_active(user_id, wid, task.thread_id):
+    state_key = _task_state_key(user_id, task)
+    current_generation = current_turn_generation(
+        user_id,
+        task.thread_id,
+        chat_id=task.chat_id,
+        surface_key=task.surface_key,
+    )
+    if not await _is_task_binding_active(user_id, wid, task.thread_id, task.surface_key):
         logger.debug(
             "Dropping stale status task: user=%d window=%s thread=%s",
             user_id,
             wid,
             task.thread_id,
         )
-        await _do_clear_status_message(bot, user_id, tid)
-        await _do_clear_commentary_message(bot, user_id, tid)
+        await _do_clear_status_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
+        await _do_clear_commentary_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
         await _do_clear_pending_input_message(bot, user_id, tid)
-        await _do_clear_plan_update_message(bot, user_id, tid)
-        await _do_clear_image_preview_message(bot, user_id, tid)
-        _clear_warning_tracking_for_topic(user_id, tid)
+        await _do_clear_plan_update_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
+        await _do_clear_image_preview_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
+        _clear_warning_tracking_for_topic(
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
         _audit_task_delivery(
             action="suppress",
             user_id=user_id,
-            chat_id=session_manager.resolve_chat_id(user_id, task.thread_id),
+            chat_id=_task_chat_id(user_id, task),
             task=task,
             text=task.text or "",
             content_type="status",
@@ -1759,11 +2149,17 @@ async def _process_status_update_task(
             task.turn_generation,
             current_generation,
         )
-        await _do_clear_status_message(bot, user_id, tid)
+        await _do_clear_status_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
         _audit_task_delivery(
             action="suppress",
             user_id=user_id,
-            chat_id=session_manager.resolve_chat_id(user_id, task.thread_id),
+            chat_id=_task_chat_id(user_id, task),
             task=task,
             text=task.text or "",
             content_type="status",
@@ -1771,18 +2167,24 @@ async def _process_status_update_task(
             reason="stale_turn_generation",
         )
         return
-    if (user_id, tid) in _technical_status_closed:
+    if state_key in _technical_status_closed:
         logger.debug(
             "Dropping technical status after terminal artifact: user=%d window=%s thread=%s",
             user_id,
             wid,
             task.thread_id,
         )
-        await _do_clear_status_message(bot, user_id, tid)
+        await _do_clear_status_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
         _audit_task_delivery(
             action="suppress",
             user_id=user_id,
-            chat_id=session_manager.resolve_chat_id(user_id, task.thread_id),
+            chat_id=_task_chat_id(user_id, task),
             task=task,
             text=task.text or "",
             content_type="status",
@@ -1790,13 +2192,19 @@ async def _process_status_update_task(
             reason="technical_status_closed",
         )
         return
-    chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
-    skey = (user_id, tid)
+    chat_id = _task_chat_id(user_id, task)
+    skey = state_key
     status_text = task.text or ""
 
     if not status_text:
         # No status text means clear status
-        await _do_clear_status_message(bot, user_id, tid)
+        await _do_clear_status_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
         return
 
     current_info = _status_msg_info.get(skey)
@@ -1837,8 +2245,23 @@ async def _process_status_update_task(
 
         if stored_wid != wid:
             # Window changed - delete old and send new
-            await _do_clear_status_message(bot, user_id, tid)
-            await _do_send_status_message(bot, user_id, tid, wid, status_text)
+            await _do_clear_status_message(
+                bot,
+                user_id,
+                tid,
+                chat_id=task.chat_id,
+                surface_key=task.surface_key,
+            )
+            await _do_send_status_message(
+                bot,
+                user_id,
+                tid,
+                wid,
+                status_text,
+                chat_id=chat_id,
+                state_chat_id=task.chat_id,
+                surface_key=task.surface_key,
+            )
         elif status_text == last_text:
             # Same content, skip edit
             return
@@ -1917,10 +2340,28 @@ async def _process_status_update_task(
                         return
                     logger.debug(f"Failed to edit status message: {e}")
                     _status_msg_info.pop(skey, None)
-                    await _do_send_status_message(bot, user_id, tid, wid, status_text)
+                    await _do_send_status_message(
+                        bot,
+                        user_id,
+                        tid,
+                        wid,
+                        status_text,
+                        chat_id=chat_id,
+                        state_chat_id=task.chat_id,
+                        surface_key=task.surface_key,
+                    )
     else:
         # No existing status message, send new
-        await _do_send_status_message(bot, user_id, tid, wid, status_text)
+        await _do_send_status_message(
+            bot,
+            user_id,
+            tid,
+            wid,
+            status_text,
+            chat_id=chat_id,
+            state_chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
 
 
 async def _do_send_status_message(
@@ -1929,6 +2370,10 @@ async def _do_send_status_message(
     thread_id_or_0: int,
     window_id: str,
     text: str,
+    *,
+    chat_id: int | None = None,
+    state_chat_id: int | None | object = _STATE_CHAT_UNSET,
+    surface_key: str | None = None,
 ) -> None:
     """Send a new status message and track it (internal, called from worker)."""
     if _is_poll_only_status_text(text):
@@ -1936,9 +2381,15 @@ async def _do_send_status_message(
     text = _normalize_technical_status_text(text)
     if not text:
         return
-    skey = (user_id, thread_id_or_0)
+    skey = _topic_state_key(
+        user_id,
+        thread_id_or_0,
+        chat_id=chat_id if state_chat_id is _STATE_CHAT_UNSET else state_chat_id,
+        surface_key=surface_key,
+    )
     thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
-    chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+    if chat_id is None:
+        chat_id = session_manager.resolve_chat_id(user_id, thread_id)
     # Safety net: delete any orphaned status message before sending a new one.
     # This catches edge cases where tracking was cleared without deleting the message.
     old = _status_msg_info.pop(skey, None)
@@ -1984,15 +2435,27 @@ async def _process_commentary_update_task(
     """Keep only the latest visible commentary artifact in a topic."""
     wid = task.window_id or ""
     tid = task.thread_id or 0
-    current_generation = current_turn_generation(user_id, task.thread_id)
-    if not await _is_task_binding_active(user_id, wid, task.thread_id):
+    state_key = _task_state_key(user_id, task)
+    current_generation = current_turn_generation(
+        user_id,
+        task.thread_id,
+        chat_id=task.chat_id,
+        surface_key=task.surface_key,
+    )
+    if not await _is_task_binding_active(user_id, wid, task.thread_id, task.surface_key):
         logger.debug(
             "Dropping stale commentary task: user=%d window=%s thread=%s",
             user_id,
             wid,
             task.thread_id,
         )
-        await _do_clear_commentary_message(bot, user_id, tid)
+        await _do_clear_commentary_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
         return
     if _is_stale_turn_generation(task.turn_generation, current_generation):
         logger.debug(
@@ -2003,7 +2466,13 @@ async def _process_commentary_update_task(
             task.turn_generation,
             current_generation,
         )
-        await _do_clear_commentary_message(bot, user_id, tid)
+        await _do_clear_commentary_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
         return
 
     commentary_parts = [part for part in task.parts if part]
@@ -2011,10 +2480,16 @@ async def _process_commentary_update_task(
         commentary_parts = [task.text]
     commentary_text = "\n\n".join(commentary_parts)
     if not commentary_text:
-        await _do_clear_commentary_message(bot, user_id, tid)
+        await _do_clear_commentary_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
         return
 
-    if (user_id, tid) in _pre_final_visible_closed:
+    if state_key in _pre_final_visible_closed:
         logger.debug(
             "Dropping commentary after final answer: user=%d window=%s thread=%s",
             user_id,
@@ -2023,7 +2498,7 @@ async def _process_commentary_update_task(
         )
         return
 
-    ckey = (user_id, tid)
+    ckey = state_key
     current_info = _commentary_msg_info.get(ckey)
     extra_ids = _commentary_extra_msg_ids.get(ckey, ())
     if current_info:
@@ -2042,7 +2517,7 @@ async def _process_commentary_update_task(
             and not extra_ids
             and not _should_reemit_commentary_at_tail(commentary_text)
         ):
-            chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
+            chat_id = _task_chat_id(user_id, task)
             try:
                 await bot.edit_message_text(
                     chat_id=chat_id,
@@ -2083,7 +2558,15 @@ async def _process_commentary_update_task(
                     _commentary_msg_info.pop(ckey, None)
 
     await _do_send_commentary_message(
-        bot, user_id, tid, wid, commentary_parts, commentary_text
+        bot,
+        user_id,
+        tid,
+        wid,
+        commentary_parts,
+        commentary_text,
+        chat_id=_task_chat_id(user_id, task),
+        state_chat_id=task.chat_id,
+        surface_key=task.surface_key,
     )
 
 
@@ -2094,11 +2577,21 @@ async def _do_send_commentary_message(
     window_id: str,
     parts: list[str],
     full_text: str,
+    *,
+    chat_id: int | None = None,
+    state_chat_id: int | None | object = _STATE_CHAT_UNSET,
+    surface_key: str | None = None,
 ) -> None:
     """Send a new commentary bubble when in-place reuse is unavailable."""
-    ckey = (user_id, thread_id_or_0)
+    ckey = _topic_state_key(
+        user_id,
+        thread_id_or_0,
+        chat_id=chat_id if state_chat_id is _STATE_CHAT_UNSET else state_chat_id,
+        surface_key=surface_key,
+    )
     thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
-    chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+    if chat_id is None:
+        chat_id = session_manager.resolve_chat_id(user_id, thread_id)
     old = _commentary_msg_info.pop(ckey, None)
     old_extra = _commentary_extra_msg_ids.pop(ckey, ())
     if old:
@@ -2149,15 +2642,27 @@ async def _process_plan_update_task(
     """Keep a dedicated mutable Codex plan artifact updated in place."""
     wid = task.window_id or ""
     tid = task.thread_id or 0
-    current_generation = current_turn_generation(user_id, task.thread_id)
-    if not await _is_task_binding_active(user_id, wid, task.thread_id):
+    state_key = _task_state_key(user_id, task)
+    current_generation = current_turn_generation(
+        user_id,
+        task.thread_id,
+        chat_id=task.chat_id,
+        surface_key=task.surface_key,
+    )
+    if not await _is_task_binding_active(user_id, wid, task.thread_id, task.surface_key):
         logger.debug(
             "Dropping stale plan-update task: user=%d window=%s thread=%s",
             user_id,
             wid,
             task.thread_id,
         )
-        await _do_clear_plan_update_message(bot, user_id, tid)
+        await _do_clear_plan_update_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
         return
     if _is_stale_turn_generation(task.turn_generation, current_generation):
         logger.debug(
@@ -2168,9 +2673,15 @@ async def _process_plan_update_task(
             task.turn_generation,
             current_generation,
         )
-        await _do_clear_plan_update_message(bot, user_id, tid)
+        await _do_clear_plan_update_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
         return
-    if (user_id, tid) in _pre_final_visible_closed:
+    if state_key in _pre_final_visible_closed:
         logger.debug(
             "Dropping plan update after final answer: user=%d window=%s thread=%s",
             user_id,
@@ -2181,17 +2692,23 @@ async def _process_plan_update_task(
 
     plan_text = task.text or ""
     if not plan_text:
-        await _do_clear_plan_update_message(bot, user_id, tid)
+        await _do_clear_plan_update_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
         return
 
-    pkey = (user_id, tid)
+    pkey = state_key
     current_info = _plan_update_msg_info.get(pkey)
     if current_info:
         msg_id, stored_wid, last_text = current_info
         if stored_wid == wid and last_text == plan_text:
             return
         if stored_wid == wid:
-            chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
+            chat_id = _task_chat_id(user_id, task)
             try:
                 await bot.edit_message_text(
                     chat_id=chat_id,
@@ -2233,7 +2750,16 @@ async def _process_plan_update_task(
                 except Exception:
                     _plan_update_msg_info.pop(pkey, None)
 
-    await _do_send_plan_update_message(bot, user_id, tid, wid, plan_text)
+    await _do_send_plan_update_message(
+        bot,
+        user_id,
+        tid,
+        wid,
+        plan_text,
+        chat_id=_task_chat_id(user_id, task),
+        state_chat_id=task.chat_id,
+        surface_key=task.surface_key,
+    )
 
 
 async def _do_send_plan_update_message(
@@ -2242,11 +2768,24 @@ async def _do_send_plan_update_message(
     thread_id_or_0: int,
     window_id: str,
     text: str,
+    *,
+    chat_id: int | None = None,
+    state_chat_id: int | None | object = _STATE_CHAT_UNSET,
+    surface_key: str | None = None,
 ) -> None:
     """Send a new dedicated plan artifact."""
-    pkey = (user_id, thread_id_or_0)
+    state_chat_for_key = (
+        chat_id if state_chat_id is _STATE_CHAT_UNSET else state_chat_id
+    )
+    pkey = _topic_state_key(
+        user_id,
+        thread_id_or_0,
+        chat_id=state_chat_for_key,
+        surface_key=surface_key,
+    )
     thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
-    chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+    if chat_id is None:
+        chat_id = session_manager.resolve_chat_id(user_id, thread_id)
     old = _plan_update_msg_info.pop(pkey, None)
     if old:
         try:
@@ -2291,29 +2830,41 @@ async def _process_pending_input_update_task(
     """
     wid = task.window_id or ""
     tid = task.thread_id or 0
-    if not await _is_task_binding_active(user_id, wid, task.thread_id):
+    pkey = _task_state_key(user_id, task)
+    if not await _is_task_binding_active(user_id, wid, task.thread_id, task.surface_key):
         logger.debug(
             "Dropping stale pending-input task: user=%d window=%s thread=%s",
             user_id,
             wid,
             task.thread_id,
         )
-        await _do_clear_pending_input_message(bot, user_id, tid)
+        await _do_clear_pending_input_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
         return
 
     pending_text = task.text or ""
     if not pending_text:
-        await _do_clear_pending_input_message(bot, user_id, tid)
+        await _do_clear_pending_input_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
         return
 
-    pkey = (user_id, tid)
     current_info = _pending_input_msg_info.get(pkey)
     if current_info:
         msg_id, stored_wid, last_text = current_info
         if stored_wid == wid and last_text == pending_text:
             return
         if stored_wid == wid:
-            chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
+            chat_id = _task_chat_id(user_id, task)
             try:
                 await bot.edit_message_text(
                     chat_id=chat_id,
@@ -2353,7 +2904,16 @@ async def _process_pending_input_update_task(
                 except Exception:
                     _pending_input_msg_info.pop(pkey, None)
 
-    await _do_send_pending_input_message(bot, user_id, tid, wid, pending_text)
+    await _do_send_pending_input_message(
+        bot,
+        user_id,
+        tid,
+        wid,
+        pending_text,
+        chat_id=_task_chat_id(user_id, task),
+        state_chat_id=task.chat_id,
+        surface_key=task.surface_key,
+    )
 
 
 def _render_ingress_receipt_text(text: str, status: str) -> str:
@@ -2382,15 +2942,14 @@ async def _process_ingress_receipt_task(
 ) -> None:
     """Send/edit a current-update receipt that is not pre-ACK user echo."""
     wid = task.window_id or ""
-    tid = task.thread_id or 0
     proof_id = task.proof_id or ""
     if not proof_id:
         return
-    if not await _is_task_binding_active(user_id, wid, task.thread_id):
+    if not await _is_task_binding_active(user_id, wid, task.thread_id, task.surface_key):
         _audit_task_delivery(
             action="suppress",
             user_id=user_id,
-            chat_id=session_manager.resolve_chat_id(user_id, task.thread_id),
+            chat_id=_task_chat_id(user_id, task),
             task=task,
             text=task.text or "",
             content_type="ingress_receipt",
@@ -2400,9 +2959,12 @@ async def _process_ingress_receipt_task(
         return
 
     text = _render_ingress_receipt_text(task.text or "", task.receipt_status)
-    rkey = (user_id, tid, proof_id)
+    rkey = (
+        *_task_state_key(user_id, task),
+        proof_id,
+    )
     current = _ingress_receipt_msg_info.get(rkey)
-    chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
+    chat_id = _task_chat_id(user_id, task)
     if task.receipt_status == "superseded":
         _ingress_receipt_superseded.add(rkey)
         if current:
@@ -2513,7 +3075,7 @@ async def _process_pending_input_clear_task(
     wid = task.window_id or ""
     tid = task.thread_id or 0
     if task.window_id and not await _is_task_binding_active(
-        user_id, wid, task.thread_id
+        user_id, wid, task.thread_id, task.surface_key
     ):
         logger.debug(
             "Dropping stale pending-input clear: user=%d window=%s thread=%s",
@@ -2522,7 +3084,13 @@ async def _process_pending_input_clear_task(
             task.thread_id,
         )
         return
-    await _do_clear_pending_input_message(bot, user_id, tid)
+    await _do_clear_pending_input_message(
+        bot,
+        user_id,
+        tid,
+        chat_id=task.chat_id,
+        surface_key=task.surface_key,
+    )
 
 
 async def _do_send_pending_input_message(
@@ -2531,11 +3099,21 @@ async def _do_send_pending_input_message(
     thread_id_or_0: int,
     window_id: str,
     text: str,
+    *,
+    chat_id: int | None = None,
+    state_chat_id: int | None | object = _STATE_CHAT_UNSET,
+    surface_key: str | None = None,
 ) -> None:
     """Send a new pending-input preview artifact."""
-    pkey = (user_id, thread_id_or_0)
+    pkey = _topic_state_key(
+        user_id,
+        thread_id_or_0,
+        chat_id=chat_id if state_chat_id is _STATE_CHAT_UNSET else state_chat_id,
+        surface_key=surface_key,
+    )
     thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
-    chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+    if chat_id is None:
+        chat_id = session_manager.resolve_chat_id(user_id, thread_id)
     old = _pending_input_msg_info.pop(pkey, None)
     if old:
         try:
@@ -2575,13 +3153,22 @@ async def _do_clear_status_message(
     bot: Bot,
     user_id: int,
     thread_id_or_0: int = 0,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> None:
     """Delete the status message for a user (internal, called from worker)."""
-    skey = (user_id, thread_id_or_0)
+    skey = _topic_state_key(
+        user_id,
+        thread_id_or_0,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
     info = _status_msg_info.pop(skey, None)
     if info:
         msg_id = info[0]
-        chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
+        if chat_id is None:
+            chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
         try:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
             log_telegram_delivery(
@@ -2618,16 +3205,25 @@ async def _do_clear_commentary_message(
     bot: Bot,
     user_id: int,
     thread_id_or_0: int = 0,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> None:
     """Delete the tracked commentary message for a user/topic."""
-    ckey = (user_id, thread_id_or_0)
+    ckey = _topic_state_key(
+        user_id,
+        thread_id_or_0,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
     info = _commentary_msg_info.pop(ckey, None)
     extra_ids = _commentary_extra_msg_ids.pop(ckey, ())
     if _latest_pre_final_visible_kind.get(ckey) == "commentary":
         _latest_pre_final_visible_kind.pop(ckey, None)
     if info:
         msg_id = info[0]
-        chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
+        if chat_id is None:
+            chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
         try:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
         except Exception as e:
@@ -2643,12 +3239,21 @@ async def _do_clear_plan_update_message(
     bot: Bot,
     user_id: int,
     thread_id_or_0: int = 0,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> None:
     """Delete the tracked plan update artifact for a user/topic."""
-    pkey = (user_id, thread_id_or_0)
+    pkey = _topic_state_key(
+        user_id,
+        thread_id_or_0,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
     info = _plan_update_msg_info.pop(pkey, None)
     if info:
-        chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
+        if chat_id is None:
+            chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
         try:
             await bot.delete_message(chat_id=chat_id, message_id=info[0])
             log_telegram_delivery(
@@ -2688,6 +3293,9 @@ async def _do_clear_image_preview_message(
     user_id: int,
     thread_id_or_0: int = 0,
     *,
+    chat_id: int | None = None,
+    state_chat_id: int | None | object = _STATE_CHAT_UNSET,
+    surface_key: str | None = None,
     info: ImagePreviewMessageInfo | None = None,
     reason: str = "clear_image_preview",
     schedule_retry: bool = True,
@@ -2697,6 +3305,9 @@ async def _do_clear_image_preview_message(
         bot,
         user_id,
         thread_id_or_0,
+        chat_id=chat_id,
+        state_chat_id=state_chat_id,
+        surface_key=surface_key,
         info=info,
         reason=reason,
         schedule_retry=schedule_retry,
@@ -2708,6 +3319,9 @@ async def _clear_image_preview_message_result(
     user_id: int,
     thread_id_or_0: int = 0,
     *,
+    chat_id: int | None = None,
+    state_chat_id: int | None | object = _STATE_CHAT_UNSET,
+    surface_key: str | None = None,
     info: ImagePreviewMessageInfo | None = None,
     reason: str = "clear_image_preview",
     schedule_retry: bool = True,
@@ -2717,26 +3331,42 @@ async def _clear_image_preview_message_result(
     Returns True when tracking is gone or the specific Telegram message is
     authoritatively gone. Returns False when cleanup debt remains.
     """
-    pkey = (user_id, thread_id_or_0)
+    state_chat_for_key = (
+        chat_id if state_chat_id is _STATE_CHAT_UNSET else state_chat_id
+    )
+    pkey = _topic_state_key(
+        user_id,
+        thread_id_or_0,
+        chat_id=state_chat_for_key,
+        surface_key=surface_key,
+    )
+    latest_key = pkey
     if info is None:
         info = _image_preview_msg_info.get(pkey)
     current_info = _image_preview_msg_info.get(pkey)
     owns_current_tracking = _image_preview_info_matches(current_info, info)
     if (
         owns_current_tracking
-        and _latest_pre_final_visible_kind.get(pkey) == IMAGE_PREVIEW_SEMANTIC_KIND
+        and _latest_pre_final_visible_kind.get(latest_key) == IMAGE_PREVIEW_SEMANTIC_KIND
     ):
-        _latest_pre_final_visible_kind.pop(pkey, None)
+        _latest_pre_final_visible_kind.pop(latest_key, None)
     if not info:
         return True
 
-    chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
+    if chat_id is None:
+        chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
     try:
         await bot.delete_message(chat_id=chat_id, message_id=info.message_id)
         if _image_preview_info_matches(_image_preview_msg_info.get(pkey), info):
             _image_preview_msg_info.pop(pkey, None)
         _discard_image_preview_retry_task(
-            _image_preview_retry_key(user_id, thread_id_or_0, info),
+            _image_preview_retry_key(
+                user_id,
+                thread_id_or_0,
+                info,
+                chat_id=state_chat_for_key,
+                surface_key=surface_key,
+            ),
             cancel=True,
         )
         log_telegram_delivery(
@@ -2778,6 +3408,9 @@ async def _clear_image_preview_message_result(
                 user_id,
                 thread_id_or_0,
                 info,
+                chat_id=chat_id,
+                state_chat_id=state_chat_for_key,
+                surface_key=surface_key,
                 delay_seconds=_retry_after_seconds(e),
             )
         return False
@@ -2787,7 +3420,13 @@ async def _clear_image_preview_message_result(
             if _image_preview_info_matches(_image_preview_msg_info.get(pkey), info):
                 _image_preview_msg_info.pop(pkey, None)
             _discard_image_preview_retry_task(
-                _image_preview_retry_key(user_id, thread_id_or_0, info),
+                _image_preview_retry_key(
+                    user_id,
+                    thread_id_or_0,
+                    info,
+                    chat_id=state_chat_for_key,
+                    surface_key=surface_key,
+                ),
                 cancel=True,
             )
         log_telegram_delivery(
@@ -2821,6 +3460,9 @@ async def _clear_image_preview_message_result(
                 user_id,
                 thread_id_or_0,
                 info,
+                chat_id=chat_id,
+                state_chat_id=state_chat_for_key,
+                surface_key=surface_key,
                 delay_seconds=1,
             )
         return False
@@ -2832,10 +3474,19 @@ def _schedule_image_preview_delete_retry(
     thread_id_or_0: int,
     info: ImagePreviewMessageInfo,
     *,
+    chat_id: int | None = None,
+    state_chat_id: int | None | object = _STATE_CHAT_UNSET,
+    surface_key: str | None = None,
     delay_seconds: int,
 ) -> None:
     """Schedule bounded cleanup debt for a concrete preview message."""
-    retry_key = _image_preview_retry_key(user_id, thread_id_or_0, info)
+    retry_key = _image_preview_retry_key(
+        user_id,
+        thread_id_or_0,
+        info,
+        chat_id=chat_id if state_chat_id is _STATE_CHAT_UNSET else state_chat_id,
+        surface_key=surface_key,
+    )
     existing = _image_preview_delete_retry_tasks.get(retry_key)
     if existing is not None and not existing.done():
         return
@@ -2846,6 +3497,9 @@ def _schedule_image_preview_delete_retry(
             user_id,
             thread_id_or_0,
             info,
+            chat_id=chat_id,
+            state_chat_id=state_chat_id,
+            surface_key=surface_key,
             initial_delay_seconds=delay,
         )
     )
@@ -2857,10 +3511,19 @@ async def _retry_image_preview_delete(
     thread_id_or_0: int,
     info: ImagePreviewMessageInfo,
     *,
+    chat_id: int | None = None,
+    state_chat_id: int | None | object = _STATE_CHAT_UNSET,
+    surface_key: str | None = None,
     initial_delay_seconds: int,
 ) -> None:
     """Retry preview deletion a bounded number of times without blocking queues."""
-    retry_key = _image_preview_retry_key(user_id, thread_id_or_0, info)
+    retry_key = _image_preview_retry_key(
+        user_id,
+        thread_id_or_0,
+        info,
+        chat_id=chat_id if state_chat_id is _STATE_CHAT_UNSET else state_chat_id,
+        surface_key=surface_key,
+    )
     delay = initial_delay_seconds
     try:
         for attempt in range(1, _IMAGE_PREVIEW_DELETE_RETRY_MAX_ATTEMPTS + 1):
@@ -2869,6 +3532,9 @@ async def _retry_image_preview_delete(
                 bot,
                 user_id,
                 thread_id_or_0,
+                chat_id=chat_id,
+                state_chat_id=state_chat_id,
+                surface_key=surface_key,
                 info=info,
                 reason=f"clear_image_preview_retry_{attempt}",
                 schedule_retry=False,
@@ -2882,7 +3548,11 @@ async def _retry_image_preview_delete(
         log_telegram_delivery(
             action="delete",
             user_id=user_id,
-            chat_id=session_manager.resolve_chat_id(user_id, thread_id_or_0 or None),
+            chat_id=(
+                chat_id
+                if chat_id is not None
+                else session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
+            ),
             thread_id=thread_id_or_0 or None,
             message_id=info.message_id,
             window_id=info.window_id,
@@ -2903,14 +3573,23 @@ async def _do_clear_pending_input_message(
     bot: Bot,
     user_id: int,
     thread_id_or_0: int = 0,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> None:
     """Delete the tracked pending-input preview message for a user/topic."""
-    pkey = (user_id, thread_id_or_0)
+    pkey = _topic_state_key(
+        user_id,
+        thread_id_or_0,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
     _pending_input_enqueued.pop(pkey, None)
     info = _pending_input_msg_info.pop(pkey, None)
     if info:
         msg_id = info[0]
-        chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
+        if chat_id is None:
+            chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
         try:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
         except Exception as e:
@@ -2923,14 +3602,27 @@ async def _check_and_send_status(
     window_id: str,
     thread_id: int | None = None,
     *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
     expected_turn_generation: int | None = None,
 ) -> None:
     """Check terminal for status line and send status message if present."""
     tid = thread_id or 0
-    if (user_id, tid) in _technical_status_closed:
+    state_key = _topic_state_key(
+        user_id,
+        tid,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
+    if state_key in _technical_status_closed:
         return
     if expected_turn_generation is not None:
-        current_generation = current_turn_generation(user_id, thread_id)
+        current_generation = current_turn_generation(
+            user_id,
+            thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        )
         if _is_stale_turn_generation(expected_turn_generation, current_generation):
             return
     # Skip if there are more messages pending in the queue
@@ -2948,10 +3640,23 @@ async def _check_and_send_status(
     status_line = parse_status_line(pane_text)
     if status_line:
         if expected_turn_generation is not None:
-            current_generation = current_turn_generation(user_id, thread_id)
+            current_generation = current_turn_generation(
+                user_id,
+                thread_id,
+                chat_id=chat_id,
+                surface_key=surface_key,
+            )
             if _is_stale_turn_generation(expected_turn_generation, current_generation):
                 return
-        await _do_send_status_message(bot, user_id, tid, window_id, status_line)
+        await _do_send_status_message(
+            bot,
+            user_id,
+            tid,
+            window_id,
+            status_line,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        )
 
 
 async def enqueue_content_message(
@@ -2964,6 +3669,8 @@ async def enqueue_content_message(
     semantic_kind: str = "",
     text: str | None = None,
     thread_id: int | None = None,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
     image_data: list[tuple[str, bytes]] | None = None,
     image_caption: str | None = None,
     document_data: list[tuple[str, str, bytes]] | None = None,
@@ -2989,6 +3696,8 @@ async def enqueue_content_message(
         semantic_kind=semantic_kind,
         warning_key=warning_key,
         thread_id=thread_id,
+        chat_id=chat_id,
+        surface_key=surface_key,
         image_data=image_data,
         image_caption=image_caption,
         document_data=document_data,
@@ -3003,6 +3712,8 @@ async def enqueue_status_update(
     window_id: str,
     status_text: str | None,
     thread_id: int | None = None,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
     turn_generation: int = 0,
 ) -> None:
     """Enqueue status update. Skipped if text unchanged or during flood control."""
@@ -3012,13 +3723,18 @@ async def enqueue_status_update(
         return
 
     tid = thread_id or 0
-    if status_text and (user_id, tid) in _technical_status_closed:
+    state_key = _topic_state_key(
+        user_id,
+        tid,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
+    if status_text and state_key in _technical_status_closed:
         return
 
     # Deduplicate: skip if text matches what's already displayed
     if status_text:
-        skey = (user_id, tid)
-        info = _status_msg_info.get(skey)
+        info = _status_msg_info.get(state_key)
         if info and info[1] == window_id and info[2] == status_text:
             return
 
@@ -3030,10 +3746,17 @@ async def enqueue_status_update(
             text=status_text,
             window_id=window_id,
             thread_id=thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
             turn_generation=turn_generation,
         )
     else:
-        task = MessageTask(task_type="status_clear", thread_id=thread_id)
+        task = MessageTask(
+            task_type="status_clear",
+            thread_id=thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        )
 
     queue.put_nowait(task)
 
@@ -3047,6 +3770,8 @@ async def enqueue_ingress_receipt(
     proof_id: str,
     receipt_status: str = "pending",
     thread_id: int | None = None,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> None:
     """Enqueue a high-priority Telegram ingress receipt/update.
 
@@ -3059,9 +3784,16 @@ async def enqueue_ingress_receipt(
         text=text,
         window_id=window_id,
         thread_id=thread_id,
+        chat_id=chat_id,
+        surface_key=surface_key,
         proof_id=proof_id,
         receipt_status=receipt_status,
-        turn_generation=current_turn_generation(user_id, thread_id),
+        turn_generation=current_turn_generation(
+            user_id,
+            thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        ),
     )
     lock = _queue_locks[user_id]
     tid = thread_id or 0
@@ -3071,6 +3803,12 @@ async def enqueue_ingress_receipt(
         for index, item in enumerate(items):
             if (
                 (item.thread_id or 0) == tid
+                and _task_matches_surface(
+                    item,
+                    tid,
+                    chat_id=chat_id,
+                    surface_key=surface_key,
+                )
                 and item.task_type == "content"
                 and item.semantic_kind == ASSISTANT_FINAL_SEMANTIC_KIND
             ):
@@ -3083,7 +3821,12 @@ async def enqueue_ingress_receipt(
         for item in suffix:
             if (
                 not placed
-                and (item.thread_id or 0) == tid
+                and _task_matches_surface(
+                    item,
+                    tid,
+                    chat_id=chat_id,
+                    surface_key=surface_key,
+                )
                 and item.task_type in _TECHNICAL_CHURN_TASK_TYPES
             ):
                 reordered.append(task)
@@ -3105,11 +3848,19 @@ async def enqueue_commentary_update(
     *,
     parts: list[str] | None = None,
     thread_id: int | None = None,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
     turn_generation: int = 0,
 ) -> None:
     """Enqueue latest-only commentary replacement for a topic."""
     tid = thread_id or 0
-    if commentary_text and (user_id, tid) in _pre_final_visible_closed:
+    state_key = _topic_state_key(
+        user_id,
+        tid,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
+    if commentary_text and state_key in _pre_final_visible_closed:
         return
 
     queue = get_or_create_queue(bot, user_id)
@@ -3121,10 +3872,17 @@ async def enqueue_commentary_update(
             parts=list(parts or []),
             window_id=window_id,
             thread_id=thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
             turn_generation=turn_generation,
         )
     else:
-        task = MessageTask(task_type="commentary_clear", thread_id=thread_id)
+        task = MessageTask(
+            task_type="commentary_clear",
+            thread_id=thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        )
 
     queue.put_nowait(task)
 
@@ -3135,11 +3893,19 @@ async def enqueue_plan_update(
     window_id: str,
     plan_text: str | None,
     thread_id: int | None = None,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
     turn_generation: int = 0,
 ) -> None:
     """Enqueue a dedicated mutable Codex plan update artifact."""
     tid = thread_id or 0
-    if plan_text and (user_id, tid) in _pre_final_visible_closed:
+    state_key = _topic_state_key(
+        user_id,
+        tid,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
+    if plan_text and state_key in _pre_final_visible_closed:
         return
 
     queue = get_or_create_queue(bot, user_id)
@@ -3149,6 +3915,8 @@ async def enqueue_plan_update(
             text=plan_text,
             window_id=window_id,
             thread_id=thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
             turn_generation=turn_generation,
         )
     else:
@@ -3156,6 +3924,8 @@ async def enqueue_plan_update(
             task_type="plan_clear",
             window_id=window_id,
             thread_id=thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
             turn_generation=turn_generation,
         )
     queue.put_nowait(task)
@@ -3167,11 +3937,18 @@ async def enqueue_pending_input_update(
     window_id: str,
     pending_input_text: str | None,
     thread_id: int | None = None,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
     turn_generation: int = 0,
 ) -> None:
     """Enqueue a dedicated pending-input preview artifact update."""
     tid = thread_id or 0
-    pkey = (user_id, tid)
+    pkey = _topic_state_key(
+        user_id,
+        tid,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
     flood_end = _flood_until.get(user_id, 0)
     if flood_end > time.monotonic():
         # Non-content updates are dropped during flood control; do not pin dedupe
@@ -3196,6 +3973,8 @@ async def enqueue_pending_input_update(
             text=pending_input_text,
             window_id=window_id,
             thread_id=thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
             turn_generation=turn_generation,
         )
     else:
@@ -3203,6 +3982,8 @@ async def enqueue_pending_input_update(
             task_type="pending_input_clear",
             window_id=window_id,
             thread_id=thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
             turn_generation=turn_generation,
         )
 
@@ -3244,17 +4025,37 @@ async def enqueue_pre_final_close(
 def _mark_pre_final_visible_closed(
     user_id: int,
     thread_id: int | None = None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> None:
     """Prevent visible pre-final artifacts from surfacing until the next user turn."""
-    _pre_final_visible_closed.add((user_id, thread_id or 0))
+    _pre_final_visible_closed.add(
+        _topic_state_key(
+            user_id,
+            thread_id or 0,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        )
+    )
 
 
 def _mark_technical_status_closed(
     user_id: int,
     thread_id: int | None = None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> None:
     """Prevent technical status artifacts from surfacing until the next user turn."""
-    _technical_status_closed.add((user_id, thread_id or 0))
+    _technical_status_closed.add(
+        _topic_state_key(
+            user_id,
+            thread_id or 0,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        )
+    )
 
 
 def _mark_commentary_closed(
@@ -3269,11 +4070,20 @@ def _mark_commentary_closed(
 def reopen_pre_final_visible_lane(
     user_id: int,
     thread_id: int | None = None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> None:
     """Allow visible pre-final artifacts to surface again for the next turn."""
-    _pre_final_visible_closed.discard((user_id, thread_id or 0))
-    _technical_status_closed.discard((user_id, thread_id or 0))
-    _latest_pre_final_visible_kind.pop((user_id, thread_id or 0), None)
+    key = _topic_state_key(
+        user_id,
+        thread_id or 0,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
+    _pre_final_visible_closed.discard(key)
+    _technical_status_closed.discard(key)
+    _latest_pre_final_visible_kind.pop(key, None)
 
 
 def reopen_commentary_lane(
@@ -3288,47 +4098,94 @@ def clear_pre_final_visible_lane_state(
     user_id: int,
     thread_id: int | None = None,
     *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
     forget_image_preview: bool = True,
 ) -> None:
     """Clear pre-final artifact visibility state for a topic during teardown."""
-    key = (user_id, thread_id or 0)
+    legacy_key = (user_id, thread_id or 0)
+    key = _topic_state_key(
+        user_id,
+        thread_id or 0,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
     _pre_final_visible_closed.discard(key)
     _technical_status_closed.discard(key)
     _turn_generations.pop(key, None)
     _latest_pre_final_visible_kind.pop(key, None)
     _pending_input_enqueued.pop(key, None)
+    _pending_input_enqueued.pop(legacy_key, None)
     _plan_update_msg_info.pop(key, None)
     if forget_image_preview:
         _image_preview_msg_info.pop(key, None)
-        _discard_image_preview_retry_tasks_for_topic(user_id, thread_id or 0)
+        _image_preview_msg_info.pop(legacy_key, None)
+        _discard_image_preview_retry_tasks_for_topic(
+            user_id,
+            thread_id or 0,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        )
 
 
 def is_pre_final_visible_lane_closed(
     user_id: int,
     thread_id: int | None = None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> bool:
     """Return True when pre-final/status lanes are closed for this topic."""
-    key = (user_id, thread_id or 0)
+    key = _topic_state_key(
+        user_id,
+        thread_id or 0,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
     return key in _pre_final_visible_closed or key in _technical_status_closed
 
 
 def current_turn_generation(
     user_id: int,
     thread_id: int | None = None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> int:
     """Return the current turn generation for a topic."""
-    return _turn_generations.get((user_id, thread_id or 0), 0)
+    return _turn_generations.get(
+        _topic_state_key(
+            user_id,
+            thread_id or 0,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        ),
+        0,
+    )
 
 
 def open_new_turn_generation(
     user_id: int,
     thread_id: int | None = None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> int:
     """Advance to the next turn generation and reopen the terminal surface."""
-    key = (user_id, thread_id or 0)
+    key = _topic_state_key(
+        user_id,
+        thread_id or 0,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
     generation = _turn_generations.get(key, 0) + 1
     _turn_generations[key] = generation
-    reopen_pre_final_visible_lane(user_id, thread_id)
+    reopen_pre_final_visible_lane(
+        user_id,
+        thread_id,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
     # Plan artifacts are latest-only within one assistant turn. Reusing an old
     # plan bubble across a new user turn edits history above the current chat
     # tail, making the plan appear missing even though Telegram accepted the
@@ -3343,7 +4200,7 @@ def clear_commentary_lane_state(
     thread_id: int | None = None,
 ) -> None:
     """Clear tracked commentary plus the shared pre-final visible lane state."""
-    key = (user_id, thread_id or 0)
+    key = _topic_state_key(user_id, thread_id or 0)
     clear_pre_final_visible_lane_state(user_id, thread_id)
     _commentary_msg_info.pop(key, None)
     _commentary_extra_msg_ids.pop(key, None)
@@ -3351,7 +4208,7 @@ def clear_commentary_lane_state(
 
 def clear_status_msg_info(user_id: int, thread_id: int | None = None) -> None:
     """Clear status message tracking for a user (and optionally a specific thread)."""
-    skey = (user_id, thread_id or 0)
+    skey = _topic_state_key(user_id, thread_id or 0)
     _status_msg_info.pop(skey, None)
 
 
@@ -3374,8 +4231,9 @@ async def clear_commentary_message(
 ) -> None:
     """Delete any tracked commentary message for a topic when a bot handle exists."""
     if bot is None:
-        _commentary_msg_info.pop((user_id, thread_id or 0), None)
-        _commentary_extra_msg_ids.pop((user_id, thread_id or 0), None)
+        key = _topic_state_key(user_id, thread_id or 0)
+        _commentary_msg_info.pop(key, None)
+        _commentary_extra_msg_ids.pop(key, None)
         return
     await _do_clear_commentary_message(bot, user_id, thread_id or 0)
 
@@ -3387,7 +4245,7 @@ async def clear_plan_update_message(
 ) -> None:
     """Delete any tracked plan update artifact for a topic when a bot handle exists."""
     if bot is None:
-        _plan_update_msg_info.pop((user_id, thread_id or 0), None)
+        _plan_update_msg_info.pop(_topic_state_key(user_id, thread_id or 0), None)
         return
     await _do_clear_plan_update_message(bot, user_id, thread_id or 0)
 
@@ -3396,19 +4254,42 @@ async def clear_image_preview_message(
     bot: Bot | None,
     user_id: int,
     thread_id: int | None = None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> bool:
     """Delete any tracked image-preview progress bubble when a bot handle exists."""
+    key = _topic_state_key(
+        user_id,
+        thread_id or 0,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
     if bot is None:
-        _image_preview_msg_info.pop((user_id, thread_id or 0), None)
-        _discard_image_preview_retry_tasks_for_topic(user_id, thread_id or 0)
+        _image_preview_msg_info.pop(key, None)
+        _discard_image_preview_retry_tasks_for_topic(
+            user_id,
+            thread_id or 0,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        )
         return True
-    return await _clear_image_preview_message_result(bot, user_id, thread_id or 0)
+    return await _clear_image_preview_message_result(
+        bot,
+        user_id,
+        thread_id or 0,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
 
 
 async def open_new_turn_generation_with_cleanup(
     bot: Bot | None,
     user_id: int,
     thread_id: int | None = None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> int:
     """Advance turn generation after clearing live pre-final image preview media.
 
@@ -3418,13 +4299,26 @@ async def open_new_turn_generation_with_cleanup(
     handle available.
     """
     thread_id_or_0 = thread_id or 0
-    old_info = _image_preview_msg_info.get((user_id, thread_id_or_0))
-    generation = open_new_turn_generation(user_id, thread_id)
+    preview_key = _topic_state_key(
+        user_id,
+        thread_id_or_0,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
+    old_info = _image_preview_msg_info.get(preview_key)
+    generation = open_new_turn_generation(
+        user_id,
+        thread_id,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
     if bot is not None and old_info is not None:
         await _clear_image_preview_message_result(
             bot,
             user_id,
             thread_id_or_0,
+            chat_id=chat_id,
+            surface_key=surface_key,
             info=old_info,
         )
     return generation
@@ -3434,14 +4328,28 @@ async def clear_pending_input_message(
     bot: Bot | None,
     user_id: int,
     thread_id: int | None = None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> None:
     """Delete any tracked pending-input preview for a topic when a bot handle exists."""
+    pkey = _topic_state_key(
+        user_id,
+        thread_id or 0,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
     if bot is None:
-        pkey = (user_id, thread_id or 0)
         _pending_input_msg_info.pop(pkey, None)
         _pending_input_enqueued.pop(pkey, None)
         return
-    await _do_clear_pending_input_message(bot, user_id, thread_id or 0)
+    await _do_clear_pending_input_message(
+        bot,
+        user_id,
+        thread_id or 0,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
 
 
 def clear_tool_msg_ids_for_topic(user_id: int, thread_id: int | None = None) -> None:

@@ -105,7 +105,7 @@ CODEX_DELIVERED_NO_ACK_MESSAGE = (
 CODEX_DELIVERED_NO_ACK_MATCH_SECONDS = 10 * 60
 _SHELL_COMMAND_NAMES = {"bash", "dash", "fish", "sh", "zsh"}
 _CODEX_ROLLOUT_THREAD_RE = re.compile(
-    r"rollout-[^/]*?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\\.jsonl$",
+    r"rollout-[^/]*?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$",
     re.IGNORECASE,
 )
 
@@ -204,7 +204,10 @@ def _codex_has_live_input_plane(
     """Return True when a Codex-bound tmux pane still has a live input plane."""
     surface = classify_input_surface(pane_text or "")
 
-    if runtime_capability_registry.known_runtime_kind_from_command(pane_command) == "codex":
+    if (
+        runtime_capability_registry.known_runtime_kind_from_command(pane_command)
+        == "codex"
+    ):
         return True
 
     command_name = _command_basename(pane_command)
@@ -521,7 +524,8 @@ class SessionManager:
         state: dict[str, Any] = {
             "schema_version": config.state_schema_version,
             "runtime_kind": infer_runtime_kind(
-                window_state.runtime_kind for window_state in self.window_states.values()
+                window_state.runtime_kind
+                for window_state in self.window_states.values()
             ),
             "window_states": {k: v.to_dict() for k, v in self.window_states.items()},
             "user_window_offsets": {
@@ -540,15 +544,22 @@ class SessionManager:
                 for uid, bindings in self.external_surface_bindings.items()
             },
             SURFACE_POLICIES_KEY: {
-                str(uid): {surface_key: policy for surface_key, policy in policies.items()}
+                str(uid): {
+                    surface_key: policy for surface_key, policy in policies.items()
+                }
                 for uid, policies in self.surface_policies.items()
             },
             SURFACE_BINDING_STATES_KEY: {
-                str(uid): {surface_key: binding_state for surface_key, binding_state in states.items()}
+                str(uid): {
+                    surface_key: binding_state
+                    for surface_key, binding_state in states.items()
+                }
                 for uid, states in self.surface_binding_states.items()
             },
             SURFACE_BIND_FLOW_VERSIONS_KEY: {
-                str(uid): {surface_key: version for surface_key, version in versions.items()}
+                str(uid): {
+                    surface_key: version for surface_key, version in versions.items()
+                }
                 for uid, versions in self.surface_bind_flow_versions.items()
             },
             SURFACE_BIND_FLOW_NONCES_KEY: {
@@ -560,7 +571,9 @@ class SessionManager:
                     surface_key: normalized_pending.to_dict()
                     for surface_key, pending in pending_slots.items()
                     if (
-                        normalized_pending := self._normalize_pending_slot_record(pending)
+                        normalized_pending := self._normalize_pending_slot_record(
+                            pending
+                        )
                     )
                     is not None
                 }
@@ -610,7 +623,9 @@ class SessionManager:
         return key.startswith("@") and len(key) > 1 and key[1:].isdigit()
 
     @staticmethod
-    def make_external_binding_window_id(runtime_kind: str, source_thread_id: str) -> str:
+    def make_external_binding_window_id(
+        runtime_kind: str, source_thread_id: str
+    ) -> str:
         """Build a synthetic window key for external non-tmux binds."""
         safe_runtime = (runtime_kind or "codex").strip() or "codex"
         safe_thread = source_thread_id.strip()
@@ -643,9 +658,9 @@ class SessionManager:
         chat_id: int | None = None,
     ) -> str:
         """Build the canonical persisted key for a control surface."""
-        if thread_id is not None and chat_id is not None:
-            raise ValueError("surface key requires exactly one of thread_id or chat_id")
         if thread_id is not None:
+            if chat_id is not None:
+                return f"{TOPIC_SURFACE_PREFIX}{int(chat_id)}:{int(thread_id)}"
             return f"{TOPIC_SURFACE_PREFIX}{int(thread_id)}"
         if chat_id is not None:
             return f"{CHAT_SURFACE_PREFIX}{int(chat_id)}"
@@ -674,19 +689,28 @@ class SessionManager:
         raise ValueError("surface title key requires thread_id or chat_id")
 
     @staticmethod
-    def _parse_surface_key(surface_key: str) -> tuple[str, int] | None:
-        """Parse a persisted surface key into (kind, numeric id)."""
+    def _parse_surface_key(
+        surface_key: str,
+    ) -> tuple[str, int | None, int | None] | None:
+        """Parse a persisted surface key into (kind, chat_id, thread_id)."""
         if surface_key.startswith(TOPIC_SURFACE_PREFIX):
             payload = surface_key[len(TOPIC_SURFACE_PREFIX) :]
-            kind = "topic"
+            parts = payload.split(":")
+            try:
+                if len(parts) == 1:
+                    return "topic", None, int(parts[0])
+                if len(parts) == 2:
+                    return "topic", int(parts[0]), int(parts[1])
+            except (TypeError, ValueError):
+                return None
+            return None
         elif surface_key.startswith(CHAT_SURFACE_PREFIX):
             payload = surface_key[len(CHAT_SURFACE_PREFIX) :]
-            kind = "chat"
+            try:
+                return "chat", int(payload), None
+            except (TypeError, ValueError):
+                return None
         else:
-            return None
-        try:
-            return kind, int(payload)
-        except (TypeError, ValueError):
             return None
 
     @staticmethod
@@ -719,7 +743,30 @@ class SessionManager:
         parsed = cls._parse_surface_key(surface_key)
         if parsed is None or parsed[0] != "topic":
             return None
-        return parsed[1]
+        return parsed[2]
+
+    @classmethod
+    def _legacy_topic_surface_key(cls, surface_key: str) -> str | None:
+        parsed = cls._parse_surface_key(surface_key)
+        if parsed is None:
+            return None
+        kind, chat_id, thread_id = parsed
+        if kind != "topic" or chat_id is None or thread_id is None:
+            return None
+        return cls.make_surface_key(thread_id=thread_id)
+
+    def _legacy_topic_surface_matches_chat(
+        self,
+        user_id: int,
+        surface_key: str,
+    ) -> bool:
+        parsed = self._parse_surface_key(surface_key)
+        if parsed is None:
+            return False
+        kind, chat_id, thread_id = parsed
+        if kind != "topic" or chat_id is None or thread_id is None:
+            return False
+        return self.resolve_chat_id(user_id, thread_id) == chat_id
 
     def _resolve_surface_key(
         self,
@@ -733,9 +780,10 @@ class SessionManager:
             parsed = self._parse_surface_key(surface_key)
             if parsed is None:
                 raise ValueError(f"invalid surface key: {surface_key!r}")
+            kind, parsed_chat_id, parsed_thread_id = parsed
             return self.make_surface_key(
-                thread_id=parsed[1] if parsed[0] == "topic" else None,
-                chat_id=parsed[1] if parsed[0] == "chat" else None,
+                thread_id=parsed_thread_id if kind == "topic" else None,
+                chat_id=parsed_chat_id,
             )
         return self.make_surface_key(thread_id=thread_id, chat_id=chat_id)
 
@@ -767,7 +815,9 @@ class SessionManager:
                     thread_id=parsed_thread_id,
                 )
             return self.make_surface_title_key(chat_id=parsed_chat_id)
-        raise ValueError("surface title key requires surface_key, thread_id, or chat_id")
+        raise ValueError(
+            "surface title key requires surface_key, thread_id, or chat_id"
+        )
 
     @classmethod
     def _normalize_surface_map(cls, raw: Any) -> dict[int, dict[str, Any]]:
@@ -793,7 +843,9 @@ class SessionManager:
         return normalized
 
     @staticmethod
-    def _prune_empty_surface_entry(store: dict[int, dict[str, Any]], user_id: int) -> None:
+    def _prune_empty_surface_entry(
+        store: dict[int, dict[str, Any]], user_id: int
+    ) -> None:
         if user_id in store and not store[user_id]:
             store.pop(user_id, None)
 
@@ -803,10 +855,10 @@ class SessionManager:
         parsed = cls._parse_surface_key(raw_key)
         if parsed is None:
             return None
-        kind, numeric_id = parsed
+        kind, chat_id, thread_id = parsed
         if kind == "topic":
-            return cls.make_surface_key(thread_id=numeric_id)
-        return cls.make_surface_key(chat_id=numeric_id)
+            return cls.make_surface_key(thread_id=thread_id, chat_id=chat_id)
+        return cls.make_surface_key(chat_id=chat_id)
 
     @classmethod
     def _normalize_surface_title_key(cls, surface_key: Any) -> str | None:
@@ -883,35 +935,45 @@ class SessionManager:
                 thread_id = self._topic_thread_id_from_surface_key(surface_key)
                 if thread_id is None or not isinstance(metadata, dict):
                     continue
-                external_topic_bindings.setdefault(user_id, {})[thread_id] = dict(metadata)
+                external_topic_bindings.setdefault(user_id, {})[thread_id] = dict(
+                    metadata
+                )
 
         for user_id, policies in self.surface_policies.items():
             for surface_key, policy in policies.items():
                 thread_id = self._topic_thread_id_from_surface_key(surface_key)
                 if thread_id is None:
                     continue
-                topic_policies.setdefault(user_id, {})[thread_id] = normalize_topic_policy(policy)
+                topic_policies.setdefault(user_id, {})[thread_id] = (
+                    normalize_topic_policy(policy)
+                )
 
         for user_id, states in self.surface_binding_states.items():
             for surface_key, binding_state in states.items():
                 thread_id = self._topic_thread_id_from_surface_key(surface_key)
                 if thread_id is None:
                     continue
-                topic_binding_states.setdefault(user_id, {})[thread_id] = normalize_binding_state(binding_state)
+                topic_binding_states.setdefault(user_id, {})[thread_id] = (
+                    normalize_binding_state(binding_state)
+                )
 
         for user_id, versions in self.surface_bind_flow_versions.items():
             for surface_key, version in versions.items():
                 thread_id = self._topic_thread_id_from_surface_key(surface_key)
                 if thread_id is None:
                     continue
-                topic_bind_flow_versions.setdefault(user_id, {})[thread_id] = normalize_bind_flow_version(version)
+                topic_bind_flow_versions.setdefault(user_id, {})[thread_id] = (
+                    normalize_bind_flow_version(version)
+                )
 
         for user_id, nonces in self.surface_bind_flow_nonces.items():
             for surface_key, nonce in nonces.items():
                 thread_id = self._topic_thread_id_from_surface_key(surface_key)
                 if thread_id is None:
                     continue
-                topic_bind_flow_nonces.setdefault(user_id, {})[thread_id] = normalize_bind_flow_nonce(nonce)
+                topic_bind_flow_nonces.setdefault(user_id, {})[thread_id] = (
+                    normalize_bind_flow_nonce(nonce)
+                )
 
         changed = (
             self.thread_bindings != thread_bindings
@@ -930,7 +992,9 @@ class SessionManager:
         self.topic_bind_flow_nonces = topic_bind_flow_nonces
         return changed
 
-    def _merge_legacy_topic_state_into_surface(self, *, overwrite: bool = False) -> bool:
+    def _merge_legacy_topic_state_into_surface(
+        self, *, overwrite: bool = False
+    ) -> bool:
         """Merge legacy topic-keyed state into canonical surface maps."""
         changed = False
 
@@ -947,7 +1011,9 @@ class SessionManager:
             target = self.external_surface_bindings.setdefault(user_id, {})
             for thread_id, metadata in bindings.items():
                 surface_key = self.make_surface_key(thread_id=thread_id)
-                normalized_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+                normalized_metadata = (
+                    dict(metadata) if isinstance(metadata, dict) else {}
+                )
                 if overwrite or surface_key not in target:
                     if target.get(surface_key) != normalized_metadata:
                         target[surface_key] = normalized_metadata
@@ -1404,9 +1470,8 @@ class SessionManager:
                     new_bindings[tid] = val
                     parsed = self.parse_external_binding_window_id(val)
                     runtime_kind = (
-                        (parsed[0] if parsed is not None else config.default_runtime_kind)
-                        or config.default_runtime_kind
-                    )
+                        parsed[0] if parsed is not None else config.default_runtime_kind
+                    ) or config.default_runtime_kind
                     source_thread_id = parsed[1] if parsed is not None else ""
                     external = self.external_topic_bindings.setdefault(uid, {})
                     meta = external.get(tid)
@@ -1780,6 +1845,7 @@ class SessionManager:
                 legacy_keys_seen = True
             if (
                 (new_sid and state.thread_id != new_sid)
+                or (new_sid and state.requires_live_proof)
                 or state.cwd != new_cwd
                 or state.runtime_kind != new_runtime_kind
             ):
@@ -1792,6 +1858,7 @@ class SessionManager:
                 )
                 if new_sid:
                     state.thread_id = new_sid
+                    state.requires_live_proof = False
                 state.cwd = new_cwd
                 state.runtime_kind = new_runtime_kind
                 changed = True
@@ -1860,6 +1927,7 @@ class SessionManager:
             state.runtime_kind = runtime_kind
         state.registered_at = time.time()
         state.thread_id = thread_id
+        state.requires_live_proof = state.runtime_kind == "codex" and not thread_id
         self._save_state()
         return state
 
@@ -1946,9 +2014,10 @@ class SessionManager:
             pane_pid=pane_pid,
             cwd=live_cwd or state.cwd,
         )
-        if (
-            live_codex_candidate is not None
-            and state.thread_id != live_codex_candidate.thread_id
+        if live_codex_candidate is not None and (
+            state.thread_id != live_codex_candidate.thread_id
+            or state.requires_live_proof
+            or normalize_cwd(state.cwd) != live_codex_candidate.normalized_cwd
         ):
             old_thread_id = state.thread_id
             old_cwd = state.cwd
@@ -1956,6 +2025,7 @@ class SessionManager:
             state.cwd = live_codex_candidate.cwd
             if not state.runtime_kind:
                 state.runtime_kind = "codex"
+            state.requires_live_proof = False
             state.registered_at = time.time()
             logger.info(
                 "Adopted live Codex thread for window %s from process fd proof: "
@@ -1984,46 +2054,57 @@ class SessionManager:
         changed = True
 
         if state.runtime_kind == "codex" and self.codex_thread_catalog is not None:
-            try:
-                self.codex_thread_catalog.refresh()
-                candidates = sorted(
-                    self.codex_thread_catalog.list_candidates_for_cwd(live_cwd),
-                    key=lambda candidate: (
-                        candidate.mtime,
-                        candidate.ordering_timestamp,
-                        candidate.thread_id,
-                    ),
-                    reverse=True,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Unable to resolve live Codex thread for cwd drift on %s: %s",
-                    window_id,
-                    exc,
-                )
-                candidates = []
-            if candidates:
-                selected = candidates[0]
-                state.thread_id = selected.thread_id
+            if state.requires_live_proof:
+                state.thread_id = ""
                 logger.info(
-                    "Adopted live Codex thread for window %s after cwd drift: "
-                    "%s (%s) -> %s (%s)",
+                    "Kept fresh Codex window %s replay-silent after cwd drift "
+                    "without fd proof: %s (%s) -> <proof-required> (%s)",
                     window_id,
                     old_thread_id or "<none>",
                     old_cwd or "<none>",
-                    selected.thread_id,
                     live_cwd,
                 )
             else:
-                state.thread_id = ""
-                logger.info(
-                    "Cleared thread for window %s after cwd drift without "
-                    "matching Codex rollout: %s (%s) -> <none> (%s)",
-                    window_id,
-                    old_thread_id or "<none>",
-                    old_cwd or "<none>",
-                    live_cwd,
-                )
+                try:
+                    self.codex_thread_catalog.refresh()
+                    candidates = sorted(
+                        self.codex_thread_catalog.list_candidates_for_cwd(live_cwd),
+                        key=lambda candidate: (
+                            candidate.mtime,
+                            candidate.ordering_timestamp,
+                            candidate.thread_id,
+                        ),
+                        reverse=True,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Unable to resolve live Codex thread for cwd drift on %s: %s",
+                        window_id,
+                        exc,
+                    )
+                    candidates = []
+                if candidates:
+                    selected = candidates[0]
+                    state.thread_id = selected.thread_id
+                    logger.info(
+                        "Adopted live Codex thread for window %s after cwd drift: "
+                        "%s (%s) -> %s (%s)",
+                        window_id,
+                        old_thread_id or "<none>",
+                        old_cwd or "<none>",
+                        selected.thread_id,
+                        live_cwd,
+                    )
+                else:
+                    state.thread_id = ""
+                    logger.info(
+                        "Cleared thread for window %s after cwd drift without "
+                        "matching Codex rollout: %s (%s) -> <none> (%s)",
+                        window_id,
+                        old_thread_id or "<none>",
+                        old_cwd or "<none>",
+                        live_cwd,
+                    )
         elif old_thread_id:
             state.thread_id = ""
             logger.info(
@@ -2146,7 +2227,9 @@ class SessionManager:
         ):
             return False
         try:
-            return bool(self.codex_thread_catalog.is_helper_thread_fast(state.thread_id))
+            return bool(
+                self.codex_thread_catalog.is_helper_thread_fast(state.thread_id)
+            )
         except Exception as exc:
             logger.warning(
                 "Unable to classify Codex helper window %s (%s): %s",
@@ -2223,7 +2306,7 @@ class SessionManager:
                     self._prune_empty_surface_entry(
                         self.external_surface_bindings,
                         user_id,
-                )
+                    )
                 changed = True
                 logger.warning(
                     "Removed binding from surface %s to inactive/helper window %s for user %d",
@@ -2578,10 +2661,13 @@ class SessionManager:
             for surface_key, bound_window_id in bindings.items():
                 if bound_window_id != window_id:
                     continue
-                metadata = self.get_external_surface_binding(
-                    user_id,
-                    surface_key=surface_key,
-                ) or {}
+                metadata = (
+                    self.get_external_surface_binding(
+                        user_id,
+                        surface_key=surface_key,
+                    )
+                    or {}
+                )
                 return user_id, surface_key, dict(metadata)
         return None
 
@@ -2598,10 +2684,10 @@ class SessionManager:
             parsed = self._parse_surface_key(surface_key)
             if parsed is None:
                 return surface_key, None, None
-            kind, numeric_id = parsed
+            kind, chat_id, thread_id = parsed
             if kind == "chat":
-                return surface_key, numeric_id, None
-            return surface_key, None, numeric_id
+                return surface_key, chat_id, None
+            return surface_key, chat_id, thread_id
         return None, None, None
 
     async def _resolve_external_thread_for_window(
@@ -2624,7 +2710,9 @@ class SessionManager:
             str(metadata.get("source_thread_id") or parsed_thread_id).strip()
             or parsed_thread_id
         )
-        summary = str(metadata.get("summary") or source_thread_id).strip() or source_thread_id
+        summary = (
+            str(metadata.get("summary") or source_thread_id).strip() or source_thread_id
+        )
         cwd = str(metadata.get("cwd") or "").strip()
         file_path = str(metadata.get("file_path") or "").strip()
         message_count = 0
@@ -2697,8 +2785,17 @@ class SessionManager:
             capability.replay_evidence_discovery == "rollout_jsonl"
             and self.codex_thread_catalog is not None
         ):
+            if state.requires_live_proof and state.registered_at > 0:
+                return CodexThreadResolution(
+                    status="ambiguous",
+                    selected=None,
+                    candidates=(),
+                    reason="live_process_rollout_proof_required",
+                )
             if state.thread_id:
-                candidate = self.codex_thread_catalog.get_candidate_fast(state.thread_id)
+                candidate = self.codex_thread_catalog.get_candidate_fast(
+                    state.thread_id
+                )
                 if candidate is not None:
                     return CodexThreadResolution(
                         status="selected",
@@ -2724,9 +2821,11 @@ class SessionManager:
                         reason="parallel_live_window_same_cwd",
                     )
             if state.registered_at > 0:
-                recent_resolution = self.codex_thread_catalog.resolve_recent_for_registration(
-                    cwd=state.cwd,
-                    registered_at=state.registered_at,
+                recent_resolution = (
+                    self.codex_thread_catalog.resolve_recent_for_registration(
+                        cwd=state.cwd,
+                        registered_at=state.registered_at,
+                    )
                 )
                 if recent_resolution.status != "not_found":
                     return recent_resolution
@@ -2913,6 +3012,13 @@ class SessionManager:
         if not bindings:
             return None
         window_id = bindings.get(resolved_surface_key)
+        if window_id is None:
+            legacy_surface_key = self._legacy_topic_surface_key(resolved_surface_key)
+            if legacy_surface_key and self._legacy_topic_surface_matches_chat(
+                user_id,
+                resolved_surface_key,
+            ):
+                window_id = bindings.get(legacy_surface_key)
         if window_id and self._is_inactive_or_helper_tmux_binding(window_id):
             return None
         return window_id
@@ -2951,6 +3057,13 @@ class SessionManager:
         if not bindings:
             return None
         binding = bindings.get(resolved_surface_key)
+        if binding is None:
+            legacy_surface_key = self._legacy_topic_surface_key(resolved_surface_key)
+            if legacy_surface_key and self._legacy_topic_surface_matches_chat(
+                user_id,
+                resolved_surface_key,
+            ):
+                binding = bindings.get(legacy_surface_key)
         if not isinstance(binding, dict):
             return None
         return dict(binding)
@@ -2983,7 +3096,9 @@ class SessionManager:
         states[resolved_surface_key] = BINDING_STATE_BOUND
         policies = self.surface_policies.setdefault(user_id, {})
         policies.setdefault(resolved_surface_key, TOPIC_POLICY_IMPLICIT_BIND_ALLOWED)
-        self._rotate_surface_bind_flow_credentials(user_id, surface_key=resolved_surface_key)
+        self._rotate_surface_bind_flow_credentials(
+            user_id, surface_key=resolved_surface_key
+        )
         if window_name:
             self.window_display_names[window_id] = window_name
         self._sync_legacy_topic_views_from_surface()
@@ -3021,7 +3136,9 @@ class SessionManager:
             runtime_kind,
             source_thread_id,
         )
-        self.surface_bindings.setdefault(user_id, {})[resolved_surface_key] = binding_window_id
+        self.surface_bindings.setdefault(user_id, {})[resolved_surface_key] = (
+            binding_window_id
+        )
         self.external_surface_bindings.setdefault(user_id, {})[resolved_surface_key] = {
             "runtime_kind": runtime_kind,
             "source_thread_id": source_thread_id,
@@ -3039,7 +3156,9 @@ class SessionManager:
             resolved_surface_key,
             TOPIC_POLICY_IMPLICIT_BIND_ALLOWED,
         )
-        self._rotate_surface_bind_flow_credentials(user_id, surface_key=resolved_surface_key)
+        self._rotate_surface_bind_flow_credentials(
+            user_id, surface_key=resolved_surface_key
+        )
         self._sync_legacy_topic_views_from_surface()
         self._save_state()
         logger.info(
@@ -3066,12 +3185,14 @@ class SessionManager:
             thread_id=thread_id,
             chat_id=chat_id,
         )
-        self._rotate_surface_bind_flow_credentials(user_id, surface_key=resolved_surface_key)
+        self._rotate_surface_bind_flow_credentials(
+            user_id, surface_key=resolved_surface_key
+        )
         bindings = self.surface_bindings.get(user_id)
         if not bindings or resolved_surface_key not in bindings:
-            self.surface_binding_states.setdefault(user_id, {})[resolved_surface_key] = (
-                BINDING_STATE_NONE
-            )
+            self.surface_binding_states.setdefault(user_id, {})[
+                resolved_surface_key
+            ] = BINDING_STATE_NONE
             self._sync_legacy_topic_views_from_surface()
             self._save_state()
             return None
@@ -3211,7 +3332,9 @@ class SessionManager:
         self.surface_binding_states.setdefault(user_id, {})[resolved_surface_key] = (
             BINDING_STATE_BIND_FLOW
         )
-        self._rotate_surface_bind_flow_credentials(user_id, surface_key=resolved_surface_key)
+        self._rotate_surface_bind_flow_credentials(
+            user_id, surface_key=resolved_surface_key
+        )
         self._sync_legacy_topic_views_from_surface()
         self._save_state()
 
@@ -3235,7 +3358,9 @@ class SessionManager:
         self.surface_binding_states.setdefault(user_id, {})[resolved_surface_key] = (
             BINDING_STATE_NONE
         )
-        self._rotate_surface_bind_flow_credentials(user_id, surface_key=resolved_surface_key)
+        self._rotate_surface_bind_flow_credentials(
+            user_id, surface_key=resolved_surface_key
+        )
         self._sync_legacy_topic_views_from_surface()
         self._save_state()
 
@@ -3297,10 +3422,13 @@ class SessionManager:
             thread_id=thread_id,
             chat_id=chat_id,
         )
-        current = self.peek_surface_pending_slot(
-            user_id,
-            surface_key=resolved_surface_key,
-        ) or {}
+        current = (
+            self.peek_surface_pending_slot(
+                user_id,
+                surface_key=resolved_surface_key,
+            )
+            or {}
+        )
         next_revision = revision
         if next_revision is None:
             next_revision = normalize_bind_flow_version(current.get("revision")) + 1
@@ -3313,7 +3441,9 @@ class SessionManager:
             }
         )
         assert record is not None
-        self.surface_pending_slots.setdefault(user_id, {})[resolved_surface_key] = record
+        self.surface_pending_slots.setdefault(user_id, {})[resolved_surface_key] = (
+            record
+        )
         self._save_state()
         return record.to_dict()
 
@@ -3494,13 +3624,15 @@ class SessionManager:
             return self.get_window_for_surface(user_id, chat_id=chat_id)
         return self.get_window_for_thread(user_id, thread_id)
 
-    def get_topic_binding(
-        self, user_id: int, thread_id: int
-    ) -> TopicBinding | None:
+    def get_topic_binding(self, user_id: int, thread_id: int) -> TopicBinding | None:
         """Resolve a persisted topic binding object."""
         window_id = self.get_window_for_thread(user_id, thread_id)
         if not window_id:
             return None
+        surface_key, chat_id, _resolved_thread_id = self.get_surface_coordinates_for_window(
+            user_id,
+            window_id,
+        )
         if self._is_inactive_or_helper_tmux_binding(window_id):
             return None
         if self.is_external_binding_window_id(window_id):
@@ -3519,6 +3651,8 @@ class SessionManager:
                 binding_scope="external",
                 source_thread_id=source_thread_id,
                 read_only=bool(external.get("read_only", True)),
+                surface_key=surface_key or self.make_surface_key(thread_id=thread_id),
+                chat_id=chat_id,
             )
         descriptor = self.get_process_descriptor(window_id)
         return TopicBinding(
@@ -3529,26 +3663,38 @@ class SessionManager:
             runtime_kind=descriptor.runtime_kind
             if descriptor is not None
             else config.default_runtime_kind,
+            surface_key=surface_key or self.make_surface_key(thread_id=thread_id),
+            chat_id=chat_id,
         )
 
     def iter_topic_bindings(self) -> Iterator[TopicBinding]:
         """Iterate persisted topic bindings as structured runtime-neutral objects."""
         for user_id, bindings in self.surface_bindings.items():
             for surface_key, window_id in bindings.items():
-                thread_id = self._topic_thread_id_from_surface_key(surface_key)
+                parsed_surface = self._parse_surface_key(surface_key)
+                chat_id = parsed_surface[1] if parsed_surface is not None else None
+                thread_id = (
+                    parsed_surface[2]
+                    if parsed_surface is not None
+                    else self._topic_thread_id_from_surface_key(surface_key)
+                )
                 if self.is_external_binding_window_id(window_id):
-                    external = self.get_external_surface_binding(
-                        user_id,
-                        surface_key=surface_key,
-                    ) or {}
+                    external = (
+                        self.get_external_surface_binding(
+                            user_id,
+                            surface_key=surface_key,
+                        )
+                        or {}
+                    )
                     runtime_kind = (
                         str(
-                            external.get("runtime_kind")
-                            or config.default_runtime_kind
+                            external.get("runtime_kind") or config.default_runtime_kind
                         ).strip()
                         or config.default_runtime_kind
                     )
-                    source_thread_id = str(external.get("source_thread_id") or "").strip()
+                    source_thread_id = str(
+                        external.get("source_thread_id") or ""
+                    ).strip()
                     yield TopicBinding(
                         user_id=user_id,
                         thread_id=thread_id,
@@ -3558,6 +3704,8 @@ class SessionManager:
                         binding_scope="external",
                         source_thread_id=source_thread_id,
                         read_only=bool(external.get("read_only", True)),
+                        surface_key=surface_key,
+                        chat_id=chat_id,
                     )
                     continue
                 if self._is_inactive_or_helper_tmux_binding(window_id):
@@ -3576,6 +3724,8 @@ class SessionManager:
                     runtime_kind=descriptor.runtime_kind
                     if descriptor is not None
                     else config.default_runtime_kind,
+                    surface_key=surface_key,
+                    chat_id=chat_id,
                 )
 
     def iter_thread_bindings(self) -> Iterator[tuple[int, int | None, str]]:
@@ -3710,7 +3860,9 @@ class SessionManager:
                         record = json.loads(raw_line.decode("utf-8"))
                     except (UnicodeDecodeError, json.JSONDecodeError):
                         continue
-                    if isinstance(record, dict) and _codex_record_confirms_strict_user_submit(
+                    if isinstance(
+                        record, dict
+                    ) and _codex_record_confirms_strict_user_submit(
                         record,
                         expected_text,
                     ):
@@ -3828,9 +3980,7 @@ class SessionManager:
                     return
                 await asyncio.sleep(FAST_CODEX_ACK_POLL_SECONDS)
             proof.status = CODEX_DELIVERED_NO_ACK_STATUS
-            proof.failure_reason = (
-                "Codex did not persist a matching user message within the short ACK window"
-            )
+            proof.failure_reason = "Codex did not persist a matching user message within the short ACK window"
             self._log_fast_input_stage(
                 proof,
                 "runtime_ack_delayed",
@@ -4081,8 +4231,7 @@ class SessionManager:
                     turn_context_start_byte=turn_context_start_byte,
                 ):
                     logger.info(
-                        "codex_submit_ack: confirmed submit to %s "
-                        "after %d attempt(s)",
+                        "codex_submit_ack: confirmed submit to %s after %d attempt(s)",
                         window_id,
                         attempts,
                     )

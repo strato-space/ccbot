@@ -27,7 +27,9 @@ If this note conflicts with any explanatory note in `doc/`, this note wins.
 - **Surface key**
   - the canonical persisted local key for a control surface under one user scope
   - current concrete encodings:
-    - `t:<thread_id>` for named topics
+    - `t:<chat_id>:<thread_id>` for named topics when Telegram coordinates are
+      known
+    - `t:<thread_id>` only as a legacy mirror/fallback for older persisted data
     - `c:<chat_id>` for no-topics main-chat surfaces
   - this is a product-side persistence key, not a Telegram domain noun
   - it is not the full control-surface identity by itself
@@ -89,6 +91,22 @@ If this note conflicts with any explanatory note in `doc/`, this note wins.
     - nonce
   - stale callbacks must fail closed rather than mutating a newer bind flow
 
+- **Bind workspace selection**
+  - explicit user-selected cwd captured during bind flow
+  - scoped to the initiating control surface and bind-flow credentials
+  - for Telegram topics, the canonical surface key is chat-qualified
+    (`t:<chat_id>:<thread_id>`); bare `t:<thread_id>` is legacy mirror data only
+  - never inferred from the bot-controller service `WorkingDirectory`
+  - stale or missing workspace selection fails closed instead of launching a
+    runtime in a fallback cwd
+
+- **Binding activation proof**
+  - post-launch proof that the Telegram control surface, tmux window, selected
+    cwd, runtime process, runtime conversation identity, and replay evidence
+    refer to the same live binding
+  - cwd equality alone is not sufficient proof for Codex/OMX because helper or
+    stale sessions may share the same cwd
+
 - **Pending slot**
   - surface-scoped deferred user intent captured before writable activation is
     complete
@@ -144,7 +162,7 @@ If this note conflicts with any explanatory note in `doc/`, this note wins.
 
 Named-topic variant:
 
-`(user_id, surface_key=t:<thread_id>) -> named topic control surface`
+`(user_id, surface_key=t:<chat_id>:<thread_id>) -> named topic control surface`
 
 No-topics main-chat variant:
 

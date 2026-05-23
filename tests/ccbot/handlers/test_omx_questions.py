@@ -1203,9 +1203,9 @@ async def test_omx_question_idempotent_edit_keeps_tracking_without_duplicate(
     assert await omx_questions.handle_omx_question_callback(update, context) is True
 
     bot.send_message.assert_not_awaited()
-    assert omx_questions._question_msgs[(1, "t:42")] == 77
+    assert omx_questions._question_msgs[(1, "t:-100:42")] == 77
     assert (
-        omx_questions._question_render_state[(1, "t:42")]
+        omx_questions._question_render_state[(1, "t:-100:42")]
         == ("question-2026-04-30T01-00-00-000Z-a1b2c3d4", (0,))
     )
     query.answer.assert_awaited_once_with("Updated")
@@ -1306,8 +1306,8 @@ async def test_omx_question_toggle_unknown_edit_failure_does_not_send_duplicate(
     assert await omx_questions.handle_omx_question_callback(update, context) is True
 
     bot.send_message.assert_not_awaited()
-    assert omx_questions._question_msgs[(1, "t:42")] == 77
-    assert (1, "t:42") not in omx_questions._question_render_state
+    assert omx_questions._question_msgs[(1, "t:-100:42")] == 77
+    assert (1, "t:-100:42") not in omx_questions._question_render_state
     query.answer.assert_awaited_once_with(
         "Could not update question prompt; please retry",
         show_alert=True,

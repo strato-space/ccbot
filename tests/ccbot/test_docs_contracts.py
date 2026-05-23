@@ -38,7 +38,7 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "no-topics group main chat" in readme
     assert "ordinary text and `@bot` mentions stay silent until a command is used" in readme
     assert "Command entry paths also capture the Telegram group `chat_id`" in readme
-    assert "`chat_id` as a Telegram routing\ncoordinate" in readme
+    assert "standalone `chat_id` as a\nTelegram routing coordinate" in readme
     assert "CODEX_HOME=/data/iqdoctor/.codex" in readme
     assert "OMX_AUTO_UPDATE=0" in readme
     assert "`CCBOT_RESTORE_*` remains restore\nintent, not proof" in readme
@@ -197,7 +197,7 @@ def test_runtime_ontology_note_uses_runtime_neutral_terms() -> None:
     assert "pane reaction is diagnostic only" in ontology
     assert "read-only rather than pretending to send into tmux" in ontology
     assert "control surface" in ontology
-    assert "surface_key=t:<thread_id>" in ontology
+    assert "surface_key=t:<chat_id>:<thread_id>" in ontology
     assert "queue" in ontology
     assert "steer" in ontology
     assert "literal ACP-protocol-over-stdio" in ontology

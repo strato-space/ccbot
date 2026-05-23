@@ -374,9 +374,9 @@ to tmux or Telegram:
 CCBOT_DIR=/data/iqdoctor/.ccbot \
   ccbot binding-preflight --json \
   --user-id 3045664 \
-  --surface-key t:555 \
+  --surface-key t:-1003685295814:555 \
   --expected-user-id 3045664 \
-  --expected-surface-key t:555 \
+  --expected-surface-key t:-1003685295814:555 \
   --expected-window-name comfy-agent \
   --expected-runtime-kind codex \
   --expected-cwd /home/tools/mediagen-comfy
@@ -457,13 +457,16 @@ Optional startup restore intent may be declared per bot instance with
 identity/control-surface coordinates only; canonical `surface_bindings` state is
 still written only after startup validates the runtime identity, full
 `(user_id, surface_key)` control-surface identity, and any required group
-`chat_id` routing coordinates.  Restore treats `chat_id` as a Telegram routing
-coordinate, not as part of the full control-surface identity.
+`chat_id` routing coordinates.  Restore treats a standalone `chat_id` as a
+Telegram routing coordinate: it may derive or validate the canonical
+chat-qualified surface key, but it is not itself a complete control-surface
+identity.
 
 For Codex-backed restore, the controller service environment must also include
 the Codex replay root and non-interactive OMX setting, for example:
 
 ```env
+CCBOT_COMMAND=omx --madmax
 CODEX_HOME=/data/iqdoctor/.codex
 OMX_AUTO_UPDATE=0
 CCBOT_RESTORE_ENABLED=1
@@ -471,11 +474,16 @@ CCBOT_RESTORE_WINDOW=comfy-agent
 CCBOT_RESTORE_CWD=/home/tools/mediagen-comfy
 CCBOT_RESTORE_RUNTIME_ID=019d6825-88ba-7f10-948e-eaaf162ea2a9
 CCBOT_RESTORE_USER_ID=3045664
-CCBOT_RESTORE_SURFACE_KEY=t:555
+CCBOT_RESTORE_SURFACE_KEY=t:-1003685295814:555
 CCBOT_RESTORE_CHAT_ID=-1003685295814
 CCBOT_RESTORE_SHARED_GROUP=true
 CCBOT_RESTORE_COMMAND=omx --madmax
 ```
+
+Runtime launches scrub controller-only `CCBOT_RESTORE_*`, Telegram token, and
+controller selection variables from child process env. If OpenAI auth still
+requires a secret wrapper for a particular host, that wrapper must be auth-only
+and cwd-neutral; the selected workspace remains the explicit bind path.
 
 Startup restore is non-destructive in v1: it inventories the tmux
 session/window/panes before acting, distinguishes `LiveRuntimeProof` from
@@ -501,8 +509,8 @@ restarted or killed by this recovery path.
 
 | Bot controller | systemd user service | `CCBOT_DIR` | tmux session/window | Telegram identity/routing | runtime cwd | `CODEX_HOME` |
 | --- | --- | --- | --- | --- | --- | --- |
-| ComfyCodexBot | `ccbot.service` | `/data/iqdoctor/.ccbot` | `comfy` / `comfy-agent` | user `3045664`, surface `t:555`, chat `-1003685295814` | `/home/tools/mediagen-comfy` | `/data/iqdoctor/.codex` |
-| ImmArenaBot | `imm_arena_bot.service` | `/data/iqdoctor/.ccbot-imm_arena_bot` | `imm_arena_bot` / `imm` | user `3045664`, surface `t:3`, chat `-1003974721114` | `/home/tools/imm` | `/home/tools/imm/.codex` |
+| ComfyCodexBot | `ccbot.service` | `/data/iqdoctor/.ccbot` | `comfy` / `comfy-agent` | user `3045664`, surface `t:-1003685295814:555`, chat `-1003685295814` | `/home/tools/mediagen-comfy` | `/data/iqdoctor/.codex` |
+| ImmArenaBot | `imm_arena_bot.service` | `/data/iqdoctor/.ccbot-imm_arena_bot` | `imm_arena_bot` / `imm` | user `3045664`, surface `t:-1003974721114:3`, chat `-1003974721114` | `/home/tools/imm` | `/home/tools/imm/.codex` |
 
 Older `/home/tools/server/comfy` references are historical/runtime-runbook
 context only; they are not the primary ComfyCodexBot Codex workspace.
@@ -518,9 +526,18 @@ as the restored Telegram binding target.
    - private chats with topics enabled: a first plain text message may still open bind flow
    - shared group topics: ordinary text and `@bot` mentions stay silent until a command is used; use `/bind` or `/resume`
    - no-topics group main chat: ordinary text and `@bot` mentions stay silent until a command is used; use `/bind` or `/resume`
-3. A directory browser appears — select the project directory
+3. A directory browser appears from a cwd-neutral root such as
+   `CCBOT_BIND_DEFAULT_ROOT`, `CCBOT_WORKSPACE_ROOT`, or `/home/tools` — select
+   the project directory. Controller restore state and the controller service
+   `WorkingDirectory` are never workspace selections by themselves.
 4. If the directory has existing Codex identities, an identity picker appears — choose one to resume or start fresh
 5. A tmux window is created, the configured runtime starts there (with resume wiring if resuming), and Telegram input starts routing only after the surface is bound
+
+Forum-topic bindings are stored by chat-qualified surface identity
+(`t:<chat_id>:<thread_id>`). Older bare `t:<thread_id>` records are treated as
+legacy mirrors and are used only when the saved chat id proves the same
+Telegram group, so equal numeric topic ids in different groups cannot share a
+runtime binding.
 
 Command entry paths also capture the Telegram group `chat_id` needed for later
 topic delivery and title sync. Bot-addressed `@mention` is not used as a

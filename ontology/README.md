@@ -77,11 +77,11 @@ Autonomous service recovery is not a general tmux recovery permission.  The
 current whitelisted controller/tmux targets are exactly:
 
 - ComfyCodexBot: `ccbot.service`, `CCBOT_DIR=/data/iqdoctor/.ccbot`, tmux
-  `comfy:comfy-agent`, control surface `3045664/t:555`, runtime cwd
+  `comfy:comfy-agent`, control surface `3045664/t:-1003685295814:555`, runtime cwd
   `/home/tools/mediagen-comfy`, `CODEX_HOME=/data/iqdoctor/.codex`.
 - ImmArenaBot: `imm_arena_bot.service`,
   `CCBOT_DIR=/data/iqdoctor/.ccbot-imm_arena_bot`, tmux
-  `imm_arena_bot:imm`, control surface `3045664/t:3`, runtime cwd
+  `imm_arena_bot:imm`, control surface `3045664/t:-1003974721114:3`, runtime cwd
   `/home/tools/imm`, `CODEX_HOME=/home/tools/imm/.codex`.
 
 Both whitelisted controller services now carry `tmux-preserve.conf` with

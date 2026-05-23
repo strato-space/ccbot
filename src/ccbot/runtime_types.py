@@ -67,7 +67,10 @@ def infer_semantic_kind(
         return IMAGE_PREVIEW_SEMANTIC_KIND
     if content_type == "tool_result" or event_kind == "tool_output":
         return TOOL_RESULT_SEMANTIC_KIND
-    if content_type in {"command_execution", "local_command"} or event_kind == "command_execution":
+    if (
+        content_type in {"command_execution", "local_command"}
+        or event_kind == "command_execution"
+    ):
         return COMMAND_EXECUTION_SEMANTIC_KIND
     if content_type == "file_change" or event_kind == "file_change":
         return FILE_CHANGE_SEMANTIC_KIND
@@ -115,6 +118,8 @@ class TopicBinding:
     binding_scope: str = "tmux"
     source_thread_id: str = ""
     read_only: bool = False
+    surface_key: str = ""
+    chat_id: int | None = None
 
 
 @dataclass
@@ -126,6 +131,7 @@ class LiveProcessDescriptor:
     window_name: str = ""
     runtime_kind: str = "claude"
     registered_at: float = 0.0
+    requires_live_proof: bool = False
 
     @property
     def session_id(self) -> str:
@@ -147,6 +153,8 @@ class LiveProcessDescriptor:
             data["window_name"] = self.window_name
         if self.registered_at:
             data["registered_at"] = self.registered_at
+        if self.requires_live_proof:
+            data["requires_live_proof"] = self.requires_live_proof
         return data
 
     @classmethod
@@ -157,6 +165,7 @@ class LiveProcessDescriptor:
             window_name=data.get("window_name", ""),
             runtime_kind=data.get("runtime_kind", "claude"),
             registered_at=float(data.get("registered_at", 0.0) or 0.0),
+            requires_live_proof=bool(data.get("requires_live_proof", False)),
         )
 
 
@@ -252,7 +261,9 @@ class NormalizedEvent:
         if self.dispatch_to_telegram is None:
             self.dispatch_to_telegram = self.delivery_class != DELIVERY_CLASS_LIFECYCLE
         if self.status_message_eligible is None:
-            self.status_message_eligible = self.delivery_class == DELIVERY_CLASS_PROGRESS
+            self.status_message_eligible = (
+                self.delivery_class == DELIVERY_CLASS_PROGRESS
+            )
 
     @property
     def session_id(self) -> str:
@@ -406,7 +417,9 @@ class RuntimeCapabilityRegistry:
     def _build_command_index(self) -> dict[str, str]:
         index: dict[str, str] = {}
         for runtime_kind, capability in self._capabilities.items():
-            for command_name in (capability.launch_command_name,) + capability.command_aliases:
+            for command_name in (
+                capability.launch_command_name,
+            ) + capability.command_aliases:
                 normalized = command_name.strip().casefold()
                 if normalized:
                     index[normalized] = runtime_kind
@@ -415,7 +428,9 @@ class RuntimeCapabilityRegistry:
     def get(self, runtime_kind: str | None = None) -> RuntimeCapability:
         """Get the capability profile for a runtime, falling back safely."""
         normalized = normalize_runtime_kind(runtime_kind or self.default_runtime_kind)
-        return self._capabilities.get(normalized, self._capabilities[self.default_runtime_kind])
+        return self._capabilities.get(
+            normalized, self._capabilities[self.default_runtime_kind]
+        )
 
     def items(self) -> tuple[tuple[str, RuntimeCapability], ...]:
         """Return all registered runtime capabilities."""

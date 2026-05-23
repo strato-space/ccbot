@@ -31,6 +31,26 @@ from .state_schema import split_session_map_payload
 
 logger = logging.getLogger(__name__)
 
+RUNTIME_ENV_UNSET_VARS = frozenset(SENSITIVE_ENV_VARS) | {
+    "CCBOT_COMMAND",
+    "CCBOT_DIR",
+    "CCBOT_RESTORE_CHAT_ID",
+    "CCBOT_RESTORE_COMMAND",
+    "CCBOT_RESTORE_CWD",
+    "CCBOT_RESTORE_ENABLED",
+    "CCBOT_RESTORE_RETRY_INTERVAL_SECONDS",
+    "CCBOT_RESTORE_RETRY_TIMEOUT_SECONDS",
+    "CCBOT_RESTORE_RUNTIME_ID",
+    "CCBOT_RESTORE_RUNTIME_KIND",
+    "CCBOT_RESTORE_SHARED_GROUP",
+    "CCBOT_RESTORE_SURFACE_KEY",
+    "CCBOT_RESTORE_USER_ID",
+    "CCBOT_RESTORE_WINDOW",
+    "CCBOT_TELEGRAM_PROXY",
+    "CLAUDE_COMMAND",
+    "TMUX_SESSION_NAME",
+}
+
 
 @dataclass
 class TmuxWindow:
@@ -114,11 +134,21 @@ class TmuxManager:
         Prevents new windows (and their child processes like Claude Code)
         from inheriting secrets such as TELEGRAM_BOT_TOKEN.
         """
-        for var in SENSITIVE_ENV_VARS:
+        for var in RUNTIME_ENV_UNSET_VARS:
             try:
                 session.unset_environment(var)
             except Exception:
                 pass  # var not set in session env — nothing to remove
+
+    @staticmethod
+    def _runtime_env_scrub_prefix() -> str:
+        """Return an env(1) prefix that removes controller-only variables."""
+        return " ".join(
+            [
+                "env",
+                *(f"-u {shlex.quote(var)}" for var in sorted(RUNTIME_ENV_UNSET_VARS)),
+            ]
+        )
 
     async def list_windows(self) -> list[TmuxWindow]:
         """List all windows in the session with their working directories.
@@ -410,7 +440,9 @@ class TmuxManager:
                 )
                 return False
             except Exception as e:
-                logger.error("Failed to run tmux for pasted text to %s: %s", window_id, e)
+                logger.error(
+                    "Failed to run tmux for pasted text to %s: %s", window_id, e
+                )
                 return False
 
         loaded = await _run_tmux(
@@ -517,8 +549,8 @@ class TmuxManager:
             return ""
         configured_runtime_kind = infer_runtime_kind_from_command(config.ccbot_command)
         source_command = launch_command or config.ccbot_command
-        inferred_runtime_kind = (
-            runtime_kind or infer_runtime_kind_from_command(source_command)
+        inferred_runtime_kind = runtime_kind or infer_runtime_kind_from_command(
+            source_command
         )
         cmd = runtime_capability_registry.build_launch_command(
             inferred_runtime_kind,
@@ -533,7 +565,9 @@ class TmuxManager:
             ),
             resume_session_id=resume_session_id,
         )
-        return f"cd {shlex.quote(str(path))} && {cmd}"
+        return (
+            f"cd {shlex.quote(str(path))} && {self._runtime_env_scrub_prefix()} {cmd}"
+        )
 
     def _registered_window_identity(
         self,
@@ -725,9 +759,13 @@ class TmuxManager:
             existing = await self.find_window_by_name(final_window_name)
             if existing:
                 try:
-                    existing_cwd = str(Path(existing.cwd).expanduser().resolve(strict=False))
+                    existing_cwd = str(
+                        Path(existing.cwd).expanduser().resolve(strict=False)
+                    )
                 except (OSError, RuntimeError, ValueError):
-                    existing_cwd = str(Path(existing.cwd).expanduser()) if existing.cwd else ""
+                    existing_cwd = (
+                        str(Path(existing.cwd).expanduser()) if existing.cwd else ""
+                    )
                 if existing_cwd and existing_cwd != str(path):
                     return (
                         False,
@@ -740,8 +778,10 @@ class TmuxManager:
                         False,
                     )
 
-                active_runtime = runtime_capability_registry.known_runtime_kind_from_command(
-                    existing.pane_current_command
+                active_runtime = (
+                    runtime_capability_registry.known_runtime_kind_from_command(
+                        existing.pane_current_command
+                    )
                 )
                 requested_runtime = runtime_kind or infer_runtime_kind_from_command(
                     launch_command or config.ccbot_command
@@ -751,7 +791,9 @@ class TmuxManager:
                     expected_cwd=path,
                 )
                 if active_runtime is None and registered_identity:
-                    active_runtime = registered_identity.runtime_kind or requested_runtime
+                    active_runtime = (
+                        registered_identity.runtime_kind or requested_runtime
+                    )
                 if active_runtime and active_runtime != requested_runtime:
                     return (
                         False,

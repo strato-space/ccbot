@@ -113,6 +113,37 @@ def test_resolve_delivery_target_single_topic_uses_group_coordinates(tmp_path):
     assert target.surface_key == "t:42"
 
 
+def test_resolve_delivery_target_chat_qualified_topic_needs_no_group_map(tmp_path):
+    state_path = tmp_path / "state.json"
+    _write_state(
+        state_path,
+        {
+            "surface_bindings": {"12345": {"t:-100200300:42": "@7"}},
+            "group_chat_ids": {},
+        },
+    )
+
+    target = sender.resolve_delivery_target(state_path=state_path)
+
+    assert target.chat_id == -100200300
+    assert target.message_thread_id == 42
+    assert target.surface_key == "t:-100200300:42"
+
+
+def test_resolve_delivery_target_explicit_chat_qualified_surface_key(tmp_path):
+    state_path = tmp_path / "state.json"
+    _write_state(state_path, {"group_chat_ids": {}})
+
+    target = sender.resolve_delivery_target(
+        state_path=state_path,
+        surface_key="t:-100200300:42",
+    )
+
+    assert target.chat_id == -100200300
+    assert target.message_thread_id == 42
+    assert target.user_id is None
+
+
 def test_resolve_delivery_target_ambiguous_requires_explicit_target(tmp_path):
     state_path = tmp_path / "state.json"
     _write_state(

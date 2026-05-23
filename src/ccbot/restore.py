@@ -263,11 +263,31 @@ def _normalize_surface_key(surface_key: str) -> str:
     if not raw.startswith(("t:", "c:")):
         raise RestoreIntentError("restore intent has invalid surface_key")
     prefix, payload = raw.split(":", 1)
+    parts = payload.split(":")
     try:
-        numeric_id = int(payload)
+        if prefix == "t" and len(parts) == 2:
+            chat_id = int(parts[0])
+            thread_id = int(parts[1])
+            return f"{prefix}:{chat_id}:{thread_id}"
+        if len(parts) == 1:
+            numeric_id = int(parts[0])
+            return f"{prefix}:{numeric_id}"
     except ValueError as exc:
         raise RestoreIntentError("restore intent has invalid surface_key") from exc
-    return f"{prefix}:{numeric_id}"
+    raise RestoreIntentError("restore intent has invalid surface_key")
+
+
+def _surface_coordinates(surface_key: str) -> tuple[int | None, int | None]:
+    if surface_key.startswith("c:"):
+        return int(surface_key.split(":", 1)[1]), None
+    if not surface_key.startswith("t:"):
+        return None, None
+    parts = surface_key.split(":")
+    if len(parts) == 2:
+        return None, int(parts[1])
+    if len(parts) == 3:
+        return int(parts[1]), int(parts[2])
+    return None, None
 
 
 def parse_restore_intent(
@@ -290,6 +310,12 @@ def parse_restore_intent(
     shared_group = _truthy(source.get("CCBOT_RESTORE_SHARED_GROUP"))
     group_chat_raw = str(source.get("CCBOT_RESTORE_CHAT_ID") or "").strip()
     group_chat_id = _parse_int(group_chat_raw, "chat_id") if group_chat_raw else None
+    surface_chat_id, _surface_thread_id_value = _surface_coordinates(surface_key)
+    if group_chat_id is not None and surface_chat_id is not None:
+        if group_chat_id != surface_chat_id:
+            raise RestoreIntentError("restore intent chat_id does not match surface_key")
+    elif group_chat_id is None and shared_group and surface_chat_id is not None:
+        group_chat_id = surface_chat_id
     if shared_group and group_chat_id is None:
         raise RestoreIntentError("restore intent missing chat_id for shared group surface")
 
@@ -309,9 +335,7 @@ def parse_restore_intent(
 
 
 def _surface_thread_id(surface_key: str) -> int | None:
-    if not surface_key.startswith("t:"):
-        return None
-    return int(surface_key.split(":", 1)[1])
+    return _surface_coordinates(surface_key)[1]
 
 
 def _normalize_path(path: str) -> str:

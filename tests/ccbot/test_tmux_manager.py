@@ -107,7 +107,9 @@ async def test_send_pasted_text_uses_tmux_buffer_paste_path(
 
 
 @pytest.mark.asyncio
-async def test_create_window_explicitly_cd_into_requested_directory(monkeypatch, tmp_path):
+async def test_create_window_explicitly_cd_into_requested_directory(
+    monkeypatch, tmp_path
+):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     pane = _FakePane()
@@ -132,7 +134,10 @@ async def test_create_window_explicitly_cd_into_requested_directory(monkeypatch,
     assert window_id == "@9"
     assert ("allow-rename", "off") in window.options
     assert pane.commands == [
-        (f"cd {workspace} && codex resume thread-123", True)
+        (
+            f"cd {workspace} && {TmuxManager._runtime_env_scrub_prefix()} codex resume thread-123",
+            True,
+        )
     ]
 
 
@@ -160,12 +165,27 @@ async def test_create_window_prefers_ccbot_command_over_legacy_claude_command(
 
     assert ok is True
     assert pane.commands == [
-        (f"cd {workspace} && omx --madmax resume thread-123", True)
+        (
+            f"cd {workspace} && {TmuxManager._runtime_env_scrub_prefix()} omx --madmax resume thread-123",
+            True,
+        )
     ]
 
 
+def test_runtime_env_scrub_prefix_removes_controller_restore_vars() -> None:
+    prefix = TmuxManager._runtime_env_scrub_prefix()
+
+    assert "env " in prefix
+    assert "-u CCBOT_RESTORE_RUNTIME_ID" in prefix
+    assert "-u CCBOT_RESTORE_SURFACE_KEY" in prefix
+    assert "-u TELEGRAM_BOT_TOKEN" in prefix
+    assert "-u OPENAI_API_KEY" in prefix
+
+
 @pytest.mark.asyncio
-async def test_create_window_derives_basename_and_collision_suffix(monkeypatch, tmp_path):
+async def test_create_window_derives_basename_and_collision_suffix(
+    monkeypatch, tmp_path
+):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     pane = _FakePane()
@@ -174,12 +194,16 @@ async def test_create_window_derives_basename_and_collision_suffix(monkeypatch, 
     manager = TmuxManager(session_name="ccbot-test")
 
     async def _find_window_by_name(window_name: str):
-        return TmuxWindow(
-            window_id="@8",
-            window_name="workspace",
-            cwd=str(workspace),
-            pane_current_command="bash",
-        ) if window_name == "workspace" else None
+        return (
+            TmuxWindow(
+                window_id="@8",
+                window_name="workspace",
+                cwd=str(workspace),
+                pane_current_command="bash",
+            )
+            if window_name == "workspace"
+            else None
+        )
 
     monkeypatch.setattr(manager, "find_window_by_name", _find_window_by_name)
     monkeypatch.setattr(manager, "get_or_create_session", lambda: session)
@@ -193,9 +217,7 @@ async def test_create_window_derives_basename_and_collision_suffix(monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_create_window_keeps_legacy_resume_flag_for_claude(
-    monkeypatch, tmp_path
-):
+async def test_create_window_keeps_legacy_resume_flag_for_claude(monkeypatch, tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     pane = _FakePane()
@@ -217,7 +239,10 @@ async def test_create_window_keeps_legacy_resume_flag_for_claude(
 
     assert ok is True
     assert pane.commands == [
-        (f"cd {workspace} && claude --resume session-456", True)
+        (
+            f"cd {workspace} && {TmuxManager._runtime_env_scrub_prefix()} claude --resume session-456",
+            True,
+        )
     ]
 
 
@@ -246,7 +271,10 @@ async def test_create_window_uses_registry_resume_flag_for_fast_agent(
 
     assert ok is True
     assert pane.commands == [
-        (f"cd {workspace} && fast-agent --resume session-789", True)
+        (
+            f"cd {workspace} && {TmuxManager._runtime_env_scrub_prefix()} fast-agent --resume session-789",
+            True,
+        )
     ]
 
 
@@ -294,7 +322,10 @@ async def test_create_or_reuse_window_reuses_exact_match_and_launches_codex_resu
     assert window_id == "@7"
     assert "Reused window 'workspace'" in message
     assert sent == [
-        ("@7", f"cd {workspace} && codex resume thread-123"),
+        (
+            "@7",
+            f"cd {workspace} && {TmuxManager._runtime_env_scrub_prefix()} codex resume thread-123",
+        ),
         ("@7", "<enter>"),
     ]
 
@@ -366,7 +397,9 @@ async def test_create_or_reuse_window_fails_closed_on_resume_identity_mismatch(
         return existing if window_name == "workspace" else None
 
     monkeypatch.setattr(manager, "find_window_by_name", _find_window_by_name)
-    monkeypatch.setattr(tmux_manager_module.config, "session_map_file", session_map_file)
+    monkeypatch.setattr(
+        tmux_manager_module.config, "session_map_file", session_map_file
+    )
 
     ok, message, window_name, window_id, reused = await manager.create_or_reuse_window(
         str(workspace),

@@ -22,7 +22,7 @@ from ccbot.input_safety import (
     update_window_input_safety_snapshot,
 )
 from ccbot.handlers.callback_data import append_bind_flow_token
-from ccbot.runtime_types import NormalizedEvent
+from ccbot.runtime_types import ASSISTANT_FINAL_SEMANTIC_KIND, NormalizedEvent
 from ccbot.session import CODEX_DELIVERED_NO_ACK_MESSAGE, FastRuntimeInputProof
 from ccbot.telegram_delivery_policy import apply_telegram_delivery_policy
 from ccbot.state_schema import (
@@ -261,8 +261,13 @@ class TestBotRegistration:
         unsupported_index = ordered_callbacks.index("unsupported_content_handler")
         assert ordered_callbacks.index("audio_handler") < unsupported_index
         assert ordered_callbacks.index("video_handler") < unsupported_index
-        assert ordered_callbacks.index("_mark_telegram_update_handler") < ordered_callbacks.index("start_command")
-        assert app.handler_groups[ordered_callbacks.index("_mark_telegram_update_handler")] == -100
+        assert ordered_callbacks.index(
+            "_mark_telegram_update_handler"
+        ) < ordered_callbacks.index("start_command")
+        assert (
+            app.handler_groups[ordered_callbacks.index("_mark_telegram_update_handler")]
+            == -100
+        )
 
     def test_create_bot_applies_telegram_proxy_from_env(self, monkeypatch):
         """Freeze explicit proxy wiring for PTB/HTTPX bootstrap."""
@@ -349,9 +354,7 @@ class TestBotRegistration:
         assert builder.get_updates_read_timeout_value == 30.0
         assert builder.get_updates_write_timeout_value == 10.0
 
-    def test_telegram_request_builder_honors_polling_env_overrides(
-        self, monkeypatch
-    ):
+    def test_telegram_request_builder_honors_polling_env_overrides(self, monkeypatch):
         """Freeze explicit getUpdates pool/timeout configuration."""
 
         class _RecorderBuilder:
@@ -408,7 +411,9 @@ class TestBotRegistration:
         monkeypatch.setenv("CCBOT_TELEGRAM_BOOTSTRAP_RETRIES", "bad")
 
         assert bot_mod._env_int("CCBOT_TELEGRAM_GET_UPDATES_POOL_SIZE", 4) == 4
-        assert bot_mod._env_float("CCBOT_TELEGRAM_GET_UPDATES_POOL_TIMEOUT", 10.0) == 10.0
+        assert (
+            bot_mod._env_float("CCBOT_TELEGRAM_GET_UPDATES_POOL_TIMEOUT", 10.0) == 10.0
+        )
         assert bot_mod.telegram_poll_timeout() == 10
         assert bot_mod.telegram_bootstrap_retries() == -1
 
@@ -571,7 +576,9 @@ class TestTelegramPollingHealth:
 
     @pytest.mark.asyncio
     async def test_polling_health_error_does_not_exit(self, monkeypatch):
-        bot = SimpleNamespace(get_webhook_info=AsyncMock(side_effect=RuntimeError("api")))
+        bot = SimpleNamespace(
+            get_webhook_info=AsyncMock(side_effect=RuntimeError("api"))
+        )
         sleeps = 0
 
         async def _sleep(_seconds):
@@ -754,7 +761,7 @@ class TestCommandSurface:
             chat_id=100,
             thread_id=1,
             legacy_scope_id=1,
-            surface_key="t:1",
+            surface_key="t:100:1",
             label="topic",
             is_shared_group=True,
             supports_bind_flow=True,
@@ -970,7 +977,7 @@ class TestCommandSurface:
             cwd="/tmp/project",
             file_path="/tmp/rollout-thread-1.jsonl",
             read_only=True,
-            surface_key="t:42",
+            surface_key="t:100:42",
         )
         mock_sm.start_topic_bind_flow.assert_not_called()
         mock_reply.assert_awaited_once()
@@ -1384,13 +1391,13 @@ class TestCommandSurface:
                 "chat_id": 100,
                 "thread_id": 42,
                 "legacy_scope_id": 42,
-                "surface_key": "t:42",
+                "surface_key": "t:100:42",
                 "label": "topic",
                 "is_shared_group": True,
                 "supports_bind_flow": True,
             },
             bot_mod.PENDING_SURFACE_SLOTS_KEY: {
-                "t:42": {
+                "t:100:42": {
                     "text": "queued hello",
                     "revision": 1,
                     "status": "pending",
@@ -1443,7 +1450,7 @@ class TestCommandSurface:
 
             await bot_mod.unbind_command(update, context)
 
-        mock_sm.unbind_surface.assert_called_once_with(1, surface_key="t:42")
+        mock_sm.unbind_surface.assert_called_once_with(1, surface_key="t:100:42")
         mock_sm.require_manual_bind.assert_called_once_with(1, 42)
         mock_clear.assert_awaited_once_with(1, 42, context.bot, context.user_data)
         mock_reply.assert_awaited_once()
@@ -1585,7 +1592,7 @@ class TestCommandSurface:
                 chat_id=100,
                 thread_id=42,
                 legacy_scope_id=42,
-                surface_key="t:42",
+                surface_key="t:100:42",
                 label="topic",
                 is_shared_group=True,
                 supports_bind_flow=True,
@@ -1805,8 +1812,7 @@ class TestCommandSurface:
                 ),
             }
             mock_sm.codex_thread_catalog.is_helper_thread_fast.side_effect = (
-                lambda thread_id: thread_id
-                == "019dddf6-7efa-7d13-9a64-08c9dc9ac1d2"
+                lambda thread_id: thread_id == "019dddf6-7efa-7d13-9a64-08c9dc9ac1d2"
             )
 
             await bot_mod._start_bind_flow(
@@ -1958,7 +1964,7 @@ class TestCommandSurface:
                 chat_id=100,
                 thread_id=42,
                 legacy_scope_id=42,
-                surface_key="t:42",
+                surface_key="t:100:42",
                 label="topic",
                 is_shared_group=True,
                 supports_bind_flow=True,
@@ -2085,7 +2091,7 @@ class TestCommandSurface:
                 chat_id=100,
                 thread_id=42,
                 legacy_scope_id=42,
-                surface_key="t:42",
+                surface_key="t:100:42",
                 label="topic",
                 is_shared_group=True,
                 supports_bind_flow=True,
@@ -2221,6 +2227,35 @@ class TestTopicCleanup:
 
             mock_tmux.kill_window.assert_called_once_with("@7")
             mock_sm.unbind_thread.assert_called_once_with(1, 42)
+            mock_clear.assert_called_once_with(1, 42, context.bot, context.user_data)
+
+    @pytest.mark.asyncio
+    async def test_topic_closed_uses_chat_qualified_surface_binding(self):
+        update = _make_topic_update()
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._session_has_method", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.clear_topic_state", new_callable=AsyncMock) as mock_clear,
+        ):
+            mock_sm.surface_bindings = {1: {"t:100:42": "@7"}}
+            mock_sm.get_window_for_surface.return_value = "@7"
+            mock_sm.get_display_name.return_value = "project"
+            window = MagicMock()
+            window.window_id = "@7"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=window)
+            mock_tmux.kill_window = AsyncMock()
+
+            await bot_mod.topic_closed_handler(update, context)
+
+            mock_tmux.kill_window.assert_called_once_with("@7")
+            mock_sm.get_window_for_thread.assert_not_called()
+            mock_sm.unbind_surface.assert_called_once_with(1, surface_key="t:100:42")
+            mock_sm.unbind_thread.assert_not_called()
             mock_clear.assert_called_once_with(1, 42, context.bot, context.user_data)
 
     @pytest.mark.asyncio
@@ -2526,7 +2561,9 @@ class TestMediaForwarding:
         ):
             mock_sm.get_window_for_thread.return_value = "@7"
             mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
-            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(window_id="@7")
+            )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
 
@@ -2588,7 +2625,9 @@ class TestMediaForwarding:
         ):
             mock_sm.get_window_for_thread.return_value = "@7"
             mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
-            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(window_id="@7")
+            )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
 
@@ -2636,7 +2675,9 @@ class TestMediaForwarding:
         ):
             mock_sm.get_window_for_thread.side_effect = ["@7", "@8"]
             mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
-            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(window_id="@7")
+            )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
 
@@ -2671,10 +2712,12 @@ class TestMediaForwarding:
         ):
             mock_sm.get_window_for_thread.side_effect = ["@7", "external:codex:thread"]
             mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
-            mock_sm.is_external_binding_window_id.side_effect = (
-                lambda window_id: str(window_id).startswith("external:")
+            mock_sm.is_external_binding_window_id.side_effect = lambda window_id: str(
+                window_id
+            ).startswith("external:")
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(window_id="@7")
             )
-            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
 
@@ -2712,7 +2755,9 @@ class TestMediaForwarding:
                 (1, "nonce"),
                 (2, "nonce"),
             ]
-            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(window_id="@7")
+            )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
 
@@ -2747,7 +2792,9 @@ class TestMediaForwarding:
             mock_sm.surface_bindings = {1: {"t:42": "@7"}}
             mock_sm.resolve_chat_id.return_value = 100
             mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
-            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(window_id="@7")
+            )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
 
@@ -2785,7 +2832,9 @@ class TestMediaForwarding:
         ):
             mock_sm.get_window_for_thread.return_value = "@7"
             mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
-            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(window_id="@7")
+            )
             mock_tmux.capture_pane = AsyncMock(
                 return_value="OpenAI Codex\n› ping\n■ Approval required\n"
             )
@@ -2823,7 +2872,9 @@ class TestMediaForwarding:
         ):
             mock_sm.get_window_for_thread.return_value = "@7"
             mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
-            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(window_id="@7")
+            )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
 
@@ -2851,7 +2902,9 @@ class TestMediaForwarding:
         ):
             mock_sm.get_window_for_thread.return_value = "@7"
             mock_sm.get_topic_bind_flow_credentials.side_effect = RuntimeError("boom")
-            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(window_id="@7")
+            )
 
             await bot_mod.document_handler(update, context)
 
@@ -2911,7 +2964,9 @@ class TestMediaForwarding:
         ):
             mock_sm.get_window_for_thread.return_value = "@7"
             mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
-            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(window_id="@7")
+            )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
 
@@ -2925,7 +2980,9 @@ class TestMediaForwarding:
         assert any("two.txt" in payload for payload in payloads)
 
     @pytest.mark.asyncio
-    async def test_text_immediately_before_document_joins_attachment_batch(self, tmp_path):
+    async def test_text_immediately_before_document_joins_attachment_batch(
+        self, tmp_path
+    ):
         context = _make_context()
         text_update = _make_topic_update(text="install this")
         doc_update = _make_topic_update()
@@ -2945,11 +3002,17 @@ class TestMediaForwarding:
             patch("ccbot.bot.clear_status_msg_info"),
             patch("ccbot.bot.safe_edit", new_callable=AsyncMock, return_value=None),
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
-            patch("ccbot.bot._surface_omx_question_state", new_callable=AsyncMock, return_value=False),
+            patch(
+                "ccbot.bot._surface_omx_question_state",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
         ):
             mock_sm.get_window_for_thread.return_value = "@7"
             mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
-            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(window_id="@7")
+            )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
 
@@ -2977,11 +3040,17 @@ class TestMediaForwarding:
             patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
-            patch("ccbot.bot._surface_omx_question_state", new_callable=AsyncMock, return_value=False),
+            patch(
+                "ccbot.bot._surface_omx_question_state",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
         ):
             mock_sm.get_window_for_thread.return_value = "@7"
             mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
-            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(window_id="@7")
+            )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
 
@@ -3007,11 +3076,17 @@ class TestMediaForwarding:
             patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
-            patch("ccbot.bot._surface_omx_question_state", new_callable=AsyncMock, return_value=False),
+            patch(
+                "ccbot.bot._surface_omx_question_state",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
         ):
             mock_sm.get_window_for_thread.return_value = "@7"
             mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
-            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(window_id="@7")
+            )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_sm.send_to_window = AsyncMock(
                 return_value=(True, CODEX_DELIVERED_NO_ACK_MESSAGE)
@@ -3041,24 +3116,42 @@ class TestMediaForwarding:
             patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
-            patch("ccbot.bot._surface_omx_question_state", new_callable=AsyncMock, return_value=False),
-            patch("ccbot.bot._capture_bash_output", new_callable=AsyncMock) as mock_capture,
-            patch("ccbot.bot.asyncio.create_task", side_effect=_capture_task) as mock_create_task,
+            patch(
+                "ccbot.bot._surface_omx_question_state",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "ccbot.bot._capture_bash_output", new_callable=AsyncMock
+            ) as mock_capture,
+            patch(
+                "ccbot.bot.asyncio.create_task", side_effect=_capture_task
+            ) as mock_create_task,
         ):
             mock_sm.get_window_for_thread.return_value = "@7"
             mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
-            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(window_id="@7")
+            )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
 
             await bot_mod.text_handler(update, context)
 
         mock_sm.send_to_window.assert_awaited_once_with("@7", "!ls -la")
-        mock_capture.assert_called_once_with(context.bot, 1, 42, "@7", "ls -la")
+        mock_capture.assert_called_once_with(
+            context.bot,
+            1,
+            42,
+            "@7",
+            "ls -la",
+            chat_id=100,
+            surface_key="t:100:42",
+        )
         mock_create_task.assert_called_once()
         assert bot_mod._attachment_batcher.keys() == []
-        assert bot_mod._bash_capture_tasks[(1, 42)] is dummy_task
-        bot_mod._bash_capture_tasks.pop((1, 42), None)
+        assert bot_mod._bash_capture_tasks[(1, "t:100:42")] is dummy_task
+        bot_mod._bash_capture_tasks.pop((1, "t:100:42"), None)
 
     @pytest.mark.asyncio
     async def test_simple_text_uses_fast_path_without_text_lead_hold(self):
@@ -3073,10 +3166,20 @@ class TestMediaForwarding:
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
-            patch("ccbot.bot.enqueue_ingress_receipt", new_callable=AsyncMock) as mock_receipt,
+            patch(
+                "ccbot.bot.enqueue_ingress_receipt", new_callable=AsyncMock
+            ) as mock_receipt,
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
-            patch("ccbot.bot._surface_omx_question_state", new_callable=AsyncMock, return_value=False),
-            patch("ccbot.bot.find_answerable_omx_question_for_window", new_callable=AsyncMock, return_value=None),
+            patch(
+                "ccbot.bot._surface_omx_question_state",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "ccbot.bot.find_answerable_omx_question_for_window",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
             patch("ccbot.bot._get_window_runtime_kind", return_value="codex"),
             patch("ccbot.bot.uuid.uuid4", return_value=SimpleNamespace(hex="proof-1")),
         ):
@@ -3170,10 +3273,20 @@ class TestMediaForwarding:
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
-            patch("ccbot.bot.enqueue_ingress_receipt", new_callable=AsyncMock) as mock_receipt,
+            patch(
+                "ccbot.bot.enqueue_ingress_receipt", new_callable=AsyncMock
+            ) as mock_receipt,
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
-            patch("ccbot.bot._surface_omx_question_state", new_callable=AsyncMock, return_value=False),
-            patch("ccbot.bot.find_answerable_omx_question_for_window", new_callable=AsyncMock, return_value=None),
+            patch(
+                "ccbot.bot._surface_omx_question_state",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "ccbot.bot.find_answerable_omx_question_for_window",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
             patch("ccbot.bot._get_window_runtime_kind", return_value="codex"),
             patch("ccbot.bot._schedule_attachment_batch_flush") as mock_schedule,
         ):
@@ -3247,7 +3360,10 @@ class TestMediaForwarding:
             assert window_id == "@7"
             assert "Audio artifact received." in text_to_send
             assert f"Audio artifact: {expected_path}" in text_to_send
-            assert "Audio metadata: mime=audio/mpeg, duration=37, size=12345" in text_to_send
+            assert (
+                "Audio metadata: mime=audio/mpeg, duration=37, size=12345"
+                in text_to_send
+            )
             assert "Transcript: unavailable" in text_to_send
 
     @pytest.mark.asyncio
@@ -3444,13 +3560,13 @@ class TestMediaForwarding:
             assert "Video artifact received." in text_to_send
             assert f"Video artifact: {expected_path}" in text_to_send
             assert "Video thumbnail: (image attached:" in text_to_send
-            assert "Video metadata: mime=video/mp4, duration=8, size=45678" in text_to_send
+            assert (
+                "Video metadata: mime=video/mp4, duration=8, size=45678" in text_to_send
+            )
             assert "Transcript: not attempted in MVP" in text_to_send
 
     @pytest.mark.asyncio
-    async def test_video_without_preview_still_forwards_artifact_path(
-        self, tmp_path
-    ):
+    async def test_video_without_preview_still_forwards_artifact_path(self, tmp_path):
         update = _make_topic_update()
         context = _make_context()
         video = MagicMock(
@@ -3824,9 +3940,7 @@ class TestMediaForwarding:
             )
 
     @pytest.mark.asyncio
-    async def test_video_sticker_gif_conversion_failure_is_non_fatal(
-        self, tmp_path
-    ):
+    async def test_video_sticker_gif_conversion_failure_is_non_fatal(self, tmp_path):
         update = _make_topic_update()
         context = _make_context()
 
@@ -3879,9 +3993,7 @@ class TestMediaForwarding:
             assert "Sticker animation GIF: unavailable (ffmpeg failed:" in text_to_send
 
     @pytest.mark.asyncio
-    async def test_video_sticker_gif_conversion_success_is_reported(
-        self, tmp_path
-    ):
+    async def test_video_sticker_gif_conversion_success_is_reported(self, tmp_path):
         update = _make_topic_update()
         context = _make_context()
 
@@ -4182,7 +4294,9 @@ class TestMediaForwarding:
 
             await bot_mod.voice_handler(update, context)
 
-            mock_sm.send_to_window.assert_called_once_with("@7", "Локальная расшифровка")
+            mock_sm.send_to_window.assert_called_once_with(
+                "@7", "Локальная расшифровка"
+            )
 
     @pytest.mark.asyncio
     async def test_voice_handler_disabled_provider_does_not_download(self):
@@ -4613,8 +4727,13 @@ class TestLauncherRegistration:
             patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.safe_edit", new_callable=AsyncMock),
-            patch("ccbot.bot._register_bound_window", new_callable=AsyncMock) as mock_register,
-            patch("ccbot.bot._maybe_autosend_pending_after_activation", new_callable=AsyncMock),
+            patch(
+                "ccbot.bot._register_bound_window", new_callable=AsyncMock
+            ) as mock_register,
+            patch(
+                "ccbot.bot._maybe_autosend_pending_after_activation",
+                new_callable=AsyncMock,
+            ),
             patch.object(bot_mod.config, "claude_command", "codex"),
         ):
             mock_sm.get_surface_title.return_value = "comfy-agent-ops"
@@ -4661,7 +4780,9 @@ class TestLauncherRegistration:
         )
 
     @pytest.mark.asyncio
-    async def test_create_and_bind_window_uses_shared_topic_title_from_other_actor(self):
+    async def test_create_and_bind_window_uses_shared_topic_title_from_other_actor(
+        self,
+    ):
         query = MagicMock(spec=CallbackQuery)
         query.answer = AsyncMock()
         context = _make_context()
@@ -4682,8 +4803,13 @@ class TestLauncherRegistration:
             patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.safe_edit", new_callable=AsyncMock),
-            patch("ccbot.bot._register_bound_window", new_callable=AsyncMock) as mock_register,
-            patch("ccbot.bot._maybe_autosend_pending_after_activation", new_callable=AsyncMock),
+            patch(
+                "ccbot.bot._register_bound_window", new_callable=AsyncMock
+            ) as mock_register,
+            patch(
+                "ccbot.bot._maybe_autosend_pending_after_activation",
+                new_callable=AsyncMock,
+            ),
             patch.object(bot_mod.config, "claude_command", "codex"),
         ):
             mock_sm.get_surface_title.return_value = ""
@@ -4727,7 +4853,9 @@ class TestLauncherRegistration:
         assert mock_register.await_args.kwargs["sync_topic_title"] is True
 
     @pytest.mark.asyncio
-    async def test_create_and_bind_window_updates_cached_title_after_tmux_suffix_sync(self):
+    async def test_create_and_bind_window_updates_cached_title_after_tmux_suffix_sync(
+        self,
+    ):
         query = MagicMock(spec=CallbackQuery)
         query.answer = AsyncMock()
         context = _make_context()
@@ -4748,8 +4876,13 @@ class TestLauncherRegistration:
             patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.safe_edit", new_callable=AsyncMock),
-            patch("ccbot.bot._register_bound_window", new_callable=AsyncMock) as mock_register,
-            patch("ccbot.bot._maybe_autosend_pending_after_activation", new_callable=AsyncMock),
+            patch(
+                "ccbot.bot._register_bound_window", new_callable=AsyncMock
+            ) as mock_register,
+            patch(
+                "ccbot.bot._maybe_autosend_pending_after_activation",
+                new_callable=AsyncMock,
+            ),
             patch.object(bot_mod.config, "claude_command", "codex"),
         ):
             mock_sm.get_surface_title.return_value = "comfy-agent-ops"
@@ -4781,7 +4914,9 @@ class TestLauncherRegistration:
         )
 
     @pytest.mark.asyncio
-    async def test_create_and_bind_window_does_not_rename_topic_to_cwd_when_title_unknown(self):
+    async def test_create_and_bind_window_does_not_rename_topic_to_cwd_when_title_unknown(
+        self,
+    ):
         query = MagicMock(spec=CallbackQuery)
         query.answer = AsyncMock()
         context = _make_context()
@@ -4802,8 +4937,13 @@ class TestLauncherRegistration:
             patch("ccbot.bot.tmux_manager") as mock_tmux,
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.safe_edit", new_callable=AsyncMock),
-            patch("ccbot.bot._register_bound_window", new_callable=AsyncMock) as mock_register,
-            patch("ccbot.bot._maybe_autosend_pending_after_activation", new_callable=AsyncMock),
+            patch(
+                "ccbot.bot._register_bound_window", new_callable=AsyncMock
+            ) as mock_register,
+            patch(
+                "ccbot.bot._maybe_autosend_pending_after_activation",
+                new_callable=AsyncMock,
+            ),
             patch.object(bot_mod.config, "claude_command", "codex"),
         ):
             mock_sm.get_surface_title.return_value = ""
@@ -4846,11 +4986,86 @@ class TestLauncherRegistration:
 
 
 class TestThreadPickerFlow:
+    def test_same_surface_is_chat_qualified(self):
+        first = bot_mod.ControlSurface(
+            kind="group_topic",
+            chat_id=-1001,
+            thread_id=42,
+            legacy_scope_id=42,
+            surface_key="t:42",
+            label="topic",
+            is_shared_group=True,
+            supports_bind_flow=True,
+        )
+        second = bot_mod.ControlSurface(
+            kind="group_topic",
+            chat_id=-1002,
+            thread_id=42,
+            legacy_scope_id=42,
+            surface_key="t:42",
+            label="topic",
+            is_shared_group=True,
+            supports_bind_flow=True,
+        )
+
+        assert bot_mod._same_surface(first, second) is False
+
+    def test_browse_state_is_surface_scoped(self):
+        first = bot_mod.ControlSurface(
+            kind="group_topic",
+            chat_id=-1001,
+            thread_id=42,
+            legacy_scope_id=42,
+            surface_key="t:42",
+            label="topic",
+            is_shared_group=True,
+            supports_bind_flow=True,
+        )
+        second = bot_mod.ControlSurface(
+            kind="group_topic",
+            chat_id=-1002,
+            thread_id=42,
+            legacy_scope_id=42,
+            surface_key="t:42",
+            label="topic",
+            is_shared_group=True,
+            supports_bind_flow=True,
+        )
+        user_data = {}
+
+        bot_mod._set_browse_state_for_surface(
+            user_data,
+            first,
+            path="/home/tools/mediagen-comfy",
+            dirs=["src"],
+        )
+        bot_mod._set_browse_state_for_surface(
+            user_data,
+            second,
+            path="/home/tools/ccbot",
+            dirs=["tests"],
+        )
+
+        assert (
+            bot_mod._selected_browse_path(user_data, first)
+            == "/home/tools/mediagen-comfy"
+        )
+        assert bot_mod._selected_browse_path(user_data, second) == "/home/tools/ccbot"
+
+        bot_mod._clear_browse_state_for_surface(user_data, second)
+
+        assert (
+            bot_mod._selected_browse_path(user_data, first)
+            == "/home/tools/mediagen-comfy"
+        )
+        assert bot_mod._selected_browse_path(user_data, second) is None
+
     @staticmethod
     def _make_callback_update(data: str, thread_id: int = 42) -> MagicMock:
         update = MagicMock()
         update.effective_user = MagicMock(id=1)
         update.effective_chat = MagicMock(type="supergroup", id=100)
+        update.message = None
         update.callback_query = MagicMock()
         update.callback_query.data = data
         update.callback_query.answer = AsyncMock()
@@ -4870,10 +5085,14 @@ class TestThreadPickerFlow:
             )
         )
         context = _make_context()
-        context.user_data = {
-            "_pending_thread_id": 42,
-            bot_mod.BROWSE_PATH_KEY: "/tmp/project",
-        }
+        context.user_data = {}
+        surface = bot_mod.control_surface_classifier(update)
+        bot_mod._set_pending_surface(context.user_data, surface)
+        bot_mod._set_browse_state_for_surface(
+            context.user_data,
+            surface,
+            path="/tmp/project",
+        )
         thread = SimpleNamespace(
             thread_id="thread-1",
             summary="Existing Codex thread",
@@ -4897,9 +5116,43 @@ class TestThreadPickerFlow:
             await bot_mod.callback_handler(update, context)
 
         assert context.user_data[bot_mod.STATE_KEY] == bot_mod.STATE_SELECTING_THREAD
-        assert context.user_data[bot_mod.THREADS_KEY] == [thread]
+        assert bot_mod._cached_threads_for_surface(context.user_data, surface) == [
+            thread
+        ]
         mock_sm.list_threads_for_directory.assert_awaited_once_with("/tmp/project")
         mock_edit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_directory_confirm_without_selected_path_fails_closed(self):
+        update = self._make_callback_update(
+            append_bind_flow_token(
+                bot_mod.CB_DIR_CONFIRM,
+                version=2,
+                nonce="nonce123",
+            )
+        )
+        context = _make_context()
+        context.user_data = {"_pending_thread_id": 42}
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch(
+                "ccbot.bot._create_and_bind_window", new_callable=AsyncMock
+            ) as mock_create,
+        ):
+            mock_sm.validate_topic_bind_flow_callback.return_value = True
+            mock_sm.list_threads_for_directory = AsyncMock(return_value=[])
+
+            await bot_mod.callback_handler(update, context)
+
+        update.callback_query.answer.assert_awaited_once_with(
+            "Stale bind path, use /bind again",
+            show_alert=True,
+        )
+        mock_sm.list_threads_for_directory.assert_not_awaited()
+        mock_create.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_thread_picker_resume_uses_selected_thread_id(self):
@@ -4911,11 +5164,17 @@ class TestThreadPickerFlow:
             )
         )
         context = _make_context()
-        context.user_data = {
-            "_pending_thread_id": 42,
-            "_selected_path": "/tmp/project",
-            bot_mod.THREADS_KEY: [SimpleNamespace(thread_id="thread-1")],
-        }
+        context.user_data = {}
+        surface = bot_mod.control_surface_classifier(update)
+        bot_mod._set_pending_surface(context.user_data, surface)
+        bot_mod._set_surface_flow_values(
+            context.user_data,
+            surface,
+            **{
+                bot_mod.THREADS_KEY: [SimpleNamespace(thread_id="thread-1")],
+                bot_mod.THREAD_PICKER_SELECTED_PATH_KEY: "/tmp/project",
+            },
+        )
 
         with (
             patch("ccbot.bot.is_user_allowed", return_value=True),
@@ -4941,10 +5200,14 @@ class TestThreadPickerFlow:
             )
         )
         context = _make_context()
-        context.user_data = {
-            "_pending_thread_id": 42,
-            "_selected_path": "/tmp/project",
-        }
+        context.user_data = {}
+        surface = bot_mod.control_surface_classifier(update)
+        bot_mod._set_pending_surface(context.user_data, surface)
+        bot_mod._set_surface_flow_values(
+            context.user_data,
+            surface,
+            **{bot_mod.THREAD_PICKER_SELECTED_PATH_KEY: "/tmp/project"},
+        )
 
         with (
             patch("ccbot.bot.is_user_allowed", return_value=True),
@@ -4964,12 +5227,41 @@ class TestThreadPickerFlow:
                 chat_id=100,
                 thread_id=42,
                 legacy_scope_id=42,
-                surface_key="t:42",
+                surface_key="t:100:42",
                 label="topic",
                 is_shared_group=True,
                 supports_bind_flow=True,
             )
         }
+
+    @pytest.mark.asyncio
+    async def test_thread_picker_missing_selected_path_fails_closed(self):
+        update = self._make_callback_update(
+            append_bind_flow_token(
+                bot_mod.CB_THREAD_NEW,
+                version=2,
+                nonce="nonce123",
+            )
+        )
+        context = _make_context()
+        context.user_data = {"_pending_thread_id": 42}
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch(
+                "ccbot.bot._create_and_bind_window", new_callable=AsyncMock
+            ) as mock_create,
+        ):
+            mock_sm.validate_topic_bind_flow_callback.return_value = True
+            await bot_mod.callback_handler(update, context)
+
+        update.callback_query.answer.assert_awaited_once_with(
+            "Stale bind path, use /bind again",
+            show_alert=True,
+        )
+        mock_create.assert_not_awaited()
 
 
 class TestTelegramDelivery:
@@ -5029,6 +5321,48 @@ class TestTelegramDelivery:
         assert projected.semantic_kind == "commentary"
         assert projected.text == "x" * 1200
         assert projected.status_message_eligible is False
+
+    @pytest.mark.asyncio
+    async def test_handle_new_message_preserves_chat_qualified_delivery_surface(self):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="done",
+            is_complete=True,
+            content_type="text",
+            role="assistant",
+            event_kind="assistant_message",
+            runtime_kind="codex",
+            semantic_kind=ASSISTANT_FINAL_SEMANTIC_KIND,
+        )
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot._session_has_method", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.mark_runtime_presence_active"),
+            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch("ccbot.bot.get_interactive_msg_id", return_value=None),
+        ):
+            mock_sm.find_bindings_for_thread = AsyncMock(
+                return_value=[
+                    bot_mod.TopicBinding(
+                        user_id=1,
+                        thread_id=42,
+                        window_id="@7",
+                        surface_key="t:-100200300:42",
+                        chat_id=-100200300,
+                        runtime_kind="codex",
+                    )
+                ]
+            )
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        mock_content.assert_awaited_once()
+        assert mock_content.await_args.kwargs["chat_id"] == -100200300
+        assert mock_content.await_args.kwargs["surface_key"] == "t:-100200300:42"
 
     @pytest.mark.asyncio
     async def test_handle_new_message_compact_mode_routes_plan_update_to_dedicated_artifact(
@@ -5314,7 +5648,9 @@ class TestTelegramDelivery:
         mock_content.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_suppresses_fast_receipt_duplicate_after_opening_turn(self):
+    async def test_handle_new_message_suppresses_fast_receipt_duplicate_after_opening_turn(
+        self,
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",
@@ -5381,7 +5717,9 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_supersedes_pending_receipt_when_replay_echo_wins_race(self):
+    async def test_handle_new_message_supersedes_pending_receipt_when_replay_echo_wins_race(
+        self,
+    ):
         bot = AsyncMock()
         msg = NormalizedEvent(
             thread_id="thread-1",

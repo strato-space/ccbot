@@ -67,7 +67,8 @@ Compatibility topic mirrors still exist for topic-shaped callers:
 
 ### Named topic control surface
 
-- canonical persisted key: `t:<thread_id>`
+- canonical persisted key: `t:<chat_id>:<thread_id>` when Telegram
+  coordinates are known; bare `t:<thread_id>` is legacy mirror/fallback data
 - corresponds to a forum topic in a topic-enabled chat
 
 ### No-topics main-chat control surface

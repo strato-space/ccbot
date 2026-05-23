@@ -95,15 +95,23 @@ Prefer explicit non-interactive Codex policy in that command when your host poli
 - For Codex restore, set `CODEX_HOME` in the controller service env so replay
   ACK/catalog lookup uses the intended root, and set `OMX_AUTO_UPDATE=0` so an
   OMX update prompt cannot block non-interactive startup.
+- Prefer `CCBOT_COMMAND=omx --madmax` with `CODEX_HOME`/`OMX_AUTO_UPDATE` owned
+  by the controller service/drop-ins. Any host-specific auth wrapper must be
+  cwd-neutral and must not carry `CCBOT_RESTORE_*` intent into runtime children.
+- `/bind` directory browsing starts from configured workspace roots or
+  `/home/tools`, not from the controller service `WorkingDirectory`.
+- Telegram forum-topic bindings are keyed by `t:<chat_id>:<thread_id>`; bare
+  `t:<thread_id>` entries are legacy mirrors and must not be treated as
+  cross-group authority.
 - Autonomous controller restarts on `str` are scoped to exactly two
   bot-controller/tmux surfaces:
   - ComfyCodexBot: `ccbot.service`, `CCBOT_DIR=/data/iqdoctor/.ccbot`,
-    tmux `comfy:comfy-agent`, user/surface `3045664/t:555`, chat
+    tmux `comfy:comfy-agent`, user/surface `3045664/t:-1003685295814:555`, chat
     `-1003685295814`, runtime cwd `/home/tools/mediagen-comfy`,
     `CODEX_HOME=/data/iqdoctor/.codex`.
   - ImmArenaBot: `imm_arena_bot.service`,
     `CCBOT_DIR=/data/iqdoctor/.ccbot-imm_arena_bot`, tmux
-    `imm_arena_bot:imm`, user/surface `3045664/t:3`, chat
+    `imm_arena_bot:imm`, user/surface `3045664/t:-1003974721114:3`, chat
     `-1003974721114`, runtime cwd `/home/tools/imm`,
     `CODEX_HOME=/home/tools/imm/.codex`.
 - `/home/tools/server/comfy` is historical/runtime-runbook context only; it is

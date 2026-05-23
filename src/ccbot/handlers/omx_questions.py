@@ -104,6 +104,11 @@ def _question_surface_key(
     window_id: str = "",
 ) -> _QuestionKey:
     """Return the control-surface-aware key for a Telegram question artifact."""
+    if thread_id is not None and chat_id is not None:
+        return user_id, session_manager.make_surface_key(
+            chat_id=chat_id,
+            thread_id=thread_id,
+        )
     if window_id:
         surface_key, _, _ = session_manager.get_surface_coordinates_for_window(
             user_id,
@@ -1629,7 +1634,13 @@ async def handle_omx_question_ui(
     """Send/update an OMX question prompt for the bound window, if active."""
     window = await tmux_manager.find_window_by_id(window_id)
     if not window:
-        await clear_omx_question_msg(user_id, bot, thread_id, window_id=window_id)
+        await clear_omx_question_msg(
+            user_id,
+            bot,
+            thread_id,
+            chat_id=chat_id,
+            window_id=window_id,
+        )
         return False
     key = _question_surface_key(
         user_id,
@@ -1665,6 +1676,7 @@ async def handle_omx_question_ui(
                 user_id,
                 bot,
                 thread_id,
+                chat_id=chat_id,
                 window_id=window_id,
             )
         return False

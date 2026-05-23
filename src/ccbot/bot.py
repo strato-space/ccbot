@@ -118,6 +118,7 @@ from .handlers.directory_browser import (
     BROWSE_DIRS_KEY,
     BROWSE_PAGE_KEY,
     BROWSE_PATH_KEY,
+    BROWSE_SURFACE_SLOTS_KEY,
     THREADS_KEY,
     STATE_BROWSING_DIRECTORY,
     STATE_KEY,
@@ -130,6 +131,7 @@ from .handlers.directory_browser import (
     clear_browse_state,
     clear_thread_picker_state,
     clear_window_picker_state,
+    default_browse_root,
 )
 from .handlers.cleanup import clear_topic_state
 from .handlers.history import send_history
@@ -189,6 +191,7 @@ from .runtime_types import (
     GENERATED_IMAGE_PREVIEW_CONTENT_TYPE,
     LIFECYCLE_SEMANTIC_KIND,
     PLAN_UPDATE_SEMANTIC_KIND,
+    TopicBinding,
     USER_ECHO_SEMANTIC_KIND,
     runtime_capability_registry,
 )
@@ -229,6 +232,7 @@ _last_telegram_update_monotonic: float | None = None
 _attachment_batcher = AttachmentBatcher()
 _attachment_flush_tasks: dict[IngressBatchKey, asyncio.Task] = {}
 _attachment_batch_bots: dict[IngressBatchKey, Bot] = {}
+THREAD_PICKER_SELECTED_PATH_KEY = "_selected_path"
 
 # Codex passthrough commands intentionally advertised in the Telegram menu.
 # Keep this list limited to the supported core lane; other raw slash commands
@@ -268,6 +272,15 @@ class _ResumeCommandTarget:
     summary: str
     cwd: str
     file_path: str = ""
+
+
+@dataclass(frozen=True)
+class _DeliveryBinding:
+    user_id: int
+    window_id: str
+    thread_id: int | None
+    surface_key: str | None = None
+    chat_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -441,11 +454,10 @@ def _clear_same_thread_picker_state(
     if pending_surface is None or not _same_surface(pending_surface, surface):
         return
     clear_window_picker_state(user_data)
-    clear_browse_state(user_data)
-    clear_thread_picker_state(user_data)
+    _clear_browse_state_for_surface(user_data, surface)
+    _clear_thread_picker_state_for_surface(user_data, surface)
     _set_pending_surface(user_data, None)
     user_data.pop("_pending_thread_text", None)
-    user_data.pop("_selected_path", None)
 
 
 def _clear_shared_group_peer_flow_state(
@@ -566,7 +578,7 @@ def control_surface_classifier(update: Update) -> ControlSurface:
             chat_id=chat.id,
             thread_id=thread_id,
             legacy_scope_id=thread_id,
-            surface_key=f"t:{thread_id}",
+            surface_key=f"t:{chat.id}:{thread_id}",
             label="topic",
             is_shared_group=is_group_chat,
             supports_bind_flow=True,
@@ -581,6 +593,17 @@ def control_surface_classifier(update: Update) -> ControlSurface:
         is_shared_group=False,
         supports_bind_flow=False,
     )
+
+
+def _surface_identity_kwargs(surface: ControlSurface | None) -> dict[str, object]:
+    kwargs: dict[str, object] = {}
+    if surface is None:
+        return kwargs
+    if surface.chat_id is not None:
+        kwargs["chat_id"] = surface.chat_id
+    if surface.surface_key:
+        kwargs["surface_key"] = surface.surface_key
+    return kwargs
 
 
 def surface_key_adapter(surface: ControlSurface) -> int | None:
@@ -669,9 +692,175 @@ def _set_pending_surface(
 def _same_surface(a: ControlSurface | None, b: ControlSurface | None) -> bool:
     if a is None or b is None:
         return False
+    if a.chat_id is not None and b.chat_id is not None and a.chat_id != b.chat_id:
+        return False
+    if (
+        a.kind == b.kind
+        and a.chat_id is not None
+        and b.chat_id is not None
+        and a.thread_id == b.thread_id
+    ):
+        return True
     if a.surface_key and b.surface_key:
         return a.surface_key == b.surface_key
     return a.legacy_scope_id == b.legacy_scope_id
+
+
+def _surface_flow_key(surface: ControlSurface | None) -> str | None:
+    if surface is None:
+        return None
+    return "|".join(
+        (
+            surface.kind,
+            str(surface.chat_id) if surface.chat_id is not None else "",
+            str(surface.thread_id) if surface.thread_id is not None else "",
+            surface.surface_key or "",
+        )
+    )
+
+
+def _surface_browse_slots(user_data: dict | None) -> dict[str, dict[str, object]]:
+    if user_data is None:
+        return {}
+    slots = user_data.get(BROWSE_SURFACE_SLOTS_KEY)
+    if not isinstance(slots, dict):
+        slots = {}
+        user_data[BROWSE_SURFACE_SLOTS_KEY] = slots
+    return slots
+
+
+def _set_browse_state_for_surface(
+    user_data: dict | None,
+    surface: ControlSurface | None,
+    *,
+    path: str,
+    page: int = 0,
+    dirs: list[str] | None = None,
+) -> None:
+    if user_data is None:
+        return
+    user_data[STATE_KEY] = STATE_BROWSING_DIRECTORY
+    user_data[BROWSE_PATH_KEY] = path
+    user_data[BROWSE_PAGE_KEY] = page
+    if dirs is not None:
+        user_data[BROWSE_DIRS_KEY] = dirs
+    flow_key = _surface_flow_key(surface)
+    if flow_key is None:
+        return
+    slot: dict[str, object] = {
+        BROWSE_PATH_KEY: path,
+        BROWSE_PAGE_KEY: page,
+    }
+    if dirs is not None:
+        slot[BROWSE_DIRS_KEY] = list(dirs)
+    _surface_browse_slots(user_data)[flow_key] = slot
+
+
+def _set_surface_flow_values(
+    user_data: dict | None,
+    surface: ControlSurface | None,
+    **values: object,
+) -> None:
+    if user_data is None:
+        return
+    flow_key = _surface_flow_key(surface)
+    if flow_key is None:
+        for key, value in values.items():
+            user_data[key] = value
+        return
+    slots = _surface_browse_slots(user_data)
+    slot = slots.get(flow_key)
+    if not isinstance(slot, dict):
+        slot = {}
+        slots[flow_key] = slot
+    slot.update(values)
+
+
+def _clear_browse_state_for_surface(
+    user_data: dict | None,
+    surface: ControlSurface | None,
+) -> None:
+    if user_data is None:
+        return
+    flow_key = _surface_flow_key(surface)
+    clear_browse_state(user_data)
+    slots = user_data.get(BROWSE_SURFACE_SLOTS_KEY)
+    if flow_key and isinstance(slots, dict):
+        slots.pop(flow_key, None)
+        if not slots:
+            user_data.pop(BROWSE_SURFACE_SLOTS_KEY, None)
+
+
+def _get_browse_slot_value(
+    user_data: dict | None,
+    surface: ControlSurface | None,
+    key: str,
+) -> object | None:
+    if user_data is None:
+        return None
+    flow_key = _surface_flow_key(surface)
+    slots = user_data.get(BROWSE_SURFACE_SLOTS_KEY)
+    if flow_key:
+        if not isinstance(slots, dict):
+            return None
+        slot = slots.get(flow_key)
+        if not isinstance(slot, dict):
+            return None
+        return slot.get(key)
+    return user_data.get(key)
+
+
+def _selected_browse_path(
+    user_data: dict | None,
+    surface: ControlSurface | None,
+) -> str | None:
+    value = _get_browse_slot_value(user_data, surface, BROWSE_PATH_KEY)
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
+def _thread_picker_selected_path(
+    user_data: dict | None,
+    surface: ControlSurface | None,
+) -> str | None:
+    value = _get_browse_slot_value(user_data, surface, THREAD_PICKER_SELECTED_PATH_KEY)
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
+def _cached_threads_for_surface(
+    user_data: dict | None,
+    surface: ControlSurface | None,
+) -> list[object]:
+    value = _get_browse_slot_value(user_data, surface, THREADS_KEY)
+    return value if isinstance(value, list) else []
+
+
+def _clear_thread_picker_state_for_surface(
+    user_data: dict | None,
+    surface: ControlSurface | None,
+) -> None:
+    if user_data is None:
+        return
+    clear_thread_picker_state(user_data)
+    user_data.pop(THREAD_PICKER_SELECTED_PATH_KEY, None)
+    flow_key = _surface_flow_key(surface)
+    slots = user_data.get(BROWSE_SURFACE_SLOTS_KEY)
+    if flow_key and isinstance(slots, dict):
+        slot = slots.get(flow_key)
+        if isinstance(slot, dict):
+            slot.pop(THREADS_KEY, None)
+            slot.pop(THREAD_PICKER_SELECTED_PATH_KEY, None)
+            if not slot:
+                slots.pop(flow_key, None)
+        if not slots:
+            user_data.pop(BROWSE_SURFACE_SLOTS_KEY, None)
+
+
+async def _answer_stale_bind_path(query: object) -> None:
+    await query.answer("Stale bind path, use /bind again", show_alert=True)
 
 
 def _pending_slots(user_data: dict | None) -> dict[str, dict[str, object]]:
@@ -783,21 +972,49 @@ def _get_session_window_for_surface(
     return session_manager.get_window_for_thread(user_id, legacy_scope_id)
 
 
-def _get_shared_group_binding_for_surface(
+def _surface_key_candidates(surface: ControlSurface) -> list[str]:
+    keys: list[str] = []
+    if surface.surface_key:
+        keys.append(surface.surface_key)
+    if surface.kind == "group_topic" and surface.thread_id is not None:
+        legacy_key = f"t:{surface.thread_id}"
+        if legacy_key not in keys:
+            keys.append(legacy_key)
+    return keys
+
+
+def _binding_surface_key_for_owner(
+    user_id: int,
+    surface: ControlSurface,
+) -> str | None:
+    bindings_by_user = getattr(session_manager, "surface_bindings", None)
+    if isinstance(bindings_by_user, dict):
+        bindings = bindings_by_user.get(user_id) or bindings_by_user.get(str(user_id))
+        if isinstance(bindings, dict):
+            for key in _surface_key_candidates(surface):
+                if key in bindings:
+                    return key
+    return surface.surface_key
+
+
+def _get_shared_group_binding_record_for_surface(
     user_id: int, surface: ControlSurface
-) -> tuple[int, str] | None:
+) -> tuple[int, str, str] | None:
     """Resolve an existing group surface binding owned by another user."""
     if not surface.is_shared_group or not surface.surface_key:
         return None
     bindings_by_user = getattr(session_manager, "surface_bindings", None)
     if not isinstance(bindings_by_user, dict):
         return None
+    candidate_keys = _surface_key_candidates(surface)
 
     for owner_id, bindings in bindings_by_user.items():
         if owner_id == user_id or not isinstance(bindings, dict):
             continue
-        window_id = bindings.get(surface.surface_key)
-        if isinstance(window_id, str) and window_id:
+        for binding_surface_key in candidate_keys:
+            window_id = bindings.get(binding_surface_key)
+            if not isinstance(window_id, str) or not window_id:
+                continue
             try:
                 binding_owner_id = int(owner_id)
             except (TypeError, ValueError):
@@ -807,8 +1024,18 @@ def _get_shared_group_binding_for_surface(
                 surface,
             ):
                 continue
-            return binding_owner_id, window_id
+            return binding_owner_id, window_id, binding_surface_key
     return None
+
+
+def _get_shared_group_binding_for_surface(
+    user_id: int, surface: ControlSurface
+) -> tuple[int, str] | None:
+    record = _get_shared_group_binding_record_for_surface(user_id, surface)
+    if record is None:
+        return None
+    owner_id, window_id, _binding_surface_key = record
+    return owner_id, window_id
 
 
 def _shared_group_binding_matches_surface(
@@ -1007,6 +1234,35 @@ def _capture_surface_binding_generation(
         return None
 
 
+async def _find_delivery_bindings_for_session(session_id: str) -> list[_DeliveryBinding]:
+    """Resolve runtime replay recipients without losing surface/chat identity."""
+    if _session_has_method("find_bindings_for_thread"):
+        bindings: list[TopicBinding] = await session_manager.find_bindings_for_thread(
+            session_id
+        )
+        return [
+            _DeliveryBinding(
+                user_id=binding.user_id,
+                window_id=binding.window_id,
+                thread_id=binding.thread_id,
+                surface_key=binding.surface_key or None,
+                chat_id=binding.chat_id,
+            )
+            for binding in bindings
+        ]
+
+    # Test/migration fallback for old session manager mocks.
+    active_users = await session_manager.find_users_for_session(session_id)
+    return [
+        _DeliveryBinding(
+            user_id=user_id,
+            window_id=window_id,
+            thread_id=thread_id,
+        )
+        for user_id, window_id, thread_id in active_users
+    ]
+
+
 def _validate_surface_bind_flow_callback(
     user_id: int,
     surface: ControlSurface,
@@ -1179,6 +1435,13 @@ async def _handle_fast_input_proof_complete(
         status = "delayed_runtime"
     else:
         status = "failed"
+    proof_surface_kwargs: dict[str, object] = {}
+    proof_chat_id = getattr(proof, "chat_id", None)
+    if isinstance(proof_chat_id, int):
+        proof_surface_kwargs["chat_id"] = proof_chat_id
+    proof_surface_key = getattr(proof, "surface_key", None)
+    if isinstance(proof_surface_key, str) and proof_surface_key:
+        proof_surface_kwargs["surface_key"] = proof_surface_key
     await enqueue_ingress_receipt(
         bot,
         getattr(proof, "user_id"),
@@ -1187,6 +1450,7 @@ async def _handle_fast_input_proof_complete(
         proof_id=proof_id,
         receipt_status=status,
         thread_id=getattr(proof, "thread_id"),
+        **proof_surface_kwargs,
     )
 
 
@@ -1246,10 +1510,9 @@ def _resolve_existing_window_runtime_kind(
     pane_command: str,
 ) -> str | None:
     """Resolve the runtime kind for a live tmux window selected via /bind."""
-    return (
-        runtime_capability_registry.known_runtime_kind_from_command(pane_command)
-        or _get_registered_window_runtime_kind(window_id)
-    )
+    return runtime_capability_registry.known_runtime_kind_from_command(
+        pane_command
+    ) or _get_registered_window_runtime_kind(window_id)
 
 
 def build_bot_commands() -> list[BotCommand]:
@@ -1522,7 +1785,16 @@ async def _surface_blocked_prompt_state(
     chat_id: int | None = None,
 ) -> None:
     """Show the current blocked prompt as a read-only snapshot."""
-    await handle_interactive_ui(bot, user_id, window_id, thread_id)
+    surface_identity_kwargs: dict[str, object] = {}
+    if chat_id is not None:
+        surface_identity_kwargs["chat_id"] = chat_id
+    await handle_interactive_ui(
+        bot,
+        user_id,
+        window_id,
+        thread_id,
+        **surface_identity_kwargs,
+    )
     notice = (
         "⚠️ Terminal prompt is waiting for a decision. "
         "Remote input is disabled for this state."
@@ -1774,7 +2046,7 @@ async def _start_bind_flow(
         await safe_reply(update.message, msg_text, reply_markup=keyboard)
         return
 
-    start_path = str(Path.cwd())
+    start_path = default_browse_root()
     msg_text, keyboard, subdirs = build_directory_browser(
         start_path,
         bind_flow_version=bind_flow_version,
@@ -1784,10 +2056,13 @@ async def _start_bind_flow(
         clear_thread_picker_state(context.user_data)
         clear_window_picker_state(context.user_data)
         clear_browse_state(context.user_data)
-        context.user_data[STATE_KEY] = STATE_BROWSING_DIRECTORY
-        context.user_data[BROWSE_PATH_KEY] = start_path
-        context.user_data[BROWSE_PAGE_KEY] = 0
-        context.user_data[BROWSE_DIRS_KEY] = subdirs
+        _set_browse_state_for_surface(
+            context.user_data,
+            surface,
+            path=start_path,
+            page=0,
+            dirs=subdirs,
+        )
         _set_pending_surface(context.user_data, surface)
         if pending_text is not None:
             context.user_data["_pending_thread_text"] = pending_text
@@ -2057,10 +2332,14 @@ async def unbind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     runtime_kind = _default_launch_runtime_kind()
     wid = _get_session_window_for_surface(user.id, surface)
     binding_owner_id = user.id
+    binding_surface_key = _binding_surface_key_for_owner(user.id, surface)
     if not wid:
-        shared_binding = _get_shared_group_binding_for_surface(user.id, surface)
+        shared_binding = _get_shared_group_binding_record_for_surface(
+            user.id,
+            surface,
+        )
         if shared_binding is not None:
-            binding_owner_id, wid = shared_binding
+            binding_owner_id, wid, binding_surface_key = shared_binding
     if not wid:
         _require_manual_bind(user.id, surface)
         await clear_topic_state(
@@ -2079,7 +2358,7 @@ async def unbind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     display = session_manager.get_display_name(wid)
     session_manager.unbind_surface(
         binding_owner_id,
-        surface_key=surface.surface_key,
+        surface_key=binding_surface_key,
     )
     _require_manual_bind(user.id, surface)
     if binding_owner_id != user.id:
@@ -2444,12 +2723,16 @@ async def topic_closed_handler(
         return
 
     surface = control_surface_classifier(update)
-    wid = session_manager.get_window_for_thread(user.id, thread_id)
+    wid = _get_session_window_for_surface(user.id, surface)
     binding_owner_id = user.id
+    binding_surface_key = _binding_surface_key_for_owner(user.id, surface)
     if not wid:
-        shared_binding = _get_shared_group_binding_for_surface(user.id, surface)
+        shared_binding = _get_shared_group_binding_record_for_surface(
+            user.id,
+            surface,
+        )
         if shared_binding is not None:
-            binding_owner_id, wid = shared_binding
+            binding_owner_id, wid, binding_surface_key = shared_binding
     if wid:
         display = session_manager.get_display_name(wid)
         w = await tmux_manager.find_window_by_id(wid)
@@ -2470,7 +2753,13 @@ async def topic_closed_handler(
                 binding_owner_id,
                 thread_id,
             )
-        session_manager.unbind_thread(binding_owner_id, thread_id)
+        if binding_surface_key and _session_has_method("unbind_surface"):
+            session_manager.unbind_surface(
+                binding_owner_id,
+                surface_key=binding_surface_key,
+            )
+        else:
+            session_manager.unbind_thread(binding_owner_id, thread_id)
         # Clean up all memory state for this topic
         await clear_topic_state(user.id, thread_id, context.bot, context.user_data)
         if binding_owner_id != user.id:
@@ -3212,7 +3501,9 @@ async def _warn_attachment_batch_downloads_failed(key: IngressBatchKey) -> None:
 
 def _surface_from_captured_target(target: CapturedBindingTarget) -> ControlSurface:
     return ControlSurface(
-        kind="group_topic" if target.message_thread_id is not None else "group_main_chat",
+        kind="group_topic"
+        if target.message_thread_id is not None
+        else "group_main_chat",
         chat_id=target.chat_id,
         thread_id=target.message_thread_id,
         legacy_scope_id=target.message_thread_id
@@ -3453,7 +3744,11 @@ async def _resolve_attachment_input_target(
         )
         return None
 
-    if silent_unbound and chat.type in ("group", "supergroup") and thread_id is not None:
+    if (
+        silent_unbound
+        and chat.type in ("group", "supergroup")
+        and thread_id is not None
+    ):
         session_manager.set_group_chat_id(user.id, thread_id, chat.id)
 
     w = await tmux_manager.find_window_by_id(wid)
@@ -3462,7 +3757,14 @@ async def _resolve_attachment_input_target(
             return None
         display = session_manager.get_display_name(wid)
         if not using_shared_group_binding:
-            session_manager.unbind_thread(user.id, thread_id)
+            binding_surface_key = _binding_surface_key_for_owner(
+                user.id,
+                control_surface,
+            )
+            if binding_surface_key and _session_has_method("unbind_surface"):
+                session_manager.unbind_surface(user.id, surface_key=binding_surface_key)
+            else:
+                session_manager.unbind_thread(user.id, thread_id)
             await safe_reply(
                 update.message,
                 f"❌ Window '{display}' no longer exists. Binding removed.\n"
@@ -3831,7 +4133,9 @@ async def _maybe_video_sticker_gif(source_path: Path) -> tuple[Path | None, str 
     return gif_path, None
 
 
-async def _sticker_artifacts(sticker: Any) -> tuple[_StickerArtifacts | None, str | None]:
+async def _sticker_artifacts(
+    sticker: Any,
+) -> tuple[_StickerArtifacts | None, str | None]:
     """Persist a Telegram sticker without collapsing animation into image semantics."""
     unique_id = _sanitize_attachment_filename(
         getattr(sticker, "file_unique_id", None),
@@ -3872,7 +4176,9 @@ async def _sticker_artifacts(sticker: Any) -> tuple[_StickerArtifacts | None, st
                 fallback_suffix,
             )
         except Exception as exc:
-            logger.warning("Failed to download Telegram sticker animation artifact: %s", exc)
+            logger.warning(
+                "Failed to download Telegram sticker animation artifact: %s", exc
+            )
             status_lines.append(
                 f"Sticker animation artifact: unavailable ({exc.__class__.__name__})"
             )
@@ -3880,7 +4186,9 @@ async def _sticker_artifacts(sticker: Any) -> tuple[_StickerArtifacts | None, st
         if is_video and original_path is not None:
             gif_path, gif_failure = await _maybe_video_sticker_gif(original_path)
             if gif_failure:
-                status_lines.append(f"Sticker animation GIF: unavailable ({gif_failure})")
+                status_lines.append(
+                    f"Sticker animation GIF: unavailable ({gif_failure})"
+                )
         elif is_animated and original_path is not None:
             status_lines.append(
                 "Sticker animation GIF: not generated for .tgs stickers"
@@ -4114,13 +4422,41 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await safe_reply(update.message, f'🎤 "{text}"')
 
 
-# Active bash capture tasks: (user_id, thread_id) → asyncio.Task
-_bash_capture_tasks: dict[tuple[int, int], asyncio.Task[None]] = {}
+# Active bash capture tasks: (user_id, delivery surface token) → asyncio.Task
+_bash_capture_tasks: dict[tuple[int, int | str], asyncio.Task[None]] = {}
 
 
-def _cancel_bash_capture(user_id: int, thread_id: int) -> None:
-    """Cancel any running bash capture for this topic."""
-    key = (user_id, thread_id)
+def _bash_capture_key(
+    user_id: int,
+    thread_id: int | None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
+) -> tuple[int, int | str]:
+    """Return the delivery-surface key for a running bash capture task."""
+    if surface_key:
+        token: int | str = surface_key
+    elif chat_id is not None:
+        token = session_manager.make_surface_key(thread_id=thread_id, chat_id=chat_id)
+    else:
+        token = thread_id or 0
+    return user_id, token
+
+
+def _cancel_bash_capture(
+    user_id: int,
+    thread_id: int | None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
+) -> None:
+    """Cancel any running bash capture for this delivery surface."""
+    key = _bash_capture_key(
+        user_id,
+        thread_id,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
     task = _bash_capture_tasks.pop(key, None)
     if task and not task.done():
         task.cancel()
@@ -4129,9 +4465,12 @@ def _cancel_bash_capture(user_id: int, thread_id: int) -> None:
 async def _capture_bash_output(
     bot: Bot,
     user_id: int,
-    thread_id: int,
+    thread_id: int | None,
     window_id: str,
     command: str,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> None:
     """Background task: capture ``!`` bash command output from tmux pane.
 
@@ -4143,7 +4482,7 @@ async def _capture_bash_output(
         # Wait for the command to start producing output
         await asyncio.sleep(2.0)
 
-        chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+        delivery_chat_id = chat_id or session_manager.resolve_chat_id(user_id, thread_id)
         msg_id: int | None = None
         last_output: str = ""
 
@@ -4172,7 +4511,7 @@ async def _capture_bash_output(
                 # First capture — send a new message
                 sent = await send_with_fallback(
                     bot,
-                    chat_id,
+                    delivery_chat_id,
                     output,
                     message_thread_id=thread_id,
                 )
@@ -4182,7 +4521,7 @@ async def _capture_bash_output(
                 # Subsequent captures — edit in place
                 try:
                     await bot.edit_message_text(
-                        chat_id=chat_id,
+                        chat_id=delivery_chat_id,
                         message_id=msg_id,
                         text=convert_markdown(output),
                         parse_mode="MarkdownV2",
@@ -4191,7 +4530,7 @@ async def _capture_bash_output(
                 except Exception:
                     try:
                         await bot.edit_message_text(
-                            chat_id=chat_id,
+                            chat_id=delivery_chat_id,
                             message_id=msg_id,
                             text=output,
                             link_preview_options=NO_LINK_PREVIEW,
@@ -4203,7 +4542,15 @@ async def _capture_bash_output(
     except asyncio.CancelledError:
         return
     finally:
-        _bash_capture_tasks.pop((user_id, thread_id), None)
+        _bash_capture_tasks.pop(
+            _bash_capture_key(
+                user_id,
+                thread_id,
+                chat_id=chat_id,
+                surface_key=surface_key,
+            ),
+            None,
+        )
 
 
 async def _register_bound_window(
@@ -4297,6 +4644,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     surface = control_surface_classifier(update)
     thread_id = surface.message_thread_id
+    surface_identity_kwargs = _surface_identity_kwargs(surface)
 
     # Capture group chat_id for supergroup forum topic routing.
     # Required: Telegram Bot API needs group chat_id (not user_id) to send
@@ -4350,7 +4698,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
             return
         # Stale browsing state from a different thread — clear it
-        clear_browse_state(context.user_data)
+        _clear_browse_state_for_surface(context.user_data, pending_surface)
         _set_pending_surface(context.user_data, None)
         context.user_data.pop("_pending_thread_text", None)
 
@@ -4364,10 +4712,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
             return
         # Stale picker state from a different thread — clear it
-        clear_thread_picker_state(context.user_data)
+        _clear_thread_picker_state_for_surface(context.user_data, pending_surface)
         _set_pending_surface(context.user_data, None)
         context.user_data.pop("_pending_thread_text", None)
-        context.user_data.pop("_selected_path", None)
 
     if not surface.supports_bind_flow:
         await safe_reply(
@@ -4492,10 +4839,15 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         wid,
         None,
         thread_id=surface.message_thread_id,
+        **surface_identity_kwargs,
     )
 
     # Cancel any running bash capture — new message pushes pane content down
-    _cancel_bash_capture(user.id, surface.legacy_scope_id)
+    _cancel_bash_capture(
+        user.id,
+        surface.legacy_scope_id,
+        **surface_identity_kwargs,
+    )
 
     # Check for pending interactive UI before sending text.
     # This catches UIs (permission prompts, etc.) that status polling might have missed.
@@ -4564,8 +4916,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         await safe_reply(
             update.message,
-            "✅ OMX question answered as Other:\n"
-            f"{answer.get('value', '').strip()}",
+            f"✅ OMX question answered as Other:\n{answer.get('value', '').strip()}",
         )
         return
 
@@ -4624,8 +4975,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 text,
                 proof_id=proof_id,
                 thread_id=surface.message_thread_id,
+                **surface_identity_kwargs,
             )
-            success, message, proof = await session_manager.send_to_window_fast_unverified(
+            (
+                success,
+                message,
+                proof,
+            ) = await session_manager.send_to_window_fast_unverified(
                 wid,
                 text,
                 proof_id=proof_id,
@@ -4649,6 +5005,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 proof_id=proof_id,
                 receipt_status="failed",
                 thread_id=surface.message_thread_id,
+                **surface_identity_kwargs,
             )
             if message == BLOCKED_PROMPT_SEND_MESSAGE:
                 await _surface_blocked_prompt_state(
@@ -4706,15 +5063,32 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 surface.legacy_scope_id,
                 wid,
                 bash_cmd,
+                **surface_identity_kwargs,
             )
         )
-        _bash_capture_tasks[(user.id, surface.legacy_scope_id)] = task
+        _bash_capture_tasks[
+            _bash_capture_key(
+                user.id,
+                surface.legacy_scope_id,
+                **surface_identity_kwargs,
+            )
+        ] = task
 
     # If in interactive mode, refresh the UI after sending text
-    interactive_window = get_interactive_window(user.id, thread_id)
+    interactive_window = get_interactive_window(
+        user.id,
+        thread_id,
+        **surface_identity_kwargs,
+    )
     if interactive_window and interactive_window == wid:
         await asyncio.sleep(0.2)
-        await handle_interactive_ui(context.bot, user.id, wid, thread_id)
+        await handle_interactive_ui(
+            context.bot,
+            user.id,
+            wid,
+            thread_id,
+            **surface_identity_kwargs,
+        )
 
 
 # --- Window creation helper ---
@@ -4888,6 +5262,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if await handle_omx_question_callback(update, context):
         return
     current_surface = control_surface_classifier(update)
+    surface_identity_kwargs = _surface_identity_kwargs(current_surface)
 
     # History: older/newer pagination
     # Format: hp:<page>:<window_id>:<start>:<end> or hn:<page>:<window_id>:<start>:<end>
@@ -4951,8 +5326,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
 
         # Look up dir name from cached subdirs
+        raw_cached_dirs = _get_browse_slot_value(
+            context.user_data,
+            pending_surface,
+            BROWSE_DIRS_KEY,
+        )
         cached_dirs: list[str] = (
-            context.user_data.get(BROWSE_DIRS_KEY, []) if context.user_data else []
+            raw_cached_dirs if isinstance(raw_cached_dirs, list) else []
         )
         if idx < 0 or idx >= len(cached_dirs):
             await query.answer(
@@ -4961,12 +5341,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
         subdir_name = cached_dirs[idx]
 
-        default_path = str(Path.cwd())
-        current_path = (
-            context.user_data.get(BROWSE_PATH_KEY, default_path)
-            if context.user_data
-            else default_path
-        )
+        current_path = _selected_browse_path(context.user_data, pending_surface)
+        if current_path is None:
+            await _answer_stale_bind_path(query)
+            return
         new_path = (Path(current_path) / subdir_name).resolve()
 
         if not new_path.exists() or not new_path.is_dir():
@@ -4975,8 +5353,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         new_path_str = str(new_path)
         if context.user_data is not None:
-            context.user_data[BROWSE_PATH_KEY] = new_path_str
-            context.user_data[BROWSE_PAGE_KEY] = 0
+            _set_browse_state_for_surface(
+                context.user_data,
+                pending_surface,
+                path=new_path_str,
+                page=0,
+            )
 
         current_version, current_nonce = _get_current_bind_flow_credentials(
             user.id, pending_surface
@@ -4987,7 +5369,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             bind_flow_nonce=current_nonce,
         )
         if context.user_data is not None:
-            context.user_data[BROWSE_DIRS_KEY] = subdirs
+            _set_browse_state_for_surface(
+                context.user_data,
+                pending_surface,
+                path=new_path_str,
+                page=0,
+                dirs=subdirs,
+            )
         await safe_edit(query, msg_text, reply_markup=keyboard)
         await query.answer()
 
@@ -5005,20 +5393,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if not _callback_matches_pending_surface(update, context, pending_surface):
             await query.answer("Stale browser (topic mismatch)", show_alert=True)
             return
-        default_path = str(Path.cwd())
-        current_path = (
-            context.user_data.get(BROWSE_PATH_KEY, default_path)
-            if context.user_data
-            else default_path
-        )
+        current_path = _selected_browse_path(context.user_data, pending_surface)
+        if current_path is None:
+            await _answer_stale_bind_path(query)
+            return
         current = Path(current_path).resolve()
         parent = current.parent
         # No restriction - allow navigating anywhere
 
         parent_path = str(parent)
         if context.user_data is not None:
-            context.user_data[BROWSE_PATH_KEY] = parent_path
-            context.user_data[BROWSE_PAGE_KEY] = 0
+            _set_browse_state_for_surface(
+                context.user_data,
+                pending_surface,
+                path=parent_path,
+                page=0,
+            )
 
         current_version, current_nonce = _get_current_bind_flow_credentials(
             user.id, pending_surface
@@ -5029,7 +5419,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             bind_flow_nonce=current_nonce,
         )
         if context.user_data is not None:
-            context.user_data[BROWSE_DIRS_KEY] = subdirs
+            _set_browse_state_for_surface(
+                context.user_data,
+                pending_surface,
+                path=parent_path,
+                page=0,
+                dirs=subdirs,
+            )
         await safe_edit(query, msg_text, reply_markup=keyboard)
         await query.answer()
 
@@ -5052,14 +5448,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         except ValueError:
             await query.answer("Invalid data")
             return
-        default_path = str(Path.cwd())
-        current_path = (
-            context.user_data.get(BROWSE_PATH_KEY, default_path)
-            if context.user_data
-            else default_path
-        )
+        current_path = _selected_browse_path(context.user_data, pending_surface)
+        if current_path is None:
+            await _answer_stale_bind_path(query)
+            return
         if context.user_data is not None:
-            context.user_data[BROWSE_PAGE_KEY] = pg
+            _set_browse_state_for_surface(
+                context.user_data,
+                pending_surface,
+                path=current_path,
+                page=pg,
+            )
 
         current_version, current_nonce = _get_current_bind_flow_credentials(
             user.id, pending_surface
@@ -5071,17 +5470,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             bind_flow_nonce=current_nonce,
         )
         if context.user_data is not None:
-            context.user_data[BROWSE_DIRS_KEY] = subdirs
+            _set_browse_state_for_surface(
+                context.user_data,
+                pending_surface,
+                path=current_path,
+                page=pg,
+                dirs=subdirs,
+            )
         await safe_edit(query, msg_text, reply_markup=keyboard)
         await query.answer()
 
     elif data == CB_DIR_CONFIRM:
-        default_path = str(Path.cwd())
-        selected_path = (
-            context.user_data.get(BROWSE_PATH_KEY, default_path)
-            if context.user_data
-            else default_path
-        )
         # Check if this was initiated from a thread bind flow
         pending_thread_id = _resolve_bind_flow_callback_thread_id(update, context)
         pending_surface = _resolve_bind_flow_callback_surface(update, context)
@@ -5096,14 +5495,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         # Validate: confirm button must come from the same topic that started browsing
         if not _callback_matches_pending_surface(update, context, pending_surface):
-            clear_browse_state(context.user_data)
+            _clear_browse_state_for_surface(context.user_data, pending_surface)
             if context.user_data is not None:
                 _set_pending_surface(context.user_data, None)
                 context.user_data.pop("_pending_thread_text", None)
             await query.answer("Stale browser (topic mismatch)", show_alert=True)
             return
 
-        clear_browse_state(context.user_data)
+        selected_path = _selected_browse_path(context.user_data, pending_surface)
+        if selected_path is None:
+            _clear_browse_state_for_surface(context.user_data, pending_surface)
+            await _answer_stale_bind_path(query)
+            return
+
+        _clear_browse_state_for_surface(context.user_data, pending_surface)
 
         # Check for existing persisted threads in this directory.
         threads = await session_manager.list_threads_for_directory(selected_path)
@@ -5111,8 +5516,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             # Show thread picker — store state for later.
             if context.user_data is not None:
                 context.user_data[STATE_KEY] = STATE_SELECTING_THREAD
-                context.user_data[THREADS_KEY] = threads
-                context.user_data["_selected_path"] = selected_path
+                _set_surface_flow_values(
+                    context.user_data,
+                    pending_surface,
+                    **{
+                        THREADS_KEY: threads,
+                        THREAD_PICKER_SELECTED_PATH_KEY: selected_path,
+                    },
+                )
             current_version, current_nonce = _get_current_bind_flow_credentials(
                 user.id, pending_surface
             )
@@ -5150,7 +5561,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.answer("Stale browser (topic mismatch)", show_alert=True)
             return
         active_surface = pending_surface or current_surface
-        clear_browse_state(context.user_data)
+        _clear_browse_state_for_surface(context.user_data, pending_surface)
         if context.user_data is not None:
             _set_pending_surface(context.user_data, None)
             context.user_data.pop("_pending_thread_text", None)
@@ -5181,22 +5592,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.answer("Invalid data")
             return
 
-        cached_threads = (
-            context.user_data.get(THREADS_KEY, []) if context.user_data else []
-        )
+        cached_threads = _cached_threads_for_surface(context.user_data, pending_surface)
         if idx < 0 or idx >= len(cached_threads):
             await query.answer("Thread not found")
             return
 
         thread = cached_threads[idx]
-        selected_path = (
-            context.user_data.get("_selected_path", str(Path.cwd()))
-            if context.user_data
-            else str(Path.cwd())
-        )
-        clear_thread_picker_state(context.user_data)
-        if context.user_data is not None:
-            context.user_data.pop("_selected_path", None)
+        selected_path = _thread_picker_selected_path(context.user_data, pending_surface)
+        if selected_path is None:
+            await _answer_stale_bind_path(query)
+            return
+        _clear_thread_picker_state_for_surface(context.user_data, pending_surface)
 
         await _create_and_bind_window(
             query,
@@ -5222,14 +5628,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if not _callback_matches_pending_surface(update, context, pending_surface):
             await query.answer("Stale picker (topic mismatch)", show_alert=True)
             return
-        selected_path = (
-            context.user_data.get("_selected_path", str(Path.cwd()))
-            if context.user_data
-            else str(Path.cwd())
-        )
-        clear_thread_picker_state(context.user_data)
-        if context.user_data is not None:
-            context.user_data.pop("_selected_path", None)
+        selected_path = _thread_picker_selected_path(context.user_data, pending_surface)
+        if selected_path is None:
+            await _answer_stale_bind_path(query)
+            return
+        _clear_thread_picker_state_for_surface(context.user_data, pending_surface)
 
         await _create_and_bind_window(
             query,
@@ -5255,11 +5658,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.answer("Stale picker (topic mismatch)", show_alert=True)
             return
         active_surface = pending_surface or current_surface
-        clear_thread_picker_state(context.user_data)
+        _clear_thread_picker_state_for_surface(context.user_data, pending_surface)
         if context.user_data is not None:
             _set_pending_surface(context.user_data, None)
             context.user_data.pop("_pending_thread_text", None)
-            context.user_data.pop("_selected_path", None)
         if active_surface is not None:
             _clear_pending_slot(context, user.id, active_surface)
             _require_manual_bind(user.id, active_surface)
@@ -5374,7 +5776,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
         # Preserve pending thread info, clear only picker state
         clear_window_picker_state(context.user_data)
-        start_path = str(Path.cwd())
+        start_path = default_browse_root()
         current_version, current_nonce = _get_current_bind_flow_credentials(
             user.id, pending_surface
         )
@@ -5384,10 +5786,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             bind_flow_nonce=current_nonce,
         )
         if context.user_data is not None:
-            context.user_data[STATE_KEY] = STATE_BROWSING_DIRECTORY
-            context.user_data[BROWSE_PATH_KEY] = start_path
-            context.user_data[BROWSE_PAGE_KEY] = 0
-            context.user_data[BROWSE_DIRS_KEY] = subdirs
+            _set_browse_state_for_surface(
+                context.user_data,
+                pending_surface,
+                path=start_path,
+                page=0,
+                dirs=subdirs,
+            )
         await safe_edit(query, msg_text, reply_markup=keyboard)
         await query.answer()
 
@@ -5462,7 +5867,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.answer(message, show_alert=True)
             return
         await asyncio.sleep(0.5)
-        await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+        await handle_interactive_ui(
+            context.bot,
+            user.id,
+            window_id,
+            thread_id,
+            **surface_identity_kwargs,
+        )
         await query.answer()
 
     # Interactive UI: Down arrow
@@ -5480,7 +5891,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.answer(message, show_alert=True)
             return
         await asyncio.sleep(0.5)
-        await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+        await handle_interactive_ui(
+            context.bot,
+            user.id,
+            window_id,
+            thread_id,
+            **surface_identity_kwargs,
+        )
         await query.answer()
 
     # Interactive UI: Left arrow
@@ -5498,7 +5915,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.answer(message, show_alert=True)
             return
         await asyncio.sleep(0.5)
-        await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+        await handle_interactive_ui(
+            context.bot,
+            user.id,
+            window_id,
+            thread_id,
+            **surface_identity_kwargs,
+        )
         await query.answer()
 
     # Interactive UI: Right arrow
@@ -5516,7 +5939,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.answer(message, show_alert=True)
             return
         await asyncio.sleep(0.5)
-        await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+        await handle_interactive_ui(
+            context.bot,
+            user.id,
+            window_id,
+            thread_id,
+            **surface_identity_kwargs,
+        )
         await query.answer()
 
     # Interactive UI: Escape
@@ -5533,7 +5962,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if not success:
             await query.answer(message, show_alert=True)
             return
-        await clear_interactive_msg(user.id, context.bot, thread_id)
+        await clear_interactive_msg(
+            user.id,
+            context.bot,
+            thread_id,
+            **surface_identity_kwargs,
+        )
         await query.answer("⎋ Esc")
 
     # Interactive UI: Enter
@@ -5551,7 +5985,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.answer(message, show_alert=True)
             return
         await asyncio.sleep(0.5)
-        await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+        await handle_interactive_ui(
+            context.bot,
+            user.id,
+            window_id,
+            thread_id,
+            **surface_identity_kwargs,
+        )
         await query.answer("⏎ Enter")
 
     # Interactive UI: Space
@@ -5569,7 +6009,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.answer(message, show_alert=True)
             return
         await asyncio.sleep(0.5)
-        await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+        await handle_interactive_ui(
+            context.bot,
+            user.id,
+            window_id,
+            thread_id,
+            **surface_identity_kwargs,
+        )
         await query.answer("␣ Space")
 
     # Interactive UI: Tab
@@ -5587,14 +6033,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.answer(message, show_alert=True)
             return
         await asyncio.sleep(0.5)
-        await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+        await handle_interactive_ui(
+            context.bot,
+            user.id,
+            window_id,
+            thread_id,
+            **surface_identity_kwargs,
+        )
         await query.answer("⇥ Tab")
 
     # Interactive UI: refresh display
     elif data.startswith(CB_ASK_REFRESH):
         window_id = data[len(CB_ASK_REFRESH) :]
         thread_id = _get_thread_id(update)
-        await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+        await handle_interactive_ui(
+            context.bot,
+            user.id,
+            window_id,
+            thread_id,
+            **surface_identity_kwargs,
+        )
         await query.answer("🔄")
 
     # Screenshot quick keys: send key to tmux window
@@ -5728,32 +6186,55 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         )
         return
 
-    # Find users whose thread-bound window matches this session
-    active_users = await session_manager.find_users_for_session(msg.session_id)
+    # Find Telegram surfaces whose bound runtime window matches this session.
+    active_users = await _find_delivery_bindings_for_session(msg.session_id)
 
     if not active_users:
         logger.info(f"No active users for session {msg.session_id}")
         return
 
-    for user_id, wid, thread_id in active_users:
+    for binding in active_users:
+        user_id = binding.user_id
+        wid = binding.window_id
+        thread_id = binding.thread_id
+        delivery_surface_kwargs: dict[str, object] = {}
+        if binding.chat_id is not None:
+            delivery_surface_kwargs["chat_id"] = binding.chat_id
+        if binding.surface_key:
+            delivery_surface_kwargs["surface_key"] = binding.surface_key
         if msg.runtime_kind == "codex":
             mark_runtime_presence_active(user_id, thread_id, wid)
 
-        turn_generation = current_turn_generation(user_id, thread_id)
+        turn_generation = current_turn_generation(
+            user_id,
+            thread_id,
+            **delivery_surface_kwargs,
+        )
         if opens_new_turn:
-            await flush_terminal_artifacts_before_new_turn(bot, user_id, thread_id)
+            await flush_terminal_artifacts_before_new_turn(
+                bot,
+                user_id,
+                thread_id,
+                **delivery_surface_kwargs,
+            )
             turn_generation = await open_new_turn_generation_with_cleanup(
                 bot,
                 user_id,
                 thread_id,
+                **delivery_surface_kwargs,
             )
         elif (
             is_turn_started_lifecycle or is_operator_turn_opener
-        ) and is_pre_final_visible_lane_closed(user_id, thread_id):
+        ) and is_pre_final_visible_lane_closed(
+            user_id,
+            thread_id,
+            **delivery_surface_kwargs,
+        ):
             turn_generation = await open_new_turn_generation_with_cleanup(
                 bot,
                 user_id,
                 thread_id,
+                **delivery_surface_kwargs,
             )
 
         if opens_new_turn:
@@ -5775,6 +6256,7 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                         proof_id=fast_proof.proof_id,
                         receipt_status="superseded",
                         thread_id=thread_id,
+                        **delivery_surface_kwargs,
                     )
                 else:
                     log_telegram_delivery(
@@ -5814,14 +6296,25 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         # Handle interactive tools specially - capture terminal and send UI
         if msg.tool_name in INTERACTIVE_TOOL_NAMES and msg.content_type == "tool_use":
             # Mark interactive mode BEFORE sleeping so polling skips this window
-            set_interactive_mode(user_id, wid, thread_id)
+            set_interactive_mode(
+                user_id,
+                wid,
+                thread_id,
+                **delivery_surface_kwargs,
+            )
             # Flush pending messages (e.g. plan content) before sending interactive UI
             queue = get_message_queue(user_id)
             if queue:
                 await queue.join()
             # Wait briefly for Claude Code to render the question UI
             await asyncio.sleep(0.3)
-            handled = await handle_interactive_ui(bot, user_id, wid, thread_id)
+            handled = await handle_interactive_ui(
+                bot,
+                user_id,
+                wid,
+                thread_id,
+                **delivery_surface_kwargs,
+            )
             if handled:
                 # Update user's read offset
                 session = await session_manager.resolve_session_for_window(wid)
@@ -5836,11 +6329,16 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 continue  # Don't send the normal tool_use message
             else:
                 # UI not rendered — clear the early-set mode
-                clear_interactive_mode(user_id, thread_id)
+                clear_interactive_mode(user_id, thread_id, **delivery_surface_kwargs)
 
         # Any non-interactive message means the interaction is complete — delete the UI message
-        if get_interactive_msg_id(user_id, thread_id):
-            await clear_interactive_msg(user_id, bot, thread_id)
+        if get_interactive_msg_id(user_id, thread_id, **delivery_surface_kwargs):
+            await clear_interactive_msg(
+                user_id,
+                bot,
+                thread_id,
+                **delivery_surface_kwargs,
+            )
 
         # Skip tool call notifications when CCBOT_SHOW_TOOL_CALLS=false
         if not config.show_tool_calls and msg.content_type in (
@@ -5864,6 +6362,7 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 wid,
                 status_text,
                 thread_id=thread_id,
+                **delivery_surface_kwargs,
                 turn_generation=turn_generation,
             )
             continue
@@ -5873,7 +6372,11 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
             and msg.is_complete
             and msg.semantic_kind == PLAN_UPDATE_SEMANTIC_KIND
         ):
-            if is_pre_final_visible_lane_closed(user_id, thread_id):
+            if is_pre_final_visible_lane_closed(
+                user_id,
+                thread_id,
+                **delivery_surface_kwargs,
+            ):
                 logger.debug(
                     "Skipping post-final plan update artifact: user=%d thread=%s",
                     user_id,
@@ -5893,6 +6396,7 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 wid,
                 msg.text,
                 thread_id=thread_id,
+                **delivery_surface_kwargs,
                 turn_generation=turn_generation,
             )
 
@@ -5910,7 +6414,11 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
             and msg.is_complete
             and msg.content_type in {"commentary", "orchestration"}
         ):
-            if is_pre_final_visible_lane_closed(user_id, thread_id):
+            if is_pre_final_visible_lane_closed(
+                user_id,
+                thread_id,
+                **delivery_surface_kwargs,
+            ):
                 logger.debug(
                     "Skipping post-final pre-final visible artifact: user=%d thread=%s content_type=%s",
                     user_id,
@@ -5938,6 +6446,7 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 commentary_text,
                 parts=commentary_parts,
                 thread_id=thread_id,
+                **delivery_surface_kwargs,
                 turn_generation=turn_generation,
             )
 
@@ -5977,6 +6486,7 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 semantic_kind=msg.semantic_kind,
                 text=msg.text,
                 thread_id=thread_id,
+                **delivery_surface_kwargs,
                 image_data=msg.image_data,
                 image_caption=msg.image_caption,
                 document_data=msg.document_data,
@@ -6043,7 +6553,8 @@ async def _startup_restore_retry_loop() -> None:
 
 
 async def post_init(application: Application) -> None:
-    global session_monitor, _status_poll_task, _polling_health_task, _startup_restore_retry_task
+    global session_monitor, _status_poll_task
+    global _polling_health_task, _startup_restore_retry_task
 
     await application.bot.delete_my_commands()
     await application.bot.set_my_commands(build_bot_commands())
@@ -6179,8 +6690,10 @@ def _configure_telegram_request_builder(builder: Any) -> Any:
 
 
 def create_bot() -> Application:
-    builder = Application.builder().token(config.telegram_bot_token).rate_limiter(
-        AIORateLimiter(max_retries=5)
+    builder = (
+        Application.builder()
+        .token(config.telegram_bot_token)
+        .rate_limiter(AIORateLimiter(max_retries=5))
     )
     builder = _configure_telegram_request_builder(builder)
     telegram_proxy = _telegram_proxy_from_env()

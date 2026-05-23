@@ -159,14 +159,23 @@ def _is_chat_not_found(error: Exception) -> bool:
     return "chat not found" in str(error).lower()
 
 
-def _parse_surface_key(surface_key: str) -> tuple[str, int]:
+def _parse_surface_key(surface_key: str) -> tuple[str, int | None, int | None]:
     raw = (surface_key or "").strip()
     if raw.startswith("t:"):
-        return "topic", int(raw[2:])
+        parts = raw[2:].split(":")
+        if len(parts) == 1:
+            return "topic", None, int(parts[0])
+        if len(parts) == 2:
+            return "topic", int(parts[0]), int(parts[1])
+        raise DeliveryTargetError(
+            f"invalid surface_key {surface_key!r}; expected "
+            "t:<thread_id>, t:<chat_id>:<thread_id>, or c:<chat_id>"
+        )
     if raw.startswith("c:"):
-        return "chat", int(raw[2:])
+        return "chat", int(raw[2:]), None
     raise DeliveryTargetError(
-        f"invalid surface_key {surface_key!r}; expected t:<thread_id> or c:<chat_id>"
+        f"invalid surface_key {surface_key!r}; expected "
+        "t:<thread_id>, t:<chat_id>:<thread_id>, or c:<chat_id>"
     )
 
 
@@ -185,32 +194,41 @@ def _group_chat_ids(state: dict[str, Any]) -> dict[str, int]:
 
 def _target_from_surface(
     *,
-    user_id: int,
+    user_id: int | None,
     surface_key: str,
     group_chat_ids: dict[str, int],
     reason: str,
 ) -> DeliveryTarget:
-    kind, numeric_id = _parse_surface_key(surface_key)
+    kind, chat_id, thread_id = _parse_surface_key(surface_key)
     if kind == "chat":
         return DeliveryTarget(
-            chat_id=normalize_chat_id(numeric_id),
+            chat_id=normalize_chat_id(chat_id),
             message_thread_id=None,
             user_id=user_id,
             surface_key=surface_key,
             reason=reason,
         )
 
-    thread_id = numeric_id
-    route_key = f"{user_id}:{thread_id}"
-    chat_id = group_chat_ids.get(route_key)
-    if chat_id is None:
+    assert thread_id is not None
+    resolved_chat_id = chat_id
+    if resolved_chat_id is None:
+        if user_id is None:
+            raise DeliveryTargetError(
+                "surface topic target needs --user-id when no chat-qualified "
+                "surface key is provided"
+            )
+        route_key = f"{user_id}:{thread_id}"
+        resolved_chat_id = group_chat_ids.get(route_key)
+    else:
+        route_key = f"{user_id}:{thread_id}" if user_id is not None else f"?:{thread_id}"
+    if resolved_chat_id is None:
         raise DeliveryTargetError(
             "Cannot resolve Telegram group chat_id for topic surface "
             f"{surface_key!r}; missing group_chat_ids[{route_key!r}]. "
             "Pass --chat-id explicitly."
         )
     return DeliveryTarget(
-        chat_id=normalize_chat_id(chat_id),
+        chat_id=normalize_chat_id(resolved_chat_id),
         message_thread_id=thread_id,
         user_id=user_id,
         surface_key=surface_key,
@@ -271,7 +289,7 @@ def _routing_coordinate_candidates(state: dict[str, Any]) -> list[DeliveryTarget
             chat_id=normalize_chat_id(chat_id),
             message_thread_id=None if thread_id == 0 else thread_id,
             user_id=user_id,
-            surface_key=f"c:{chat_id}" if thread_id == 0 else f"t:{thread_id}",
+            surface_key=f"c:{chat_id}" if thread_id == 0 else f"t:{chat_id}:{thread_id}",
             reason="state_group_chat_id_fallback",
         )
         dedupe_key = (target.chat_id, target.message_thread_id)
@@ -327,26 +345,28 @@ def resolve_delivery_target(
     group_ids = _group_chat_ids(state)
 
     if surface_key:
-        kind, numeric_id = _parse_surface_key(surface_key)
+        kind, surface_chat_id, surface_thread_id = _parse_surface_key(surface_key)
         if kind == "chat":
+            assert surface_chat_id is not None
             if explicit_thread_id is not None:
                 raise DeliveryTargetError(
                     "--thread-id cannot be combined with chat surface c:<chat_id>"
                 )
             return DeliveryTarget(
-                chat_id=normalize_chat_id(numeric_id),
+                chat_id=normalize_chat_id(surface_chat_id),
                 message_thread_id=None,
                 user_id=explicit_user_id,
                 surface_key=surface_key,
                 reason="explicit_surface_key",
             )
 
-        if explicit_user_id is None:
+        assert surface_thread_id is not None
+        if explicit_user_id is None and surface_chat_id is None:
             matching_users = sorted(
                 {
                     int(key.split(":", 1)[0])
                     for key in group_ids
-                    if key.endswith(f":{numeric_id}")
+                    if key.endswith(f":{surface_thread_id}")
                     and key.split(":", 1)[0].lstrip("-").isdigit()
                 }
             )

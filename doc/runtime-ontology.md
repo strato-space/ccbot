@@ -68,7 +68,8 @@ The code now models a broader `control surface` with two species:
 
 That is the minimal repair required by real code:
 
-- `surface_key=t:<thread_id>` for named topics
+- `surface_key=t:<chat_id>:<thread_id>` for named topics when Telegram
+  coordinates are known; bare `t:<thread_id>` is legacy mirror/fallback data
 - `surface_key=c:<chat_id>` for no-topics main-chat mode
 - full persisted control-surface identity is `(user_id, surface_key)`; the
   `surface_key` alone is a local product key, not a globally unique surface

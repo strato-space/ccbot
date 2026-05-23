@@ -65,7 +65,9 @@ class TestThreadBindings:
         assert binding.window_id == "@1"
         assert binding.window_name == "proj"
 
-    def test_get_topic_binding_preserves_runtime_kind(self, mgr: SessionManager) -> None:
+    def test_get_topic_binding_preserves_runtime_kind(
+        self, mgr: SessionManager
+    ) -> None:
         mgr.bind_thread(100, 1, "@1", window_name="proj")
         mgr.get_window_state("@1").runtime_kind = "codex"
         binding = mgr.get_topic_binding(100, 1)
@@ -75,8 +77,21 @@ class TestThreadBindings:
     def test_iter_topic_bindings(self, mgr: SessionManager) -> None:
         mgr.bind_thread(100, 1, "@1", window_name="one")
         mgr.bind_thread(100, 2, "@2", window_name="two")
-        result = {(b.user_id, b.thread_id, b.window_id) for b in mgr.iter_topic_bindings()}
+        result = {
+            (b.user_id, b.thread_id, b.window_id) for b in mgr.iter_topic_bindings()
+        }
         assert result == {(100, 1, "@1"), (100, 2, "@2")}
+
+    def test_iter_topic_bindings_preserves_surface_coordinates(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.bind_surface(100, "@1", surface_key="t:-100200300:42", window_name="one")
+
+        binding = next(mgr.iter_topic_bindings())
+
+        assert binding.surface_key == "t:-100200300:42"
+        assert binding.chat_id == -100200300
+        assert binding.thread_id == 42
 
     def test_iter_topic_bindings_preserves_runtime_kind(
         self, mgr: SessionManager
@@ -110,9 +125,9 @@ class TestThreadBindings:
         assert mgr.get_window_for_thread(100, 1) is None
         assert mgr.get_topic_binding(100, 1) is None
         assert mgr.get_window_for_thread(100, 2) == "@0"
-        assert {(b.user_id, b.thread_id, b.window_id) for b in mgr.iter_topic_bindings()} == {
-            (100, 2, "@0")
-        }
+        assert {
+            (b.user_id, b.thread_id, b.window_id) for b in mgr.iter_topic_bindings()
+        } == {(100, 2, "@0")}
         assert mgr.topic_binding_states[100][1] == BINDING_STATE_NONE
         assert mgr.user_window_offsets == {100: {"@0": 456}}
 
@@ -158,7 +173,9 @@ class TestThreadBindings:
         assert "@45" in mgr.window_states
         assert mgr.get_window_for_thread(100, 1) == "@45"
 
-    def test_bind_external_thread_exposes_external_topic_binding(self, mgr: SessionManager) -> None:
+    def test_bind_external_thread_exposes_external_topic_binding(
+        self, mgr: SessionManager
+    ) -> None:
         binding_window_id = mgr.bind_external_thread(
             100,
             1,
@@ -180,11 +197,10 @@ class TestThreadBindings:
         assert binding.window_name == "Thread One"
 
 
-
-
 class TestSurfaceKeyedBindings:
     def test_make_surface_key_formats_topic_and_chat(self, mgr: SessionManager) -> None:
         assert mgr.make_surface_key(thread_id=42) == "t:42"
+        assert mgr.make_surface_key(chat_id=-100123, thread_id=42) == "t:-100123:42"
         assert mgr.make_surface_key(chat_id=-100123) == "c:-100123"
 
     def test_bind_surface_chat_key_does_not_backfill_legacy_topic_maps(
@@ -204,6 +220,24 @@ class TestSurfaceKeyedBindings:
         assert mgr.get_window_for_surface(100, surface_key="t:42") == "@7"
         assert mgr.get_window_for_thread(100, 42) == "@7"
 
+    def test_chat_qualified_surface_keys_do_not_collide_by_topic_id(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.bind_surface(100, "@7", surface_key="t:-1001:42", window_name="one")
+        mgr.bind_surface(100, "@8", surface_key="t:-1002:42", window_name="two")
+
+        assert mgr.get_window_for_surface(100, surface_key="t:-1001:42") == "@7"
+        assert mgr.get_window_for_surface(100, surface_key="t:-1002:42") == "@8"
+
+    def test_chat_qualified_lookup_can_read_legacy_topic_key_when_chat_matches(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.set_group_chat_id(100, 42, -1001)
+        mgr.bind_surface(100, "@7", surface_key="t:42", window_name="legacy")
+
+        assert mgr.get_window_for_surface(100, surface_key="t:-1001:42") == "@7"
+        assert mgr.get_window_for_surface(100, surface_key="t:-1002:42") is None
+
     def test_external_surface_binding_round_trips_for_chat_surface(
         self, mgr: SessionManager
     ) -> None:
@@ -219,7 +253,10 @@ class TestSurfaceKeyedBindings:
         )
 
         assert binding_window_id == "external:codex:thread-1"
-        assert mgr.get_window_for_surface(100, surface_key="c:-100123") == binding_window_id
+        assert (
+            mgr.get_window_for_surface(100, surface_key="c:-100123")
+            == binding_window_id
+        )
         assert mgr.get_external_surface_binding(100, surface_key="c:-100123") == {
             "runtime_kind": "codex",
             "source_thread_id": "thread-1",
@@ -248,16 +285,22 @@ class TestSurfaceKeyedBindings:
         assert consumed is not None
         assert consumed["status"] == "consumed"
         assert consumed["consumed_by_activation_id"] == "activation-1"
-        assert mgr.consume_surface_pending_slot(
-            100,
-            "activation-1",
-            surface_key="t:42",
-        ) is None
-        assert mgr.consume_surface_pending_slot(
-            100,
-            "activation-2",
-            surface_key="t:42",
-        ) is None
+        assert (
+            mgr.consume_surface_pending_slot(
+                100,
+                "activation-1",
+                surface_key="t:42",
+            )
+            is None
+        )
+        assert (
+            mgr.consume_surface_pending_slot(
+                100,
+                "activation-2",
+                surface_key="t:42",
+            )
+            is None
+        )
 
     def test_clear_surface_pending_slot_returns_previous_record(
         self, mgr: SessionManager
@@ -361,6 +404,9 @@ class TestGroupChatId:
 
     def test_make_surface_key_for_topic_and_chat(self, mgr: SessionManager) -> None:
         assert mgr.make_surface_key(thread_id=42) == "t:42"
+        assert mgr.make_surface_key(chat_id=-100200300, thread_id=42) == (
+            "t:-100200300:42"
+        )
         assert mgr.make_surface_key(chat_id=-100200300) == "c:-100200300"
 
 
@@ -381,20 +427,31 @@ class TestSurfaceBindingsChatMode:
     def test_get_surface_coordinates_for_chat_window(self, mgr: SessionManager) -> None:
         mgr.bind_surface(100, "@7", chat_id=-100200300, window_name="main-chat")
 
-        surface_key, chat_id, thread_id = mgr.get_surface_coordinates_for_window(100, "@7")
+        surface_key, chat_id, thread_id = mgr.get_surface_coordinates_for_window(
+            100, "@7"
+        )
 
         assert surface_key == "c:-100200300"
         assert chat_id == -100200300
         assert thread_id is None
 
-
-    def test_surface_policy_and_binding_state_for_chat(self, mgr: SessionManager) -> None:
+    def test_surface_policy_and_binding_state_for_chat(
+        self, mgr: SessionManager
+    ) -> None:
         mgr.require_manual_bind_for_surface(100, chat_id=-100200300)
-        assert mgr.get_surface_policy(100, chat_id=-100200300) == TOPIC_POLICY_MANUAL_BIND_REQUIRED
-        assert mgr.get_surface_binding_state(100, chat_id=-100200300) == BINDING_STATE_NONE
+        assert (
+            mgr.get_surface_policy(100, chat_id=-100200300)
+            == TOPIC_POLICY_MANUAL_BIND_REQUIRED
+        )
+        assert (
+            mgr.get_surface_binding_state(100, chat_id=-100200300) == BINDING_STATE_NONE
+        )
 
         mgr.start_surface_bind_flow(100, chat_id=-100200300)
-        assert mgr.get_surface_binding_state(100, chat_id=-100200300) == BINDING_STATE_BIND_FLOW
+        assert (
+            mgr.get_surface_binding_state(100, chat_id=-100200300)
+            == BINDING_STATE_BIND_FLOW
+        )
         version, nonce = mgr.get_surface_bind_flow_credentials(100, chat_id=-100200300)
         assert mgr.validate_surface_bind_flow_callback(
             100,
@@ -411,7 +468,9 @@ class TestSurfaceBindingsChatMode:
 
         overwritten = mgr.set_surface_pending_slot(100, "updated", chat_id=-100200300)
         assert overwritten["revision"] == 2
-        assert mgr.peek_surface_pending_slot(100, chat_id=-100200300)["text"] == "updated"
+        assert (
+            mgr.peek_surface_pending_slot(100, chat_id=-100200300)["text"] == "updated"
+        )
 
         consumed = mgr.consume_surface_pending_slot(
             100,
@@ -421,11 +480,14 @@ class TestSurfaceBindingsChatMode:
         assert consumed is not None
         assert consumed["status"] == "consumed"
         assert consumed["consumed_by_activation_id"] == "activation-1"
-        assert mgr.consume_surface_pending_slot(
-            100,
-            "activation-2",
-            chat_id=-100200300,
-        ) is None
+        assert (
+            mgr.consume_surface_pending_slot(
+                100,
+                "activation-2",
+                chat_id=-100200300,
+            )
+            is None
+        )
 
         mgr.clear_surface_pending_slot(100, chat_id=-100200300)
         assert mgr.peek_surface_pending_slot(100, chat_id=-100200300) is None
@@ -446,9 +508,7 @@ class TestRuntimeCapabilityRegistryIntegration:
 
 
 class TestWindowState:
-    def test_get_process_descriptor_is_read_only(
-        self, mgr: SessionManager
-    ) -> None:
+    def test_get_process_descriptor_is_read_only(self, mgr: SessionManager) -> None:
         assert mgr.get_process_descriptor("@missing") is None
         assert "@missing" not in mgr.window_states
 
@@ -530,6 +590,56 @@ class TestWindowState:
         assert state.thread_id == new_thread_id
         assert state.cwd == "/tmp/new-project"
 
+    def test_reconcile_fresh_codex_cwd_drift_stays_replay_silent_without_fd_proof(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        codex_home = tmp_path / ".codex"
+        sessions_root = codex_home / "sessions" / "2026" / "05" / "22"
+        sessions_root.mkdir(parents=True)
+        stale_thread_id = "019e4e71-1499-7d11-991b-2de6af8aa0ce"
+        rollout = sessions_root / f"rollout-2026-05-22T06-48-14-{stale_thread_id}.jsonl"
+        rollout.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-05-22T06:48:14Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": stale_thread_id,
+                        "cwd": "/tmp/new-project",
+                        "originator": "codex_cli",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+        monkeypatch.setattr(SessionManager, "_save_state", lambda self: None)
+        manager = SessionManager(
+            codex_thread_catalog=CodexThreadCatalog(codex_home=codex_home)
+        )
+        manager.window_states["@8"] = LiveProcessDescriptor(
+            thread_id="",
+            cwd="/tmp/old-project",
+            runtime_kind="codex",
+            window_name="comfy-agent",
+            registered_at=100.0,
+            requires_live_proof=True,
+        )
+
+        changed = manager.reconcile_live_tmux_window(
+            window_id="@8",
+            cwd="/tmp/new-project",
+            window_name="comfy-agent",
+            pane_current_command="node",
+        )
+
+        assert changed is True
+        state = manager.window_states["@8"]
+        assert state.thread_id == ""
+        assert state.cwd == "/tmp/new-project"
+        assert state.requires_live_proof is True
+
     def test_reconcile_live_tmux_window_adopts_same_cwd_with_fd_proof(
         self, mgr: SessionManager, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -563,6 +673,87 @@ class TestWindowState:
         state = mgr.window_states["@8"]
         assert state.thread_id == new_thread_id
         assert state.cwd == "/tmp/project"
+
+    def test_resolve_live_codex_rollout_matches_timestamped_filename(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        codex_home = tmp_path / ".codex"
+        sessions_root = codex_home / "sessions" / "2026" / "05" / "23"
+        sessions_root.mkdir(parents=True)
+        thread_id = "019e5459-7f95-7cd1-906b-2d04e664796c"
+        rollout = sessions_root / f"rollout-2026-05-23T10-20-12-{thread_id}.jsonl"
+        rollout.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-05-23T10:20:12Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": thread_id,
+                        "cwd": "/tmp/project",
+                        "originator": "codex_cli",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+        monkeypatch.setattr(SessionManager, "_save_state", lambda self: None)
+        manager = SessionManager(
+            codex_thread_catalog=CodexThreadCatalog(codex_home=codex_home)
+        )
+        monkeypatch.setattr(
+            manager,
+            "_iter_open_rollout_paths_under_pid",
+            lambda _root_pid: iter((rollout,)),
+        )
+
+        candidate = manager._resolve_live_codex_rollout_from_pane_pid(
+            pane_pid="1234",
+            cwd="/tmp/project",
+        )
+
+        assert candidate is not None
+        assert candidate.thread_id == thread_id
+
+    @pytest.mark.asyncio
+    async def test_resolve_thread_for_window_requires_live_proof_for_fresh_codex(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        codex_home = tmp_path / ".codex"
+        sessions_root = codex_home / "sessions" / "2026" / "05" / "16"
+        sessions_root.mkdir(parents=True)
+        stale_thread_id = "019e3169-663d-76f0-aeaf-18c952412efd"
+        rollout = sessions_root / f"rollout-2026-05-16T15-30-51-{stale_thread_id}.jsonl"
+        rollout.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-05-16T15:30:51Z",
+                    "type": "session_meta",
+                    "payload": {"id": stale_thread_id, "cwd": "/tmp/project"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+        monkeypatch.setattr(SessionManager, "_save_state", lambda self: None)
+        manager = SessionManager(
+            codex_thread_catalog=CodexThreadCatalog(codex_home=codex_home)
+        )
+        manager.window_states["@8"] = LiveProcessDescriptor(
+            thread_id=stale_thread_id,
+            cwd="/tmp/project",
+            runtime_kind="codex",
+            window_name="comfy-agent-ops",
+            registered_at=100.0,
+            requires_live_proof=True,
+        )
+
+        locator = await manager.resolve_thread_for_window("@8")
+
+        assert locator is None
+        assert manager.window_states["@8"].thread_id == stale_thread_id
 
     def test_reconcile_live_tmux_window_same_cwd_without_fd_proof_keeps_binding(
         self, mgr: SessionManager, monkeypatch: pytest.MonkeyPatch
@@ -780,7 +971,9 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="node"
+                )
             )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
@@ -823,7 +1016,9 @@ class TestRuntimeInputDriverIntegration:
                 cwd="/tmp/project",
             )
         )
-        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0)
+        monkeypatch.setattr(
+            "ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0
+        )
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_RETRY_SECONDS", 0.01)
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_POLL_SECONDS", 0.001)
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_TIMEOUT_SECONDS", 0.05)
@@ -838,7 +1033,9 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="node"
+                )
             )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
@@ -890,7 +1087,9 @@ class TestRuntimeInputDriverIntegration:
                 cwd="/tmp/project",
             )
         )
-        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0)
+        monkeypatch.setattr(
+            "ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0
+        )
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_RETRY_SECONDS", 0.001)
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_POLL_SECONDS", 0.001)
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_TIMEOUT_SECONDS", 0.003)
@@ -901,7 +1100,9 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="node"
+                )
             )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
@@ -948,7 +1149,9 @@ class TestRuntimeInputDriverIntegration:
                 cwd="/tmp/project",
             )
         )
-        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0)
+        monkeypatch.setattr(
+            "ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0
+        )
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_RETRY_SECONDS", 0.001)
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_POLL_SECONDS", 0.001)
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_TIMEOUT_SECONDS", 0.05)
@@ -968,7 +1171,9 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="node"
+                )
             )
             mock_tmux.capture_pane = AsyncMock(
                 side_effect=[
@@ -1021,7 +1226,9 @@ class TestRuntimeInputDriverIntegration:
                 cwd="/tmp/project",
             )
         )
-        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0)
+        monkeypatch.setattr(
+            "ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0
+        )
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_RETRY_SECONDS", 0.001)
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_POLL_SECONDS", 0.001)
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_TIMEOUT_SECONDS", 0.05)
@@ -1055,11 +1262,11 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="node"
+                )
             )
-            mock_tmux.capture_pane = AsyncMock(
-                side_effect=["", "› $oh-my-codex:ralph"]
-            )
+            mock_tmux.capture_pane = AsyncMock(side_effect=["", "› $oh-my-codex:ralph"])
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
             mock_driver.send_multiline_submit_key = AsyncMock(
                 side_effect=submit_and_ack_on_confirmation
@@ -1096,7 +1303,9 @@ class TestRuntimeInputDriverIntegration:
                 cwd="/tmp/project",
             )
         )
-        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0)
+        monkeypatch.setattr(
+            "ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0
+        )
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_RETRY_SECONDS", 0.01)
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_POLL_SECONDS", 0.001)
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_TIMEOUT_SECONDS", 0.05)
@@ -1119,7 +1328,9 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="node"
+                )
             )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
@@ -1160,7 +1371,9 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="node"
+                )
             )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_driver.send_text = AsyncMock()
@@ -1200,7 +1413,9 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="node"
+                )
             )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_driver.send_text = AsyncMock()
@@ -1227,7 +1442,9 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="node"
+                )
             )
             mock_tmux.capture_pane = AsyncMock(
                 return_value=(
@@ -1265,7 +1482,9 @@ class TestRuntimeInputDriverIntegration:
             ) as mock_ack,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="node"
+                )
             )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
@@ -1321,9 +1540,7 @@ class TestRuntimeInputDriverIntegration:
                             "payload": {
                                 "type": "message",
                                 "role": "user",
-                                "content": [
-                                    {"type": "input_text", "text": "hello"}
-                                ],
+                                "content": [{"type": "input_text", "text": "hello"}],
                             },
                         }
                     )
@@ -1336,7 +1553,9 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="node"
+                )
             )
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
             mock_driver.send_multiline_submit_key = AsyncMock(
@@ -1414,7 +1633,9 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="node"
+                )
             )
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
             mock_driver.send_multiline_submit_key = AsyncMock(
@@ -1508,11 +1729,11 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="node"
+                )
             )
-            mock_tmux.capture_pane = AsyncMock(
-                return_value="› $oh-my-codex:ralph"
-            )
+            mock_tmux.capture_pane = AsyncMock(return_value="› $oh-my-codex:ralph")
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
             mock_driver.send_multiline_submit_key = AsyncMock(
                 side_effect=submit_and_ack_on_confirmation
@@ -1601,7 +1822,9 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="node"
+                )
             )
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
             mock_driver.send_multiline_submit_key = AsyncMock(
@@ -1730,7 +1953,9 @@ class TestRuntimeInputDriverIntegration:
             created_at_monotonic=now - 0.5,
             status="pending",
         )
-        stale.text_hash = current.text_hash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        stale.text_hash = current.text_hash = (
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        )
         pending.text_hash = current.text_hash
         mgr.fast_input_proofs = {"old": stale, "current": current, "pending": pending}
 
@@ -1797,7 +2022,9 @@ class TestRuntimeInputDriverIntegration:
     ):
         rollout = tmp_path / "thread-1.jsonl"
         rollout.write_text(json.dumps({"type": "turn_context"}) + "\n")
-        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0)
+        monkeypatch.setattr(
+            "ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0
+        )
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_RETRY_SECONDS", 0.01)
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_POLL_SECONDS", 0.001)
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_TIMEOUT_SECONDS", 0.05)
@@ -1811,9 +2038,7 @@ class TestRuntimeInputDriverIntegration:
                             "payload": {
                                 "type": "message",
                                 "role": "user",
-                                "content": [
-                                    {"type": "input_text", "text": "hello"}
-                                ],
+                                "content": [{"type": "input_text", "text": "hello"}],
                             },
                         }
                     )
@@ -1850,7 +2075,9 @@ class TestRuntimeInputDriverIntegration:
     ):
         rollout = tmp_path / "thread-1.jsonl"
         rollout.write_text("", encoding="utf-8")
-        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0)
+        monkeypatch.setattr(
+            "ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0
+        )
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_RETRY_SECONDS", 0.01)
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_POLL_SECONDS", 0.001)
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_TIMEOUT_SECONDS", 0.05)
@@ -1915,7 +2142,7 @@ class TestRuntimeInputDriverIntegration:
             )
         )
 
-        assert ".open(\"a\"" not in source
+        assert '.open("a"' not in source
         assert ".open('a'" not in source
         assert "write_text(" not in source
 
@@ -1943,7 +2170,9 @@ class TestRuntimeInputDriverIntegration:
                 cwd="/tmp/project",
             )
         )
-        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0)
+        monkeypatch.setattr(
+            "ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0
+        )
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_RETRY_SECONDS", 0.01)
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_POLL_SECONDS", 0.001)
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_TIMEOUT_SECONDS", 0.1)
@@ -1983,7 +2212,9 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="node"
+                )
             )
             mock_tmux.capture_pane = AsyncMock(return_value="")
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
@@ -2020,7 +2251,9 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1", pane_current_command="bash")
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="bash"
+                )
             )
             mock_tmux.capture_pane = AsyncMock(return_value="user@host:/tmp/project$ ")
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
@@ -2085,7 +2318,9 @@ class TestRuntimeInputDriverIntegration:
                 cwd="/tmp/project",
             )
         )
-        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0)
+        monkeypatch.setattr(
+            "ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0
+        )
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_RETRY_SECONDS", 0.01)
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_POLL_SECONDS", 0.001)
         monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_TIMEOUT_SECONDS", 0.05)
@@ -2106,7 +2341,9 @@ class TestRuntimeInputDriverIntegration:
             patch("ccbot.session.runtime_input_driver") as mock_driver,
         ):
             mock_tmux.find_window_by_id = AsyncMock(
-                return_value=SimpleNamespace(window_id="@1", pane_current_command="node")
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="node"
+                )
             )
             mock_tmux.capture_pane = AsyncMock(return_value=pane_text)
             mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
@@ -2156,13 +2393,17 @@ class TestRuntimeInputDriverIntegration:
         mock_driver.send_raw_slash_command.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_send_to_window_fails_closed_for_external_binding(self, mgr: SessionManager):
+    async def test_send_to_window_fails_closed_for_external_binding(
+        self, mgr: SessionManager
+    ):
         success, message = await mgr.send_to_window("external:codex:thread-1", "ping")
         assert success is False
         assert "read-only mode" in message
 
     @pytest.mark.asyncio
-    async def test_send_special_key_uses_runtime_input_driver(self, mgr: SessionManager):
+    async def test_send_special_key_uses_runtime_input_driver(
+        self, mgr: SessionManager
+    ):
         mgr.window_states["@1"] = LiveProcessDescriptor(
             thread_id="thread-1",
             cwd="/tmp/project",
@@ -2176,9 +2417,7 @@ class TestRuntimeInputDriverIntegration:
             mock_tmux.find_window_by_id = AsyncMock(
                 return_value=SimpleNamespace(window_id="@1")
             )
-            mock_driver.send_special_key = AsyncMock(
-                return_value=(True, "Sent Escape")
-            )
+            mock_driver.send_special_key = AsyncMock(return_value=(True, "Sent Escape"))
 
             success, message = await mgr.send_special_key_to_window("@1", "Escape")
 
@@ -2196,7 +2435,9 @@ class TestTopicControlStateMachine:
         assert mgr.get_topic_policy(100, 42) == TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
         assert mgr.get_topic_binding_state(100, 42) == BINDING_STATE_NONE
 
-    def test_bind_thread_marks_bound_without_touching_policy(self, mgr: SessionManager) -> None:
+    def test_bind_thread_marks_bound_without_touching_policy(
+        self, mgr: SessionManager
+    ) -> None:
         mgr.set_topic_policy(100, 42, TOPIC_POLICY_MANUAL_BIND_REQUIRED)
         mgr.start_topic_bind_flow(100, 42)
         assert mgr.get_topic_binding_state(100, 42) == BINDING_STATE_BIND_FLOW

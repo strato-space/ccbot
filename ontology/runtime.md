@@ -23,7 +23,8 @@ This note defines the core runtime nouns for `ccbot`.
   - the canonical persisted local key for a Telegram control surface under one
     user scope
   - concrete shapes in the current code:
-    - `t:<thread_id>`
+    - `t:<chat_id>:<thread_id>` for named topics when Telegram coordinates are known
+    - `t:<thread_id>` only as a legacy mirror/fallback for older persisted data
     - `c:<chat_id>`
   - this is a product persistence noun, not a Telegram API noun
   - it is not the full control-surface identity by itself
@@ -32,8 +33,8 @@ This note defines the core runtime nouns for `ccbot`.
   - the full persisted identity for a control surface in the current storage
     model
   - current concrete shape: `(user_id, surface_key)`
-  - this prevents `t:<thread_id>` values from being treated as globally unique
-    outside their persisted user scope
+  - this prevents bare `thread_id` values from being treated as globally unique
+    across Telegram chats
 
 - **Telegram group routing coordinates**
   - physical Telegram `chat_id` coordinates needed for outbound delivery and
@@ -157,12 +158,12 @@ This note defines the core runtime nouns for `ccbot`.
     runbook may perform an approved controller-service restart
   - current allowed instances are exactly:
     - ComfyCodexBot: `ccbot.service`, `CCBOT_DIR=/data/iqdoctor/.ccbot`, tmux
-      `comfy:comfy-agent`, control surface `3045664/t:555`, chat
+      `comfy:comfy-agent`, control surface `3045664/t:-1003685295814:555`, chat
       `-1003685295814`, cwd `/home/tools/mediagen-comfy`, Codex home
       `/data/iqdoctor/.codex`
     - ImmArenaBot: `imm_arena_bot.service`,
       `CCBOT_DIR=/data/iqdoctor/.ccbot-imm_arena_bot`, tmux
-      `imm_arena_bot:imm`, control surface `3045664/t:3`, chat
+      `imm_arena_bot:imm`, control surface `3045664/t:-1003974721114:3`, chat
       `-1003974721114`, cwd `/home/tools/imm`, Codex home
       `/home/tools/imm/.codex`
   - `/home/tools/server/comfy` is historical/runtime-runbook context for
