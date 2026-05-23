@@ -405,11 +405,12 @@ class TestGroupChatId:
         mgr.set_group_chat_id(100, 1, -1001234567890)
         assert mgr.resolve_chat_id(100) == 100
 
-    def test_set_group_chat_id_overwrites(self, mgr: SessionManager) -> None:
-        """set_group_chat_id updates the stored value on change."""
+    def test_set_group_chat_id_keeps_distinct_chat_thread_surfaces(self, mgr: SessionManager) -> None:
+        """Same numeric thread id in different chats is ambiguous without chat_id."""
         mgr.set_group_chat_id(100, 1, -999)
         mgr.set_group_chat_id(100, 1, -888)
-        assert mgr.resolve_chat_id(100, 1) == -888
+        assert mgr.group_chat_ids == {"t:-999:1": -999, "t:-888:1": -888}
+        assert mgr.resolve_chat_id(100, 1) == 100
 
     def test_multiple_threads_independent(self, mgr: SessionManager) -> None:
         """Different threads for the same user store independent group chat_ids."""
@@ -418,18 +419,20 @@ class TestGroupChatId:
         assert mgr.resolve_chat_id(100, 1) == -111
         assert mgr.resolve_chat_id(100, 2) == -222
 
-    def test_multiple_users_independent(self, mgr: SessionManager) -> None:
-        """Different users store independent group chat_ids."""
+    def test_equal_thread_ids_in_different_chats_are_ambiguous_without_chat_surface(
+        self, mgr: SessionManager
+    ) -> None:
+        """Thread-only resolution fails closed when chat/thread is ambiguous."""
         mgr.set_group_chat_id(100, 1, -111)
         mgr.set_group_chat_id(200, 1, -222)
-        assert mgr.resolve_chat_id(100, 1) == -111
-        assert mgr.resolve_chat_id(200, 1) == -222
+        assert mgr.resolve_chat_id(100, 1) == 100
+        assert mgr.resolve_chat_id(200, 1) == 200
 
     def test_set_group_chat_id_with_none_thread(self, mgr: SessionManager) -> None:
         """set_group_chat_id supports no-topics main-chat routing via the chat-wide slot."""
         mgr.set_group_chat_id(100, None, -999)
         assert mgr.resolve_chat_id(100, None) == -999
-        assert mgr.group_chat_ids.get("100:0") == -999
+        assert mgr.group_chat_ids.get("c:-999") == -999
 
     def test_make_surface_key_for_topic_and_chat(self, mgr: SessionManager) -> None:
         assert mgr.make_surface_key(thread_id=42) == "t:42"

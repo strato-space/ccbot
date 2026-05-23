@@ -495,10 +495,10 @@ class SessionManager:
     surface_bind_flow_versions/nonces: user_id -> {surface_key -> bind-flow credentials}
     surface_pending_slots: user_id -> {surface_key -> PendingSurfaceSlot}
     surface_routing_modes: surface_key -> steer|queue
-    surface_titles: user_id -> {title_surface_key -> Telegram-visible title}
+    surface_titles: title_surface_key -> Telegram-visible title
     thread_bindings/external_topic_bindings/topic_*: compatibility-only topic mirrors
     window_display_names: window_id -> window_name (for display)
-    group_chat_ids: "user_id:thread_id" -> group chat_id (for supergroup routing)
+    group_chat_ids: surface_key -> Telegram group chat_id (for supergroup routing)
     """
 
     window_states: dict[str, LiveProcessDescriptor] = field(default_factory=dict)
@@ -515,7 +515,7 @@ class SessionManager:
         default_factory=dict
     )
     surface_routing_modes: dict[str, str] = field(default_factory=dict)
-    surface_titles: dict[int, dict[str, str]] = field(default_factory=dict)
+    surface_titles: dict[str, str] = field(default_factory=dict)
     thread_bindings: dict[int, dict[int, str]] = field(default_factory=dict)
     external_topic_bindings: dict[int, dict[int, dict[str, Any]]] = field(
         default_factory=dict
@@ -620,12 +620,9 @@ class SessionManager:
                 for surface_key, mode in self.surface_routing_modes.items()
             },
             SURFACE_TITLES_KEY: {
-                str(uid): {
-                    surface_key: title
-                    for surface_key, title in titles.items()
-                    if str(title or "").strip()
-                }
-                for uid, titles in self.surface_titles.items()
+                surface_key: title
+                for surface_key, title in self.surface_titles.items()
+                if str(title or "").strip()
             },
             "thread_bindings": {
                 str(uid): {str(tid): wid for tid, wid in bindings.items()}
@@ -809,11 +806,22 @@ class SessionManager:
         return self.resolve_chat_id(user_id, thread_id) == chat_id
 
     def _stored_topic_chat_id(self, user_id: int, thread_id: int | None) -> int | None:
-        """Return an explicitly stored Telegram group chat id for a topic."""
+        """Return a stored Telegram group chat id for a topic.
+
+        ``user_id`` is accepted for API compatibility only; routing coordinates
+        are stored by effective Telegram surface, not by actor.
+        """
         if thread_id is None:
             return None
-        chat_id = self.group_chat_ids.get(f"{int(user_id)}:{int(thread_id)}")
-        return chat_id if isinstance(chat_id, int) else None
+        matches = [
+            chat_id
+            for surface_key, chat_id in self.group_chat_ids.items()
+            if self._topic_thread_id_from_surface_key(surface_key) == thread_id
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        legacy = self.group_chat_ids.get(f"{int(user_id)}:{int(thread_id)}")
+        return legacy if isinstance(legacy, int) else None
 
     def _resolve_surface_key(
         self,
@@ -945,6 +953,59 @@ class SessionManager:
     @staticmethod
     def _normalize_pending_slot_record(record: Any) -> PendingSurfaceSlot | None:
         return PendingSurfaceSlot.from_record(record)
+
+    @classmethod
+    def _normalize_surface_titles(cls, raw: Any) -> dict[str, str]:
+        """Normalize title metadata to a flat surface-key map."""
+        normalized: dict[str, str] = {}
+        if not isinstance(raw, dict):
+            return normalized
+        for key, value in raw.items():
+            if isinstance(value, dict):
+                for surface_key, title in value.items():
+                    clean = str(title or "").strip()
+                    if isinstance(surface_key, str) and clean:
+                        normalized[surface_key] = clean
+            elif isinstance(key, str):
+                clean = str(value or "").strip()
+                if clean:
+                    normalized[key] = clean
+        return normalized
+
+    @classmethod
+    def _normalize_group_chat_ids(cls, raw: Any) -> dict[str, int]:
+        """Normalize group routing coordinates to flat surface keys.
+
+        Legacy state used ``user_id:thread_id`` keys. The value already is the
+        Telegram chat id, so topic entries can be migrated to
+        ``t:<chat_id>:<thread_id>`` and no-topics main-chat entries to
+        ``c:<chat_id>``.
+        """
+        normalized: dict[str, int] = {}
+        if not isinstance(raw, dict):
+            return normalized
+        for key, value in raw.items():
+            try:
+                chat_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            key_text = str(key)
+            parsed = cls._parse_surface_key(key_text)
+            if parsed is not None:
+                normalized[key_text] = chat_id
+                continue
+            parts = key_text.split(":", 1)
+            if len(parts) != 2:
+                continue
+            try:
+                thread_id = int(parts[1])
+            except ValueError:
+                continue
+            if thread_id == 0:
+                normalized[cls.make_surface_key(chat_id=chat_id)] = chat_id
+            else:
+                normalized[cls.make_surface_key(thread_id=thread_id, chat_id=chat_id)] = chat_id
+        return normalized
 
     @classmethod
     def _normalize_surface_pending_slots(
@@ -1292,20 +1353,13 @@ class SessionManager:
                 self.surface_routing_modes = self._normalize_surface_routing_modes(
                     state.get(SURFACE_ROUTING_MODES_KEY, {})
                 )
-                self.surface_titles = {
-                    user_id: {
-                        surface_key: str(title).strip()
-                        for surface_key, title in titles.items()
-                        if str(title or "").strip()
-                    }
-                    for user_id, titles in self._normalize_surface_title_map(
-                        state.get(SURFACE_TITLES_KEY, {})
-                    ).items()
-                }
+                self.surface_titles = self._normalize_surface_titles(
+                    state.get(SURFACE_TITLES_KEY, {})
+                )
                 self.window_display_names = state.get("window_display_names", {})
-                self.group_chat_ids = {
-                    k: int(v) for k, v in state.get("group_chat_ids", {}).items()
-                }
+                self.group_chat_ids = self._normalize_group_chat_ids(
+                    state.get("group_chat_ids", {})
+                )
 
                 # Detect old format: keys that don't look like window IDs
                 needs_migration = False
@@ -1760,10 +1814,9 @@ class SessionManager:
             thread_id=thread_id,
             chat_id=chat_id,
         )
-        titles = self.surface_titles.setdefault(user_id, {})
-        if titles.get(resolved_surface_key) == normalized_title:
+        if self.surface_titles.get(resolved_surface_key) == normalized_title:
             return False
-        titles[resolved_surface_key] = normalized_title
+        self.surface_titles[resolved_surface_key] = normalized_title
         self._save_state()
         logger.info(
             "Stored surface title: user=%d surface=%s title=%r",
@@ -1787,10 +1840,7 @@ class SessionManager:
             thread_id=thread_id,
             chat_id=chat_id,
         )
-        titles = self.surface_titles.get(user_id)
-        if not titles:
-            return ""
-        return str(titles.get(resolved_surface_key) or "").strip()
+        return str(self.surface_titles.get(resolved_surface_key) or "").strip()
 
     def get_shared_surface_title(
         self,
@@ -1812,11 +1862,7 @@ class SessionManager:
             thread_id=thread_id,
             chat_id=chat_id,
         )
-        for _user_id, titles in sorted(self.surface_titles.items()):
-            title = str(titles.get(resolved_surface_key) or "").strip()
-            if title:
-                return title
-        return ""
+        return str(self.surface_titles.get(resolved_surface_key) or "").strip()
 
     # --- Group chat ID management (supergroup forum topic routing) ---
 
@@ -1834,8 +1880,7 @@ class SessionManager:
         Without it, all outbound messages in forum topics fail with
         "Message thread not found". See commit history: 5afc111 → 26cb81f → PR #23.
         """
-        tid = thread_id or 0
-        key = f"{user_id}:{tid}"
+        key = self.make_surface_key(thread_id=thread_id, chat_id=chat_id)
         if self.group_chat_ids.get(key) != chat_id:
             self.group_chat_ids[key] = chat_id
             self._save_state()
@@ -1858,12 +1903,18 @@ class SessionManager:
         this method instead of raw user_id. Using user_id directly breaks
         supergroup forum topic routing.
         """
-        lookup_thread_id = thread_id if thread_id is not None else 0
-        key = f"{user_id}:{lookup_thread_id}"
-        group_id = self.group_chat_ids.get(key)
-        if group_id is not None:
-            return group_id
-        return user_id
+        if thread_id is None:
+            main_chats = [
+                chat_id
+                for surface_key, chat_id in self.group_chat_ids.items()
+                if self._parse_surface_key(surface_key) == ("chat", chat_id, None)
+            ]
+            legacy_main = self.group_chat_ids.get(f"{int(user_id)}:0")
+            if isinstance(legacy_main, int):
+                return legacy_main
+            return main_chats[0] if len(main_chats) == 1 else user_id
+        group_id = self._stored_topic_chat_id(user_id, thread_id)
+        return group_id if group_id is not None else user_id
 
     async def wait_for_session_map_entry(
         self, window_id: str, timeout: float = 5.0, interval: float = 0.5

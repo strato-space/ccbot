@@ -50,15 +50,15 @@ If this note conflicts with any explanatory note in `doc/`, this note wins.
   - physical Telegram delivery coordinates needed after a product control
     surface has been resolved
   - for shared named topics, the current persisted shape is
-    `group_chat_ids[user_id:thread_id] -> Telegram group chat_id`
+    `group_chat_ids[t:<chat_id>:<thread_id>] -> Telegram group chat_id`
   - for no-topics group main chat mode, the current persisted shape is
-    `group_chat_ids[user_id:0] -> Telegram group chat_id`
+    `group_chat_ids[c:<chat_id>] -> Telegram group chat_id`
   - these coordinates are not the product control-surface identity; they are
     the transport routing data used for topic title sync and outbound delivery
 
 - **Surface title**
   - optional human-facing title captured from Telegram topic create/edit events
-  - current persisted shape is `surface_titles[user_id][title_surface_key] -> title`
+  - current persisted shape is `surface_titles[title_surface_key] -> title`
   - for named topics with known Telegram coordinates,
     `title_surface_key` is chat-qualified (`t:<chat_id>:<thread_id>`) so equal
     numeric `thread_id` values in different groups cannot share title metadata

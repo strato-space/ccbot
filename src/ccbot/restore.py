@@ -511,9 +511,20 @@ def _validate_group_chat_coordinate(
         return RestoreCheckResult(True)
     thread_id = _surface_thread_id(intent.surface_key)
     group_chat_ids = getattr(session_manager, "group_chat_ids", {})
-    key = f"{intent.user_id}:{thread_id or 0}"
-    existing = group_chat_ids.get(key)
-    if existing is not None and int(existing) != int(intent.group_chat_id):
+    keys = [
+        f"{intent.user_id}:{thread_id or 0}",
+        f"t:{intent.group_chat_id}:{thread_id}" if thread_id else f"c:{intent.group_chat_id}",
+    ]
+    existing_values = []
+    for key in keys:
+        existing = group_chat_ids.get(key)
+        if existing is not None:
+            existing_values.append(int(existing))
+    if not existing_values and thread_id:
+        for surface_key, chat_id in group_chat_ids.items():
+            if str(surface_key).startswith("t:") and str(surface_key).endswith(f":{thread_id}"):
+                existing_values.append(int(chat_id))
+    if existing_values and int(intent.group_chat_id) not in existing_values:
         return RestoreCheckResult(False, "telegram routing chat_id mismatch")
     return RestoreCheckResult(True)
 

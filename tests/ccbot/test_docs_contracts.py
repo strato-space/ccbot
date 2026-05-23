@@ -256,9 +256,9 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "full persisted identity" in topic_control
     assert "equal `thread_id` values in different groups are not the same control surface" in topic_control
     assert "Telegram group routing coordinates" in topic_control
-    assert "group_chat_ids[user_id:thread_id] -> Telegram group chat_id" in topic_control
+    assert "group_chat_ids[t:<chat_id>:<thread_id>] -> Telegram group chat_id" in topic_control
     assert "Surface title" in topic_control
-    assert "surface_titles[user_id][title_surface_key] -> title" in topic_control
+    assert "surface_titles[title_surface_key] -> title" in topic_control
     assert "t:<chat_id>:<thread_id>" in topic_control
     assert "title metadata is\n    surface-scoped" in topic_control
     assert "cached surface-title metadata must be\n  updated to that final name" in topic_control

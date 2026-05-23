@@ -27,8 +27,8 @@ Canonical persisted control-state maps are surface-scoped:
 - `surface_binding_states[user_id][surface_key]`
 - `surface_bindings[user_id][surface_key] -> window_id`
 - `surface_pending_slots[user_id][surface_key] -> deferred explicit pre-bind input`
-- `surface_titles[user_id][title_surface_key] -> Telegram-visible title`
-- `group_chat_ids[user_id:thread_id_or_0] -> Telegram group chat_id`
+- `surface_titles[title_surface_key] -> Telegram-visible title`
+- `group_chat_ids[surface_key] -> Telegram group chat_id`
 
 In shared group topics and no-topics group main chats, a persisted binding under
 one allowed user is the effective binding for the whole chat/topic control

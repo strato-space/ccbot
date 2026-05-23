@@ -568,7 +568,7 @@ def test_surface_titles_round_trip_in_state(tmp_path, monkeypatch):
 
     assert changed is True
     saved = json.loads(state_file.read_text())
-    assert saved["surface_titles"]["100"]["t:-100200:8227"] == "comfy-agent-ops"
+    assert saved["surface_titles"]["t:-100200:8227"] == "comfy-agent-ops"
 
     monkeypatch.setattr(session_module.SessionManager, "_load_state", original_load_state)
     reloaded = SessionManager()
@@ -595,8 +595,8 @@ def test_surface_titles_are_chat_qualified_for_equal_topic_ids(tmp_path, monkeyp
     assert manager.get_surface_title(100, thread_id=42, chat_id=-1003) == ""
 
     saved = json.loads(state_file.read_text())
-    assert saved["surface_titles"]["100"]["t:-1001:42"] == "comfy-agent"
-    assert saved["surface_titles"]["100"]["t:-1002:42"] == "comfy-agent-ops"
+    assert saved["surface_titles"]["t:-1001:42"] == "comfy-agent"
+    assert saved["surface_titles"]["t:-1002:42"] == "comfy-agent-ops"
 
 
 def test_shared_surface_title_lookup_crosses_actor_scope_only_for_exact_surface(
@@ -614,7 +614,7 @@ def test_shared_surface_title_lookup_crosses_actor_scope_only_for_exact_surface(
         manager.get_shared_surface_title(thread_id=42, chat_id=-1001)
         == "comfy-agent-ops"
     )
-    assert manager.get_surface_title(300, thread_id=42, chat_id=-1001) == ""
+    assert manager.get_surface_title(300, thread_id=42, chat_id=-1001) == "comfy-agent-ops"
     assert (
         manager.get_shared_surface_title(thread_id=42, chat_id=-1002)
         == "other-group"
