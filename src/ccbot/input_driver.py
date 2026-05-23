@@ -176,6 +176,60 @@ class RuntimeInputDriver:
             InputDispatch.raw_slash_command(text, runtime_kind=runtime_kind).action,
         )
 
+    async def send_queued_text(
+        self,
+        window_id: str,
+        text: str,
+        *,
+        runtime_kind: str = DEFAULT_RUNTIME_KIND,
+    ) -> tuple[bool, str]:
+        """Send text using the runtime's queued-message submit gesture."""
+        window = await self._tmux.find_window_by_id(window_id)
+        if not window:
+            return False, "Window not found (may have been closed)"
+
+        normalized_runtime = normalize_runtime_kind(runtime_kind)
+        success, message = await self._send_text(
+            window.window_id,
+            text,
+            runtime_kind=normalized_runtime,
+            submit=False,
+            metadata={},
+        )
+        if not success:
+            return success, message
+
+        await asyncio.sleep(
+            self._submit_delay_seconds(
+                runtime_kind=normalized_runtime,
+                multiline="\n" in text,
+            )
+        )
+        if normalized_runtime == "codex":
+            queued = await self._tmux.send_key(window.window_id, "Tab")
+            submit_path = "queue-tab"
+        else:
+            queued = await self._send_submit_key(window.window_id)
+            submit_path = "submit-key"
+        if not queued:
+            logger.warning(
+                "input_delivery: failed to queue text to %s via %s "
+                "(runtime=%s, chars=%d)",
+                window.window_id,
+                submit_path,
+                normalized_runtime,
+                len(text),
+            )
+            return False, "Failed to queue text"
+        logger.info(
+            "input_delivery: queued text to %s via %s (runtime=%s, chars=%d)",
+            window.window_id,
+            submit_path,
+            normalized_runtime,
+            len(text),
+        )
+        return True, f"Queued text to {window.window_id}"
+
     async def send_special_key(
         self,
         window_id: str,

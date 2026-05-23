@@ -977,12 +977,12 @@ class SessionManager:
     def _normalize_surface_routing_modes(cls, raw: Any) -> dict[int, dict[str, str]]:
         normalized: dict[int, dict[str, str]] = {}
         for user_id, payload in cls._normalize_surface_map(raw).items():
-            normalized_payload: dict[str, str] = {}
             for surface_key, mode in payload.items():
-                normalized_payload[surface_key] = cls.normalize_routing_mode(mode)
-            if normalized_payload:
-                normalized[user_id] = normalized_payload
-        return normalized
+                owner_id = cls._routing_mode_owner_id_static(user_id, surface_key)
+                normalized.setdefault(owner_id, {})[surface_key] = cls.normalize_routing_mode(
+                    mode
+                )
+        return {uid: modes for uid, modes in normalized.items() if modes}
 
     def _sync_legacy_topic_views_from_surface(self) -> bool:
         """Rebuild legacy topic-keyed mirrors from canonical surface state."""
@@ -3495,8 +3495,9 @@ class SessionManager:
             chat_id=chat_id,
         )
 
-    def _routing_mode_owner_id(self, user_id: int, surface_key: str) -> int:
-        parsed = self._parse_surface_key(surface_key)
+    @classmethod
+    def _routing_mode_owner_id_static(cls, user_id: int, surface_key: str) -> int:
+        parsed = cls._parse_surface_key(surface_key)
         if parsed is None:
             return user_id
         kind, chat_id, thread_id = parsed
@@ -3505,6 +3506,9 @@ class SessionManager:
         if kind == "topic" and chat_id is not None and thread_id is not None:
             return 0
         return user_id
+
+    def _routing_mode_owner_id(self, user_id: int, surface_key: str) -> int:
+        return self._routing_mode_owner_id_static(user_id, surface_key)
 
     def get_surface_routing_mode(
         self,
@@ -3529,6 +3533,18 @@ class SessionManager:
         mode = self.surface_routing_modes.get(owner_id, {}).get(resolved_surface_key)
         if mode:
             return self.normalize_routing_mode(mode)
+        legacy_mode = self.surface_routing_modes.get(user_id, {}).get(resolved_surface_key)
+        if legacy_mode:
+            normalized = self.normalize_routing_mode(legacy_mode)
+            if owner_id != user_id:
+                self.surface_routing_modes.setdefault(owner_id, {})[resolved_surface_key] = (
+                    normalized
+                )
+                self.surface_routing_modes.get(user_id, {}).pop(resolved_surface_key, None)
+                if not self.surface_routing_modes.get(user_id):
+                    self.surface_routing_modes.pop(user_id, None)
+                self._save_state()
+            return normalized
         if str(runtime_kind or "").strip().casefold() == "codex":
             return ROUTING_MODE_STEER
         return ROUTING_MODE_QUEUE
@@ -3553,6 +3569,10 @@ class SessionManager:
         self.surface_routing_modes.setdefault(owner_id, {})[resolved_surface_key] = (
             normalized
         )
+        if owner_id != user_id:
+            self.surface_routing_modes.get(user_id, {}).pop(resolved_surface_key, None)
+            if not self.surface_routing_modes.get(user_id):
+                self.surface_routing_modes.pop(user_id, None)
         self._save_state()
         return normalized
 
@@ -4614,19 +4634,11 @@ class SessionManager:
         ):
             return False, BLOCKED_PROMPT_SEND_MESSAGE
 
-        trimmed = text.lstrip()
-        if trimmed.startswith("/"):
-            success, message = await runtime_input_driver.send_raw_slash_command(
-                window.window_id,
-                text,
-                runtime_kind=runtime_kind,
-            )
-        else:
-            success, message = await runtime_input_driver.send_text(
-                window.window_id,
-                text,
-                runtime_kind=runtime_kind,
-            )
+        success, message = await runtime_input_driver.send_queued_text(
+            window.window_id,
+            text,
+            runtime_kind=runtime_kind,
+        )
         if success:
             return True, f"Queued to {display}"
         return False, message

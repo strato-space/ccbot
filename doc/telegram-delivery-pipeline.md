@@ -549,9 +549,9 @@ Routing mode affects semantics:
 
 - `queue`
   - normal turn submission through the live runtime input plane
-  - for Codex, queue mode does not require the pane to be idle before ccbot
-    submits the prompt; Codex may hold the text in its own pending composer
-    queue
+  - for Codex, queue mode sends the payload and then uses Codex's `Tab`
+    queued-message gesture instead of the normal Enter/C-m submit path; it
+    does not require the pane to be idle before ccbot queues the prompt
 - `steer`
   - directed immediate intervention into the current turn when the runtime supports it
   - this is the default for Codex-bound Telegram text so ccbot preserves

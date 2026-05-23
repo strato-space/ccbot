@@ -51,6 +51,10 @@ class _FakeTmux:
         self.calls.append(("enter", window_id, None))
         return True
 
+    async def send_key(self, window_id: str, key: str) -> bool:
+        self.calls.append(("key", window_id, key))
+        return True
+
 
 @pytest.mark.asyncio
 async def test_multiline_codex_text_uses_bracketed_paste_and_submit_key() -> None:
@@ -107,6 +111,41 @@ async def test_single_line_codex_text_still_uses_literal_path() -> None:
     assert fake_tmux.calls == [
         ("literal", "@1", "ping"),
         ("submit", "@1", None),
+    ]
+
+
+
+@pytest.mark.asyncio
+async def test_codex_queued_text_uses_tab_instead_of_enter() -> None:
+    fake_tmux = _FakeTmux()
+    driver = RuntimeInputDriver(fake_tmux, submit_delay=0)
+
+    success, message = await driver.send_queued_text("@1", "ping", runtime_kind="codex")
+
+    assert success is True
+    assert message == "Queued text to @1"
+    assert fake_tmux.calls == [
+        ("literal", "@1", "ping"),
+        ("key", "@1", "Tab"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_multiline_codex_queued_text_uses_paste_then_tab() -> None:
+    fake_tmux = _FakeTmux()
+    driver = RuntimeInputDriver(fake_tmux, submit_delay=0)
+
+    success, message = await driver.send_queued_text(
+        "@1",
+        "line one\nline two",
+        runtime_kind="codex",
+    )
+
+    assert success is True
+    assert message == "Queued text to @1"
+    assert fake_tmux.calls == [
+        ("paste", "@1", "line one\nline two"),
+        ("key", "@1", "Tab"),
     ]
 
 

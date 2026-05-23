@@ -586,6 +586,22 @@ class TestSurfaceRoutingModes:
         )
         assert "t:-100200300:42" in mgr.surface_routing_modes[0]
 
+    def test_surface_routing_mode_migrates_legacy_user_owned_chat_thread_mode(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.surface_routing_modes = {100: {"t:-100200300:42": "queue"}}
+
+        assert (
+            mgr.get_surface_routing_mode(
+                100,
+                chat_id=-100200300,
+                thread_id=42,
+                runtime_kind="codex",
+            )
+            == "queue"
+        )
+        assert mgr.surface_routing_modes == {0: {"t:-100200300:42": "queue"}}
+
     @pytest.mark.asyncio
     async def test_send_to_window_queued_codex_allows_busy_pane_without_rollout_ack(
         self, mgr: SessionManager
@@ -612,13 +628,13 @@ class TestSurfaceRoutingModes:
                     "────────────────────────────────────────\n"
                 )
             )
-            mock_driver.send_text = AsyncMock(return_value=(True, "sent"))
+            mock_driver.send_queued_text = AsyncMock(return_value=(True, "queued"))
 
             success, message = await mgr.send_to_window_queued("@1", "hello")
 
         assert success is True
         assert message == "Queued to @1"
-        mock_driver.send_text.assert_awaited_once_with(
+        mock_driver.send_queued_text.assert_awaited_once_with(
             "@1",
             "hello",
             runtime_kind="codex",

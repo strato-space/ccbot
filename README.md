@@ -629,9 +629,9 @@ Routing note:
 - `/steer <prompt>` and `/queue <prompt>` are one-shot prompt sends that use the
   named semantics without needing to toggle first. Without a prompt, `/steer`
   and `/queue` set the persisted surface mode.
-- `queue` mode sends through the same live tmux input plane but does not require
-  Codex to be idle before submit; visible blocked prompts and dead input planes
-  still fail closed.
+- `queue` mode sends through the same live tmux input plane but, for Codex,
+  uses the `Tab` queued-message gesture instead of the normal Enter/C-m submit
+  path; visible blocked prompts and dead input planes still fail closed.
 - `steer` is a routing semantic for immediate runtime-aware control flows; it
   is not the same thing as raw terminal takeover.
 - Raw terminal control in tmux remains a separate operator layer and is never modeled as an ordinary queued message.
