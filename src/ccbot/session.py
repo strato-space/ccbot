@@ -1837,6 +1837,52 @@ class SessionManager:
         self._save_state()
         return state
 
+    def clear_duplicate_thread_claims_for_window(
+        self,
+        owner_window_id: str,
+        *,
+        reason: str,
+    ) -> list[str]:
+        """Clear stale duplicate runtime-thread claims for an explicit owner.
+
+        Startup restore has stronger authority than persisted stale descriptors:
+        it validates a specific tmux window against the configured runtime id.
+        When that proof re-binds the owner window, any other distinct bound tmux
+        window carrying the same runtime id must become replay-silent.
+        """
+        owner = self.get_process_descriptor(owner_window_id)
+        if owner is None or not owner.thread_id:
+            return []
+        bound_window_ids = self._bound_tmux_window_ids()
+        cleared: list[str] = []
+        for peer_window_id, peer in self.window_states.items():
+            if peer_window_id == owner_window_id:
+                continue
+            if peer_window_id not in bound_window_ids:
+                continue
+            if peer.thread_id != owner.thread_id:
+                continue
+            if (
+                owner.runtime_kind
+                and peer.runtime_kind
+                and peer.runtime_kind != owner.runtime_kind
+            ):
+                continue
+            peer.thread_id = ""
+            cleared.append(peer_window_id)
+        if not cleared:
+            return []
+        self._save_state()
+        logger.warning(
+            "Cleared duplicate runtime thread claims for owner %s: thread %s "
+            "cleared from %s reason=%s",
+            owner_window_id,
+            owner.thread_id,
+            sorted(cleared),
+            reason,
+        )
+        return cleared
+
     def reconcile_live_tmux_window(
         self,
         *,

@@ -223,6 +223,27 @@ def test_bind_restored_surface_records_group_route_and_clears_external(
     assert mgr.resolve_chat_id(100, 42) == -1004242
 
 
+def test_bind_restored_surface_clears_stale_duplicate_runtime_claim(
+    mgr: SessionManager,
+) -> None:
+    intent = _intent()
+    mgr.register_live_process(
+        "@6",
+        "/home/tools/server/comfy",
+        window_name="mediagen-comfy",
+        runtime_kind="codex",
+        thread_id="thread-1",
+    )
+    mgr.bind_surface(100, "@6", surface_key="t:8227", window_name="mediagen-comfy")
+
+    bind_restored_surface(mgr, intent, window_id="@9")
+
+    assert mgr.window_states["@9"].thread_id == "thread-1"
+    assert mgr.window_states["@6"].thread_id == ""
+    assert mgr.surface_bindings[100]["t:42"] == "@9"
+    assert mgr.surface_bindings[100]["t:8227"] == "@6"
+
+
 def test_bind_restored_no_topics_surface_records_threadless_group_route(
     mgr: SessionManager,
 ) -> None:

@@ -649,6 +649,13 @@ def bind_restored_surface(
         surface_key=intent.surface_key,
         window_name=intent.window_name,
     )
+    clear_duplicates = getattr(
+        session_manager,
+        "clear_duplicate_thread_claims_for_window",
+        None,
+    )
+    if callable(clear_duplicates):
+        clear_duplicates(window_id, reason="startup_restore")
 
 
 def _classify_existing_window(
