@@ -16,9 +16,11 @@ aliases for the wider codebase.
 """
 
 import asyncio
+from datetime import datetime
 import json
 import logging
 from pathlib import Path
+import time
 from typing import Any, Callable, Awaitable
 
 import aiofiles
@@ -28,6 +30,7 @@ from .codex_threads import normalize_cwd
 from .codex_rollout import CodexRolloutNormalizer, CodexRolloutState
 from .monitor_state import MonitorState, TrackedSession
 from .runtime_types import NormalizedEvent, RolloutSource, USER_ECHO_SEMANTIC_KIND
+from .telegram_delivery_policy import is_internal_user_payload
 from .tmux_manager import tmux_manager
 from .transcript_parser import TranscriptParser
 from .utils import read_cwd_from_jsonl
@@ -120,6 +123,104 @@ class SessionMonitor:
             dispatch_to_telegram=dispatch_to_telegram,
             status_message_eligible=entry.status_message_eligible,
         )
+
+    @staticmethod
+    def _timestamp_seconds(timestamp: str | None) -> float | None:
+        if not timestamp:
+            return None
+        try:
+            return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _codex_record_user_text(data: dict[str, Any]) -> str:
+        payload = data.get("payload")
+        if not isinstance(payload, dict):
+            return ""
+        record_type = str(data.get("type") or "").strip()
+        payload_type = str(payload.get("type") or "").strip()
+        if record_type == "response_item" and payload_type == "message":
+            if str(payload.get("role") or "").strip() != "user":
+                return ""
+            content = payload.get("content")
+            if isinstance(content, str):
+                return content.strip()
+            if not isinstance(content, list):
+                return ""
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "".join(parts).strip()
+        if record_type == "event_msg" and payload_type == "user_message":
+            text = payload.get("message") or payload.get("text")
+            return text.strip() if isinstance(text, str) else ""
+        return ""
+
+    def _initial_codex_backfill_offset(
+        self,
+        file_path: Path,
+        *,
+        file_size: int,
+        live_since: float,
+    ) -> int | None:
+        """Return a safe current-turn backfill offset for a newly tracked Codex source.
+
+        New live Codex bindings can be discovered a few seconds after the runtime
+        has already appended the turn-opening user record. Starting at EOF would
+        then lose the ordinary user echo while still delivering later status/final
+        events. This bounded scan replays only a recent user opener associated
+        with the live attachment; historical/no-live attaches keep EOF behavior.
+        """
+        if live_since <= 0 or file_size <= 0:
+            return None
+
+        now = time.time()
+        max_live_attach_age = 300.0
+        if live_since < now - max_live_attach_age:
+            return None
+
+        grace = max(float(self.poll_interval) * 3.0, 30.0)
+        lower_bound = live_since - 120.0
+        upper_bound = live_since + grace
+        candidates: list[tuple[float, int]] = []
+        try:
+            with file_path.open("rb") as handle:
+                while True:
+                    offset = handle.tell()
+                    line = handle.readline()
+                    if not line:
+                        break
+                    try:
+                        data = json.loads(line.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        continue
+                    text = self._codex_record_user_text(data)
+                    if not text or is_internal_user_payload(text):
+                        continue
+                    ts = self._timestamp_seconds(data.get("timestamp"))
+                    if ts is None or ts < lower_bound or ts > upper_bound:
+                        continue
+                    candidates.append((ts, offset))
+        except OSError as e:
+            logger.debug(
+                "Unable to scan Codex initial backfill offset for %s: %s", file_path, e
+            )
+            return None
+        if not candidates:
+            return None
+
+        # Start at the latest user copy in the bounded turn window. If Codex
+        # wrote both response_item and event_msg copies, this skips the earlier
+        # copy and lets the existing compact policy promote the remaining
+        # user_echo exactly once.
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return candidates[0][1]
 
     async def _get_active_cwds(self) -> set[str]:
         """Get normalized cwds of all active tmux windows."""
@@ -265,7 +366,9 @@ class SessionMonitor:
                         await f.readline()  # Skip rest of partial line
                         tracked_source.last_byte_offset = await f.tell()
                         return []
-                    await f.seek(tracked_source.last_byte_offset)  # Reset for normal read
+                    await f.seek(
+                        tracked_source.last_byte_offset
+                    )  # Reset for normal read
 
                 # Read only new lines from the offset.
                 # Track safe_offset: advance past valid lines and past
@@ -310,7 +413,9 @@ class SessionMonitor:
     ) -> CodexRolloutState:
         """Rebuild cross-poll Codex synthesis state up to the tracked offset."""
         state = CodexRolloutState()
-        target_offset = tracked_source.last_byte_offset if up_to_offset is None else up_to_offset
+        target_offset = (
+            tracked_source.last_byte_offset if up_to_offset is None else up_to_offset
+        )
         if target_offset <= 0:
             return state
 
@@ -352,7 +457,9 @@ class SessionMonitor:
             # This lets the later canonical user copy for the same turn collapse
             # correctly after restart, while still preventing historical
             # unmatched event_msg fallbacks from re-flushing.
-            active_turn_key = state.current_turn_key or f"surrogate:{state.turn_generation}"
+            active_turn_key = (
+                state.current_turn_key or f"surrogate:{state.turn_generation}"
+            )
             state.recent_user_event_messages = {
                 signature: emitted_at
                 for signature, emitted_at in state.recent_user_event_messages.items()
@@ -402,7 +509,9 @@ class SessionMonitor:
             for thread_id, rollout_source in self._active_rollout_sources.items()
             if thread_id in active_thread_ids
         ]
-        known_thread_ids = {rollout_source.thread_id for rollout_source in rollout_sources}
+        known_thread_ids = {
+            rollout_source.thread_id for rollout_source in rollout_sources
+        }
         missing_thread_ids = active_thread_ids - known_thread_ids
 
         # Legacy fallback: old tests and Claude-only flows may still patch the
@@ -431,10 +540,27 @@ class SessionMonitor:
                     except OSError:
                         file_size = 0
                         current_mtime = 0.0
+                    initial_offset = file_size
+                    if rollout_source.runtime_kind == "codex":
+                        backfill_offset = await asyncio.to_thread(
+                            self._initial_codex_backfill_offset,
+                            rollout_source.file_path,
+                            file_size=file_size,
+                            live_since=rollout_source.live_since,
+                        )
+                        if backfill_offset is not None:
+                            initial_offset = backfill_offset
+                            logger.info(
+                                "Started tracking live Codex rollout source for thread %s "
+                                "from current-turn user opener offset %d (EOF %d)",
+                                rollout_source.thread_id,
+                                initial_offset,
+                                file_size,
+                            )
                     tracked = TrackedSession(
                         session_id=rollout_source.thread_id,
                         file_path=str(rollout_source.file_path),
-                        last_byte_offset=file_size,
+                        last_byte_offset=initial_offset,
                         runtime_kind=rollout_source.runtime_kind,
                     )
                     self.state.update_tracked_source(tracked)
@@ -443,7 +569,8 @@ class SessionMonitor:
                         "Started tracking rollout source for thread: %s",
                         rollout_source.thread_id,
                     )
-                    continue
+                    if initial_offset >= file_size:
+                        continue
 
                 # Check mtime + file size to see if file has changed
                 try:
@@ -466,10 +593,12 @@ class SessionMonitor:
                             codex_state is not None
                             and codex_state.pending_event_messages
                         ):
-                            parsed_entries = TranscriptParser.parse_codex_rollout_entries(
-                                [],
-                                thread_id=rollout_source.thread_id,
-                                state=codex_state,
+                            parsed_entries = (
+                                TranscriptParser.parse_codex_rollout_entries(
+                                    [],
+                                    thread_id=rollout_source.thread_id,
+                                    state=codex_state,
+                                )
                             )
                             for entry in parsed_entries:
                                 event = self._normalized_event_from_parsed_entry(
@@ -482,7 +611,9 @@ class SessionMonitor:
 
                 # File changed, read new content from last offset
                 previous_offset = tracked.last_byte_offset
-                new_entries = await self._read_new_lines(tracked, rollout_source.file_path)
+                new_entries = await self._read_new_lines(
+                    tracked, rollout_source.file_path
+                )
                 self._file_mtimes[rollout_source.thread_id] = current_mtime
 
                 if new_entries:
@@ -576,7 +707,9 @@ class SessionMonitor:
                 binding.binding_scope == "tmux"
                 and binding.window_id not in live_window_ids
             )
-            resolved = await session_manager.resolve_thread_for_window(binding.window_id)
+            resolved = await session_manager.resolve_thread_for_window(
+                binding.window_id
+            )
             if tmux_window_missing and (
                 resolved is None
                 or not resolved.thread_id
@@ -587,11 +720,13 @@ class SessionMonitor:
             if resolved is not None and resolved.thread_id:
                 window_to_session[binding.window_id] = resolved.thread_id
                 if resolved.file_path:
+                    state = session_manager.window_states.get(binding.window_id)
                     active_rollout_sources[resolved.thread_id] = RolloutSource(
                         thread_id=resolved.thread_id,
                         file_path=Path(resolved.file_path),
                         runtime_kind=resolved.runtime_kind,
                         cwd=resolved.cwd,
+                        live_since=float(getattr(state, "registered_at", 0.0) or 0.0),
                     )
 
         self._active_rollout_sources = active_rollout_sources

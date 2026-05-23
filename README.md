@@ -103,7 +103,9 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   warnings, never as ordinary user echo.
   Ordinary user echo remains visible; only explicit internal payload shapes
   such as `<subagent_notification>` or tagged command scaffolds stay hidden and
-  non-turn-opening.
+  non-turn-opening. For live Codex bindings, a newly discovered replay source
+  may backfill only the bounded current-turn opener so tmux-originated user
+  messages are visible without flooding historical replay.
   When command/tool/file previews are surfaced, they follow a Codex-style split:
   preview body in fenced `sh` / `json`, truncation metadata outside the fence,
   and no redundant `completed · output 1 line(s)` footer when the preview

@@ -235,7 +235,8 @@ control surface at a time.
 
 Durable terminal/history bubbles in `compact` mode are intentionally narrow:
 
-- user echo
+- user echo, including replay-proven live Codex turn openers that were
+  appended shortly before ccbot attached to the live tmux window
 - orchestration milestones
 - warning artifacts
 - final assistant text
@@ -414,3 +415,7 @@ Preview refinements:
   observed it must be delivered before a later queued user turn can advance the
   surface generation, and a user echo must never be rendered by editing an old
   technical status bubble
+- live Codex replay attachment may backfill a bounded current-turn user opener
+  from replay evidence; historical/external replay attachment must not flood
+  old user history, and Telegram-originated duplicates remain governed by
+  runtime-input proof rather than bare text matching

@@ -53,7 +53,9 @@ The default Telegram surface is `compact`, not `verbose`.
 - internal injected user payloads such as `<skill>...</skill>` never appear as
   ordinary chat content
 - ordinary user echo remains visible in compact mode unless it matches an
-  explicit internal payload shape
+  explicit internal payload shape; for live Codex windows, first-track replay
+  attachment may backfill only the bounded current-turn opener so a tmux-typed
+  prompt is not lost when ccbot attaches seconds after the user record
 - Telegram ingress receipts for eligible simple Codex text are current-update
   acknowledgements only: before replay ACK they are not `user_echo`, not runtime
   proof, and not turn openers; ACK success or the later replay-backed user echo
@@ -183,7 +185,8 @@ Ordering guarantees:
 9. when a final assistant artifact is observed, delivery must wait for that
    terminal artifact before a queued follow-up user turn advances the generation
 10. a user echo opens a new turn as ordinary content and must not be created by
-    editing a previous technical status artifact
+    editing a previous technical status artifact; if it is recovered by bounded
+    live Codex replay backfill, it is still delivered as a fresh user echo
 11. no late status artifact may appear below the final answer for the same turn
 12. no late commentary, orchestration milestone, plan update, or surfaced preview bubble
     may appear below the final answer for the same turn

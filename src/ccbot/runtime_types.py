@@ -206,6 +206,7 @@ class RolloutSource:
     runtime_kind: str = "claude"
     source_kind: str = "jsonl"
     cwd: str = ""
+    live_since: float = 0.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.file_path, Path):

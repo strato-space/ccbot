@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from pathlib import Path
+import time
 
 import pytest
 from unittest.mock import patch
@@ -185,7 +187,13 @@ class TestCheckForUpdatesCodexRollout:
     async def test_repeated_reads_do_not_duplicate_codex_events(
         self, monitor, tmp_path
     ):
-        rollout = Path(__file__).resolve().parents[1] / "fixtures" / "codex" / "rollouts" / "root_tool_call_and_output.jsonl"
+        rollout = (
+            Path(__file__).resolve().parents[1]
+            / "fixtures"
+            / "codex"
+            / "rollouts"
+            / "root_tool_call_and_output.jsonl"
+        )
         copied = tmp_path / "thread.jsonl"
         copied.write_text(rollout.read_text(encoding="utf-8"), encoding="utf-8")
 
@@ -243,7 +251,9 @@ class TestCheckForUpdatesCodexRollout:
         monitor.state.update_session(tracked)
 
         async def _scan():
-            raise AssertionError("legacy project scan should not run for active runtime sources")
+            raise AssertionError(
+                "legacy project scan should not run for active runtime sources"
+            )
 
         monitor.scan_rollout_sources = _scan  # type: ignore[assignment]
 
@@ -254,6 +264,246 @@ class TestCheckForUpdatesCodexRollout:
             "command_execution",
             "lifecycle",
         }
+
+    @staticmethod
+    def _iso_from_epoch(seconds: float) -> str:
+        return (
+            datetime.fromtimestamp(seconds, tz=timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+
+    @pytest.mark.asyncio
+    async def test_new_live_codex_source_replays_recent_turn_opener(
+        self, monitor, tmp_path
+    ):
+        copied = tmp_path / "late-live-user.jsonl"
+        live_since = time.time() - 2.0
+        user_ts = self._iso_from_epoch(live_since - 3.0)
+        event_ts = self._iso_from_epoch(live_since - 2.999)
+        command_ts = self._iso_from_epoch(live_since + 1.0)
+        records = [
+            {
+                "timestamp": user_ts,
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "собери только бриф на тему - анекдот по процессу Citematic Shorts",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": event_ts,
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "собери только бриф на тему - анекдот по процессу Citematic Shorts",
+                },
+            },
+            {
+                "timestamp": command_ts,
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call_cmd",
+                    "arguments": json.dumps({"cmd": "pwd"}),
+                },
+            },
+        ]
+        copied.write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+        thread_id = "thread-late-live-user"
+        monitor._active_rollout_sources = {
+            thread_id: RolloutSource(
+                thread_id=thread_id,
+                file_path=copied,
+                runtime_kind="codex",
+                live_since=live_since,
+            )
+        }
+
+        events = await monitor.check_for_updates({thread_id})
+
+        user_events = [event for event in events if event.role == "user"]
+        assert len(user_events) == 1
+        assert user_events[0].semantic_kind == "user_echo"
+        # The duplicate event_msg copy can carry dispatch_to_telegram=False
+        # until compact policy promotes ordinary user_echo in bot delivery.
+        assert "Citematic Shorts" in user_events[0].text
+        assert any(event.event_kind == "command_execution" for event in events)
+        tracked = monitor.state.get_tracked_source(thread_id)
+        assert tracked is not None
+        assert tracked.last_byte_offset == copied.stat().st_size
+
+    @pytest.mark.asyncio
+    async def test_new_live_codex_source_does_not_replay_old_history(
+        self, monitor, tmp_path
+    ):
+        copied = tmp_path / "old-history.jsonl"
+        live_since = time.time() - 2.0
+        old_ts = self._iso_from_epoch(live_since - 1800.0)
+        old_answer_ts = self._iso_from_epoch(live_since - 1798.0)
+        records = [
+            {
+                "timestamp": old_ts,
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "old prompt"}],
+                },
+            },
+            {
+                "timestamp": old_answer_ts,
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "old answer"}],
+                },
+            },
+        ]
+        copied.write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+        thread_id = "thread-old-history"
+        monitor._active_rollout_sources = {
+            thread_id: RolloutSource(
+                thread_id=thread_id,
+                file_path=copied,
+                runtime_kind="codex",
+                live_since=live_since,
+            )
+        }
+
+        events = await monitor.check_for_updates({thread_id})
+
+        assert events == []
+        tracked = monitor.state.get_tracked_source(thread_id)
+        assert tracked is not None
+        assert tracked.last_byte_offset == copied.stat().st_size
+
+    @pytest.mark.asyncio
+    async def test_new_live_codex_source_anchors_before_later_internal_user_payload(
+        self, monitor, tmp_path
+    ):
+        copied = tmp_path / "later-internal-user.jsonl"
+        live_since = time.time() - 2.0
+        records = [
+            {
+                "timestamp": self._iso_from_epoch(live_since - 3.0),
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "ordinary prompt"}],
+                },
+            },
+            {
+                "timestamp": self._iso_from_epoch(live_since - 1.0),
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "<subagent_notification>hidden</subagent_notification>",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": self._iso_from_epoch(live_since + 1.0),
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call_cmd",
+                    "arguments": json.dumps({"cmd": "pwd"}),
+                },
+            },
+        ]
+        copied.write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+        thread_id = "thread-later-internal-user"
+        monitor._active_rollout_sources = {
+            thread_id: RolloutSource(
+                thread_id=thread_id,
+                file_path=copied,
+                runtime_kind="codex",
+                live_since=live_since,
+            )
+        }
+
+        events = await monitor.check_for_updates({thread_id})
+
+        user_events = [event for event in events if event.role == "user"]
+        assert user_events[0].text == "ordinary prompt"
+        assert user_events[0].dispatch_to_telegram is True
+        assert (
+            user_events[1].text
+            == "<subagent_notification>hidden</subagent_notification>"
+        )
+        assert any(event.event_kind == "command_execution" for event in events)
+
+    @pytest.mark.asyncio
+    async def test_new_live_codex_source_ignores_stale_live_since(
+        self, monitor, tmp_path
+    ):
+        copied = tmp_path / "stale-live-since.jsonl"
+        live_since = time.time() - 3600.0
+        records = [
+            {
+                "timestamp": self._iso_from_epoch(live_since + 10.0),
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "stale prompt"}],
+                },
+            },
+            {
+                "timestamp": self._iso_from_epoch(live_since + 12.0),
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "stale answer"}],
+                },
+            },
+        ]
+        copied.write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+        thread_id = "thread-stale-live-since"
+        monitor._active_rollout_sources = {
+            thread_id: RolloutSource(
+                thread_id=thread_id,
+                file_path=copied,
+                runtime_kind="codex",
+                live_since=live_since,
+            )
+        }
+
+        events = await monitor.check_for_updates({thread_id})
+
+        assert events == []
+        tracked = monitor.state.get_tracked_source(thread_id)
+        assert tracked is not None
+        assert tracked.last_byte_offset == copied.stat().st_size
 
     @pytest.mark.asyncio
     async def test_hydrate_codex_rollout_state_preserves_active_turn_user_duplicate_buffer(
@@ -289,7 +539,9 @@ class TestCheckForUpdatesCodexRollout:
 
         assert hydrated.pending_event_messages == []
         assert len(hydrated.recent_user_event_messages) == 1
-        assert next(iter(hydrated.recent_user_event_messages.keys()))[0] == "surrogate:1"
+        assert (
+            next(iter(hydrated.recent_user_event_messages.keys()))[0] == "surrogate:1"
+        )
 
         canonical = TranscriptParser.parse_codex_rollout_entries(
             [
@@ -337,7 +589,9 @@ class TestCheckForUpdatesCodexRollout:
 
         thread_id = "thread-user-hidden"
         monitor._active_rollout_sources = {
-            thread_id: RolloutSource(thread_id=thread_id, file_path=copied, runtime_kind="codex")
+            thread_id: RolloutSource(
+                thread_id=thread_id, file_path=copied, runtime_kind="codex"
+            )
         }
         tracked = TrackedSession(
             session_id=thread_id,
@@ -360,7 +614,9 @@ class TestCheckForUpdatesCodexRollout:
         copied = tmp_path / "spawn-stateful.jsonl"
         thread_id = "thread-spawn-stateful"
         monitor._active_rollout_sources = {
-            thread_id: RolloutSource(thread_id=thread_id, file_path=copied, runtime_kind="codex")
+            thread_id: RolloutSource(
+                thread_id=thread_id, file_path=copied, runtime_kind="codex"
+            )
         }
         tracked = TrackedSession(
             session_id=thread_id,
@@ -408,7 +664,9 @@ class TestCheckForUpdatesCodexRollout:
 
         dispatchable = [event for event in second if event.dispatch_to_telegram]
         assert len(dispatchable) == 1
-        assert dispatchable[0].text.startswith("• Spawned Mill [explorer] (gpt-5.4 medium)")
+        assert dispatchable[0].text.startswith(
+            "• Spawned Mill [explorer] (gpt-5.4 medium)"
+        )
 
     @pytest.mark.asyncio
     async def test_check_for_updates_flushes_pending_codex_event_msg_without_file_change(
