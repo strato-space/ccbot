@@ -121,7 +121,9 @@ The delivery pipeline keeps:
   when the runtime exposes a durable blocking question record
 - one latest-only mutable runtime image-preview media artifact per
   `(user_id, control surface, turn generation)`; the first same-turn preview
-  sends a Telegram photo bubble and later previews edit that media in place
+  sends a Telegram photo bubble and later previews edit that media in place;
+  if a preview payload contains multiple images, the first image is used for
+  the mutable bubble and the truncation is audited
 - one ordered content queue per user
 - one current turn generation per `(user_id, control surface)`
 - one terminal turn artifact: `assistant_final`
@@ -258,6 +260,9 @@ media in place. They are authorized replay-proven disclosure to the active bound
 control surface, use sanitized provenance captions, never read local path
 arguments for media bytes in the MVP, and do not close the assistant turn.
 They never read local path arguments as preview media sources.
+Compact mode uses the first image only when a preview payload contains multiple images.
+It then records a truncation audit event rather than attempting to mutate a
+Telegram media group.
 
 ## Progress Routing
 

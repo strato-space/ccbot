@@ -167,9 +167,10 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   `view_image` / `Viewed Image` replay output with paired embedded image bytes
   is delivered as a latest-only pre-final mutable Telegram photo bubble with a
   sanitized caption; the first preview sends the bubble and later same-turn
-  previews edit that media in place. It is authorized replay-proven disclosure
-  to the active bound control surface. It is never a local-path file read and
-  does not close the assistant turn.
+  previews edit that media in place. If a preview carries multiple images,
+  compact mode uses the first image and audits the truncation.
+  It is authorized replay-proven disclosure to the active bound control surface.
+  It is never a local-path file read and does not close the assistant turn.
 - **Send messages** — Forward text to Codex via tmux keystrokes
 - **Simple text fast path** — eligible one-line Codex text gets an immediate
   Telegram ingress receipt and starts a runtime injection attempt before the

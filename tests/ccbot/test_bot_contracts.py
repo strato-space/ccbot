@@ -4836,7 +4836,9 @@ class TestTelegramDelivery:
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=0),
             patch(
-                "ccbot.bot.open_new_turn_generation", return_value=1
+                "ccbot.bot.open_new_turn_generation_with_cleanup",
+                new_callable=AsyncMock,
+                return_value=1,
             ) as mock_open_turn,
             patch(
                 "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
@@ -4874,7 +4876,9 @@ class TestTelegramDelivery:
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=0),
             patch(
-                "ccbot.bot.open_new_turn_generation", return_value=1
+                "ccbot.bot.open_new_turn_generation_with_cleanup",
+                new_callable=AsyncMock,
+                return_value=1,
             ) as mock_open_turn,
             patch(
                 "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
@@ -4888,7 +4892,7 @@ class TestTelegramDelivery:
 
             await bot_mod.handle_new_message(msg, bot)
 
-        mock_open_turn.assert_called_once_with(1, 42)
+        mock_open_turn.assert_awaited_once_with(bot, 1, 42)
         mock_status.assert_not_awaited()
         mock_content.assert_awaited_once()
 
@@ -4919,7 +4923,9 @@ class TestTelegramDelivery:
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=0),
             patch(
-                "ccbot.bot.open_new_turn_generation", return_value=1
+                "ccbot.bot.open_new_turn_generation_with_cleanup",
+                new_callable=AsyncMock,
+                return_value=1,
             ) as mock_open_turn,
             patch(
                 "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
@@ -4933,7 +4939,7 @@ class TestTelegramDelivery:
 
             await bot_mod.handle_new_message(msg, bot)
 
-        mock_open_turn.assert_called_once_with(1, 42)
+        mock_open_turn.assert_awaited_once_with(bot, 1, 42)
         mock_status.assert_not_awaited()
         mock_content.assert_awaited_once()
 
@@ -4955,7 +4961,9 @@ class TestTelegramDelivery:
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=0),
             patch(
-                "ccbot.bot.open_new_turn_generation", return_value=1
+                "ccbot.bot.open_new_turn_generation_with_cleanup",
+                new_callable=AsyncMock,
+                return_value=1,
             ) as mock_open_turn,
             patch(
                 "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
@@ -4969,7 +4977,7 @@ class TestTelegramDelivery:
 
             await bot_mod.handle_new_message(msg, bot)
 
-        mock_open_turn.assert_called_once_with(1, 42)
+        mock_open_turn.assert_awaited_once_with(bot, 1, 42)
         mock_status.assert_not_awaited()
         mock_content.assert_awaited_once()
 
@@ -5009,7 +5017,9 @@ class TestTelegramDelivery:
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=0),
             patch(
-                "ccbot.bot.open_new_turn_generation", return_value=1
+                "ccbot.bot.open_new_turn_generation_with_cleanup",
+                new_callable=AsyncMock,
+                return_value=1,
             ) as mock_open_turn,
             patch(
                 "ccbot.bot.flush_terminal_artifacts_before_new_turn",
@@ -5034,7 +5044,7 @@ class TestTelegramDelivery:
             include_pending=True,
         )
         mock_flush.assert_awaited_once_with(bot, 1, 42)
-        mock_open_turn.assert_called_once_with(1, 42)
+        mock_open_turn.assert_awaited_once_with(bot, 1, 42)
         mock_sm.mark_fast_user_echo_represented.assert_called_once_with("proof-1")
         mock_content.assert_not_awaited()
 
@@ -5072,7 +5082,11 @@ class TestTelegramDelivery:
             patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=0),
-            patch("ccbot.bot.open_new_turn_generation", return_value=1),
+            patch(
+                "ccbot.bot.open_new_turn_generation_with_cleanup",
+                new_callable=AsyncMock,
+                return_value=1,
+            ),
             patch(
                 "ccbot.bot.flush_terminal_artifacts_before_new_turn",
                 new_callable=AsyncMock,
@@ -5115,7 +5129,9 @@ class TestTelegramDelivery:
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=0),
             patch(
-                "ccbot.bot.open_new_turn_generation", return_value=1
+                "ccbot.bot.open_new_turn_generation_with_cleanup",
+                new_callable=AsyncMock,
+                return_value=1,
             ) as mock_open_turn,
             patch(
                 "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
@@ -5631,7 +5647,9 @@ class TestTelegramDelivery:
             patch("ccbot.bot.current_turn_generation", return_value=4),
             patch("ccbot.bot.is_pre_final_visible_lane_closed", return_value=True),
             patch(
-                "ccbot.bot.open_new_turn_generation", return_value=5
+                "ccbot.bot.open_new_turn_generation_with_cleanup",
+                new_callable=AsyncMock,
+                return_value=5,
             ) as mock_open_turn,
             patch(
                 "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
@@ -5644,7 +5662,7 @@ class TestTelegramDelivery:
 
             await bot_mod.handle_new_message(msg, bot)
 
-        mock_open_turn.assert_called_once_with(1, 42)
+        mock_open_turn.assert_awaited_once_with(bot, 1, 42)
         mock_status.assert_not_awaited()
         mock_content.assert_not_awaited()
 
@@ -5670,7 +5688,9 @@ class TestTelegramDelivery:
             patch("ccbot.bot.current_turn_generation", return_value=4),
             patch("ccbot.bot.is_pre_final_visible_lane_closed", return_value=False),
             patch(
-                "ccbot.bot.open_new_turn_generation", return_value=5
+                "ccbot.bot.open_new_turn_generation_with_cleanup",
+                new_callable=AsyncMock,
+                return_value=5,
             ) as mock_open_turn,
             patch(
                 "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
@@ -5712,7 +5732,9 @@ class TestTelegramDelivery:
             patch("ccbot.bot.current_turn_generation", return_value=6),
             patch("ccbot.bot.is_pre_final_visible_lane_closed", return_value=True),
             patch(
-                "ccbot.bot.open_new_turn_generation", return_value=7
+                "ccbot.bot.open_new_turn_generation_with_cleanup",
+                new_callable=AsyncMock,
+                return_value=7,
             ) as mock_open_turn,
             patch(
                 "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
@@ -5730,7 +5752,7 @@ class TestTelegramDelivery:
 
             await bot_mod.handle_new_message(msg, bot)
 
-        mock_open_turn.assert_called_once_with(1, 42)
+        mock_open_turn.assert_awaited_once_with(bot, 1, 42)
         mock_status.assert_not_awaited()
         mock_commentary.assert_not_awaited()
         mock_content.assert_awaited_once()
@@ -5758,7 +5780,9 @@ class TestTelegramDelivery:
             patch("ccbot.bot.current_turn_generation", return_value=6),
             patch("ccbot.bot.is_pre_final_visible_lane_closed", return_value=True),
             patch(
-                "ccbot.bot.open_new_turn_generation", return_value=7
+                "ccbot.bot.open_new_turn_generation_with_cleanup",
+                new_callable=AsyncMock,
+                return_value=7,
             ) as mock_open_turn,
             patch(
                 "ccbot.bot.enqueue_content_message", new_callable=AsyncMock
@@ -5795,7 +5819,9 @@ class TestTelegramDelivery:
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=0),
             patch(
-                "ccbot.bot.open_new_turn_generation", return_value=1
+                "ccbot.bot.open_new_turn_generation_with_cleanup",
+                new_callable=AsyncMock,
+                return_value=1,
             ) as mock_open_turn,
             patch(
                 "ccbot.bot.flush_terminal_artifacts_before_new_turn",
@@ -5816,7 +5842,7 @@ class TestTelegramDelivery:
             await bot_mod.handle_new_message(msg, bot)
 
         mock_flush_terminal.assert_awaited_once_with(bot, 1, 42)
-        mock_open_turn.assert_called_once_with(1, 42)
+        mock_open_turn.assert_awaited_once_with(bot, 1, 42)
         mock_status.assert_not_awaited()
         mock_content.assert_awaited_once()
 
@@ -5889,7 +5915,9 @@ class TestTelegramDelivery:
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=0),
             patch(
-                "ccbot.bot.open_new_turn_generation", return_value=1
+                "ccbot.bot.open_new_turn_generation_with_cleanup",
+                new_callable=AsyncMock,
+                return_value=1,
             ) as mock_open_turn,
             patch(
                 "ccbot.bot.enqueue_status_update", new_callable=AsyncMock
@@ -5938,7 +5966,9 @@ class TestTelegramDelivery:
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.current_turn_generation", return_value=0),
             patch(
-                "ccbot.bot.open_new_turn_generation", return_value=1
+                "ccbot.bot.open_new_turn_generation_with_cleanup",
+                new_callable=AsyncMock,
+                return_value=1,
             ) as mock_open_turn,
             patch(
                 "ccbot.bot.enqueue_status_update", new_callable=AsyncMock

@@ -222,7 +222,7 @@ control surface at a time.
 
 ## Compact Telegram Contract
 
-Durable bubbles in `compact` mode are intentionally narrow:
+Durable terminal/history bubbles in `compact` mode are intentionally narrow:
 
 - user echo
 - orchestration milestones
@@ -231,12 +231,14 @@ Durable bubbles in `compact` mode are intentionally narrow:
 - terminal media result artifacts such as generated-image preview/photo bubbles
   with captions, when a safely validated local generated artifact substitutes
   for absent final assistant text
-- runtime image preview artifacts such as Codex `image_generation_end` and
-  `Viewed Image` latest-only mutable preview/photo bubbles, when paired
-  replay-embedded image bytes are available for the active bound control surface
 
 In addition:
 
+- runtime image preview artifacts such as Codex `image_generation_end` and
+  `Viewed Image` latest-only mutable preview/photo bubbles are visible
+  pre-final progress media, not durable terminal/history bubbles; they use the
+  first paired replay-embedded image when multiple preview images are present
+  and audit that truncation
 - latest commentary stays visible as a dedicated artifact
 - one logical commentary artifact may be serialized into multiple Telegram
   messages when needed to preserve the full text

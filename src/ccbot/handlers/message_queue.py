@@ -72,6 +72,12 @@ def _is_message_not_modified_error(exc: Exception) -> bool:
     return "message is not modified" in str(exc).lower()
 
 
+def _is_message_known_gone_error(exc: Exception) -> bool:
+    """Return True when Telegram says the tracked message no longer exists."""
+    text = str(exc).lower()
+    return "message to delete not found" in text or "message not found" in text
+
+
 # Merge limit for content messages
 MERGE_MAX_LENGTH = 3800  # Leave room for markdown conversion overhead
 
@@ -2608,7 +2614,7 @@ async def _do_clear_image_preview_message(
 ) -> None:
     """Delete and forget the tracked image-preview progress bubble."""
     pkey = (user_id, thread_id_or_0)
-    info = _image_preview_msg_info.pop(pkey, None)
+    info = _image_preview_msg_info.get(pkey)
     if _latest_pre_final_visible_kind.get(pkey) == IMAGE_PREVIEW_SEMANTIC_KIND:
         _latest_pre_final_visible_kind.pop(pkey, None)
     if not info:
@@ -2617,6 +2623,7 @@ async def _do_clear_image_preview_message(
     chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
     try:
         await bot.delete_message(chat_id=chat_id, message_id=info.message_id)
+        _image_preview_msg_info.pop(pkey, None)
         log_telegram_delivery(
             action="delete",
             user_id=user_id,
@@ -2629,9 +2636,7 @@ async def _do_clear_image_preview_message(
             semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
             reason="clear_image_preview",
         )
-    except RetryAfter:
-        raise
-    except Exception as e:
+    except RetryAfter as e:
         log_telegram_delivery(
             action="delete",
             user_id=user_id,
@@ -2644,7 +2649,34 @@ async def _do_clear_image_preview_message(
             semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
             success=False,
             error=str(e),
-            reason="clear_image_preview_failed",
+            reason="clear_image_preview_retry_after",
+        )
+        logger.debug(
+            "Deferring image-preview delete after RetryAfter for message %s: %s",
+            info.message_id,
+            e,
+        )
+    except Exception as e:
+        known_gone = _is_message_known_gone_error(e)
+        if known_gone:
+            _image_preview_msg_info.pop(pkey, None)
+        log_telegram_delivery(
+            action="delete",
+            user_id=user_id,
+            chat_id=chat_id,
+            thread_id=thread_id_or_0 or None,
+            message_id=info.message_id,
+            window_id=info.window_id,
+            task_type="image_preview_clear",
+            content_type="image_preview",
+            semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
+            success=False,
+            error=str(e),
+            reason=(
+                "clear_image_preview_already_gone"
+                if known_gone
+                else "clear_image_preview_failed"
+            ),
         )
         logger.debug(
             "Failed to delete image-preview message %s: %s",
@@ -3028,7 +3060,6 @@ def reopen_pre_final_visible_lane(
     _pre_final_visible_closed.discard((user_id, thread_id or 0))
     _technical_status_closed.discard((user_id, thread_id or 0))
     _latest_pre_final_visible_kind.pop((user_id, thread_id or 0), None)
-    _image_preview_msg_info.pop((user_id, thread_id or 0), None)
 
 
 def reopen_commentary_lane(
@@ -3086,7 +3117,6 @@ def open_new_turn_generation(
     # edit. Drop only the pointer; the old message remains as historical
     # evidence and the next plan update opens a fresh visible bubble.
     _plan_update_msg_info.pop(key, None)
-    _image_preview_msg_info.pop(key, None)
     return generation
 
 
@@ -3154,6 +3184,23 @@ async def clear_image_preview_message(
         _image_preview_msg_info.pop((user_id, thread_id or 0), None)
         return
     await _do_clear_image_preview_message(bot, user_id, thread_id or 0)
+
+
+async def open_new_turn_generation_with_cleanup(
+    bot: Bot | None,
+    user_id: int,
+    thread_id: int | None = None,
+) -> int:
+    """Advance turn generation after clearing live pre-final image preview media.
+
+    This helper is the bot-backed new-turn path. The synchronous
+    ``open_new_turn_generation`` intentionally preserves stale image-preview
+    tracking so a later preview can delete-before-replace if a caller has no bot
+    handle available.
+    """
+    if bot is not None:
+        await clear_image_preview_message(bot, user_id, thread_id)
+    return open_new_turn_generation(user_id, thread_id)
 
 
 async def clear_pending_input_message(

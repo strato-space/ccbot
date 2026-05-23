@@ -153,7 +153,7 @@ from .handlers.message_queue import (
     flush_terminal_artifacts_before_new_turn,
     get_message_queue,
     is_pre_final_visible_lane_closed,
-    open_new_turn_generation,
+    open_new_turn_generation_with_cleanup,
     shutdown_workers,
 )
 from .launcher_registration import infer_runtime_kind_from_command
@@ -4450,7 +4450,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         and bool(getattr(record, "allow_other", False))
         and text.strip()
     ):
-        open_new_turn_generation(user.id, surface.message_thread_id)
+        await open_new_turn_generation_with_cleanup(
+            context.bot,
+            user.id,
+            surface.message_thread_id,
+        )
         answer = await answer_omx_question_other(record, text, window_id=wid)
         await clear_omx_question_msg(
             user.id,
@@ -5619,11 +5623,19 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         turn_generation = current_turn_generation(user_id, thread_id)
         if opens_new_turn:
             await flush_terminal_artifacts_before_new_turn(bot, user_id, thread_id)
-            turn_generation = open_new_turn_generation(user_id, thread_id)
+            turn_generation = await open_new_turn_generation_with_cleanup(
+                bot,
+                user_id,
+                thread_id,
+            )
         elif (
             is_turn_started_lifecycle or is_operator_turn_opener
         ) and is_pre_final_visible_lane_closed(user_id, thread_id):
-            turn_generation = open_new_turn_generation(user_id, thread_id)
+            turn_generation = await open_new_turn_generation_with_cleanup(
+                bot,
+                user_id,
+                thread_id,
+            )
 
         if opens_new_turn:
             fast_proof = session_manager.match_fast_user_echo_proof(

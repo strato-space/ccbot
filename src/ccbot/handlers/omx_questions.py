@@ -32,7 +32,7 @@ from .callback_data import (
     CB_OMX_QUESTION_TOGGLE,
 )
 from .message_sender import NO_LINK_PREVIEW
-from .message_queue import open_new_turn_generation
+from .message_queue import open_new_turn_generation_with_cleanup
 
 logger = logging.getLogger(__name__)
 
@@ -1996,7 +1996,7 @@ async def handle_omx_question_callback(
             return True
         selected = [index]
 
-    open_new_turn_generation(user.id, thread_id)
+    await open_new_turn_generation_with_cleanup(context.bot, user.id, thread_id)
     answer = await answer_omx_question(record, selected, window_id=window_id)
     selected_labels = answer.get("selected_labels")
     if isinstance(selected_labels, list):

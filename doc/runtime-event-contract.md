@@ -217,6 +217,8 @@ At the default product-facing `compact` Telegram surface:
   - remains pre-final progress, not a terminal result
   - is latest-only mutable in compact mode: first same-turn preview sends a
     photo bubble, later same-turn previews edit that media in place
+  - uses the first image only when a preview payload contains multiple images;
+    media-group preview mutation is out of scope for the compact bubble
   - never reads local path arguments as media sources; those paths are only
     sanitized provenance unless paired replay-embedded bytes authorize display
 

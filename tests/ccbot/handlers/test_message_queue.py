@@ -28,6 +28,7 @@ from ccbot.handlers.message_queue import (
     _ingress_receipt_msg_info,
     _ingress_receipt_superseded,
     clear_commentary_lane_state,
+    clear_image_preview_message,
     current_turn_generation,
     enqueue_pending_input_update,
     enqueue_ingress_receipt,
@@ -37,6 +38,7 @@ from ccbot.handlers.message_queue import (
     shutdown_workers,
     _mark_commentary_closed,
     open_new_turn_generation,
+    open_new_turn_generation_with_cleanup,
     _process_commentary_update_task,
     _process_content_task,
     _process_status_update_task,
@@ -2559,6 +2561,186 @@ async def test_terminal_final_deletes_tracked_image_preview_and_prevents_cross_t
         bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=2108)
         bot.edit_message_media.assert_not_awaited()
         assert _image_preview_msg_info[(1, 42)].message_id == 2109
+    finally:
+        clear_commentary_lane_state(1, 42)
+
+
+@pytest.mark.asyncio
+async def test_new_turn_cleanup_deletes_preview_without_final_before_next_preview() -> None:
+    preview_task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=[],
+        text="• Viewed Image:\n  └ progress.png",
+        content_type="viewed_image_preview",
+        semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
+        image_data=[("image/png", b"progress-png")],
+        image_caption="🖼 Viewed Image\nFile: progress.png",
+        turn_generation=1,
+    )
+    next_turn_preview = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=[],
+        text="• Viewed Image:\n  └ next.png",
+        content_type="viewed_image_preview",
+        semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
+        image_data=[("image/png", b"next-png")],
+        image_caption="🖼 Viewed Image\nFile: next.png",
+        turn_generation=2,
+    )
+    first_photo = AsyncMock()
+    first_photo.message_id = 2111
+    next_photo = AsyncMock()
+    next_photo.message_id = 2112
+
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.send_photo",
+                new_callable=AsyncMock,
+                side_effect=[first_photo, next_photo],
+            ) as mock_photo,
+            patch(
+                "ccbot.handlers.message_queue._check_and_send_status",
+                new_callable=AsyncMock,
+            ),
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+            bot = AsyncMock()
+
+            open_new_turn_generation(1, 42)
+            await _process_content_task(bot, 1, preview_task)
+            await open_new_turn_generation_with_cleanup(bot, 1, 42)
+            await _process_content_task(bot, 1, next_turn_preview)
+
+        assert mock_photo.await_count == 2
+        bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=2111)
+        bot.edit_message_media.assert_not_awaited()
+        assert _image_preview_msg_info[(1, 42)].message_id == 2112
+    finally:
+        clear_commentary_lane_state(1, 42)
+
+
+@pytest.mark.asyncio
+async def test_image_preview_clear_delete_failure_retains_tracking_to_prevent_stack() -> None:
+    preview_task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=[],
+        text="• Viewed Image:\n  └ progress.png",
+        content_type="viewed_image_preview",
+        semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
+        image_data=[("image/png", b"progress-png")],
+        image_caption="🖼 Viewed Image\nFile: progress.png",
+        turn_generation=1,
+    )
+    sent_photo = AsyncMock()
+    sent_photo.message_id = 2113
+
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.current_turn_generation",
+                return_value=1,
+            ),
+            patch(
+                "ccbot.handlers.message_queue.send_photo",
+                new_callable=AsyncMock,
+                return_value=sent_photo,
+            ),
+            patch(
+                "ccbot.handlers.message_queue.log_telegram_delivery",
+            ) as mock_audit,
+            patch(
+                "ccbot.handlers.message_queue._check_and_send_status",
+                new_callable=AsyncMock,
+            ),
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+            bot = AsyncMock()
+
+            await _process_content_task(bot, 1, preview_task)
+            bot.delete_message.side_effect = RuntimeError("delete failed")
+            await clear_image_preview_message(bot, 1, 42)
+
+        assert _image_preview_msg_info[(1, 42)].message_id == 2113
+        assert any(
+            call.kwargs.get("reason") == "clear_image_preview_failed"
+            and call.kwargs.get("success") is False
+            for call in mock_audit.call_args_list
+        )
+    finally:
+        clear_commentary_lane_state(1, 42)
+
+
+@pytest.mark.asyncio
+async def test_image_preview_clear_retryafter_retains_tracking_and_does_not_raise() -> None:
+    preview_task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=[],
+        text="• Viewed Image:\n  └ progress.png",
+        content_type="viewed_image_preview",
+        semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
+        image_data=[("image/png", b"progress-png")],
+        image_caption="🖼 Viewed Image\nFile: progress.png",
+        turn_generation=1,
+    )
+    sent_photo = AsyncMock()
+    sent_photo.message_id = 2114
+
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.current_turn_generation",
+                return_value=1,
+            ),
+            patch(
+                "ccbot.handlers.message_queue.send_photo",
+                new_callable=AsyncMock,
+                return_value=sent_photo,
+            ),
+            patch(
+                "ccbot.handlers.message_queue.log_telegram_delivery",
+            ) as mock_audit,
+            patch(
+                "ccbot.handlers.message_queue._check_and_send_status",
+                new_callable=AsyncMock,
+            ),
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+            bot = AsyncMock()
+
+            await _process_content_task(bot, 1, preview_task)
+            bot.delete_message.side_effect = RetryAfter(3)
+            await clear_image_preview_message(bot, 1, 42)
+
+        assert _image_preview_msg_info[(1, 42)].message_id == 2114
+        assert any(
+            call.kwargs.get("reason") == "clear_image_preview_retry_after"
+            and call.kwargs.get("success") is False
+            for call in mock_audit.call_args_list
+        )
     finally:
         clear_commentary_lane_state(1, 42)
 
