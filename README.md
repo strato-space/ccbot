@@ -577,11 +577,14 @@ transcribed first through `CCBOT_VOICE_STT_PROVIDER` (`openai` by default,
 simple one-line Codex text with no attachment intent, no active/recoverable OMX
 question, no blocked prompt, no open attachment batch, and a fresh writable
 binding proof may bypass the attachment text lead-hold and synchronous ACK wait.
-That path sends a Telegram ingress receipt (`↗ Получил, отправляю в runtime…`)
-as current-update acknowledgement, then updates it to confirmed, delayed
-(`⏳ Delivered to tmux; waiting for Codex replay ACK`), or failed after the
-bounded ACK window; before ACK it is not replay-backed `user_echo` and does not
-open the runtime turn.
+If the target pane is in tmux copy-mode/scrollback, ccbot first sends `Escape`
+and verifies that tmux mode cleared before injecting text; if the mode remains,
+it fails closed before payload delivery. The fast path sends a Telegram ingress
+receipt (`↗ Получил, отправляю в runtime…`) as current-update acknowledgement,
+then updates it to confirmed, delayed (`⏳ Delivered to tmux; waiting for Codex
+replay ACK`), or failed after the bounded ACK window. Receipts may include the
+resolved tmux target hint (`window_id`, name, cwd); before ACK they are not
+replay-backed `user_echo` and do not open the runtime turn.
 audio/video originals are downloaded under `$CCBOT_DIR/media` and forwarded
 artifact-first as local paths plus metadata. Static stickers are normalized to
 PNG image attachments. Animated/video stickers use their Telegram thumbnail as

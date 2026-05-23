@@ -562,6 +562,15 @@ payload and submit-key delivery succeed but replay ACK does not arrive within
 the bounded window, the bot must surface an explicit delivered-but-unconfirmed
 state instead of a hard failure or silent success.
 
+If the active tmux pane is in tmux copy-mode/scrollback when Telegram input
+arrives, ccbot treats that as a recoverable tmux-local mode, not as Codex
+input readiness. It sends `Escape`, revalidates that `pane_in_mode` cleared,
+and only then delivers the payload plus Codex replay-ACK proof. If `Escape`
+does not clear the mode, input fails closed before payload delivery. Ingress
+receipts may include the resolved target hint (`window_id`, display name, and
+cwd) so operators can distinguish tmux internal window IDs such as `@9` from
+visible tmux indexes such as `7`.
+
 A Codex-bound tmux window is writable only while it still exposes a live Codex
 input plane. If the window has fallen back to a shell prompt, Telegram input
 must fail closed instead of pasting text into `bash`, even when the previous

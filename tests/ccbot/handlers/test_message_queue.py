@@ -74,6 +74,19 @@ def test_ingress_receipt_render_distinguishes_delivered_no_ack() -> None:
     assert "❌" not in text
 
 
+def test_ingress_receipt_render_can_include_runtime_target_hint() -> None:
+    text = _render_ingress_receipt_text(
+        "ping",
+        "delayed_runtime",
+        target_hint="target: @9 · comfy-agent-ops · /home/tools/mediagen-comfy",
+    )
+
+    assert "target: @9" in text
+    assert "comfy-agent-ops" in text
+    assert "/home/tools/mediagen-comfy" in text
+    assert text.endswith("ping")
+
+
 def test_can_merge_tasks_rejects_different_topics_for_same_window():
     base = MessageTask(
         task_type="content",

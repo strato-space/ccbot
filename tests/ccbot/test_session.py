@@ -1166,6 +1166,122 @@ class TestRuntimeInputDriverIntegration:
         )
 
     @pytest.mark.asyncio
+    async def test_send_to_window_exits_tmux_copy_mode_before_codex_submit(
+        self,
+        mgr: SessionManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        rollout = tmp_path / "thread-1.jsonl"
+        rollout.write_text("", encoding="utf-8")
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+        mgr.resolve_thread_for_window = AsyncMock(
+            return_value=ThreadLocator(
+                thread_id="thread-1",
+                summary="Thread One",
+                message_count=1,
+                file_path=str(rollout),
+                runtime_kind="codex",
+                cwd="/tmp/project",
+            )
+        )
+        monkeypatch.setattr("ccbot.session.TMUX_MODE_ESCAPE_SETTLE_SECONDS", 0)
+        monkeypatch.setattr(
+            "ccbot.session.CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS", 0
+        )
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_RETRY_SECONDS", 0.01)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_POLL_SECONDS", 0.001)
+        monkeypatch.setattr("ccbot.session.CODEX_MULTILINE_ACK_TIMEOUT_SECONDS", 0.05)
+
+        copy_mode_window = SimpleNamespace(
+            window_id="@1",
+            pane_current_command="node",
+            pane_in_mode=True,
+            pane_mode="copy-mode",
+        )
+        ready_window = SimpleNamespace(
+            window_id="@1",
+            pane_current_command="node",
+            pane_in_mode=False,
+            pane_mode="",
+        )
+
+        async def submit_and_append_ack(*args, **kwargs):
+            with rollout.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"type": "turn_context"}) + "\n")
+            return True, "Submitted text to @1"
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                side_effect=[copy_mode_window, ready_window]
+            )
+            mock_tmux.send_key = AsyncMock(return_value=True)
+            mock_tmux.capture_pane = AsyncMock(return_value="OpenAI Codex\n› ready")
+            mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
+            mock_driver.send_multiline_submit_key = AsyncMock(
+                side_effect=submit_and_append_ack
+            )
+
+            success, message = await mgr.send_to_window("@1", "ping")
+
+        assert success is True
+        assert message == "Sent to @1"
+        mock_tmux.send_key.assert_awaited_once_with("@1", "Escape")
+        mock_driver.send_text.assert_awaited_once_with(
+            "@1",
+            "ping",
+            runtime_kind="codex",
+            submit=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_to_window_fails_closed_when_copy_mode_escape_does_not_clear(
+        self,
+        mgr: SessionManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+        mgr.resolve_thread_for_window = AsyncMock()
+        monkeypatch.setattr("ccbot.session.TMUX_MODE_ESCAPE_SETTLE_SECONDS", 0)
+        copy_mode_window = SimpleNamespace(
+            window_id="@1",
+            pane_current_command="node",
+            pane_in_mode=True,
+            pane_mode="copy-mode",
+        )
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                side_effect=[copy_mode_window, copy_mode_window]
+            )
+            mock_tmux.send_key = AsyncMock(return_value=True)
+            mock_tmux.capture_pane = AsyncMock(return_value="OpenAI Codex\n› ready")
+            mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
+
+            success, message = await mgr.send_to_window("@1", "ping")
+
+        assert success is False
+        assert "could not exit" in message
+        assert "copy-mode" in message
+        mock_tmux.send_key.assert_awaited_once_with("@1", "Escape")
+        mock_tmux.capture_pane.assert_not_awaited()
+        mock_driver.send_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_send_to_window_codex_closes_completion_popup_before_ack_retry(
         self,
         mgr: SessionManager,
@@ -1702,6 +1818,161 @@ class TestRuntimeInputDriverIntegration:
         await asyncio.wait_for(done.wait(), timeout=1)
         assert proof.status == CODEX_DELIVERED_NO_ACK_STATUS
         mock_driver.send_multiline_submit_key.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_fast_codex_send_exits_tmux_copy_mode_before_payload_delivery(
+        self,
+        mgr: SessionManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        rollout = tmp_path / "thread-1.jsonl"
+        rollout.write_text("", encoding="utf-8")
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+        mgr.resolve_thread_for_window = AsyncMock(
+            return_value=ThreadLocator(
+                thread_id="thread-1",
+                summary="Thread One",
+                message_count=1,
+                file_path=str(rollout),
+                runtime_kind="codex",
+                cwd="/tmp/project",
+            )
+        )
+        monkeypatch.setattr("ccbot.session.TMUX_MODE_ESCAPE_SETTLE_SECONDS", 0)
+        monkeypatch.setattr("ccbot.session.FAST_CODEX_ACK_POLL_SECONDS", 0.001)
+        monkeypatch.setattr("ccbot.session.FAST_CODEX_ACK_TIMEOUT_SECONDS", 0.05)
+        done = asyncio.Event()
+
+        async def on_complete(proof):
+            done.set()
+
+        copy_mode_window = SimpleNamespace(
+            window_id="@1",
+            pane_current_command="node",
+            pane_in_mode=True,
+            pane_mode="copy-mode",
+        )
+        ready_window = SimpleNamespace(
+            window_id="@1",
+            pane_current_command="node",
+            pane_in_mode=False,
+            pane_mode="",
+        )
+
+        async def submit_and_append_ack(*args, **kwargs):
+            with rollout.open("a", encoding="utf-8") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "type": "response_item",
+                            "payload": {
+                                "type": "message",
+                                "role": "user",
+                                "content": [{"type": "input_text", "text": "ping"}],
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+            return True, "Submitted text to @1"
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                side_effect=[copy_mode_window, ready_window]
+            )
+            mock_tmux.send_key = AsyncMock(return_value=True)
+            mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
+            mock_driver.send_multiline_submit_key = AsyncMock(
+                side_effect=submit_and_append_ack
+            )
+
+            success, message, proof = await mgr.send_to_window_fast_unverified(
+                "@1",
+                "ping",
+                proof_id="proof-copy-mode",
+                user_id=100,
+                chat_id=-100,
+                thread_id=42,
+                surface_key="t:42",
+                on_complete=on_complete,
+            )
+
+        assert success is True
+        assert message == "Sent text to @1"
+        assert proof is not None
+        mock_tmux.send_key.assert_awaited_once_with("@1", "Escape")
+        mock_driver.send_text.assert_awaited_once_with(
+            "@1",
+            "ping",
+            runtime_kind="codex",
+            submit=False,
+        )
+        mock_driver.send_multiline_submit_key.assert_awaited_once_with(
+            "@1",
+            runtime_kind="codex",
+        )
+        await asyncio.wait_for(done.wait(), timeout=1)
+        assert proof.status == "ack_confirmed"
+
+    @pytest.mark.asyncio
+    async def test_fast_codex_send_fails_closed_when_copy_mode_escape_does_not_clear(
+        self,
+        mgr: SessionManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+        mgr.resolve_thread_for_window = AsyncMock()
+        monkeypatch.setattr("ccbot.session.TMUX_MODE_ESCAPE_SETTLE_SECONDS", 0)
+        copy_mode_window = SimpleNamespace(
+            window_id="@1",
+            pane_current_command="node",
+            pane_in_mode=True,
+            pane_mode="copy-mode",
+        )
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                side_effect=[copy_mode_window, copy_mode_window]
+            )
+            mock_tmux.send_key = AsyncMock(return_value=True)
+            mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
+            mock_driver.send_multiline_submit_key = AsyncMock(
+                return_value=(True, "Submitted text to @1")
+            )
+
+            success, message, proof = await mgr.send_to_window_fast_unverified(
+                "@1",
+                "ping",
+                proof_id="proof-copy-mode-stuck",
+                user_id=100,
+                chat_id=-100,
+                thread_id=42,
+                surface_key="t:42",
+            )
+
+        assert success is False
+        assert proof is None
+        assert "could not exit" in message
+        assert "copy-mode" in message
+        mock_tmux.send_key.assert_awaited_once_with("@1", "Escape")
+        mgr.resolve_thread_for_window.assert_not_awaited()
+        mock_driver.send_text.assert_not_awaited()
+        mock_driver.send_multiline_submit_key.assert_not_awaited()
 
     def test_codex_ack_text_match_tolerates_trailing_line_spaces_only(self) -> None:
         assert _codex_text_matches_expected_exact(

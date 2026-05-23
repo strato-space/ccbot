@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import shlex
+import subprocess
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,6 +64,8 @@ class TmuxWindow:
     pane_id: str = ""  # Active pane id (e.g. "%0")
     pane_pid: str = ""  # Active pane root process id
     pane_ids: tuple[str, ...] = ()  # All pane ids in this window
+    pane_in_mode: bool = False  # True when tmux copy-mode/a mode table owns input
+    pane_mode: str = ""  # tmux mode name such as "copy-mode"
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,8 @@ class TmuxPane:
     pane_current_command: str = ""
     pane_active: bool = False
     pane_title: str = ""
+    pane_in_mode: bool = False
+    pane_mode: str = ""
 
 
 @dataclass(frozen=True)
@@ -141,6 +146,37 @@ class TmuxManager:
                 pass  # var not set in session env — nothing to remove
 
     @staticmethod
+    def _parse_tmux_bool(value: str) -> bool:
+        return str(value or "").strip().casefold() in {"1", "true", "yes", "on"}
+
+    def _active_pane_mode_sync(self, target: str) -> tuple[bool, str]:
+        """Return whether tmux itself is intercepting input for a target pane."""
+        if not target:
+            return False, ""
+        try:
+            proc = subprocess.run(
+                [
+                    "tmux",
+                    "display-message",
+                    "-p",
+                    "-t",
+                    target,
+                    "#{pane_in_mode}\t#{pane_mode}",
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=1.0,
+            )
+        except Exception:
+            return False, ""
+        if proc.returncode != 0:
+            return False, ""
+        in_mode, _, mode = (proc.stdout or "").strip().partition("\t")
+        return self._parse_tmux_bool(in_mode), mode.strip()
+
+    @staticmethod
     def _runtime_env_scrub_prefix() -> str:
         """Return an env(1) prefix that removes controller-only variables."""
         return " ".join(
@@ -184,11 +220,16 @@ class TmuxManager:
                         pane_cmd = pane.pane_current_command or ""
                         pane_id = pane.pane_id or ""
                         pane_pid = str(getattr(pane, "pane_pid", "") or "")
+                        pane_in_mode, pane_mode = self._active_pane_mode_sync(
+                            pane_id or window.window_id or ""
+                        )
                     else:
                         cwd = ""
                         pane_cmd = ""
                         pane_id = ""
                         pane_pid = ""
+                        pane_in_mode = False
+                        pane_mode = ""
 
                     windows.append(
                         TmuxWindow(
@@ -199,6 +240,8 @@ class TmuxManager:
                             pane_id=pane_id,
                             pane_pid=pane_pid,
                             pane_ids=pane_ids,
+                            pane_in_mode=pane_in_mode,
+                            pane_mode=pane_mode,
                         )
                     )
                 except Exception as e:
@@ -230,6 +273,7 @@ class TmuxManager:
                     pane_id = getattr(pane, "pane_id", "") or ""
                     if not pane_id:
                         continue
+                    pane_in_mode, pane_mode = self._active_pane_mode_sync(pane_id)
                     panes.append(
                         TmuxPane(
                             window_id=window.window_id or window_id,
@@ -243,6 +287,8 @@ class TmuxManager:
                             or "",
                             pane_active=pane_id == active_id,
                             pane_title=getattr(pane, "pane_title", "") or "",
+                            pane_in_mode=pane_in_mode,
+                            pane_mode=pane_mode,
                         )
                     )
                 return panes

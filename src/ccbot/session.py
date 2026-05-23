@@ -76,6 +76,11 @@ from .utils import atomic_write_json
 logger = logging.getLogger(__name__)
 
 BLOCKED_PROMPT_SEND_MESSAGE = "Input blocked by a visible prompt in the terminal"
+TMUX_PANE_MODE_ESCAPE_FAILED_MESSAGE = (
+    "Input blocked: target tmux pane is in {mode} and ccbot could not exit it "
+    "with Escape."
+)
+TMUX_MODE_ESCAPE_SETTLE_SECONDS = 0.1
 CODEX_RUNTIME_NOT_ACTIVE_MESSAGE = (
     "Codex live process is not active in this tmux window; use /resume or /bind "
     "to attach a live Codex window before sending input."
@@ -184,6 +189,22 @@ def _codex_rollout_file_size(file_path: Path) -> int:
         return file_path.stat().st_size
     except OSError:
         return 0
+
+
+def _truthy_tmux_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _tmux_pane_in_mode(window: Any) -> bool:
+    """Return True when tmux itself is intercepting runtime input."""
+    return _truthy_tmux_flag(getattr(window, "pane_in_mode", False))
+
+
+def _tmux_pane_mode_escape_failed(window: Any) -> str:
+    mode = str(getattr(window, "pane_mode", "") or "").strip() or "tmux mode"
+    return TMUX_PANE_MODE_ESCAPE_FAILED_MESSAGE.format(mode=mode)
 
 
 def _command_basename(command: str) -> str:
@@ -4045,6 +4066,35 @@ class SessionManager:
                         exc,
                     )
 
+    async def _ensure_tmux_mode_allows_input(
+        self,
+        window: Any,
+    ) -> tuple[bool, str, Any | None]:
+        """Exit tmux copy-mode before injecting runtime input when possible."""
+        if not _tmux_pane_in_mode(window):
+            return True, "", window
+
+        window_id = str(getattr(window, "window_id", "") or "")
+        if not window_id:
+            return False, _tmux_pane_mode_escape_failed(window), None
+
+        logger.info(
+            "runtime_input: target %s is in tmux %s; sending Escape before input",
+            window_id,
+            str(getattr(window, "pane_mode", "") or "mode"),
+        )
+        escaped = await tmux_manager.send_key(window_id, "Escape")
+        if not escaped:
+            return False, _tmux_pane_mode_escape_failed(window), None
+
+        await asyncio.sleep(TMUX_MODE_ESCAPE_SETTLE_SECONDS)
+        refreshed = await tmux_manager.find_window_by_id(window_id)
+        if not refreshed:
+            return False, "Window not found after exiting tmux mode", None
+        if _tmux_pane_in_mode(refreshed):
+            return False, _tmux_pane_mode_escape_failed(refreshed), refreshed
+        return True, "", refreshed
+
     async def send_to_window_fast_unverified(
         self,
         window_id: str,
@@ -4076,6 +4126,11 @@ class SessionManager:
         )
         if runtime_kind != "codex":
             return False, "Fast input proof is only supported for Codex windows", None
+        mode_ok, mode_message, window = await self._ensure_tmux_mode_allows_input(
+            window
+        )
+        if not mode_ok or window is None:
+            return False, mode_message, None
 
         lock = self._codex_ack_lock(window.window_id)
         if lock.locked():
@@ -4365,6 +4420,11 @@ class SessionManager:
         window = await tmux_manager.find_window_by_id(window_id)
         if not window:
             return False, "Window not found (may have been closed)"
+        mode_ok, mode_message, window = await self._ensure_tmux_mode_allows_input(
+            window
+        )
+        if not mode_ok or window is None:
+            return False, mode_message
 
         runtime_kind = (
             self.window_states[window_id].runtime_kind

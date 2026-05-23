@@ -2916,23 +2916,56 @@ async def _process_pending_input_update_task(
     )
 
 
-def _render_ingress_receipt_text(text: str, status: str) -> str:
+def _runtime_input_target_hint(window_id: str) -> str:
+    if not window_id:
+        return ""
+    descriptor = session_manager.get_process_descriptor(window_id)
+    window_name = str(getattr(descriptor, "window_name", "") or "").strip()
+    if not window_name:
+        display_name = str(session_manager.get_display_name(window_id) or "").strip()
+        if display_name and display_name != window_id:
+            window_name = display_name
+    cwd = str(getattr(descriptor, "cwd", "") or "").strip()
+    parts = [window_id]
+    if window_name and window_name != window_id:
+        parts.append(window_name)
+    if cwd:
+        parts.append(cwd)
+    hint = "target: " + " · ".join(parts)
+    if len(hint) > 180:
+        hint = hint[:179].rstrip() + "…"
+    return hint
+
+
+def _render_ingress_receipt_text(
+    text: str,
+    status: str,
+    *,
+    target_hint: str = "",
+) -> str:
     compact = " ".join((text or "").split())
     if len(compact) > 120:
         compact = compact[:119].rstrip() + "…"
+    target_line = f"\n{target_hint}" if target_hint else ""
     if status == "confirmed":
-        return f"✅ Runtime accepted input:\n{compact}"
+        return f"✅ Runtime accepted input:{target_line}\n{compact}"
     if status in {"delayed_runtime", "delivered_no_ack"}:
-        return f"⏳ Delivered to tmux; waiting for Codex replay ACK:\n{compact}"
+        return (
+            "⏳ Delivered to tmux; waiting for Codex replay ACK:"
+            f"{target_line}\n{compact}"
+        )
     if status == "expired_without_ack":
-        return f"⚠️ Delivered to tmux, but Codex replay ACK did not arrive:\n{compact}"
+        return (
+            "⚠️ Delivered to tmux, but Codex replay ACK did not arrive:"
+            f"{target_line}\n{compact}"
+        )
     if status == "queued_after_tool":
-        return f"⏭ Queued in Codex after the current tool call:\n{compact}"
+        return f"⏭ Queued in Codex after the current tool call:{target_line}\n{compact}"
     if status == "composer_staged":
-        return f"📝 Staged in Codex composer; not yet persisted:\n{compact}"
+        return f"📝 Staged in Codex composer; not yet persisted:{target_line}\n{compact}"
     if status == "failed":
-        return f"❌ Runtime input was not confirmed:\n{compact}"
-    return f"↗ Получил, отправляю в runtime…\n{compact}"
+        return f"❌ Runtime input was not confirmed:{target_line}\n{compact}"
+    return f"↗ Получил, отправляю в runtime…{target_line}\n{compact}"
 
 
 async def _process_ingress_receipt_task(
@@ -2958,7 +2991,11 @@ async def _process_ingress_receipt_task(
         )
         return
 
-    text = _render_ingress_receipt_text(task.text or "", task.receipt_status)
+    text = _render_ingress_receipt_text(
+        task.text or "",
+        task.receipt_status,
+        target_hint=_runtime_input_target_hint(wid),
+    )
     rkey = (
         *_task_state_key(user_id, task),
         proof_id,

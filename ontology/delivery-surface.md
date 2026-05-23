@@ -128,6 +128,9 @@ control surface at a time.
   - may pass stale technical-status churn in the queue, but must not leapfrog an
     already queued terminal assistant-final artifact for the same control
     surface
+  - may include a resolved tmux target hint (`window_id`, display name, cwd) so
+    operators can tell stable tmux IDs from visible tmux indexes while replay
+    proof is still pending
   - on replay ACK success it may be edited/promoted into a confirmed user-input
     display and the later duplicate replay user echo is suppressed only after
     ordinary user-turn reopening side effects run
