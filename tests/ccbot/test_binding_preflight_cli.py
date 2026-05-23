@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -48,6 +50,33 @@ def test_binding_preflight_help_documents_read_only_semantics():
     assert "Read-only ccbot binding/workspace preflight" in help_text
     assert "never calls send_to_window" in help_text
     assert "--expected-cwd" in help_text
+
+
+def test_binding_preflight_malformed_args_do_not_require_telegram_config(tmp_path):
+    env = os.environ.copy()
+    env.pop("TELEGRAM_BOT_TOKEN", None)
+    env["CCBOT_DIR"] = str(tmp_path)
+    env["PYTHONPATH"] = "src"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ccbot.binding_preflight_cli",
+            "--user-id",
+            "not-int",
+            "--json",
+        ],
+        cwd=os.getcwd(),
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 2
+    assert "--user-id must be an integer" in result.stderr
+    assert "TELEGRAM_BOT_TOKEN" not in result.stderr
 
 
 def test_binding_preflight_canonical_comfy_target_passes(monkeypatch):
@@ -185,6 +214,87 @@ def test_binding_preflight_rejects_wrong_runtime_kind(monkeypatch):
 
     assert result.ok is False
     assert result.classification == "runtime_kind_mismatch"
+
+
+def test_binding_preflight_rejects_inactive_bound_window(monkeypatch):
+    manager = _manager_without_io(monkeypatch)
+    _bind(manager)
+    manager.window_states.pop("@1")
+
+    result = _run(
+        manager,
+        [
+            "--user-id",
+            "3045664",
+            "--surface-key",
+            "t:555",
+            "--expected-user-id",
+            "3045664",
+            "--expected-surface-key",
+            "t:555",
+        ],
+    )
+
+    assert result.ok is False
+    assert result.classification == "inactive_binding"
+    assert result.resolved
+    assert result.resolved.window_id == "@1"
+
+
+def test_binding_preflight_rejects_placeholder_runtime_metadata(monkeypatch):
+    manager = _manager_without_io(monkeypatch)
+    manager.bind_surface(
+        3045664,
+        "@1",
+        surface_key="t:555",
+        window_name="comfy-agent",
+    )
+
+    result = _run(
+        manager,
+        [
+            "--user-id",
+            "3045664",
+            "--surface-key",
+            "t:555",
+            "--expected-user-id",
+            "3045664",
+            "--expected-surface-key",
+            "t:555",
+        ],
+    )
+
+    assert result.ok is False
+    assert result.classification == "missing_runtime_metadata"
+    assert result.resolved
+    assert result.resolved.window_id == "@1"
+
+
+def test_binding_preflight_rejects_helper_window(monkeypatch):
+    manager = _manager_without_io(monkeypatch)
+    _bind(manager)
+    monkeypatch.setattr(manager, "_is_codex_helper_window", lambda _window_id: True)
+
+    result = _run(
+        manager,
+        [
+            "--user-id",
+            "3045664",
+            "--surface-key",
+            "t:555",
+            "--expected-user-id",
+            "3045664",
+            "--expected-surface-key",
+            "t:555",
+            "--expected-cwd",
+            "/home/tools/mediagen-comfy",
+        ],
+    )
+
+    assert result.ok is False
+    assert result.classification == "helper_binding"
+    assert result.resolved
+    assert result.resolved.window_id == "@1"
 
 
 def test_binding_preflight_window_id_cannot_bypass_expected_user(monkeypatch):

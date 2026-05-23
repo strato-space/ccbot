@@ -385,7 +385,9 @@ CCBOT_DIR=/data/iqdoctor/.ccbot \
 For ComfyCodexBot, `/home/tools/mediagen-comfy` is the primary Codex workspace
 for the Telegram control surface. `/home/tools/server/comfy` is historical
 runtime/runbook context only and must not be used as the primary ComfyCodexBot
-runtime-input or final media-evidence workspace.
+runtime-input or final media-evidence workspace. The preflight also fails
+closed for inactive tmux bindings, Codex helper/subagent windows, and placeholder
+runtime metadata that lacks a live cwd/runtime-kind proof.
 
 **Polling liveness:**
 

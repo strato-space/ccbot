@@ -11,13 +11,19 @@ import argparse
 import json
 import os
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
-
-from .codex_threads import normalize_cwd
 
 
 class BindingPreflightCliError(ValueError):
     """Raised when preflight arguments are malformed."""
+
+
+_BLOCKING_TARGET_REASONS = {
+    "helper_binding",
+    "inactive_binding",
+    "missing_runtime_metadata",
+}
 
 
 @dataclass(frozen=True)
@@ -82,6 +88,18 @@ def _env_default(*names: str) -> str | None:
         if value is not None and value.strip():
             return value
     return None
+
+
+def _normalize_cwd(cwd: str) -> str:
+    if not cwd:
+        return ""
+    try:
+        return str(Path(cwd).expanduser().resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        try:
+            return str(Path(cwd).expanduser())
+        except (OSError, RuntimeError, ValueError):
+            return cwd
 
 
 def _build_parser(prog: str = "ccbot binding-preflight") -> argparse.ArgumentParser:
@@ -201,6 +219,26 @@ def _window_name(manager: Any, window_id: str, descriptor: Any | None) -> str:
     return ""
 
 
+def _target_blocker(manager: Any, window_id: str, descriptor: Any | None) -> str:
+    helper_check = getattr(manager, "_is_codex_helper_window", None)
+    if callable(helper_check) and helper_check(window_id):
+        return "helper_binding"
+
+    inactive_check = getattr(manager, "_is_inactive_or_helper_tmux_binding", None)
+    if callable(inactive_check) and inactive_check(window_id):
+        return "inactive_binding"
+
+    if descriptor is None:
+        return "inactive_binding"
+
+    cwd = str(getattr(descriptor, "cwd", "") or "").strip()
+    runtime_kind = str(getattr(descriptor, "runtime_kind", "") or "").strip()
+    if not cwd or not runtime_kind:
+        return "missing_runtime_metadata"
+
+    return ""
+
+
 def _facts_for_binding(
     manager: Any,
     *,
@@ -210,6 +248,7 @@ def _facts_for_binding(
     target_reason: str,
 ) -> RuntimeBindingFacts:
     descriptor = manager.get_process_descriptor(window_id)
+    target_blocker = _target_blocker(manager, window_id, descriptor)
     cwd = str(getattr(descriptor, "cwd", "") or "").strip()
     return RuntimeBindingFacts(
         user_id=user_id,
@@ -217,9 +256,9 @@ def _facts_for_binding(
         window_id=window_id,
         window_name=_window_name(manager, window_id, descriptor),
         cwd=cwd,
-        normalized_cwd=normalize_cwd(cwd),
+        normalized_cwd=_normalize_cwd(cwd),
         runtime_kind=str(getattr(descriptor, "runtime_kind", "") or "").strip(),
-        target_reason=target_reason,
+        target_reason=target_blocker or target_reason,
     )
 
 
@@ -338,7 +377,7 @@ def _expected_from_args(manager: Any, args: argparse.Namespace) -> RuntimeBindin
         window_id=str(args.expected_window_id or "").strip(),
         window_name=str(args.expected_window_name or "").strip(),
         cwd=expected_cwd,
-        normalized_cwd=normalize_cwd(expected_cwd),
+        normalized_cwd=_normalize_cwd(expected_cwd),
         runtime_kind=str(args.expected_runtime_kind or "").strip(),
     )
 
@@ -367,6 +406,15 @@ def validate_runtime_binding_facts(
     expected: RuntimeBindingExpected,
 ) -> RuntimeBindingPreflightResult:
     """Validate resolved facts against expected safe metadata."""
+    if facts.target_reason in _BLOCKING_TARGET_REASONS:
+        return RuntimeBindingPreflightResult(
+            ok=False,
+            classification=facts.target_reason,
+            resolved=facts,
+            expected=expected,
+            remediation=_remediation(facts.target_reason, expected),
+        )
+
     checks: tuple[tuple[str, bool], ...] = (
         (
             "user_mismatch",
@@ -443,6 +491,33 @@ def run_binding_preflight(
     return validate_runtime_binding_facts(resolved.resolved, expected)
 
 
+def _validate_parse_only_args(args: argparse.Namespace) -> None:
+    parsed_thread_id = _parse_int_arg("--thread-id", args.thread_id)
+    parsed_chat_id = _parse_int_arg("--chat-id", args.chat_id)
+    _parse_int_arg("--user-id", args.user_id)
+    expected_thread_id = _parse_int_arg("--expected-thread-id", args.expected_thread_id)
+    expected_chat_id = _parse_int_arg("--expected-chat-id", args.expected_chat_id)
+    _parse_int_arg("--expected-user-id", args.expected_user_id)
+
+    if args.surface_key and (parsed_thread_id is not None or parsed_chat_id is not None):
+        raise BindingPreflightCliError(
+            "Use either --surface-key or --thread-id/--chat-id, not both"
+        )
+    if parsed_thread_id is not None and parsed_chat_id is not None:
+        raise BindingPreflightCliError("Use either --thread-id or --chat-id, not both")
+    if args.expected_surface_key and (
+        expected_thread_id is not None or expected_chat_id is not None
+    ):
+        raise BindingPreflightCliError(
+            "Use either --expected-surface-key or --expected-thread-id/"
+            "--expected-chat-id, not both"
+        )
+    if expected_thread_id is not None and expected_chat_id is not None:
+        raise BindingPreflightCliError(
+            "Use either --expected-thread-id or --expected-chat-id, not both"
+        )
+
+
 def binding_preflight_main(
     argv: list[str] | None = None,
     *,
@@ -454,6 +529,7 @@ def binding_preflight_main(
         os.environ["CCBOT_DIR"] = str(args.ccbot_dir)
 
     try:
+        _validate_parse_only_args(args)
         from .session import session_manager
 
         result = run_binding_preflight(session_manager, args)
