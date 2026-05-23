@@ -57,11 +57,10 @@ The default Telegram surface is `compact`, not `verbose`.
   attachment may backfill only the bounded current-turn opener so a tmux-typed
   prompt is not lost when ccbot attaches seconds after the user record
 - Telegram ingress receipts for eligible simple Codex text are current-update
-  acknowledgements only: before replay ACK they are not `user_echo`, not runtime
-  proof, and not turn openers; ACK success or the later replay-backed user echo
-  opens the runtime turn exactly once, while a short ACK miss edits/pairs the
-  receipt with explicit delivered-but-unconfirmed state rather than a hard
-  failure
+  acknowledgements before replay ACK; after matching Codex replay proves the
+  same Telegram-originated text, that receipt is the durable user-input bubble
+  and the duplicate replay `user_echo` is suppressed. Replay-only or tmux-typed
+  prompts still render ordinary user echo.
 - `send_chat_action("typing")` is a transient Telegram transport signal, not an
   artifact in compact ordering and not runtime proof
 - placeholder reasoning such as `[reasoning]` is suppressed
@@ -600,9 +599,11 @@ arrives, ccbot treats that as a recoverable tmux-local mode, not as Codex
 input readiness. It sends `Escape`, revalidates that `pane_in_mode` cleared,
 and only then delivers the payload plus Codex replay-ACK proof. If `Escape`
 does not clear the mode, input fails closed before payload delivery. Ingress
-receipts may include the resolved target hint (`window_id`, display name, and
-cwd) so operators can distinguish tmux internal window IDs such as `@9` from
-visible tmux indexes such as `7`.
+receipts include mode/target/prompt in the compact shape
+`↗ Steer → @9 · comfy-agent-ops · /path` or
+`⏭ Queue → @9 · comfy-agent-ops · /path` followed by the prompt preview, so
+operators can distinguish tmux internal window IDs such as `@9` from visible
+tmux indexes such as `7`.
 
 A Codex-bound tmux window is writable only while it still exposes a live Codex
 input plane. If the window has fallen back to a shell prompt, Telegram input

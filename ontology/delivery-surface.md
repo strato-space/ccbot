@@ -120,20 +120,21 @@ control surface at a time.
 - **Telegram ingress receipt**
   - immediate mutable acknowledgement for the current Telegram update on a
     bound writable surface
-  - current example: `↗ Получил, отправляю в runtime…` for eligible simple
-    Codex text while asynchronous replay proof is pending
-  - not a replay-backed runtime user echo before ACK, not runtime proof, not a
-    pending-input artifact unless the input is actually queued behind an active
-    turn, and not an assistant-final artifact
+  - current examples: `↗ Steer → @9 · comfy-agent-ops · /path` and
+    `⏭ Queue → @9 · comfy-agent-ops · /path`, followed by the prompt preview
+  - not replay proof before ACK, not a pending-input artifact unless the input
+    is actually queued behind an active turn, and not an assistant-final
+    artifact
   - may pass stale technical-status churn in the queue, but must not leapfrog an
     already queued terminal assistant-final artifact for the same control
     surface
   - may include a resolved tmux target hint (`window_id`, display name, cwd) so
     operators can tell stable tmux IDs from visible tmux indexes while replay
     proof is still pending
-  - on replay ACK success it may be edited/promoted into a confirmed user-input
-    display and the later duplicate replay user echo is suppressed only after
-    ordinary user-turn reopening side effects run
+  - on replay ACK success for the same Telegram-originated text, it is the
+    durable user-input bubble and the later duplicate replay user echo is
+    suppressed only after ordinary user-turn reopening side effects run;
+    replay-only/tmux-originated prompts still render ordinary `👤` user echo
   - on a short ACK miss after payload/submit delivery it is edited or paired
     with a delivered-but-unconfirmed state; on hard delivery failure it is
     edited or paired with an explicit failure so it never remains

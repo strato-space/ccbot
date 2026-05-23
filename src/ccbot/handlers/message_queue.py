@@ -3087,26 +3087,26 @@ def _render_ingress_receipt_text(
     compact = " ".join((text or "").split())
     if len(compact) > 120:
         compact = compact[:119].rstrip() + "…"
-    target_line = f"\n{target_hint}" if target_hint else ""
+    target_line = f" → {target_hint}" if target_hint else ""
     if status == "confirmed":
-        return f"✅ Runtime accepted input:{target_line}\n{compact}"
+        return f"✅ Accepted{target_line}\n\n{compact}"
     if status in {"delayed_runtime", "delivered_no_ack"}:
         return (
-            "⏳ Delivered to tmux; waiting for Codex replay ACK:"
-            f"{target_line}\n{compact}"
+            "⏳ Delivered; waiting for Codex replay ACK"
+            f"{target_line}\n\n{compact}"
         )
     if status == "expired_without_ack":
         return (
-            "⚠️ Delivered to tmux, but Codex replay ACK did not arrive:"
-            f"{target_line}\n{compact}"
+            "⚠️ Delivered, but Codex replay ACK did not arrive"
+            f"{target_line}\n\n{compact}"
         )
     if status in {"queued_after_tool", "queued_runtime"}:
-        return f"⏭ Queue mode: received; queued for runtime submit:{target_line}\n{compact}"
+        return f"⏭ Queue{target_line}\n\n{compact}"
     if status == "composer_staged":
-        return f"📝 Staged in Codex composer; not yet persisted:{target_line}\n{compact}"
+        return f"📝 Staged in Codex composer; not yet persisted{target_line}\n\n{compact}"
     if status == "failed":
-        return f"❌ Runtime input was not confirmed:{target_line}\n{compact}"
-    return f"↗ Steer mode: received; sending to runtime now…{target_line}\n{compact}"
+        return f"❌ Runtime input was not confirmed{target_line}\n\n{compact}"
+    return f"↗ Steer{target_line}\n\n{compact}"
 
 
 async def _process_ingress_receipt_task(
@@ -3135,7 +3135,7 @@ async def _process_ingress_receipt_task(
     text = _render_ingress_receipt_text(
         task.text or "",
         task.receipt_status,
-        target_hint=_runtime_input_target_hint(wid),
+        target_hint=_runtime_input_target_hint(wid).removeprefix("target: "),
     )
     rkey = (
         *_task_state_key(user_id, task),

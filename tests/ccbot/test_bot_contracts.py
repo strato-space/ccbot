@@ -6150,7 +6150,7 @@ class TestTelegramDelivery:
         mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_handle_new_message_supersedes_pending_receipt_when_replay_echo_wins_race(
+    async def test_handle_new_message_suppresses_pending_fast_replay_echo_because_receipt_is_user_input(
         self,
     ):
         bot = AsyncMock()
@@ -6208,9 +6208,8 @@ class TestTelegramDelivery:
             await bot_mod.handle_new_message(msg, bot)
 
         mock_sm.mark_fast_user_echo_represented.assert_called_once_with("proof-race")
-        mock_receipt.assert_awaited_once()
-        assert mock_receipt.await_args.kwargs["receipt_status"] == "superseded"
-        mock_content.assert_awaited_once()
+        mock_receipt.assert_not_awaited()
+        mock_content.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_handle_new_message_compact_mode_suppresses_turn_aborted_user_echo(

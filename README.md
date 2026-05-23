@@ -176,9 +176,9 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
 - **Send messages** — Forward text to Codex via tmux keystrokes
 - **Simple text fast path** — eligible one-line Codex text gets an immediate
   Telegram ingress receipt and starts a runtime injection attempt before the
-  replay ACK finishes; the receipt is visibly not a runtime user echo until
-  Codex/OMX replay later confirms, remains delayed/unconfirmed, or fails the
-  turn
+  replay ACK finishes; after matching Codex/OMX replay confirms the same
+  Telegram-originated text, that receipt remains as the durable user-input
+  bubble and the duplicate `👤` replay echo is suppressed
 - **Codex command forwarding** — Forward raw Codex slash commands, with a small supported menu surface for `/clear`, `/compact`, `/diff`, `/exit`, `/init`, `/review`, and `/status`
 - **Create new conversations** — Start Codex conversations from Telegram via directory browser
 - **Resume conversations** — Pick up where you left off by resuming an existing Codex identity in a directory
@@ -585,12 +585,13 @@ binding proof may bypass the attachment text lead-hold and synchronous ACK wait.
 If the target pane is in tmux copy-mode/scrollback, ccbot first sends `Escape`
 and verifies that tmux mode cleared before injecting text; if the mode remains,
 it fails closed before payload delivery. The fast path sends a Telegram ingress
-receipt that explicitly names the routing mode: `↗ Steer mode: received; sending to runtime now…`
-for immediate steer delivery or `⏭ Queue mode: received; queued for runtime submit:`
-for queued delivery. It then updates the receipt to confirmed, delayed (`⏳ Delivered to tmux; waiting for Codex
-replay ACK`), or failed after the bounded ACK window. Receipts may include the
-resolved tmux target hint (`window_id`, name, cwd); before ACK they are not
-replay-backed `user_echo` and do not open the runtime turn.
+receipt that explicitly names the routing mode and resolved target, for example
+`↗ Steer → @9 · comfy-agent-ops · /home/tools/mediagen-comfy` or
+`⏭ Queue → @9 · comfy-agent-ops · /home/tools/mediagen-comfy`, followed by the
+prompt preview. It then updates the receipt to confirmed, delayed
+(`⏳ Delivered; waiting for Codex replay ACK`), or failed after the bounded ACK
+window. After ACK, the receipt is the durable Telegram-originated user-input
+bubble; replay-only/tmux-originated prompts still render ordinary `👤` echo.
 audio/video originals are downloaded under `$CCBOT_DIR/media` and forwarded
 artifact-first as local paths plus metadata. Static stickers are normalized to
 PNG image attachments. Animated/video stickers use their Telegram thumbnail as

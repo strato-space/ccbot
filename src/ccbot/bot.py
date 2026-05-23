@@ -6523,16 +6523,19 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
             if isinstance(fast_proof, FastRuntimeInputProof):
                 session_manager.mark_fast_user_echo_represented(fast_proof.proof_id)
                 if fast_proof.status == "pending":
-                    await enqueue_ingress_receipt(
-                        bot,
-                        user_id,
-                        wid,
-                        msg.text,
-                        proof_id=fast_proof.proof_id,
-                        receipt_status="superseded",
+                    log_telegram_delivery(
+                        action="suppress",
+                        user_id=user_id,
+                        chat_id=session_manager.resolve_chat_id(user_id, thread_id),
                         thread_id=thread_id,
-                        **delivery_surface_kwargs,
+                        window_id=wid,
+                        task_type="content",
+                        content_type=msg.content_type,
+                        semantic_kind=msg.semantic_kind,
+                        text=msg.text,
+                        reason="telegram_ingress_receipt_is_user_input_bubble",
                     )
+                    continue
                 else:
                     log_telegram_delivery(
                         action="suppress",

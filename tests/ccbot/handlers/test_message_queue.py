@@ -73,13 +73,13 @@ def test_ingress_receipt_render_distinguishes_steer_and_queue_modes() -> None:
     steer_text = _render_ingress_receipt_text("hello", "pending")
     queue_text = _render_ingress_receipt_text("hello", "queued_runtime")
 
-    assert steer_text.startswith("↗ Steer mode")
-    assert queue_text.startswith("⏭ Queue mode")
+    assert steer_text == "↗ Steer\n\nhello"
+    assert queue_text == "⏭ Queue\n\nhello"
 
 def test_ingress_receipt_render_distinguishes_delivered_no_ack() -> None:
     text = _render_ingress_receipt_text("hello", "delayed_runtime")
 
-    assert text.startswith("⏳ Delivered to tmux")
+    assert text.startswith("⏳ Delivered")
     assert "waiting for Codex replay ACK" in text
     assert "❌" not in text
 
@@ -88,10 +88,10 @@ def test_ingress_receipt_render_can_include_runtime_target_hint() -> None:
     text = _render_ingress_receipt_text(
         "ping",
         "delayed_runtime",
-        target_hint="target: @9 · comfy-agent-ops · /home/tools/mediagen-comfy",
+        target_hint="@9 · comfy-agent-ops · /home/tools/mediagen-comfy",
     )
 
-    assert "target: @9" in text
+    assert "→ @9" in text
     assert "comfy-agent-ops" in text
     assert "/home/tools/mediagen-comfy" in text
     assert text.endswith("ping")
