@@ -25,9 +25,14 @@ and the Telegram topic title is normalized to that suffix-applied name.
 
 Fresh `/bind` is different from `/rename`: when the bot has captured a Telegram
 surface title from topic create/edit events, that title may seed the new tmux
-window name. If no title is known, the bot may fall back to cwd-derived tmux
-naming, but it must not overwrite the existing Telegram topic title with the cwd
-basename. The cwd is workspace metadata, not the surface name.
+window name. Topic service events are actor-delivered, but the title is a
+chat-qualified surface fact, so another allowed participant may reuse it only
+for the same exact Telegram chat/topic surface. If no title is known, the bot
+may fall back to cwd-derived tmux naming, but it must not overwrite the existing
+Telegram topic title with the cwd basename. The cwd is workspace metadata, not
+the surface name. In other words, ccbot must not overwrite the existing Telegram topic title with the cwd.
+If tmux applies a collision suffix and the Telegram title sync succeeds, the
+cached surface title is updated to the final tmux name.
 
 ## `/resume <thread-name|id>`
 

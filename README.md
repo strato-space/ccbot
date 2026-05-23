@@ -411,11 +411,14 @@ Each supported surface controls one delivery source at a time:
 - external persisted Codex thread (read-only replay lane)
 
 For fresh topic binds, Telegram topic titles captured from topic create/edit
-events may seed the tmux window display name. If no title is known, ccbot must
-not rename the Telegram topic to the selected cwd basename. Replay delivery also
-requires a proven runtime identity: a fresh same-cwd Codex/OMX window stays
-silent until its own thread is known, and one replay stream is not fanned out to
-distinct tmux windows/topics.
+events may seed the tmux window display name. In shared groups that title is a
+chat/topic surface fact, not an actor fact, so another allowed participant may
+reuse it for the same exact chat-qualified surface. If no title is known, ccbot
+must not rename the Telegram topic to the selected cwd basename. After a
+successful collision-suffixed title sync, the cached title is updated to the
+final tmux name. Replay delivery also requires a proven runtime identity: a
+fresh same-cwd Codex/OMX window stays silent until its own thread is known, and
+one replay stream is not fanned out to distinct tmux windows/topics.
 
 The concrete runtime lane depends on `CCBOT_COMMAND` (`CLAUDE_COMMAND` remains
 a legacy fallback when `CCBOT_COMMAND` is unset).

@@ -1609,11 +1609,21 @@ def _stored_surface_title_for_window_name(
     """Return a stored Telegram topic/control-surface title for tmux naming."""
     if surface is None:
         return ""
-    return session_manager.get_surface_title(
+    title = session_manager.get_surface_title(
         user_id,
         chat_id=surface.chat_id,
         thread_id=surface.thread_id,
     )
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    if surface.is_shared_group:
+        shared_title = session_manager.get_shared_surface_title(
+            chat_id=surface.chat_id,
+            thread_id=surface.thread_id,
+        )
+        if isinstance(shared_title, str) and shared_title.strip():
+            return shared_title.strip()
+    return ""
 
 
 def _unsupported_surface_message(surface: ControlSurface) -> str:
@@ -2498,7 +2508,19 @@ async def topic_edited_handler(
 
     session_manager.update_display_name(wid, final_name)
     if final_name != new_name:
-        await _sync_topic_title(context.bot, user.id, thread_id, final_name)
+        topic_synced = await _sync_topic_title(
+            context.bot,
+            user.id,
+            thread_id,
+            final_name,
+        )
+        if topic_synced:
+            session_manager.set_surface_title(
+                user.id,
+                final_name,
+                thread_id=thread_id,
+                chat_id=update.effective_chat.id if update.effective_chat else None,
+            )
     runtime_kind = _get_window_runtime_kind(wid)
     capability = session_manager.get_runtime_capability(runtime_kind)
     (
@@ -4751,6 +4773,12 @@ async def _create_and_bind_window(
                     created_wid, timeout=hook_timeout
                 )
         if pending_thread_id is not None:
+            sync_title_requested = (
+                pending_surface.message_thread_id is not None
+                and (bool(resume_session_id) or bool(preferred_window_name))
+                if pending_surface is not None
+                else True
+            )
             topic_synced = await _register_bound_window(
                 context,
                 user,
@@ -4761,16 +4789,20 @@ async def _create_and_bind_window(
                 runtime_kind=resolved_runtime_kind,
                 surface=pending_surface,
                 resume_session_id=resume_session_id,
-                sync_topic_title=(
-                    pending_surface.message_thread_id is not None
-                    and (
-                        bool(resume_session_id)
-                        or bool(preferred_window_name)
-                    )
-                    if pending_surface is not None
-                    else True
-                ),
+                sync_topic_title=sync_title_requested,
             )
+            if (
+                pending_surface is not None
+                and pending_surface.message_thread_id is not None
+                and sync_title_requested
+                and topic_synced
+            ):
+                session_manager.set_surface_title(
+                    user.id,
+                    created_wname,
+                    thread_id=pending_surface.message_thread_id,
+                    chat_id=pending_surface.chat_id,
+                )
             resolved_chat = session_manager.resolve_chat_id(user.id, pending_thread_id)
 
             status = "Resumed thread" if resume_session_id else "Started fresh thread"

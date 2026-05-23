@@ -60,6 +60,10 @@ If this note conflicts with any explanatory note in `doc/`, this note wins.
   - for named topics with known Telegram coordinates,
     `title_surface_key` is chat-qualified (`t:<chat_id>:<thread_id>`) so equal
     numeric `thread_id` values in different groups cannot share title metadata
+  - Telegram title events are actor-delivered, but title metadata is
+    surface-scoped: allowed participants may reuse a stored title for the exact
+    chat-qualified control surface, regardless of which allowed actor saw the
+    service update
   - it may seed a fresh tmux window display name, but it is not a binding,
     runtime conversation identity, replay proof, or cwd/workspace claim
 
@@ -187,6 +191,9 @@ No-topics main-chat variant:
 - a fresh bind may use a stored surface title as the tmux display name, but must
   not overwrite an existing Telegram topic title with a cwd basename when no
   title proof is available
+- when tmux collision suffixes or reuse produce a final authoritative display
+  name and Telegram title sync succeeds, cached surface-title metadata must be
+  updated to that final name
 - distinct tmux windows resolving to the same runtime conversation identity are
   ambiguous; replay delivery must fail closed instead of fanning one stream out
   to unrelated topics

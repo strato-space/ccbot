@@ -599,6 +599,29 @@ def test_surface_titles_are_chat_qualified_for_equal_topic_ids(tmp_path, monkeyp
     assert saved["surface_titles"]["100"]["t:-1002:42"] == "comfy-agent-ops"
 
 
+def test_shared_surface_title_lookup_crosses_actor_scope_only_for_exact_surface(
+    tmp_path, monkeypatch
+):
+    state_file = tmp_path / "state.json"
+    monkeypatch.setattr(session_module.config, "state_file", state_file)
+    monkeypatch.setattr(session_module.SessionManager, "_load_state", lambda self: None)
+
+    manager = SessionManager()
+    manager.set_surface_title(100, "comfy-agent-ops", thread_id=42, chat_id=-1001)
+    manager.set_surface_title(200, "other-group", thread_id=42, chat_id=-1002)
+
+    assert (
+        manager.get_shared_surface_title(thread_id=42, chat_id=-1001)
+        == "comfy-agent-ops"
+    )
+    assert manager.get_surface_title(300, thread_id=42, chat_id=-1001) == ""
+    assert (
+        manager.get_shared_surface_title(thread_id=42, chat_id=-1002)
+        == "other-group"
+    )
+    assert manager.get_shared_surface_title(thread_id=42, chat_id=-1003) == ""
+
+
 def test_surface_key_migration_from_legacy_topic_maps(tmp_path, monkeypatch):
     state_file = tmp_path / "state.json"
     state_file.write_text(

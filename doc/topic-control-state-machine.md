@@ -48,10 +48,14 @@ The `surface_titles` map stores optional human-facing title metadata captured
 from Telegram topic create/edit service updates. Named-topic title keys are
 chat-qualified as `t:<chat_id>:<thread_id>` when Telegram coordinates are known,
 so same-numbered topics in different groups cannot bleed display names into one
-another. A stored title may seed a fresh tmux window name, but it is not the
-binding, not the cwd, and not runtime/replay identity. When no title is known,
-fresh bind must not rename the Telegram topic to a cwd basename just because a
-directory was selected.
+another. Telegram service updates are delivered to an actor, but the title is
+surface-scoped: another allowed actor may reuse the stored title only for the
+same exact chat-qualified control surface. A stored title may seed a fresh tmux
+window name, but it is not the binding, not the cwd, and not runtime/replay
+identity. When no title is known, fresh bind must not rename the Telegram topic
+to a cwd basename just because a directory was selected. When the final tmux
+display name differs because of collision suffixing or reuse, successful
+Telegram title sync updates the cached title metadata to that final name.
 
 Compatibility topic mirrors still exist for topic-shaped callers:
 
@@ -124,6 +128,8 @@ Compatibility topic mirrors still exist for topic-shaped callers:
   - enters `bound`
   - writes `surface_bindings`
   - may use stored `surface_titles` for the tmux display name
+  - after successful Telegram title sync, records the final tmux display name
+    as the latest surface title
   - keeps replay delivery silent until the bound runtime identity is proven
 - Explicit `/unbind`
   - clears `surface_bindings`

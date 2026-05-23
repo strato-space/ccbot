@@ -2301,6 +2301,47 @@ class TestTopicCleanup:
             "new-topic-name",
         )
 
+    @pytest.mark.asyncio
+    async def test_topic_edited_updates_cached_title_after_collision_suffix_sync(self):
+        update = _make_topic_update()
+        update.message.forum_topic_edited = MagicMock()
+        update.message.forum_topic_edited.name = "new-topic-name"
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._sync_topic_title", new_callable=AsyncMock) as mock_sync,
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "old-topic-name"
+            mock_sm.get_runtime_capability.return_value = SimpleNamespace(
+                rename_identity_mode="title_only",
+                display_name="fast-agent",
+            )
+            mock_sm.rename_runtime_identity_for_window = AsyncMock(
+                return_value=(True, "fast-agent session title metadata updated")
+            )
+            mock_tmux.rename_window_with_suffixes = AsyncMock(
+                return_value=(
+                    True,
+                    "Renamed window to 'new-topic-name-1'",
+                    "new-topic-name-1",
+                )
+            )
+            mock_sync.return_value = True
+
+            await bot_mod.topic_edited_handler(update, context)
+
+        title_updates = mock_sm.set_surface_title.call_args_list[-2:]
+        assert title_updates[0].args == (1, "new-topic-name")
+        assert title_updates[0].kwargs == {"thread_id": 42, "chat_id": 100}
+        assert title_updates[1].args == (1, "new-topic-name-1")
+        assert title_updates[1].kwargs == {"thread_id": 42, "chat_id": 100}
+        mock_sync.assert_awaited_once_with(context.bot, 1, 42, "new-topic-name-1")
+
 
 class TestMediaForwarding:
     @pytest.mark.asyncio
@@ -4568,6 +4609,7 @@ class TestLauncherRegistration:
             patch.object(bot_mod.config, "claude_command", "codex"),
         ):
             mock_sm.get_surface_title.return_value = "comfy-agent-ops"
+            mock_register.return_value = True
             mock_tmux.create_window = AsyncMock(
                 return_value=(
                     True,
@@ -4602,6 +4644,132 @@ class TestLauncherRegistration:
         mock_register.assert_awaited_once()
         assert mock_register.await_args.kwargs["window_name"] == "comfy-agent-ops"
         assert mock_register.await_args.kwargs["sync_topic_title"] is True
+        mock_sm.set_surface_title.assert_called_once_with(
+            1,
+            "comfy-agent-ops",
+            thread_id=42,
+            chat_id=100,
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_and_bind_window_uses_shared_topic_title_from_other_actor(self):
+        query = MagicMock(spec=CallbackQuery)
+        query.answer = AsyncMock()
+        context = _make_context()
+        user = MagicMock(spec=User)
+        user.id = 2
+        surface = bot_mod.ControlSurface(
+            kind="group_topic",
+            chat_id=100,
+            thread_id=42,
+            legacy_scope_id=42,
+            surface_key="t:42",
+            label="topic",
+            is_shared_group=True,
+            supports_bind_flow=True,
+        )
+
+        with (
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock),
+            patch("ccbot.bot._register_bound_window", new_callable=AsyncMock) as mock_register,
+            patch("ccbot.bot._maybe_autosend_pending_after_activation", new_callable=AsyncMock),
+            patch.object(bot_mod.config, "claude_command", "codex"),
+        ):
+            mock_sm.get_surface_title.return_value = ""
+            mock_sm.get_shared_surface_title.return_value = "comfy-agent-ops"
+            mock_register.return_value = True
+            mock_tmux.create_window = AsyncMock(
+                return_value=(
+                    True,
+                    "Created window 'comfy-agent-ops' at /home/tools/mediagen-comfy",
+                    "comfy-agent-ops",
+                    "@6",
+                )
+            )
+            mock_sm.resolve_chat_id.return_value = 100
+
+            await bot_mod._create_and_bind_window(
+                query,
+                context,
+                user,
+                "/home/tools/mediagen-comfy",
+                pending_thread_id=42,
+                pending_surface=surface,
+            )
+
+        mock_sm.get_surface_title.assert_called_once_with(
+            2,
+            chat_id=100,
+            thread_id=42,
+        )
+        mock_sm.get_shared_surface_title.assert_called_once_with(
+            chat_id=100,
+            thread_id=42,
+        )
+        mock_tmux.create_window.assert_awaited_once_with(
+            "/home/tools/mediagen-comfy",
+            window_name="comfy-agent-ops",
+            resume_session_id=None,
+            runtime_kind="codex",
+            launch_command=None,
+        )
+        assert mock_register.await_args.kwargs["sync_topic_title"] is True
+
+    @pytest.mark.asyncio
+    async def test_create_and_bind_window_updates_cached_title_after_tmux_suffix_sync(self):
+        query = MagicMock(spec=CallbackQuery)
+        query.answer = AsyncMock()
+        context = _make_context()
+        user = MagicMock(spec=User)
+        user.id = 1
+        surface = bot_mod.ControlSurface(
+            kind="group_topic",
+            chat_id=100,
+            thread_id=42,
+            legacy_scope_id=42,
+            surface_key="t:42",
+            label="topic",
+            is_shared_group=True,
+            supports_bind_flow=True,
+        )
+
+        with (
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock),
+            patch("ccbot.bot._register_bound_window", new_callable=AsyncMock) as mock_register,
+            patch("ccbot.bot._maybe_autosend_pending_after_activation", new_callable=AsyncMock),
+            patch.object(bot_mod.config, "claude_command", "codex"),
+        ):
+            mock_sm.get_surface_title.return_value = "comfy-agent-ops"
+            mock_register.return_value = True
+            mock_tmux.create_window = AsyncMock(
+                return_value=(
+                    True,
+                    "Created window 'comfy-agent-ops-1' at /home/tools/mediagen-comfy",
+                    "comfy-agent-ops-1",
+                    "@6",
+                )
+            )
+            mock_sm.resolve_chat_id.return_value = 100
+
+            await bot_mod._create_and_bind_window(
+                query,
+                context,
+                user,
+                "/home/tools/mediagen-comfy",
+                pending_thread_id=42,
+                pending_surface=surface,
+            )
+
+        mock_sm.set_surface_title.assert_called_once_with(
+            1,
+            "comfy-agent-ops-1",
+            thread_id=42,
+            chat_id=100,
+        )
 
     @pytest.mark.asyncio
     async def test_create_and_bind_window_does_not_rename_topic_to_cwd_when_title_unknown(self):
@@ -4630,6 +4798,7 @@ class TestLauncherRegistration:
             patch.object(bot_mod.config, "claude_command", "codex"),
         ):
             mock_sm.get_surface_title.return_value = ""
+            mock_sm.get_shared_surface_title.return_value = ""
             mock_tmux.create_window = AsyncMock(
                 return_value=(
                     True,
@@ -4664,6 +4833,7 @@ class TestLauncherRegistration:
         mock_register.assert_awaited_once()
         assert mock_register.await_args.kwargs["window_name"] == "mediagen-comfy"
         assert mock_register.await_args.kwargs["sync_topic_title"] is False
+        mock_sm.set_surface_title.assert_not_called()
 
 
 class TestThreadPickerFlow:

@@ -1643,6 +1643,32 @@ class SessionManager:
             return ""
         return str(titles.get(resolved_surface_key) or "").strip()
 
+    def get_shared_surface_title(
+        self,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Return display title metadata for an exact control surface.
+
+        Topic create/edit Telegram service updates are actor-delivered, but the
+        title is a property of the chat-qualified Telegram control surface. In a
+        shared group, one allowed user may create or rename the topic and another
+        allowed user may later bind it. This lookup intentionally ignores actor
+        ownership while still requiring the exact title surface key.
+        """
+        resolved_surface_key = self._resolve_surface_title_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        for _user_id, titles in sorted(self.surface_titles.items()):
+            title = str(titles.get(resolved_surface_key) or "").strip()
+            if title:
+                return title
+        return ""
+
     # --- Group chat ID management (supergroup forum topic routing) ---
 
     def set_group_chat_id(
