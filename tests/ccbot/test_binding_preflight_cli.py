@@ -114,6 +114,36 @@ def test_binding_preflight_canonical_comfy_target_passes(monkeypatch):
     assert result.resolved.cwd == "/home/tools/mediagen-comfy"
 
 
+def test_binding_preflight_resolves_legacy_topic_with_chat_coordinates(monkeypatch):
+    manager = _manager_without_io(monkeypatch)
+    manager.set_group_chat_id(3045664, 555, -1003685295814)
+    _bind(manager, surface_key="t:555")
+
+    result = _run(
+        manager,
+        [
+            "--user-id",
+            "3045664",
+            "--surface-key",
+            "t:-1003685295814:555",
+            "--expected-user-id",
+            "3045664",
+            "--expected-surface-key",
+            "t:-1003685295814:555",
+            "--expected-window-name",
+            "comfy-agent",
+            "--expected-runtime-kind",
+            "codex",
+            "--expected-cwd",
+            "/home/tools/mediagen-comfy",
+        ],
+    )
+
+    assert result.ok is True
+    assert result.resolved
+    assert result.resolved.surface_key == "t:-1003685295814:555"
+
+
 def test_binding_preflight_rejects_stale_server_comfy_cwd(monkeypatch):
     manager = _manager_without_io(monkeypatch)
     _bind(manager, cwd="/home/tools/server/comfy")

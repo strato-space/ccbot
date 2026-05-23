@@ -262,6 +262,34 @@ def _facts_for_binding(
     )
 
 
+def _canonical_binding_surface_key(
+    manager: Any,
+    *,
+    user_id: int,
+    surface_key: str,
+) -> str:
+    """Return a chat-qualified topic key when legacy state has chat coordinates."""
+    parse_surface_key = getattr(manager, "_parse_surface_key", None)
+    make_surface_key = getattr(manager, "make_surface_key", None)
+    stored_topic_chat_id = getattr(manager, "_stored_topic_chat_id", None)
+    if (
+        not callable(parse_surface_key)
+        or not callable(make_surface_key)
+        or not callable(stored_topic_chat_id)
+    ):
+        return surface_key
+    parsed = parse_surface_key(surface_key)
+    if parsed is None:
+        return surface_key
+    kind, chat_id, thread_id = parsed
+    if kind != "topic" or chat_id is not None or thread_id is None:
+        return surface_key
+    stored_chat_id = stored_topic_chat_id(user_id, thread_id)
+    if not isinstance(stored_chat_id, int):
+        return surface_key
+    return make_surface_key(thread_id=thread_id, chat_id=stored_chat_id)
+
+
 def _bound_candidates(
     manager: Any,
     *,
@@ -274,7 +302,16 @@ def _bound_candidates(
         if user_id is not None and candidate_user_id != user_id:
             continue
         for candidate_surface_key, candidate_window_id in sorted(bindings.items()):
-            if surface_key is not None and candidate_surface_key != surface_key:
+            delivery_surface_key = _canonical_binding_surface_key(
+                manager,
+                user_id=candidate_user_id,
+                surface_key=candidate_surface_key,
+            )
+            if (
+                surface_key is not None
+                and candidate_surface_key != surface_key
+                and delivery_surface_key != surface_key
+            ):
                 continue
             if window_id is not None and candidate_window_id != window_id:
                 continue
@@ -282,7 +319,7 @@ def _bound_candidates(
                 _facts_for_binding(
                     manager,
                     user_id=candidate_user_id,
-                    surface_key=candidate_surface_key,
+                    surface_key=delivery_surface_key,
                     window_id=candidate_window_id,
                     target_reason="explicit_window_id"
                     if window_id is not None
