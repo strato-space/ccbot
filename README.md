@@ -363,6 +363,29 @@ conversational input uses runtime-native submit plus same-identity
 replay-evidence ACK. Multiline payloads still use bracketed paste before
 submit. `ccbot send` remains Telegram delivery only.
 
+**Read-only binding/workspace preflight:**
+
+Before live automation injects runtime input or treats workspace-sensitive media
+delivery evidence as final, validate the expected binding without sending text
+to tmux or Telegram:
+
+```bash
+CCBOT_DIR=/data/iqdoctor/.ccbot \
+  ccbot binding-preflight --json \
+  --user-id 3045664 \
+  --surface-key t:555 \
+  --expected-user-id 3045664 \
+  --expected-surface-key t:555 \
+  --expected-window-name comfy-agent \
+  --expected-runtime-kind codex \
+  --expected-cwd /home/tools/mediagen-comfy
+```
+
+For ComfyCodexBot, `/home/tools/mediagen-comfy` is the primary Codex workspace
+for the Telegram control surface. `/home/tools/server/comfy` is historical
+runtime/runbook context only and must not be used as the primary ComfyCodexBot
+runtime-input or final media-evidence workspace.
+
 **Polling liveness:**
 
 The bot uses Telegram long polling. ccbot configures a dedicated `getUpdates`
@@ -439,7 +462,7 @@ CODEX_HOME=/data/iqdoctor/.codex
 OMX_AUTO_UPDATE=0
 CCBOT_RESTORE_ENABLED=1
 CCBOT_RESTORE_WINDOW=comfy-agent
-CCBOT_RESTORE_CWD=/home/tools/server/comfy
+CCBOT_RESTORE_CWD=/home/tools/mediagen-comfy
 CCBOT_RESTORE_RUNTIME_ID=019d6825-88ba-7f10-948e-eaaf162ea2a9
 CCBOT_RESTORE_USER_ID=3045664
 CCBOT_RESTORE_SURFACE_KEY=t:555
@@ -454,8 +477,9 @@ session/window/panes before acting, distinguishes `LiveRuntimeProof` from
 runtime surfaces, and fails closed rather than killing tmux or restarting
 services when live identity is ambiguous.  `CCBOT_RESTORE_*` remains restore
 intent, not proof.  Local automation and live smoke validation must use
-`ccbot runtime-input` and same-runtime replay-evidence ACK; do not use
-`ccbot send` or copied `tmux paste-buffer` commands as a runtime input path.
+`ccbot binding-preflight`, `ccbot runtime-input`, and same-runtime
+replay-evidence ACK; do not use `ccbot send` or copied `tmux paste-buffer`
+commands as a runtime input path.
 The service startup path does not inject a smoke message automatically; its
 bind-time gate stops at `LiveRuntimeProof`, while the operator live-ops gate
 must prove `ccbot runtime-input` replay ACK for both configured bots.
@@ -471,8 +495,11 @@ restarted or killed by this recovery path.
 
 | Bot controller | systemd user service | `CCBOT_DIR` | tmux session/window | Telegram identity/routing | runtime cwd | `CODEX_HOME` |
 | --- | --- | --- | --- | --- | --- | --- |
-| ComfyCodexBot | `ccbot.service` | `/data/iqdoctor/.ccbot` | `comfy` / `comfy-agent` | user `3045664`, surface `t:555`, chat `-1003685295814` | `/home/tools/server/comfy` | `/data/iqdoctor/.codex` |
+| ComfyCodexBot | `ccbot.service` | `/data/iqdoctor/.ccbot` | `comfy` / `comfy-agent` | user `3045664`, surface `t:555`, chat `-1003685295814` | `/home/tools/mediagen-comfy` | `/data/iqdoctor/.codex` |
 | ImmArenaBot | `imm_arena_bot.service` | `/data/iqdoctor/.ccbot-imm_arena_bot` | `imm_arena_bot` / `imm` | user `3045664`, surface `t:3`, chat `-1003974721114` | `/home/tools/imm` | `/home/tools/imm/.codex` |
+
+Older `/home/tools/server/comfy` references are historical/runtime-runbook
+context only; they are not the primary ComfyCodexBot Codex workspace.
 
 OMX HUD/helper panes are operator telemetry, not work-runtime panes.  A HUD
 should remain a small bottom pane in its parent window and must never be chosen

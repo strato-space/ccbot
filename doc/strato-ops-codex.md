@@ -99,13 +99,16 @@ Prefer explicit non-interactive Codex policy in that command when your host poli
   bot-controller/tmux surfaces:
   - ComfyCodexBot: `ccbot.service`, `CCBOT_DIR=/data/iqdoctor/.ccbot`,
     tmux `comfy:comfy-agent`, user/surface `3045664/t:555`, chat
-    `-1003685295814`, runtime cwd `/home/tools/server/comfy`,
+    `-1003685295814`, runtime cwd `/home/tools/mediagen-comfy`,
     `CODEX_HOME=/data/iqdoctor/.codex`.
   - ImmArenaBot: `imm_arena_bot.service`,
     `CCBOT_DIR=/data/iqdoctor/.ccbot-imm_arena_bot`, tmux
     `imm_arena_bot:imm`, user/surface `3045664/t:3`, chat
     `-1003974721114`, runtime cwd `/home/tools/imm`,
     `CODEX_HOME=/home/tools/imm/.codex`.
+- `/home/tools/server/comfy` is historical/runtime-runbook context only; it is
+  not the primary ComfyCodexBot Codex workspace for binding preflight, runtime
+  input, or final Cinematic media-evidence gates.
 - Both controller services now have the tmux-preserving user-systemd drop-in
   `tmux-preserve.conf` with `KillMode=process`.  Treat that as a blast
   radius mitigation, not as proof: before and after an approved controller

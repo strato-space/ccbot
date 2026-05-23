@@ -34,7 +34,7 @@ def _intent_env(**overrides: str) -> dict[str, str]:
     env = {
         "CCBOT_RESTORE_ENABLED": "1",
         "CCBOT_RESTORE_WINDOW": "comfy-agent",
-        "CCBOT_RESTORE_CWD": "/home/tools/server/comfy",
+        "CCBOT_RESTORE_CWD": "/home/tools/mediagen-comfy",
         "CCBOT_RESTORE_RUNTIME_ID": "thread-1",
         "CCBOT_RESTORE_USER_ID": "100",
         "CCBOT_RESTORE_SURFACE_KEY": "t:42",
@@ -51,7 +51,7 @@ def _intent_env(**overrides: str) -> dict[str, str]:
 def _intent(**overrides) -> RestoreIntent:
     payload = dict(
         window_name="comfy-agent",
-        cwd="/home/tools/server/comfy",
+        cwd="/home/tools/mediagen-comfy",
         runtime_id="thread-1",
         user_id=100,
         surface_key="t:42",
@@ -103,7 +103,7 @@ def test_parse_restore_intent_requires_full_surface_identity_and_group_chat() ->
             {
                 "CCBOT_RESTORE_ENABLED": "1",
                 "CCBOT_RESTORE_WINDOW": "comfy-agent",
-                "CCBOT_RESTORE_CWD": "/home/tools/server/comfy",
+                "CCBOT_RESTORE_CWD": "/home/tools/mediagen-comfy",
                 "CCBOT_RESTORE_RUNTIME_ID": "thread-1",
                 "CCBOT_RESTORE_SURFACE_KEY": "t:42",
             }
@@ -114,7 +114,7 @@ def test_parse_restore_intent_requires_full_surface_identity_and_group_chat() ->
             {
                 "CCBOT_RESTORE_ENABLED": "1",
                 "CCBOT_RESTORE_WINDOW": "comfy-agent",
-                "CCBOT_RESTORE_CWD": "/home/tools/server/comfy",
+                "CCBOT_RESTORE_CWD": "/home/tools/mediagen-comfy",
                 "CCBOT_RESTORE_RUNTIME_ID": "thread-1",
                 "CCBOT_RESTORE_USER_ID": "100",
                 "CCBOT_RESTORE_SURFACE_KEY": "t:42",
@@ -183,7 +183,7 @@ def test_existing_runtime_reuse_requires_matching_identity_and_not_helper(
     intent = _intent()
     mgr.window_states["@1"] = LiveProcessDescriptor(
         thread_id="other-thread",
-        cwd="/home/tools/server/comfy",
+        cwd="/home/tools/mediagen-comfy",
         runtime_kind="codex",
     )
 
@@ -195,6 +195,12 @@ def test_existing_runtime_reuse_requires_matching_identity_and_not_helper(
     result = validate_existing_runtime_window_for_restore(mgr, "@1", intent)
     assert result.ok is True
 
+    mgr.window_states["@1"].cwd = "/home/tools/server/comfy"
+    result = validate_existing_runtime_window_for_restore(mgr, "@1", intent)
+    assert result.ok is False
+    assert "cwd mismatch" in result.reason
+
+    mgr.window_states["@1"].cwd = "/home/tools/mediagen-comfy"
     mgr.codex_thread_catalog = SimpleNamespace(is_helper_thread_fast=lambda _tid: True)
     result = validate_existing_runtime_window_for_restore(mgr, "@1", intent)
     assert result.ok is False
@@ -217,7 +223,7 @@ def test_bind_restored_surface_records_group_route_and_clears_external(
 
     assert mgr.window_states["@9"].thread_id == "thread-1"
     assert mgr.window_states["@9"].runtime_kind == "codex"
-    assert mgr.window_states["@9"].cwd == "/home/tools/server/comfy"
+    assert mgr.window_states["@9"].cwd == "/home/tools/mediagen-comfy"
     assert mgr.surface_bindings[100]["t:42"] == "@9"
     assert mgr.external_surface_bindings.get(100, {}) == {}
     assert mgr.resolve_chat_id(100, 42) == -1004242
@@ -229,7 +235,7 @@ def test_bind_restored_surface_clears_stale_duplicate_runtime_claim(
     intent = _intent()
     mgr.register_live_process(
         "@6",
-        "/home/tools/server/comfy",
+        "/home/tools/mediagen-comfy",
         window_name="mediagen-comfy",
         runtime_kind="codex",
         thread_id="thread-1",
@@ -303,16 +309,16 @@ async def test_replay_resume_target_does_not_authorize_unrelated_live_pane(
 ) -> None:
     mgr.window_states["@1"] = LiveProcessDescriptor(
         thread_id="other-thread",
-        cwd="/home/tools/server/comfy",
+        cwd="/home/tools/mediagen-comfy",
         runtime_kind="codex",
     )
     mgr.codex_thread_catalog = SimpleNamespace(
         get_candidate_fast=lambda _thread_id: SimpleNamespace(
-            normalized_cwd="/home/tools/server/comfy",
+            normalized_cwd="/home/tools/mediagen-comfy",
             rollout_file="/tmp/codex-home/sessions/rollout-thread-1.jsonl",
             to_locator=lambda: SimpleNamespace(
                 file_path="/tmp/codex-home/sessions/rollout-thread-1.jsonl",
-                cwd="/home/tools/server/comfy",
+                cwd="/home/tools/mediagen-comfy",
             ),
         )
     )
@@ -321,7 +327,7 @@ async def test_replay_resume_target_does_not_authorize_unrelated_live_pane(
         return_value=SimpleNamespace(
             window_id="@1",
             window_name="comfy-agent",
-            cwd="/home/tools/server/comfy",
+            cwd="/home/tools/mediagen-comfy",
             pane_current_command="codex",
             pane_id="%1",
         )
@@ -342,7 +348,7 @@ async def test_matching_helper_thread_descriptor_does_not_restore_writable_bindi
 ) -> None:
     mgr.window_states["@1"] = LiveProcessDescriptor(
         thread_id="thread-1",
-        cwd="/home/tools/server/comfy",
+        cwd="/home/tools/mediagen-comfy",
         runtime_kind="codex",
         window_name="comfy-agent",
     )
@@ -352,7 +358,7 @@ async def test_matching_helper_thread_descriptor_does_not_restore_writable_bindi
         return_value=SimpleNamespace(
             window_id="@1",
             window_name="comfy-agent",
-            cwd="/home/tools/server/comfy",
+            cwd="/home/tools/mediagen-comfy",
             pane_current_command="codex",
             pane_id="%1",
         )
@@ -392,21 +398,21 @@ async def test_window_change_between_inventory_and_bind_fails_closed(
 ) -> None:
     mgr.window_states["@1"] = LiveProcessDescriptor(
         thread_id="thread-1",
-        cwd="/home/tools/server/comfy",
+        cwd="/home/tools/mediagen-comfy",
         runtime_kind="codex",
         window_name="comfy-agent",
     )
     first = SimpleNamespace(
         window_id="@1",
         window_name="comfy-agent",
-        cwd="/home/tools/server/comfy",
+        cwd="/home/tools/mediagen-comfy",
         pane_current_command="codex",
         pane_id="%1",
     )
     second = SimpleNamespace(
         window_id="@2",
         window_name="comfy-agent",
-        cwd="/home/tools/server/comfy",
+        cwd="/home/tools/mediagen-comfy",
         pane_current_command="codex",
         pane_id="%2",
     )
@@ -430,7 +436,7 @@ async def test_shell_window_without_resume_target_proof_does_not_launch(
         return_value=SimpleNamespace(
             window_id="@1",
             window_name="comfy-agent",
-            cwd="/home/tools/server/comfy",
+            cwd="/home/tools/mediagen-comfy",
             pane_current_command="bash",
             pane_id="%1",
         )
@@ -450,13 +456,13 @@ async def test_full_loss_binds_only_after_resume_and_live_proofs(
     mgr: SessionManager,
 ) -> None:
     class _Candidate:
-        normalized_cwd = "/home/tools/server/comfy"
+        normalized_cwd = "/home/tools/mediagen-comfy"
         rollout_file = "/tmp/codex-home/sessions/rollout-thread-1.jsonl"
 
         def to_locator(self):
             return SimpleNamespace(
                 file_path="/tmp/codex-home/sessions/rollout-thread-1.jsonl",
-                cwd="/home/tools/server/comfy",
+                cwd="/home/tools/mediagen-comfy",
             )
 
     mgr.codex_thread_catalog = SimpleNamespace(get_candidate_fast=lambda _tid: _Candidate())
@@ -464,7 +470,7 @@ async def test_full_loss_binds_only_after_resume_and_live_proofs(
     created_window = SimpleNamespace(
         window_id="@9",
         window_name="comfy-agent",
-        cwd="/home/tools/server/comfy",
+        cwd="/home/tools/mediagen-comfy",
         pane_current_command="codex",
         pane_id="%9",
     )
@@ -478,7 +484,7 @@ async def test_full_loss_binds_only_after_resume_and_live_proofs(
         assert window_id == "@9"
         mgr.window_states["@9"] = LiveProcessDescriptor(
             thread_id="thread-1",
-            cwd="/home/tools/server/comfy",
+            cwd="/home/tools/mediagen-comfy",
             runtime_kind="codex",
             window_name="comfy-agent",
         )
@@ -504,7 +510,7 @@ async def test_startup_restore_reuses_registered_node_runtime_without_injecting(
     intent_env = _intent_env()
     mgr.window_states["@1"] = LiveProcessDescriptor(
         thread_id="thread-1",
-        cwd="/home/tools/server/comfy",
+        cwd="/home/tools/mediagen-comfy",
         runtime_kind="codex",
     )
     tmux = SimpleNamespace()
@@ -512,7 +518,7 @@ async def test_startup_restore_reuses_registered_node_runtime_without_injecting(
         return_value=SimpleNamespace(
             window_id="@1",
             window_name="comfy-agent",
-            cwd="/home/tools/server/comfy",
+            cwd="/home/tools/mediagen-comfy",
             pane_current_command="node",
         )
     )

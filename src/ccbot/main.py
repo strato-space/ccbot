@@ -2,7 +2,8 @@
 
 Handles two execution modes:
   1. `ccbot hook` — delegates to hook.hook_main() for Claude Code hook processing.
-  2. `ccbot send` / `ccbot runtime-input` — delegates to focused CLIs.
+  2. `ccbot send` / `ccbot runtime-input` / `ccbot binding-preflight` —
+     delegates to focused CLIs.
   3. Default — configures logging, initializes tmux session, and starts the
      Telegram bot polling loop via bot.create_bot().
 """
@@ -23,10 +24,18 @@ def _build_parser(prog: str = "ccbot") -> argparse.ArgumentParser:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("hook", "send", "send_bot_message", "runtime-input", "inject"),
+        choices=(
+            "hook",
+            "send",
+            "send_bot_message",
+            "runtime-input",
+            "inject",
+            "binding-preflight",
+        ),
         help=(
             "Optional subcommand. `send` delivers text/files to Telegram; "
-            "`runtime-input`/`inject` send text to a live runtime input plane."
+            "`runtime-input`/`inject` send text to a live runtime input plane; "
+            "`binding-preflight` validates a runtime binding read-only."
         ),
     )
     return parser
@@ -53,6 +62,12 @@ def main(argv: list[str] | None = None) -> None:
 
         command_name = args[0]
         raise SystemExit(runtime_input_main(args[1:], prog=f"ccbot {command_name}"))
+    if args and args[0] == "binding-preflight":
+        from .binding_preflight_cli import binding_preflight_main
+
+        raise SystemExit(
+            binding_preflight_main(args[1:], prog="ccbot binding-preflight")
+        )
     if args:
         _build_parser().error(f"unknown command: {args[0]}")
 

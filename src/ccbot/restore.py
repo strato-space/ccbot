@@ -607,6 +607,9 @@ def validate_existing_runtime_window_for_restore(
     thread_id = str(getattr(state, "thread_id", "") or "").strip()
     if thread_id != intent.runtime_id:
         return RestoreCheckResult(False, "runtime conversation identity mismatch")
+    existing_cwd = _normalize_path(str(getattr(state, "cwd", "") or ""))
+    if existing_cwd and existing_cwd != _normalize_path(intent.cwd):
+        return RestoreCheckResult(False, "target window cwd mismatch")
     helper_check = getattr(session_manager, "_is_codex_helper_window", None)
     if callable(helper_check) and helper_check(window_id):
         return RestoreCheckResult(False, "runtime helper window is not bindable")

@@ -45,12 +45,16 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "LiveRuntimeProof" in readme
     assert "ResumeTargetProof" in readme
     assert "OMX HUD/question/update/helper panes" in readme
-    assert "do not use\n`ccbot send` or copied `tmux paste-buffer`" in readme
+    assert "`ccbot binding-preflight`, `ccbot runtime-input`" in readme
+    assert "do not use `ccbot send` or copied `tmux paste-buffer`" in readme
     assert "does not inject a smoke message automatically" in readme
     assert "bind-time gate stops at `LiveRuntimeProof`" in readme
     assert "ComfyCodexBot" in readme
     assert "`ccbot.service`" in readme
     assert "`comfy` / `comfy-agent`" in readme
+    assert "ccbot binding-preflight --json" in readme
+    assert "/home/tools/mediagen-comfy" in readme
+    assert "/home/tools/server/comfy` is historical\nruntime/runbook context only" in readme
     assert "ImmArenaBot" in readme
     assert "`imm_arena_bot.service`" in readme
     assert "`imm_arena_bot` / `imm`" in readme
@@ -136,6 +140,8 @@ def test_strato_ops_runbook_captures_cutover_and_rollback_contract() -> None:
     assert "Do not blindly restart `imm_arena_bot.service`" in runbook
     assert "ComfyCodexBot: `ccbot.service`" in runbook
     assert "tmux `comfy:comfy-agent`" in runbook
+    assert "/home/tools/mediagen-comfy" in runbook
+    assert "/home/tools/server/comfy` is historical/runtime-runbook context only" in runbook
     assert "ImmArenaBot: `imm_arena_bot.service`" in runbook
     assert "tmux\n    `imm_arena_bot:imm`" in runbook
     assert "Both controller services now have" in runbook
@@ -224,6 +230,8 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "Bot-controller service process" in runtime
     assert "Autonomous recovery target" in runtime
     assert "ComfyCodexBot: `ccbot.service`" in runtime
+    assert "/home/tools/mediagen-comfy" in runtime
+    assert "/home/tools/server/comfy` is historical/runtime-runbook context" in runtime
     assert "ImmArenaBot: `imm_arena_bot.service`" in runtime
     assert "tmux-preserving controller restart" in runtime
     assert "current `str` fact: both whitelisted controller services now carry this" in runtime

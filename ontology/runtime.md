@@ -158,13 +158,16 @@ This note defines the core runtime nouns for `ccbot`.
   - current allowed instances are exactly:
     - ComfyCodexBot: `ccbot.service`, `CCBOT_DIR=/data/iqdoctor/.ccbot`, tmux
       `comfy:comfy-agent`, control surface `3045664/t:555`, chat
-      `-1003685295814`, cwd `/home/tools/server/comfy`, Codex home
+      `-1003685295814`, cwd `/home/tools/mediagen-comfy`, Codex home
       `/data/iqdoctor/.codex`
     - ImmArenaBot: `imm_arena_bot.service`,
       `CCBOT_DIR=/data/iqdoctor/.ccbot-imm_arena_bot`, tmux
       `imm_arena_bot:imm`, control surface `3045664/t:3`, chat
       `-1003974721114`, cwd `/home/tools/imm`, Codex home
       `/home/tools/imm/.codex`
+  - `/home/tools/server/comfy` is historical/runtime-runbook context for
+    ComfyCodexBot, not the primary Codex workspace for binding preflight,
+    runtime input, or final media-evidence gates
   - non-target tmux sessions/windows/panes are outside this recovery target and
     must not be restarted or killed by this path
 

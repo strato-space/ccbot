@@ -17,6 +17,7 @@ def test_top_level_help_does_not_start_bot(capsys, monkeypatch):
     assert "usage: ccbot" in output
     assert "send" in output
     assert "runtime-input" in output
+    assert "binding-preflight" in output
 
 
 def test_short_top_level_help_exits_zero(capsys):
@@ -82,3 +83,14 @@ def test_inject_help_uses_alias_name(capsys):
     output = capsys.readouterr().out
     assert "usage: ccbot inject " in output
     assert "usage: ccbot runtime-input" not in output
+
+
+def test_binding_preflight_help_is_read_only(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main_mod.main(["binding-preflight", "--help"])
+
+    assert exc.value.code == 0
+    output = capsys.readouterr().out
+    assert "usage: ccbot binding-preflight " in output
+    assert "Read-only ccbot binding/workspace preflight" in output
+    assert "--expected-cwd" in output

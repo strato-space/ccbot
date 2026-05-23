@@ -78,7 +78,7 @@ current whitelisted controller/tmux targets are exactly:
 
 - ComfyCodexBot: `ccbot.service`, `CCBOT_DIR=/data/iqdoctor/.ccbot`, tmux
   `comfy:comfy-agent`, control surface `3045664/t:555`, runtime cwd
-  `/home/tools/server/comfy`, `CODEX_HOME=/data/iqdoctor/.codex`.
+  `/home/tools/mediagen-comfy`, `CODEX_HOME=/data/iqdoctor/.codex`.
 - ImmArenaBot: `imm_arena_bot.service`,
   `CCBOT_DIR=/data/iqdoctor/.ccbot-imm_arena_bot`, tmux
   `imm_arena_bot:imm`, control surface `3045664/t:3`, runtime cwd
@@ -88,5 +88,8 @@ Both whitelisted controller services now carry `tmux-preserve.conf` with
 `KillMode=process`, but that drop-in is only a blast-radius guard.  Recovery
 still must verify tmux server PID and session list before/after a controller
 restart, and it must not restart or kill non-target tmux sessions/windows/panes.
-OMX HUD/helper panes are pane-level telemetry and never restored binding
-targets.
+OMX HUD/helper panes are pane-level telemetry and never restored binding targets.
+
+`/home/tools/server/comfy` is historical/runtime-runbook context only for
+ComfyCodexBot; the primary Codex workspace for binding preflight, runtime input,
+and final media-evidence gates is `/home/tools/mediagen-comfy`.
