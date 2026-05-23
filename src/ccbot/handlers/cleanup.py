@@ -40,6 +40,7 @@ async def clear_topic_state(
       - _tool_msg_ids (tool_use → message_id mapping)
       - _commentary_msg_info (latest commentary artifact tracking)
       - _plan_update_msg_info (latest mutable plan artifact tracking)
+      - _image_preview_msg_info (latest mutable preview media tracking)
       - _interactive_msgs and _interactive_mode (interactive UI state)
       - user_data pending state (_pending_thread_id, _pending_thread_text)
     """
@@ -48,8 +49,12 @@ async def clear_topic_state(
     await clear_commentary_message(bot, user_id, thread_id)
     await clear_pending_input_message(bot, user_id, thread_id)
     await clear_plan_update_message(bot, user_id, thread_id)
-    await clear_image_preview_message(bot, user_id, thread_id)
-    clear_pre_final_visible_lane_state(user_id, thread_id)
+    image_preview_cleared = await clear_image_preview_message(bot, user_id, thread_id)
+    clear_pre_final_visible_lane_state(
+        user_id,
+        thread_id,
+        forget_image_preview=image_preview_cleared,
+    )
 
     # Clear tool message ID tracking
     clear_tool_msg_ids_for_topic(user_id, thread_id)

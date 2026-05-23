@@ -18,6 +18,7 @@ from ccbot.handlers.message_queue import (
     _is_task_binding_active,
     _is_stale_turn_generation,
     _image_preview_msg_info,
+    _image_preview_delete_retry_tasks,
     _pending_input_enqueued,
     _pending_input_msg_info,
     _plan_update_msg_info,
@@ -2630,6 +2631,91 @@ async def test_new_turn_cleanup_deletes_preview_without_final_before_next_previe
 
 
 @pytest.mark.asyncio
+async def test_new_turn_cleanup_advances_generation_before_delete_await_to_drop_stale_preview() -> (
+    None
+):
+    preview_task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=[],
+        text="• Viewed Image:\n  └ progress.png",
+        content_type="viewed_image_preview",
+        semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
+        image_data=[("image/png", b"progress-png")],
+        image_caption="🖼 Viewed Image\nFile: progress.png",
+        turn_generation=1,
+    )
+    stale_preview_task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=[],
+        text="• Viewed Image:\n  └ stale.png",
+        content_type="viewed_image_preview",
+        semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
+        image_data=[("image/png", b"stale-png")],
+        image_caption="🖼 Viewed Image\nFile: stale.png",
+        turn_generation=1,
+    )
+    first_photo = AsyncMock()
+    first_photo.message_id = 2115
+    delete_started = asyncio.Event()
+    allow_delete = asyncio.Event()
+
+    async def slow_delete(*, chat_id: int, message_id: int) -> None:
+        assert chat_id == 100
+        assert message_id == 2115
+        delete_started.set()
+        await allow_delete.wait()
+
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.send_photo",
+                new_callable=AsyncMock,
+                return_value=first_photo,
+            ) as mock_photo,
+            patch(
+                "ccbot.handlers.message_queue._check_and_send_status",
+                new_callable=AsyncMock,
+            ),
+            patch("ccbot.handlers.message_queue._audit_task_delivery") as mock_audit,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+            bot = AsyncMock()
+
+            open_new_turn_generation(1, 42)
+            await _process_content_task(bot, 1, preview_task)
+            bot.delete_message.side_effect = slow_delete
+            cleanup_task = asyncio.create_task(
+                open_new_turn_generation_with_cleanup(bot, 1, 42)
+            )
+            await asyncio.wait_for(delete_started.wait(), timeout=1)
+
+            assert current_turn_generation(1, 42) == 2
+            await _process_content_task(bot, 1, stale_preview_task)
+            allow_delete.set()
+            assert await cleanup_task == 2
+
+        mock_photo.assert_awaited_once()
+        bot.edit_message_media.assert_not_awaited()
+        assert (1, 42) not in _image_preview_msg_info
+        assert any(
+            call.kwargs.get("reason") == "stale_turn_generation"
+            for call in mock_audit.call_args_list
+        )
+    finally:
+        allow_delete.set()
+        clear_commentary_lane_state(1, 42)
+
+
+@pytest.mark.asyncio
 async def test_image_preview_clear_delete_failure_retains_tracking_to_prevent_stack() -> None:
     preview_task = MessageTask(
         task_type="content",
@@ -2678,6 +2764,7 @@ async def test_image_preview_clear_delete_failure_retains_tracking_to_prevent_st
             await clear_image_preview_message(bot, 1, 42)
 
         assert _image_preview_msg_info[(1, 42)].message_id == 2113
+        assert (1, 42, 2113) in _image_preview_delete_retry_tasks
         assert any(
             call.kwargs.get("reason") == "clear_image_preview_failed"
             and call.kwargs.get("success") is False
@@ -2736,6 +2823,7 @@ async def test_image_preview_clear_retryafter_retains_tracking_and_does_not_rais
             await clear_image_preview_message(bot, 1, 42)
 
         assert _image_preview_msg_info[(1, 42)].message_id == 2114
+        assert (1, 42, 2114) in _image_preview_delete_retry_tasks
         assert any(
             call.kwargs.get("reason") == "clear_image_preview_retry_after"
             and call.kwargs.get("success") is False

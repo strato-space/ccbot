@@ -17,6 +17,8 @@ Key components:
   - Status message tracking and conversion (keyed by (user_id, thread_id))
 """
 
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import io
@@ -76,6 +78,67 @@ def _is_message_known_gone_error(exc: Exception) -> bool:
     """Return True when Telegram says the tracked message no longer exists."""
     text = str(exc).lower()
     return "message to delete not found" in text or "message not found" in text
+
+
+def _retry_after_seconds(exc: RetryAfter) -> int:
+    """Normalize PTB RetryAfter payloads to bounded seconds."""
+    retry_after = exc.retry_after
+    seconds = (
+        retry_after
+        if isinstance(retry_after, int)
+        else int(retry_after.total_seconds())
+    )
+    return max(1, min(seconds, _IMAGE_PREVIEW_DELETE_RETRY_MAX_DELAY_SECONDS))
+
+
+def _image_preview_retry_key(
+    user_id: int,
+    thread_id_or_0: int,
+    info: ImagePreviewMessageInfo,
+) -> tuple[int, int, int]:
+    """Return the retry-debt key for one concrete Telegram preview message."""
+    return (user_id, thread_id_or_0, info.message_id)
+
+
+def _image_preview_info_matches(
+    current: ImagePreviewMessageInfo | None,
+    expected: ImagePreviewMessageInfo,
+) -> bool:
+    """Return True when a tracked preview still points at the expected media."""
+    return current == expected
+
+
+def _discard_image_preview_retry_task(
+    key: tuple[int, int, int],
+    *,
+    cancel: bool,
+) -> None:
+    """Forget optional retry debt, avoiding self-cancel from inside the retry task."""
+    task = _image_preview_delete_retry_tasks.pop(key, None)
+    if not cancel or task is None or task.done():
+        return
+    try:
+        current_task = asyncio.current_task()
+    except RuntimeError:
+        current_task = None
+    if task is not current_task:
+        task.cancel()
+
+
+def _discard_image_preview_retry_tasks_for_topic(
+    user_id: int,
+    thread_id_or_0: int,
+    *,
+    cancel: bool = True,
+) -> None:
+    """Forget all retry debt associated with a topic."""
+    stale_keys = [
+        key
+        for key in _image_preview_delete_retry_tasks
+        if key[0] == user_id and key[1] == thread_id_or_0
+    ]
+    for key in stale_keys:
+        _discard_image_preview_retry_task(key, cancel=cancel)
 
 
 # Merge limit for content messages
@@ -163,6 +226,11 @@ class ImagePreviewMessageInfo:
 # Runtime image previews are pre-final progress, not durable final results, so compact
 # mode keeps only the latest preview bubble for the live topic turn.
 _image_preview_msg_info: dict[tuple[int, int], ImagePreviewMessageInfo] = {}
+# Retry debt for failed Telegram deletes of preview bubbles. Keyed by concrete
+# message id so an old preview cleanup retry cannot erase a newer preview pointer.
+_image_preview_delete_retry_tasks: dict[tuple[int, int, int], asyncio.Task[None]] = {}
+_IMAGE_PREVIEW_DELETE_RETRY_MAX_ATTEMPTS = 3
+_IMAGE_PREVIEW_DELETE_RETRY_MAX_DELAY_SECONDS = 10
 
 # Warning tracking:
 #   (user_id, thread_id_or_0, warning_key) -> (message_id, window_id, warning_text, repeat_count)
@@ -931,6 +999,10 @@ async def _send_or_edit_image_preview(
                     chat_id=chat_id,
                     message_id=current_info.message_id,
                 )
+                _discard_image_preview_retry_task(
+                    _image_preview_retry_key(user_id, thread_id_or_0, current_info),
+                    cancel=True,
+                )
                 _image_preview_msg_info.pop(preview_key, None)
                 _audit_task_delivery(
                     action="delete",
@@ -977,6 +1049,10 @@ async def _send_or_edit_image_preview(
             await bot.delete_message(
                 chat_id=chat_id,
                 message_id=current_info.message_id,
+            )
+            _discard_image_preview_retry_task(
+                _image_preview_retry_key(user_id, thread_id_or_0, current_info),
+                cancel=True,
             )
             _audit_task_delivery(
                 action="delete",
@@ -2611,19 +2687,58 @@ async def _do_clear_image_preview_message(
     bot: Bot,
     user_id: int,
     thread_id_or_0: int = 0,
+    *,
+    info: ImagePreviewMessageInfo | None = None,
+    reason: str = "clear_image_preview",
+    schedule_retry: bool = True,
 ) -> None:
-    """Delete and forget the tracked image-preview progress bubble."""
+    """Delete tracked image-preview media while preserving retryable state."""
+    await _clear_image_preview_message_result(
+        bot,
+        user_id,
+        thread_id_or_0,
+        info=info,
+        reason=reason,
+        schedule_retry=schedule_retry,
+    )
+
+
+async def _clear_image_preview_message_result(
+    bot: Bot,
+    user_id: int,
+    thread_id_or_0: int = 0,
+    *,
+    info: ImagePreviewMessageInfo | None = None,
+    reason: str = "clear_image_preview",
+    schedule_retry: bool = True,
+) -> bool:
+    """Delete tracked image-preview media.
+
+    Returns True when tracking is gone or the specific Telegram message is
+    authoritatively gone. Returns False when cleanup debt remains.
+    """
     pkey = (user_id, thread_id_or_0)
-    info = _image_preview_msg_info.get(pkey)
-    if _latest_pre_final_visible_kind.get(pkey) == IMAGE_PREVIEW_SEMANTIC_KIND:
+    if info is None:
+        info = _image_preview_msg_info.get(pkey)
+    current_info = _image_preview_msg_info.get(pkey)
+    owns_current_tracking = _image_preview_info_matches(current_info, info)
+    if (
+        owns_current_tracking
+        and _latest_pre_final_visible_kind.get(pkey) == IMAGE_PREVIEW_SEMANTIC_KIND
+    ):
         _latest_pre_final_visible_kind.pop(pkey, None)
     if not info:
-        return
+        return True
 
     chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
     try:
         await bot.delete_message(chat_id=chat_id, message_id=info.message_id)
-        _image_preview_msg_info.pop(pkey, None)
+        if _image_preview_info_matches(_image_preview_msg_info.get(pkey), info):
+            _image_preview_msg_info.pop(pkey, None)
+        _discard_image_preview_retry_task(
+            _image_preview_retry_key(user_id, thread_id_or_0, info),
+            cancel=True,
+        )
         log_telegram_delivery(
             action="delete",
             user_id=user_id,
@@ -2634,8 +2749,9 @@ async def _do_clear_image_preview_message(
             task_type="image_preview_clear",
             content_type="image_preview",
             semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
-            reason="clear_image_preview",
+            reason=reason,
         )
+        return True
     except RetryAfter as e:
         log_telegram_delivery(
             action="delete",
@@ -2649,17 +2765,31 @@ async def _do_clear_image_preview_message(
             semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
             success=False,
             error=str(e),
-            reason="clear_image_preview_retry_after",
+            reason=f"{reason}_retry_after",
         )
         logger.debug(
             "Deferring image-preview delete after RetryAfter for message %s: %s",
             info.message_id,
             e,
         )
+        if schedule_retry:
+            _schedule_image_preview_delete_retry(
+                bot,
+                user_id,
+                thread_id_or_0,
+                info,
+                delay_seconds=_retry_after_seconds(e),
+            )
+        return False
     except Exception as e:
         known_gone = _is_message_known_gone_error(e)
         if known_gone:
-            _image_preview_msg_info.pop(pkey, None)
+            if _image_preview_info_matches(_image_preview_msg_info.get(pkey), info):
+                _image_preview_msg_info.pop(pkey, None)
+            _discard_image_preview_retry_task(
+                _image_preview_retry_key(user_id, thread_id_or_0, info),
+                cancel=True,
+            )
         log_telegram_delivery(
             action="delete",
             user_id=user_id,
@@ -2673,9 +2803,9 @@ async def _do_clear_image_preview_message(
             success=False,
             error=str(e),
             reason=(
-                "clear_image_preview_already_gone"
+                f"{reason}_already_gone"
                 if known_gone
-                else "clear_image_preview_failed"
+                else f"{reason}_failed"
             ),
         )
         logger.debug(
@@ -2683,6 +2813,90 @@ async def _do_clear_image_preview_message(
             info.message_id,
             e,
         )
+        if known_gone:
+            return True
+        if schedule_retry:
+            _schedule_image_preview_delete_retry(
+                bot,
+                user_id,
+                thread_id_or_0,
+                info,
+                delay_seconds=1,
+            )
+        return False
+
+
+def _schedule_image_preview_delete_retry(
+    bot: Bot,
+    user_id: int,
+    thread_id_or_0: int,
+    info: ImagePreviewMessageInfo,
+    *,
+    delay_seconds: int,
+) -> None:
+    """Schedule bounded cleanup debt for a concrete preview message."""
+    retry_key = _image_preview_retry_key(user_id, thread_id_or_0, info)
+    existing = _image_preview_delete_retry_tasks.get(retry_key)
+    if existing is not None and not existing.done():
+        return
+    delay = max(1, min(delay_seconds, _IMAGE_PREVIEW_DELETE_RETRY_MAX_DELAY_SECONDS))
+    _image_preview_delete_retry_tasks[retry_key] = asyncio.create_task(
+        _retry_image_preview_delete(
+            bot,
+            user_id,
+            thread_id_or_0,
+            info,
+            initial_delay_seconds=delay,
+        )
+    )
+
+
+async def _retry_image_preview_delete(
+    bot: Bot,
+    user_id: int,
+    thread_id_or_0: int,
+    info: ImagePreviewMessageInfo,
+    *,
+    initial_delay_seconds: int,
+) -> None:
+    """Retry preview deletion a bounded number of times without blocking queues."""
+    retry_key = _image_preview_retry_key(user_id, thread_id_or_0, info)
+    delay = initial_delay_seconds
+    try:
+        for attempt in range(1, _IMAGE_PREVIEW_DELETE_RETRY_MAX_ATTEMPTS + 1):
+            await asyncio.sleep(delay)
+            cleaned = await _clear_image_preview_message_result(
+                bot,
+                user_id,
+                thread_id_or_0,
+                info=info,
+                reason=f"clear_image_preview_retry_{attempt}",
+                schedule_retry=False,
+            )
+            if cleaned:
+                return
+            delay = min(
+                delay * 2,
+                _IMAGE_PREVIEW_DELETE_RETRY_MAX_DELAY_SECONDS,
+            )
+        log_telegram_delivery(
+            action="delete",
+            user_id=user_id,
+            chat_id=session_manager.resolve_chat_id(user_id, thread_id_or_0 or None),
+            thread_id=thread_id_or_0 or None,
+            message_id=info.message_id,
+            window_id=info.window_id,
+            task_type="image_preview_clear",
+            content_type="image_preview",
+            semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
+            success=False,
+            reason="clear_image_preview_retry_exhausted",
+        )
+    except asyncio.CancelledError:
+        raise
+    finally:
+        if _image_preview_delete_retry_tasks.get(retry_key) is asyncio.current_task():
+            _image_preview_delete_retry_tasks.pop(retry_key, None)
 
 
 async def _do_clear_pending_input_message(
@@ -3073,6 +3287,8 @@ def reopen_commentary_lane(
 def clear_pre_final_visible_lane_state(
     user_id: int,
     thread_id: int | None = None,
+    *,
+    forget_image_preview: bool = True,
 ) -> None:
     """Clear pre-final artifact visibility state for a topic during teardown."""
     key = (user_id, thread_id or 0)
@@ -3082,7 +3298,9 @@ def clear_pre_final_visible_lane_state(
     _latest_pre_final_visible_kind.pop(key, None)
     _pending_input_enqueued.pop(key, None)
     _plan_update_msg_info.pop(key, None)
-    _image_preview_msg_info.pop(key, None)
+    if forget_image_preview:
+        _image_preview_msg_info.pop(key, None)
+        _discard_image_preview_retry_tasks_for_topic(user_id, thread_id or 0)
 
 
 def is_pre_final_visible_lane_closed(
@@ -3178,12 +3396,13 @@ async def clear_image_preview_message(
     bot: Bot | None,
     user_id: int,
     thread_id: int | None = None,
-) -> None:
+) -> bool:
     """Delete any tracked image-preview progress bubble when a bot handle exists."""
     if bot is None:
         _image_preview_msg_info.pop((user_id, thread_id or 0), None)
-        return
-    await _do_clear_image_preview_message(bot, user_id, thread_id or 0)
+        _discard_image_preview_retry_tasks_for_topic(user_id, thread_id or 0)
+        return True
+    return await _clear_image_preview_message_result(bot, user_id, thread_id or 0)
 
 
 async def open_new_turn_generation_with_cleanup(
@@ -3198,9 +3417,17 @@ async def open_new_turn_generation_with_cleanup(
     tracking so a later preview can delete-before-replace if a caller has no bot
     handle available.
     """
-    if bot is not None:
-        await clear_image_preview_message(bot, user_id, thread_id)
-    return open_new_turn_generation(user_id, thread_id)
+    thread_id_or_0 = thread_id or 0
+    old_info = _image_preview_msg_info.get((user_id, thread_id_or_0))
+    generation = open_new_turn_generation(user_id, thread_id)
+    if bot is not None and old_info is not None:
+        await _clear_image_preview_message_result(
+            bot,
+            user_id,
+            thread_id_or_0,
+            info=old_info,
+        )
+    return generation
 
 
 async def clear_pending_input_message(
@@ -3247,6 +3474,10 @@ async def shutdown_workers() -> None:
     _commentary_extra_msg_ids.clear()
     _plan_update_msg_info.clear()
     _image_preview_msg_info.clear()
+    for retry_task in list(_image_preview_delete_retry_tasks.values()):
+        if not retry_task.done():
+            retry_task.cancel()
+    _image_preview_delete_retry_tasks.clear()
     _pending_input_msg_info.clear()
     _pending_input_enqueued.clear()
     _warning_msg_info.clear()
