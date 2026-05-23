@@ -121,6 +121,7 @@ SURFACE_BINDING_STATES_KEY = "surface_binding_states"
 SURFACE_BIND_FLOW_VERSIONS_KEY = "surface_bind_flow_versions"
 SURFACE_BIND_FLOW_NONCES_KEY = "surface_bind_flow_nonces"
 SURFACE_PENDING_SLOTS_KEY = "surface_pending_slots"
+SURFACE_ROUTING_MODES_KEY = "surface_routing_modes"
 SURFACE_TITLES_KEY = "surface_titles"
 TOPIC_SURFACE_PREFIX = "t:"
 CHAT_SURFACE_PREFIX = "c:"
@@ -128,6 +129,9 @@ PENDING_SLOT_STATUS_PENDING = "pending"
 PENDING_SLOT_STATUS_CONSUMED = "consumed"
 SURFACE_PENDING_STATUS_PENDING = PENDING_SLOT_STATUS_PENDING
 SURFACE_PENDING_STATUS_CONSUMED = PENDING_SLOT_STATUS_CONSUMED
+ROUTING_MODE_STEER = "steer"
+ROUTING_MODE_QUEUE = "queue"
+DEFAULT_ROUTING_MODE = ROUTING_MODE_STEER
 
 
 @dataclass(frozen=True)
@@ -138,6 +142,7 @@ class PendingSurfaceSlot:
     revision: int
     status: str = PENDING_SLOT_STATUS_PENDING
     consumed_by_activation_id: str = ""
+    routing_mode: str = ""
 
     @classmethod
     def from_record(cls, record: Any) -> "PendingSurfaceSlot | None":
@@ -158,11 +163,15 @@ class PendingSurfaceSlot:
         if status != PENDING_SLOT_STATUS_CONSUMED:
             status = PENDING_SLOT_STATUS_PENDING
             consumed_by_activation_id = ""
+        routing_mode = str(record.get("routing_mode") or "").strip().casefold()
+        if routing_mode not in {ROUTING_MODE_STEER, ROUTING_MODE_QUEUE}:
+            routing_mode = ""
         return cls(
             text=text,
             revision=revision,
             status=status,
             consumed_by_activation_id=consumed_by_activation_id,
+            routing_mode=routing_mode,
         )
 
     def consume(self, activation_id: str) -> "PendingSurfaceSlot":
@@ -172,16 +181,20 @@ class PendingSurfaceSlot:
             revision=self.revision,
             status=PENDING_SLOT_STATUS_CONSUMED,
             consumed_by_activation_id=activation_id,
+            routing_mode=self.routing_mode,
         )
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to the stable JSON storage shape."""
-        return {
+        payload = {
             "text": self.text,
             "revision": self.revision,
             "status": self.status,
             "consumed_by_activation_id": self.consumed_by_activation_id,
         }
+        if self.routing_mode:
+            payload["routing_mode"] = self.routing_mode
+        return payload
 
 
 def _codex_rollout_file_size(file_path: Path) -> int:
@@ -481,6 +494,7 @@ class SessionManager:
     surface_binding_states: user_id -> {surface_key -> binding state}
     surface_bind_flow_versions/nonces: user_id -> {surface_key -> bind-flow credentials}
     surface_pending_slots: user_id -> {surface_key -> PendingSurfaceSlot}
+    surface_routing_modes: user_id -> {surface_key -> steer|queue}
     surface_titles: user_id -> {title_surface_key -> Telegram-visible title}
     thread_bindings/external_topic_bindings/topic_*: compatibility-only topic mirrors
     window_display_names: window_id -> window_name (for display)
@@ -500,6 +514,7 @@ class SessionManager:
     surface_pending_slots: dict[int, dict[str, PendingSurfaceSlot]] = field(
         default_factory=dict
     )
+    surface_routing_modes: dict[int, dict[str, str]] = field(default_factory=dict)
     surface_titles: dict[int, dict[str, str]] = field(default_factory=dict)
     thread_bindings: dict[int, dict[int, str]] = field(default_factory=dict)
     external_topic_bindings: dict[int, dict[int, dict[str, Any]]] = field(
@@ -599,6 +614,13 @@ class SessionManager:
                     is not None
                 }
                 for uid, pending_slots in self.surface_pending_slots.items()
+            },
+            SURFACE_ROUTING_MODES_KEY: {
+                str(uid): {
+                    surface_key: self.normalize_routing_mode(mode)
+                    for surface_key, mode in modes.items()
+                }
+                for uid, modes in self.surface_routing_modes.items()
             },
             SURFACE_TITLES_KEY: {
                 str(uid): {
@@ -942,6 +964,24 @@ class SessionManager:
                 normalized[user_id] = normalized_payload
         return normalized
 
+    @staticmethod
+    def normalize_routing_mode(mode: Any) -> str:
+        value = str(mode or "").strip().casefold()
+        if value == ROUTING_MODE_QUEUE:
+            return ROUTING_MODE_QUEUE
+        return ROUTING_MODE_STEER
+
+    @classmethod
+    def _normalize_surface_routing_modes(cls, raw: Any) -> dict[int, dict[str, str]]:
+        normalized: dict[int, dict[str, str]] = {}
+        for user_id, payload in cls._normalize_surface_map(raw).items():
+            normalized_payload: dict[str, str] = {}
+            for surface_key, mode in payload.items():
+                normalized_payload[surface_key] = cls.normalize_routing_mode(mode)
+            if normalized_payload:
+                normalized[user_id] = normalized_payload
+        return normalized
+
     def _sync_legacy_topic_views_from_surface(self) -> bool:
         """Rebuild legacy topic-keyed mirrors from canonical surface state."""
         thread_bindings: dict[int, dict[int, str]] = {}
@@ -1240,6 +1280,9 @@ class SessionManager:
                 self.surface_pending_slots = self._normalize_surface_pending_slots(
                     state.get(SURFACE_PENDING_SLOTS_KEY, {})
                 )
+                self.surface_routing_modes = self._normalize_surface_routing_modes(
+                    state.get(SURFACE_ROUTING_MODES_KEY, {})
+                )
                 self.surface_titles = {
                     user_id: {
                         surface_key: str(title).strip()
@@ -1302,6 +1345,7 @@ class SessionManager:
                 self.surface_bind_flow_versions = {}
                 self.surface_bind_flow_nonces = {}
                 self.surface_pending_slots = {}
+                self.surface_routing_modes = {}
                 self.window_display_names = {}
                 self.group_chat_ids = {}
                 migrate_legacy = False
@@ -1341,6 +1385,9 @@ class SessionManager:
                     migrate_legacy = True
                 if SURFACE_PENDING_SLOTS_KEY not in state:
                     self.surface_pending_slots = {}
+                    migrate_legacy = True
+                if SURFACE_ROUTING_MODES_KEY not in state:
+                    self.surface_routing_modes = {}
                     migrate_legacy = True
 
                 if self.topic_policies:
@@ -3446,6 +3493,83 @@ class SessionManager:
             chat_id=chat_id,
         )
 
+    def get_surface_routing_mode(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+        runtime_kind: str | None = None,
+    ) -> str:
+        """Return the persisted message routing mode for a surface.
+
+        Codex defaults to steer so existing ACK-verified behavior remains the
+        compatibility baseline until a user explicitly chooses queue mode.
+        """
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        mode = self.surface_routing_modes.get(user_id, {}).get(resolved_surface_key)
+        if mode:
+            return self.normalize_routing_mode(mode)
+        if str(runtime_kind or "").strip().casefold() == "codex":
+            return ROUTING_MODE_STEER
+        return ROUTING_MODE_QUEUE
+
+    def set_surface_routing_mode(
+        self,
+        user_id: int,
+        mode: str,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Persist a message routing mode for a canonical Telegram surface."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        normalized = self.normalize_routing_mode(mode)
+        self.surface_routing_modes.setdefault(user_id, {})[resolved_surface_key] = (
+            normalized
+        )
+        self._save_state()
+        return normalized
+
+    def toggle_surface_routing_mode(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+        runtime_kind: str | None = None,
+    ) -> str:
+        current = self.get_surface_routing_mode(
+            user_id,
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+            runtime_kind=runtime_kind,
+        )
+        next_mode = (
+            ROUTING_MODE_QUEUE
+            if current == ROUTING_MODE_STEER
+            else ROUTING_MODE_STEER
+        )
+        return self.set_surface_routing_mode(
+            user_id,
+            next_mode,
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+
     def peek_surface_pending_slot(
         self,
         user_id: int,
@@ -3480,6 +3604,7 @@ class SessionManager:
         surface_key: str | None = None,
         thread_id: int | None = None,
         chat_id: int | None = None,
+        routing_mode: str | None = None,
     ) -> dict[str, Any]:
         """Persist or overwrite the latest pending-slot payload for a surface."""
         resolved_surface_key = self._resolve_surface_key(
@@ -3503,6 +3628,9 @@ class SessionManager:
                 "revision": next_revision,
                 "status": status or PENDING_SLOT_STATUS_PENDING,
                 "consumed_by_activation_id": "",
+                "routing_mode": self.normalize_routing_mode(routing_mode)
+                if routing_mode
+                else "",
             }
         )
         assert record is not None
@@ -4431,6 +4559,62 @@ class SessionManager:
             text=text,
             allow_turn_context=False,
         )
+
+    async def send_to_window_queued(self, window_id: str, text: str) -> tuple[bool, str]:
+        """Send text through tmux without Codex replay-ACK gating.
+
+        This is the Telegram `queue` mode: it still verifies the target is a
+        live, writable runtime and fail-closes on visible prompts, but it does
+        not require Codex to be idle before submitting the text. Busy Codex
+        panes can therefore keep the input in their own pending composer queue.
+        """
+        if self.is_external_binding_window_id(window_id):
+            return False, EXTERNAL_BINDING_READ_ONLY_MESSAGE
+        display = self.get_display_name(window_id)
+        window = await tmux_manager.find_window_by_id(window_id)
+        if not window:
+            return False, "Window not found (may have been closed)"
+        mode_ok, mode_message, window = await self._ensure_tmux_mode_allows_input(
+            window
+        )
+        if not mode_ok or window is None:
+            return False, mode_message
+
+        runtime_kind = (
+            self.window_states[window_id].runtime_kind
+            if window_id in self.window_states
+            else config.default_runtime_kind
+        )
+        capability = self.get_runtime_capability(runtime_kind)
+        pane_text = await tmux_manager.capture_pane(window.window_id)
+        surface = classify_input_surface(pane_text or "")
+        if runtime_kind == "codex" and not _codex_has_live_input_plane(
+            pane_command=getattr(window, "pane_current_command", ""),
+            pane_text=pane_text,
+        ):
+            return False, CODEX_RUNTIME_NOT_ACTIVE_MESSAGE
+        if (
+            capability.blocked_input_policy == "fail_closed_on_visible_prompt"
+            and surface.kind == "blocked_prompt"
+        ):
+            return False, BLOCKED_PROMPT_SEND_MESSAGE
+
+        trimmed = text.lstrip()
+        if trimmed.startswith("/"):
+            success, message = await runtime_input_driver.send_raw_slash_command(
+                window.window_id,
+                text,
+                runtime_kind=runtime_kind,
+            )
+        else:
+            success, message = await runtime_input_driver.send_text(
+                window.window_id,
+                text,
+                runtime_kind=runtime_kind,
+            )
+        if success:
+            return True, f"Queued to {display}"
+        return False, message
 
     async def send_to_window(self, window_id: str, text: str) -> tuple[bool, str]:
         """Send text to a tmux window by ID."""

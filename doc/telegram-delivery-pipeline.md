@@ -538,9 +538,21 @@ Source does not affect priority.
 Routing mode affects semantics:
 
 - `queue`
-  - normal turn submission
+  - normal turn submission through the live runtime input plane
+  - for Codex, queue mode does not require the pane to be idle before ccbot
+    submits the prompt; Codex may hold the text in its own pending composer
+    queue
 - `steer`
-  - directed intervention into the current turn when the runtime supports it
+  - directed immediate intervention into the current turn when the runtime supports it
+  - this is the default for Codex-bound Telegram text so ccbot preserves
+    ACK-verified submit behavior unless the user switches modes
+
+Telegram controls:
+
+- `/switch` toggles the persisted mode for the current control surface.
+- `/switch steer` and `/switch queue` set the persisted mode explicitly.
+- `/steer <prompt>` and `/queue <prompt>` send one prompt with the named
+  semantics; without a prompt they set the persisted mode.
 
 Raw terminal control is not part of this equal message layer.
 Direct human `tmux` input remains a separate operator intervention surface and

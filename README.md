@@ -310,6 +310,9 @@ ccbot --help
 | `/unbind`     | Detach this topic or supported main chat from its live window |
 | `/resume`     | Bind this topic or supported main chat to a persisted runtime thread when the configured lane supports deterministic explicit resume |
 | `/rename`     | Rename the current tmux window and sync the topic title |
+| `/switch [steer|queue]` | Toggle this Telegram surface between `steer` and `queue`, or set the named mode explicitly |
+| `/steer <prompt>` | Send one prompt with immediate steer semantics; without a prompt, set this surface to `steer` |
+| `/queue <prompt>` | Send one prompt with runtime queue semantics; without a prompt, set this surface to `queue` |
 
 **Supported Codex core-lane commands shown in the Telegram menu when the configured launch lane is Codex:**
 
@@ -612,8 +615,18 @@ If the topic is bound to an external persisted thread without live tmux, input
 injection fails closed with an explicit read-only warning and a reattach hint.
 
 Routing note:
-- Telegram text, voice, photo, document, sticker, audio, and video inputs enter the equal message layer in `queue` mode by default.
-- `steer` is a routing semantic for runtime-aware control flows; it is not the same thing as raw terminal takeover.
+- Codex-bound Telegram text uses `steer` mode by default, preserving the
+  existing ACK-verified submit behavior.
+- `/switch` toggles the current Telegram surface between `steer` and `queue`;
+  `/switch steer` and `/switch queue` set the mode explicitly.
+- `/steer <prompt>` and `/queue <prompt>` are one-shot prompt sends that use the
+  named semantics without needing to toggle first. Without a prompt, `/steer`
+  and `/queue` set the persisted surface mode.
+- `queue` mode sends through the same live tmux input plane but does not require
+  Codex to be idle before submit; visible blocked prompts and dead input planes
+  still fail closed.
+- `steer` is a routing semantic for immediate runtime-aware control flows; it
+  is not the same thing as raw terminal takeover.
 - Raw terminal control in tmux remains a separate operator layer and is never modeled as an ordinary queued message.
 - Text sent to a writable live tmux runtime is delivered as payload plus
   a separate runtime submit key; payload/key success is not considered

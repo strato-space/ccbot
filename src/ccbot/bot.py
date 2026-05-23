@@ -204,6 +204,8 @@ from .state_schema import (
 )
 from .session import (
     BLOCKED_PROMPT_SEND_MESSAGE,
+    ROUTING_MODE_QUEUE,
+    ROUTING_MODE_STEER,
     FastRuntimeInputProof,
     PendingSurfaceSlot,
     session_manager,
@@ -878,6 +880,8 @@ def _put_pending_slot(
     user_id: int,
     surface: ControlSurface,
     text: str,
+    *,
+    routing_mode: str | None = None,
 ) -> dict[str, object] | None:
     if surface.surface_key is None:
         return None
@@ -886,11 +890,18 @@ def _put_pending_slot(
             user_id,
             text,
             surface_key=surface.surface_key,
+            routing_mode=routing_mode,
         )
     slots = _pending_slots(context.user_data)
     current = PendingSurfaceSlot.from_record(slots.get(surface.surface_key))
     revision = (current.revision if current is not None else 0) + 1
-    record = PendingSurfaceSlot(text=text, revision=revision).to_dict()
+    record = PendingSurfaceSlot(
+        text=text,
+        revision=revision,
+        routing_mode=session_manager.normalize_routing_mode(routing_mode)
+        if routing_mode
+        else "",
+    ).to_dict()
     slots[surface.surface_key] = record
     return record
 
@@ -935,9 +946,9 @@ def _consume_pending_slot(
     user_id: int,
     surface: ControlSurface,
     activation_id: str,
-) -> str | None:
+) -> tuple[str, str | None]:
     if surface.surface_key is None:
-        return None
+        return "", None
     if _session_has_method("consume_surface_pending_slot"):
         record = session_manager.consume_surface_pending_slot(
             user_id,
@@ -945,17 +956,18 @@ def _consume_pending_slot(
             surface_key=surface.surface_key,
         )
         if not isinstance(record, dict):
-            return None
+            return "", None
         text = record.get("text")
-        return text if isinstance(text, str) and text else None
+        if not isinstance(text, str) or not text:
+            return "", None
+        routing_mode = record.get("routing_mode")
+        return text, routing_mode if isinstance(routing_mode, str) else None
     slots = _pending_slots(context.user_data)
     slot = PendingSurfaceSlot.from_record(slots.get(surface.surface_key))
-    if slot is None:
-        return None
-    if slot.status != "pending":
-        return None
+    if slot is None or slot.status != "pending":
+        return "", None
     slots[surface.surface_key] = slot.consume(activation_id).to_dict()
-    return slot.text
+    return slot.text, slot.routing_mode or None
 
 
 def _get_session_window_for_surface(
@@ -1531,6 +1543,9 @@ def build_bot_commands() -> list[BotCommand]:
         BotCommand("unbind", "Detach this topic from its live window"),
         BotCommand("resume", "Resume a persisted thread or session in this topic"),
         BotCommand("rename", "Rename the current tmux window and topic"),
+        BotCommand("switch", "Toggle or set Telegram steer/queue routing mode"),
+        BotCommand("steer", "Send prompt with immediate steer semantics"),
+        BotCommand("queue", "Send prompt with queued runtime semantics"),
     ]
     if default_runtime_kind == "codex":
         for cmd_name, desc in CODEX_MENU_COMMANDS.items():
@@ -1961,7 +1976,7 @@ async def _maybe_autosend_pending_after_activation(
     chat_id: int | None = None,
 ) -> None:
     activation_id = f"{window_id}:{time.time_ns()}"
-    pending_text = _consume_pending_slot(
+    pending_text, pending_routing_mode = _consume_pending_slot(
         context,
         user.id,
         surface,
@@ -1972,7 +1987,13 @@ async def _maybe_autosend_pending_after_activation(
             _set_pending_surface(context.user_data, None)
             context.user_data.pop("_pending_thread_text", None)
         return
-    send_ok, send_msg = await session_manager.send_to_window(window_id, pending_text)
+    if pending_routing_mode == ROUTING_MODE_QUEUE:
+        send_ok, send_msg = await session_manager.send_to_window_queued(
+            window_id,
+            pending_text,
+        )
+    else:
+        send_ok, send_msg = await session_manager.send_to_window(window_id, pending_text)
     if context.user_data is not None:
         _set_pending_surface(context.user_data, None)
         context.user_data.pop("_pending_thread_text", None)
@@ -2008,6 +2029,7 @@ async def _start_bind_flow(
     *,
     explicit: bool,
     pending_text: str | None = None,
+    pending_routing_mode: str | None = None,
 ) -> None:
     """Open the bind chooser and mark the control surface as being in a bind flow."""
     if update.message is None:
@@ -2020,7 +2042,13 @@ async def _start_bind_flow(
         _allow_implicit_bind(user.id, surface)
     _start_surface_bind_flow_state(user.id, surface)
     if pending_text:
-        _put_pending_slot(context, user.id, surface, pending_text)
+        _put_pending_slot(
+            context,
+            user.id,
+            surface,
+            pending_text,
+            routing_mode=pending_routing_mode,
+        )
     bind_flow_version, bind_flow_nonce = _get_surface_bind_flow_credentials(
         user.id, surface
     )
@@ -4652,14 +4680,20 @@ async def _register_bound_window(
     )
 
 
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _handle_text_payload(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    *,
+    forced_routing_mode: str | None = None,
+) -> None:
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
         if update.message:
             await safe_reply(update.message, "You are not authorized to use this bot.")
         return
 
-    if not update.message or not update.message.text:
+    if not update.message or not text:
         return
 
     surface = control_surface_classifier(update)
@@ -4673,7 +4707,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if chat and chat.type in ("group", "supergroup"):
         session_manager.set_group_chat_id(user.id, thread_id, chat.id)
 
-    text = update.message.text
     if chat is not None:
         log_telegram_delivery(
             action="runtime_input_latency",
@@ -4774,6 +4807,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             binding_state = BINDING_STATE_NONE
 
         if surface.is_shared_group:
+            if forced_routing_mode in {ROUTING_MODE_STEER, ROUTING_MODE_QUEUE}:
+                await safe_reply(
+                    update.message,
+                    f"{UNBOUND_TOPIC_MESSAGE} Use /bind first.",
+                )
             return
 
         if topic_policy == TOPIC_POLICY_MANUAL_BIND_REQUIRED:
@@ -4790,6 +4828,15 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         pending_text = text
         explicit = False
+        pending_routing_mode = forced_routing_mode
+        if pending_routing_mode not in {ROUTING_MODE_STEER, ROUTING_MODE_QUEUE}:
+            pending_routing_mode = session_manager.get_surface_routing_mode(
+                user.id,
+                surface_key=surface.surface_key,
+                thread_id=surface.thread_id,
+                chat_id=surface.chat_id,
+                runtime_kind=_default_launch_runtime_kind(),
+            )
         if addressed_event.is_addressed:
             explicit = True
             if addressed_event.is_bare:
@@ -4804,6 +4851,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             surface,
             explicit=explicit,
             pending_text=pending_text,
+            pending_routing_mode=pending_routing_mode,
         )
         return
 
@@ -4950,6 +4998,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     ):
         return
 
+    routing_mode = session_manager.get_surface_routing_mode(
+        user.id,
+        surface_key=surface.surface_key,
+        thread_id=surface.thread_id,
+        chat_id=surface.chat_id,
+        runtime_kind=_get_window_runtime_kind(wid),
+    )
+    if forced_routing_mode in {ROUTING_MODE_STEER, ROUTING_MODE_QUEUE}:
+        routing_mode = forced_routing_mode
+
     if (
         not text.startswith("!")
         and surface.surface_key
@@ -4978,6 +5036,45 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             binding_generation=binding_generation,
         )
         key = IngressBatchKey.from_target(captured, media_group_id=None)
+        has_open_attachment_batch = _attachment_batcher.has_open_batch_for_target(
+            captured
+        )
+        if routing_mode == ROUTING_MODE_QUEUE and not has_open_attachment_batch:
+            proof_id = uuid.uuid4().hex
+            await enqueue_ingress_receipt(
+                context.bot,
+                user.id,
+                wid,
+                text,
+                proof_id=proof_id,
+                thread_id=surface.message_thread_id,
+                **surface_identity_kwargs,
+            )
+            success, message = await session_manager.send_to_window_queued(wid, text)
+            if success:
+                mark_runtime_presence_active(user.id, surface.message_thread_id, wid)
+                return
+            await enqueue_ingress_receipt(
+                context.bot,
+                user.id,
+                wid,
+                text,
+                proof_id=proof_id,
+                receipt_status="failed",
+                thread_id=surface.message_thread_id,
+                **surface_identity_kwargs,
+            )
+            if message == BLOCKED_PROMPT_SEND_MESSAGE:
+                await _surface_blocked_prompt_state(
+                    context.bot,
+                    user.id,
+                    wid,
+                    surface.message_thread_id,
+                    reply_message=update.message,
+                )
+                return
+            await safe_reply(update.message, f"❌ {message}")
+            return
         safety = get_window_input_safety_snapshot(w.window_id)
         if (
             safety is not None
@@ -5052,7 +5149,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             _schedule_attachment_batch_flush(key)
         return
 
-    success, message = await session_manager.send_to_window(wid, text)
+    if routing_mode == ROUTING_MODE_QUEUE and not text.startswith("!"):
+        success, message = await session_manager.send_to_window_queued(wid, text)
+    else:
+        success, message = await session_manager.send_to_window(wid, text)
     if not success:
         if message == BLOCKED_PROMPT_SEND_MESSAGE:
             await _surface_blocked_prompt_state(
@@ -5109,6 +5209,131 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             thread_id,
             **surface_identity_kwargs,
         )
+
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = update.message.text if update.message and update.message.text else ""
+    await _handle_text_payload(update, context, text)
+
+
+def _routing_command_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    text = update.message.text if update.message and update.message.text else ""
+    if text:
+        head, sep, tail = text.partition(" ")
+        if sep:
+            return tail
+        if "@" in head:
+            return ""
+    return " ".join(str(arg) for arg in (getattr(context, "args", None) or [])).strip()
+
+
+def _routing_mode_label(mode: str) -> str:
+    return ROUTING_MODE_QUEUE if mode == ROUTING_MODE_QUEUE else ROUTING_MODE_STEER
+
+
+async def _set_current_surface_routing_mode(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    mode: str,
+) -> None:
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        if update.message:
+            await safe_reply(update.message, "You are not authorized to use this bot.")
+        return
+    if not update.message:
+        return
+    surface = control_surface_classifier(update)
+    if not surface.supports_bind_flow:
+        await safe_reply(update.message, _unsupported_surface_message(surface))
+        return
+    chat = update.effective_chat
+    if chat and chat.type in ("group", "supergroup"):
+        session_manager.set_group_chat_id(user.id, surface.message_thread_id, chat.id)
+    normalized = session_manager.set_surface_routing_mode(
+        user.id,
+        mode,
+        surface_key=surface.surface_key,
+        thread_id=surface.thread_id,
+        chat_id=surface.chat_id,
+    )
+    await safe_reply(
+        update.message,
+        f"✅ Telegram routing mode: {_routing_mode_label(normalized)}",
+    )
+
+
+async def switch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    prompt = _routing_command_prompt(update, context)
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        if update.message:
+            await safe_reply(update.message, "You are not authorized to use this bot.")
+        return
+    if not update.message:
+        return
+    surface = control_surface_classifier(update)
+    if not surface.supports_bind_flow:
+        await safe_reply(update.message, _unsupported_surface_message(surface))
+        return
+    chat = update.effective_chat
+    if chat and chat.type in ("group", "supergroup"):
+        session_manager.set_group_chat_id(user.id, surface.message_thread_id, chat.id)
+    requested = prompt.casefold()
+    if requested in {ROUTING_MODE_STEER, ROUTING_MODE_QUEUE}:
+        mode = session_manager.set_surface_routing_mode(
+            user.id,
+            requested,
+            surface_key=surface.surface_key,
+            thread_id=surface.thread_id,
+            chat_id=surface.chat_id,
+        )
+    elif not requested:
+        wid = _resolve_session_window_for_surface(user.id, surface)
+        runtime_kind = (
+            (_get_window_runtime_kind(wid) if wid else None)
+            or _default_launch_runtime_kind()
+        )
+        mode = session_manager.toggle_surface_routing_mode(
+            user.id,
+            surface_key=surface.surface_key,
+            thread_id=surface.thread_id,
+            chat_id=surface.chat_id,
+            runtime_kind=runtime_kind,
+        )
+    else:
+        await safe_reply(update.message, "Usage: /switch [steer|queue]")
+        return
+    await safe_reply(
+        update.message,
+        f"✅ Telegram routing mode: {_routing_mode_label(mode)}",
+    )
+
+
+async def steer_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    prompt = _routing_command_prompt(update, context)
+    if not prompt:
+        await _set_current_surface_routing_mode(update, context, ROUTING_MODE_STEER)
+        return
+    await _handle_text_payload(
+        update,
+        context,
+        prompt,
+        forced_routing_mode=ROUTING_MODE_STEER,
+    )
+
+
+async def queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    prompt = _routing_command_prompt(update, context)
+    if not prompt:
+        await _set_current_surface_routing_mode(update, context, ROUTING_MODE_QUEUE)
+        return
+    await _handle_text_payload(
+        update,
+        context,
+        prompt,
+        forced_routing_mode=ROUTING_MODE_QUEUE,
+    )
 
 
 # --- Window creation helper ---
@@ -6737,6 +6962,9 @@ def create_bot() -> Application:
     application.add_handler(CommandHandler("resume", resume_command))
     application.add_handler(CommandHandler("rename", rename_command))
     application.add_handler(CommandHandler("usage", usage_command))
+    application.add_handler(CommandHandler("switch", switch_command))
+    application.add_handler(CommandHandler("steer", steer_command))
+    application.add_handler(CommandHandler("queue", queue_command))
     application.add_handler(CallbackQueryHandler(callback_handler))
     # Topic closed event — auto-kill associated window
     application.add_handler(

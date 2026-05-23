@@ -160,6 +160,205 @@ def _reset_attachment_batch_state():
     bot_mod._attachment_batch_bots.clear()
 
 
+
+
+class TestRoutingModeCommands:
+    @pytest.mark.asyncio
+    async def test_switch_command_toggles_current_surface_mode(self):
+        update = _make_topic_update(text="/switch")
+        context = _make_context()
+        context.args = []
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._default_launch_runtime_kind", return_value="codex"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.toggle_surface_routing_mode.return_value = "queue"
+
+            await bot_mod.switch_command(update, context)
+
+        mock_sm.toggle_surface_routing_mode.assert_called_once()
+        assert mock_sm.toggle_surface_routing_mode.call_args.kwargs["runtime_kind"] == "codex"
+        mock_reply.assert_awaited_once()
+        assert "queue" in mock_reply.await_args.args[1]
+
+
+    @pytest.mark.asyncio
+    async def test_switch_command_first_toggle_on_codex_defaults_to_queue(self):
+        update = _make_topic_update(text="/switch")
+        context = _make_context()
+        context.args = []
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._default_launch_runtime_kind", return_value="codex"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            def _toggle(user_id, **kwargs):
+                assert kwargs["runtime_kind"] == "codex"
+                return "queue"
+
+            mock_sm.toggle_surface_routing_mode.side_effect = _toggle
+
+            await bot_mod.switch_command(update, context)
+
+        mock_reply.assert_awaited_once()
+        assert "queue" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_forced_queue_command_unbound_shared_group_replies_unbound(self):
+        update = _make_topic_update(chat_type="supergroup", text="/queue hello")
+        context = _make_context()
+        context.args = ["hello"]
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+            mock_sm.get_topic_binding_state.return_value = BINDING_STATE_NONE
+            mock_sm.get_topic_policy.return_value = TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
+
+            await bot_mod.queue_command(update, context)
+
+        mock_reply.assert_awaited_once()
+        assert "/bind" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_steer_command_with_prompt_uses_one_shot_steer_mode(self):
+        update = _make_topic_update(text="/steer hi")
+        context = _make_context()
+        context.args = ["hi"]
+
+        with patch(
+            "ccbot.bot._handle_text_payload", new_callable=AsyncMock
+        ) as mock_handle:
+            await bot_mod.steer_command(update, context)
+
+        mock_handle.assert_awaited_once_with(
+            update,
+            context,
+            "hi",
+            forced_routing_mode="steer",
+        )
+
+    @pytest.mark.asyncio
+    async def test_queue_command_with_prompt_uses_one_shot_queue_mode(self):
+        update = _make_topic_update(text="/queue hi   there")
+        context = _make_context()
+        context.args = ["hi", "there"]
+
+        with patch(
+            "ccbot.bot._handle_text_payload", new_callable=AsyncMock
+        ) as mock_handle:
+            await bot_mod.queue_command(update, context)
+
+        mock_handle.assert_awaited_once_with(
+            update,
+            context,
+            "hi   there",
+            forced_routing_mode="queue",
+        )
+
+    @pytest.mark.asyncio
+    async def test_text_handler_uses_persisted_queue_mode_for_bound_text(self):
+        update = _make_topic_update(text="hello")
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
+            patch("ccbot.bot._surface_omx_question_state", new_callable=AsyncMock, return_value=False),
+            patch("ccbot.bot.find_answerable_omx_question_for_window", new_callable=AsyncMock, return_value=None),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.is_external_binding_window_id.return_value = False
+            mock_sm.get_surface_routing_mode.return_value = "queue"
+            mock_sm.send_to_window_queued = AsyncMock(return_value=(True, "Queued to @7"))
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
+            mock_tmux.find_window_by_id = AsyncMock(return_value=MagicMock(window_id="@7"))
+            mock_tmux.capture_pane = AsyncMock(return_value="OpenAI Codex\n› ready")
+
+            await bot_mod.text_handler(update, context)
+
+        mock_sm.send_to_window_queued.assert_awaited_once_with("@7", "hello")
+        mock_sm.send_to_window.assert_not_called()
+        mock_reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pending_queue_prompt_autosends_with_queue_mode_after_activation(self):
+        context = _make_context()
+        user = SimpleNamespace(id=1)
+        surface = bot_mod.ControlSurface(
+            kind="group_topic",
+            chat_id=100,
+            thread_id=42,
+            legacy_scope_id=42,
+            surface_key="t:42",
+            label="topic",
+            is_shared_group=False,
+            supports_bind_flow=True,
+        )
+        context.user_data[bot_mod.PENDING_SURFACE_SLOTS_KEY] = {
+            "t:42": {
+                "text": "queued prompt",
+                "revision": 1,
+                "status": "pending",
+                "consumed_by_activation_id": "",
+                "routing_mode": "queue",
+            }
+        }
+
+        with (
+            patch("ccbot.bot._session_has_method", return_value=False),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.safe_send", new_callable=AsyncMock),
+        ):
+            mock_sm.send_to_window_queued = AsyncMock(return_value=(True, "queued"))
+            mock_sm.send_to_window = AsyncMock()
+
+            await bot_mod._maybe_autosend_pending_after_activation(
+                context,
+                user=user,
+                surface=surface,
+                window_id="@7",
+                chat_id=100,
+            )
+
+        mock_sm.send_to_window_queued.assert_awaited_once_with("@7", "queued prompt")
+        mock_sm.send_to_window.assert_not_called()
+
+
+    @pytest.mark.asyncio
+    async def test_unbound_surface_persists_configured_queue_mode_for_pending_text(self):
+        update = _make_topic_update(chat_type="private", text="hello")
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot._start_bind_flow", new_callable=AsyncMock) as mock_start_bind,
+        ):
+            mock_sm.get_window_for_thread.return_value = None
+            mock_sm.get_topic_binding_state.return_value = BINDING_STATE_NONE
+            mock_sm.get_topic_policy.return_value = TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
+            mock_sm.get_surface_routing_mode.return_value = "queue"
+
+            await bot_mod.text_handler(update, context)
+
+        mock_start_bind.assert_awaited_once()
+        assert mock_start_bind.await_args.kwargs["pending_text"] == "hello"
+        assert mock_start_bind.await_args.kwargs["pending_routing_mode"] == "queue"
+
+
+
 class TestBotRegistration:
     def test_create_bot_keeps_voice_photo_and_passthrough_handlers(self, monkeypatch):
         """Freeze the public routing surface exposed by create_bot()."""
@@ -249,6 +448,9 @@ class TestBotRegistration:
         assert "audio_handler" in callbacks
         assert "video_handler" in callbacks
         assert "voice_handler" in callbacks
+        assert "switch_command" in callbacks
+        assert "steer_command" in callbacks
+        assert "queue_command" in callbacks
         assert "topic_closed_handler" in callbacks
         assert "topic_created_handler" in callbacks
         assert "topic_edited_handler" in callbacks
@@ -258,6 +460,9 @@ class TestBotRegistration:
             for handler in app.handlers
             if getattr(handler, "callback", None) is not None
         ]
+        assert ordered_callbacks.index("queue_command") < ordered_callbacks.index(
+            "forward_command_handler"
+        )
         unsupported_index = ordered_callbacks.index("unsupported_content_handler")
         assert ordered_callbacks.index("audio_handler") < unsupported_index
         assert ordered_callbacks.index("video_handler") < unsupported_index
@@ -438,6 +643,9 @@ class TestBotRegistration:
             "unbind",
             "resume",
             "rename",
+            "switch",
+            "steer",
+            "queue",
             "clear",
             "compact",
             "diff",
@@ -463,6 +671,9 @@ class TestBotRegistration:
             "unbind",
             "resume",
             "rename",
+            "switch",
+            "steer",
+            "queue",
         ]
         assert "status" not in names
 
@@ -700,6 +911,7 @@ class TestSurfacePendingSlots:
             1,
             "hello",
             surface_key="t:42",
+            routing_mode=None,
         )
 
     def test_pending_slot_fallback_uses_domain_normalizer(self):
@@ -740,7 +952,7 @@ class TestSurfacePendingSlots:
             "consumed_by_activation_id": "",
         }
         assert peeked == record
-        assert consumed == "hello"
+        assert consumed == ("hello", None)
         assert context.user_data[bot_mod.PENDING_SURFACE_SLOTS_KEY]["t:42"] == {
             "text": "hello",
             "revision": 2,

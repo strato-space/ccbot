@@ -537,6 +537,131 @@ class TestSurfaceBindingsChatMode:
         assert mgr.peek_surface_pending_slot(100, chat_id=-100200300) is None
 
 
+
+
+class TestSurfaceRoutingModes:
+    def test_surface_routing_mode_defaults_by_runtime_and_persists(self, mgr: SessionManager) -> None:
+        assert (
+            mgr.get_surface_routing_mode(
+                100,
+                chat_id=-100200300,
+                runtime_kind="codex",
+            )
+            == "steer"
+        )
+        assert (
+            mgr.get_surface_routing_mode(
+                100,
+                chat_id=-100200300,
+                runtime_kind="fast-agent",
+            )
+            == "queue"
+        )
+
+        saved = mgr.set_surface_routing_mode(100, "queue", chat_id=-100200300)
+
+        assert saved == "queue"
+        assert mgr.get_surface_routing_mode(100, chat_id=-100200300) == "queue"
+        assert mgr.toggle_surface_routing_mode(100, chat_id=-100200300) == "steer"
+
+    @pytest.mark.asyncio
+    async def test_send_to_window_queued_codex_allows_busy_pane_without_rollout_ack(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="node"
+                )
+            )
+            mock_tmux.capture_pane = AsyncMock(
+                return_value=(
+                    "previous output\n"
+                    "· Working (3m 09s • esc to interrupt)\n"
+                    "────────────────────────────────────────\n"
+                )
+            )
+            mock_driver.send_text = AsyncMock(return_value=(True, "sent"))
+
+            success, message = await mgr.send_to_window_queued("@1", "hello")
+
+        assert success is True
+        assert message == "Queued to @1"
+        mock_driver.send_text.assert_awaited_once_with(
+            "@1",
+            "hello",
+            runtime_kind="codex",
+        )
+
+
+    @pytest.mark.asyncio
+    async def test_send_to_window_queued_codex_fails_when_live_input_plane_missing(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="bash"
+                )
+            )
+            mock_tmux.capture_pane = AsyncMock(return_value="$ ")
+            mock_driver.send_text = AsyncMock()
+
+            success, message = await mgr.send_to_window_queued("@1", "hello")
+
+        assert success is False
+        assert "live process is not active" in message
+        mock_driver.send_text.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_to_window_queued_still_fails_closed_on_blocked_prompt(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(
+                    window_id="@1", pane_current_command="node"
+                )
+            )
+            mock_tmux.capture_pane = AsyncMock(
+                return_value="OpenAI Codex\n› ping\n■ Approval required\n"
+            )
+            mock_driver.send_text = AsyncMock()
+
+            success, message = await mgr.send_to_window_queued("@1", "hello")
+
+        assert success is False
+        assert message == "Input blocked by a visible prompt in the terminal"
+        mock_driver.send_text.assert_not_called()
+
+
 class TestRuntimeCapabilityRegistryIntegration:
     def test_session_manager_exposes_runtime_capabilities(
         self, mgr: SessionManager
