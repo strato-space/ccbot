@@ -93,6 +93,18 @@ class TestThreadBindings:
         assert binding.chat_id == -100200300
         assert binding.thread_id == 42
 
+    def test_iter_topic_bindings_canonicalizes_legacy_topic_when_chat_is_known(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.set_group_chat_id(100, 42, -100200300)
+        mgr.bind_surface(100, "@1", surface_key="t:42", window_name="one")
+
+        binding = next(mgr.iter_topic_bindings())
+
+        assert binding.surface_key == "t:-100200300:42"
+        assert binding.chat_id == -100200300
+        assert binding.thread_id == 42
+
     def test_iter_topic_bindings_preserves_runtime_kind(
         self, mgr: SessionManager
     ) -> None:
@@ -434,6 +446,21 @@ class TestSurfaceBindingsChatMode:
         assert surface_key == "c:-100200300"
         assert chat_id == -100200300
         assert thread_id is None
+
+    def test_get_surface_coordinates_canonicalizes_legacy_topic_when_chat_is_known(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.set_group_chat_id(100, 42, -100200300)
+        mgr.bind_surface(100, "@7", surface_key="t:42", window_name="topic")
+
+        surface_key, chat_id, thread_id = mgr.get_surface_coordinates_for_window(
+            100,
+            "@7",
+        )
+
+        assert surface_key == "t:-100200300:42"
+        assert chat_id == -100200300
+        assert thread_id == 42
 
     def test_surface_policy_and_binding_state_for_chat(
         self, mgr: SessionManager

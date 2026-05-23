@@ -768,6 +768,13 @@ class SessionManager:
             return False
         return self.resolve_chat_id(user_id, thread_id) == chat_id
 
+    def _stored_topic_chat_id(self, user_id: int, thread_id: int | None) -> int | None:
+        """Return an explicitly stored Telegram group chat id for a topic."""
+        if thread_id is None:
+            return None
+        chat_id = self.group_chat_ids.get(f"{int(user_id)}:{int(thread_id)}")
+        return chat_id if isinstance(chat_id, int) else None
+
     def _resolve_surface_key(
         self,
         *,
@@ -2687,6 +2694,17 @@ class SessionManager:
             kind, chat_id, thread_id = parsed
             if kind == "chat":
                 return surface_key, chat_id, None
+            if thread_id is not None and chat_id is None:
+                stored_chat_id = self._stored_topic_chat_id(user_id, thread_id)
+                if stored_chat_id is not None:
+                    return (
+                        self.make_surface_key(
+                            thread_id=thread_id,
+                            chat_id=stored_chat_id,
+                        ),
+                        stored_chat_id,
+                        thread_id,
+                    )
             return surface_key, chat_id, thread_id
         return None, None, None
 
@@ -3678,11 +3696,25 @@ class SessionManager:
                     if parsed_surface is not None
                     else self._topic_thread_id_from_surface_key(surface_key)
                 )
+                delivery_surface_key = surface_key
+                if (
+                    parsed_surface is not None
+                    and parsed_surface[0] == "topic"
+                    and thread_id is not None
+                    and chat_id is None
+                ):
+                    stored_chat_id = self._stored_topic_chat_id(user_id, thread_id)
+                    if stored_chat_id is not None:
+                        chat_id = stored_chat_id
+                        delivery_surface_key = self.make_surface_key(
+                            thread_id=thread_id,
+                            chat_id=stored_chat_id,
+                        )
                 if self.is_external_binding_window_id(window_id):
                     external = (
                         self.get_external_surface_binding(
                             user_id,
-                            surface_key=surface_key,
+                            surface_key=delivery_surface_key,
                         )
                         or {}
                     )
@@ -3704,7 +3736,7 @@ class SessionManager:
                         binding_scope="external",
                         source_thread_id=source_thread_id,
                         read_only=bool(external.get("read_only", True)),
-                        surface_key=surface_key,
+                        surface_key=delivery_surface_key,
                         chat_id=chat_id,
                     )
                     continue
@@ -3724,7 +3756,7 @@ class SessionManager:
                     runtime_kind=descriptor.runtime_kind
                     if descriptor is not None
                     else config.default_runtime_kind,
-                    surface_key=surface_key,
+                    surface_key=delivery_surface_key,
                     chat_id=chat_id,
                 )
 
