@@ -494,7 +494,7 @@ class SessionManager:
     surface_binding_states: user_id -> {surface_key -> binding state}
     surface_bind_flow_versions/nonces: user_id -> {surface_key -> bind-flow credentials}
     surface_pending_slots: user_id -> {surface_key -> PendingSurfaceSlot}
-    surface_routing_modes: user_id -> {surface_key -> steer|queue}
+    surface_routing_modes: surface_key -> steer|queue
     surface_titles: user_id -> {title_surface_key -> Telegram-visible title}
     thread_bindings/external_topic_bindings/topic_*: compatibility-only topic mirrors
     window_display_names: window_id -> window_name (for display)
@@ -514,7 +514,7 @@ class SessionManager:
     surface_pending_slots: dict[int, dict[str, PendingSurfaceSlot]] = field(
         default_factory=dict
     )
-    surface_routing_modes: dict[int, dict[str, str]] = field(default_factory=dict)
+    surface_routing_modes: dict[str, str] = field(default_factory=dict)
     surface_titles: dict[int, dict[str, str]] = field(default_factory=dict)
     thread_bindings: dict[int, dict[int, str]] = field(default_factory=dict)
     external_topic_bindings: dict[int, dict[int, dict[str, Any]]] = field(
@@ -616,11 +616,8 @@ class SessionManager:
                 for uid, pending_slots in self.surface_pending_slots.items()
             },
             SURFACE_ROUTING_MODES_KEY: {
-                str(uid): {
-                    surface_key: self.normalize_routing_mode(mode)
-                    for surface_key, mode in modes.items()
-                }
-                for uid, modes in self.surface_routing_modes.items()
+                surface_key: self.normalize_routing_mode(mode)
+                for surface_key, mode in self.surface_routing_modes.items()
             },
             SURFACE_TITLES_KEY: {
                 str(uid): {
@@ -974,15 +971,25 @@ class SessionManager:
         return ROUTING_MODE_STEER
 
     @classmethod
-    def _normalize_surface_routing_modes(cls, raw: Any) -> dict[int, dict[str, str]]:
-        normalized: dict[int, dict[str, str]] = {}
-        for user_id, payload in cls._normalize_surface_map(raw).items():
-            for surface_key, mode in payload.items():
-                owner_id = cls._routing_mode_owner_id_static(user_id, surface_key)
-                normalized.setdefault(owner_id, {})[surface_key] = cls.normalize_routing_mode(
-                    mode
-                )
-        return {uid: modes for uid, modes in normalized.items() if modes}
+    def _normalize_surface_routing_modes(cls, raw: Any) -> dict[str, str]:
+        """Normalize routing modes to a flat surface-key map.
+
+        Older state stored modes under ``user_id -> surface_key`` and an
+        intermediate migration used owner ``0`` for chat-qualified surfaces.
+        Routing mode is a property of the effective Telegram control surface
+        only, so all supported shapes collapse to ``surface_key -> mode``.
+        """
+        normalized: dict[str, str] = {}
+        if not isinstance(raw, dict):
+            return normalized
+        for key, value in raw.items():
+            if isinstance(value, dict):
+                for surface_key, mode in value.items():
+                    if isinstance(surface_key, str):
+                        normalized[surface_key] = cls.normalize_routing_mode(mode)
+            elif isinstance(key, str):
+                normalized[key] = cls.normalize_routing_mode(value)
+        return normalized
 
     def _sync_legacy_topic_views_from_surface(self) -> bool:
         """Rebuild legacy topic-keyed mirrors from canonical surface state."""
@@ -3495,20 +3502,6 @@ class SessionManager:
             chat_id=chat_id,
         )
 
-    @classmethod
-    def _routing_mode_owner_id_static(cls, user_id: int, surface_key: str) -> int:
-        parsed = cls._parse_surface_key(surface_key)
-        if parsed is None:
-            return user_id
-        kind, chat_id, thread_id = parsed
-        if kind == "chat" and chat_id is not None:
-            return 0
-        if kind == "topic" and chat_id is not None and thread_id is not None:
-            return 0
-        return user_id
-
-    def _routing_mode_owner_id(self, user_id: int, surface_key: str) -> int:
-        return self._routing_mode_owner_id_static(user_id, surface_key)
 
     def get_surface_routing_mode(
         self,
@@ -3529,22 +3522,9 @@ class SessionManager:
             thread_id=thread_id,
             chat_id=chat_id,
         )
-        owner_id = self._routing_mode_owner_id(user_id, resolved_surface_key)
-        mode = self.surface_routing_modes.get(owner_id, {}).get(resolved_surface_key)
+        mode = self.surface_routing_modes.get(resolved_surface_key)
         if mode:
             return self.normalize_routing_mode(mode)
-        legacy_mode = self.surface_routing_modes.get(user_id, {}).get(resolved_surface_key)
-        if legacy_mode:
-            normalized = self.normalize_routing_mode(legacy_mode)
-            if owner_id != user_id:
-                self.surface_routing_modes.setdefault(owner_id, {})[resolved_surface_key] = (
-                    normalized
-                )
-                self.surface_routing_modes.get(user_id, {}).pop(resolved_surface_key, None)
-                if not self.surface_routing_modes.get(user_id):
-                    self.surface_routing_modes.pop(user_id, None)
-                self._save_state()
-            return normalized
         if str(runtime_kind or "").strip().casefold() == "codex":
             return ROUTING_MODE_STEER
         return ROUTING_MODE_QUEUE
@@ -3564,15 +3544,8 @@ class SessionManager:
             thread_id=thread_id,
             chat_id=chat_id,
         )
-        owner_id = self._routing_mode_owner_id(user_id, resolved_surface_key)
         normalized = self.normalize_routing_mode(mode)
-        self.surface_routing_modes.setdefault(owner_id, {})[resolved_surface_key] = (
-            normalized
-        )
-        if owner_id != user_id:
-            self.surface_routing_modes.get(user_id, {}).pop(resolved_surface_key, None)
-            if not self.surface_routing_modes.get(user_id):
-                self.surface_routing_modes.pop(user_id, None)
+        self.surface_routing_modes[resolved_surface_key] = normalized
         self._save_state()
         return normalized
 

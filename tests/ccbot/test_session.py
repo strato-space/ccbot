@@ -584,12 +584,15 @@ class TestSurfaceRoutingModes:
             )
             == "queue"
         )
-        assert "t:-100200300:42" in mgr.surface_routing_modes[0]
+        assert mgr.surface_routing_modes["t:-100200300:42"] == "queue"
 
     def test_surface_routing_mode_migrates_legacy_user_owned_chat_thread_mode(
         self, mgr: SessionManager
     ) -> None:
-        mgr.surface_routing_modes = {100: {"t:-100200300:42": "queue"}}
+        normalized = mgr._normalize_surface_routing_modes(
+            {100: {"t:-100200300:42": "queue"}}
+        )
+        mgr.surface_routing_modes = normalized
 
         assert (
             mgr.get_surface_routing_mode(
@@ -600,7 +603,14 @@ class TestSurfaceRoutingModes:
             )
             == "queue"
         )
-        assert mgr.surface_routing_modes == {0: {"t:-100200300:42": "queue"}}
+        assert mgr.surface_routing_modes == {"t:-100200300:42": "queue"}
+
+    def test_surface_routing_mode_normalizes_intermediate_owner_zero_state(
+        self, mgr: SessionManager
+    ) -> None:
+        assert mgr._normalize_surface_routing_modes(
+            {0: {"t:-100200300:42": "queue"}}
+        ) == {"t:-100200300:42": "queue"}
 
     @pytest.mark.asyncio
     async def test_send_to_window_queued_codex_allows_busy_pane_without_rollout_ack(

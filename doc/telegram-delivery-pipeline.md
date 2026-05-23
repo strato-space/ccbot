@@ -559,7 +559,7 @@ Routing mode affects semantics:
 
 Telegram controls:
 
-- `/switch` toggles the persisted mode for the current `chat_id`/`message_thread_id` control surface.
+- `/switch` toggles the persisted mode for the current effective `chat_id`/`message_thread_id` control surface.
 - `/switch steer` and `/switch queue` set the persisted mode explicitly.
 - `/steer <prompt>` and `/queue <prompt>` send one prompt with the named
   semantics; without a prompt they set the persisted mode.
