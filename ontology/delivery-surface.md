@@ -399,6 +399,14 @@ Preview refinements:
 - Telegram `message is not modified` responses for mutable technical status
   edits are idempotent success, not send failures; they update local tracking
   and audit as `edit_noop` instead of creating a replacement bubble
+- mutable technical status artifact identity is delivery-surface state, not
+  runtime-event history; ccbot persists the active Telegram `message_id` by
+  canonical surface key and matching tmux `window_id` so a service restart can
+  edit or intentionally clear/replace the same bubble instead of stranding a
+  duplicate; poll-only or empty statuses are never persisted
+- bare `⌘ Command` previews are shell command previews and must be rendered in
+  a `sh` fence; `⌘ Command output` is a distinct output category and may keep
+  `text` or `json` fences based on payload
 - plan-update artifacts are latest-only within one assistant turn, not across
   turns; a new user turn must open a fresh plan artifact instead of editing the
   previous turn's plan bubble up-thread

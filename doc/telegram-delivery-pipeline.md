@@ -39,6 +39,14 @@ The default Telegram surface is `compact`, not `verbose`.
 - Telegram no-op edit errors (`message is not modified`) are idempotent
   success for mutable technical status; they keep the same Telegram message id
   and are audited as `edit_noop` rather than causing a fresh `Tool` bubble
+- mutable technical status artifact identity is delivery-surface state, not
+  runtime-event history; ccbot persists the active Telegram `message_id` by
+  canonical surface key and matching tmux `window_id` so a service restart can
+  edit or intentionally clear/replace the same bubble instead of stranding a
+  duplicate; poll-only or empty statuses are never persisted
+- bare `⌘ Command` previews are shell command previews and must be rendered in
+  a `sh` fence; `⌘ Command output` is a distinct output category and may keep
+  `text` or `json` fences based on payload
 - command-execution summaries, including Claude-style `local_command`, are
   routed through the mutable status artifact
 - file-change summaries are routed through the mutable status artifact

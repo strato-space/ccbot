@@ -183,7 +183,7 @@ async def test_ingress_receipt_priority_passes_status_clear() -> None:
     sent: list[tuple[str, str]] = []
     bot = AsyncMock()
 
-    async def _fake_clear(_bot, _user_id, _thread_id_or_0):
+    async def _fake_clear(_bot, _user_id, _thread_id_or_0, **_kwargs):
         sent.append(("status_clear", ""))
 
     async def _fake_process_receipt(_bot, _user_id, task):
@@ -3123,6 +3123,415 @@ async def test_status_edit_not_modified_does_not_create_duplicate_bubble(
     assert rows[-1]["reason"] == "message_not_modified"
 
     mq._status_msg_info.clear()
+
+@pytest.mark.asyncio
+async def test_status_update_hydrates_persisted_status_message_after_restart(
+    monkeypatch, tmp_path
+) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(
+        delivery_audit.config, "telegram_delivery_audit_file", audit_path
+    )
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    mq._persist_status_msg_info((1, 42), (501, "@7", "old status"))
+
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="new status",
+        turn_generation=0,
+    )
+    bot = AsyncMock()
+
+    with (
+        patch(
+            "ccbot.handlers.message_queue._is_task_binding_active",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("ccbot.handlers.message_queue.current_turn_generation", return_value=0),
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.message_queue.send_with_fallback",
+            new_callable=AsyncMock,
+        ) as mock_send,
+    ):
+        mock_sm.resolve_chat_id.return_value = 100
+        await _process_status_update_task(bot, 1, task)
+
+    bot.edit_message_text.assert_awaited_once()
+    assert bot.edit_message_text.await_args.kwargs["message_id"] == 501
+    mock_send.assert_not_awaited()
+    assert mq._status_msg_info[(1, 42)] == (501, "@7", "new status")
+
+    mq._status_msg_info.clear()
+    mq._clear_persisted_status_msg_info((1, 42))
+
+
+@pytest.mark.asyncio
+async def test_status_update_drops_missing_persisted_status_and_sends_replacement(
+    monkeypatch, tmp_path
+) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(
+        delivery_audit.config, "telegram_delivery_audit_file", audit_path
+    )
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    mq._persist_status_msg_info((1, 42), (501, "@7", "old status"))
+
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="new status",
+        turn_generation=0,
+    )
+    bot = AsyncMock()
+    bot.edit_message_text.side_effect = BadRequest("Message not found")
+    sent = AsyncMock()
+    sent.message_id = 777
+
+    with (
+        patch(
+            "ccbot.handlers.message_queue._is_task_binding_active",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("ccbot.handlers.message_queue.current_turn_generation", return_value=0),
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.message_queue.send_with_fallback",
+            new_callable=AsyncMock,
+            return_value=sent,
+        ) as mock_send,
+    ):
+        mock_sm.resolve_chat_id.return_value = 100
+        await _process_status_update_task(bot, 1, task)
+
+    bot.edit_message_text.assert_awaited_once()
+    mock_send.assert_awaited_once()
+    assert mq._status_msg_info[(1, 42)] == (777, "@7", "new status")
+
+    mq._status_msg_info.clear()
+    mq._clear_persisted_status_msg_info((1, 42))
+
+@pytest.mark.asyncio
+async def test_status_hydration_is_scoped_by_surface_key(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    legacy_key = mq._topic_state_key(1, 42)
+    surface_key = mq._topic_state_key(1, 42, chat_id=-100, surface_key="t:-100:42")
+    mq._persist_status_msg_info(legacy_key, (501, "@7", "legacy status"))
+    mq._persist_status_msg_info(surface_key, (777, "@7", "surface status"))
+
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        chat_id=-100,
+        surface_key="t:-100:42",
+        text="surface update",
+        turn_generation=0,
+    )
+    bot = AsyncMock()
+
+    with (
+        patch(
+            "ccbot.handlers.message_queue._is_task_binding_active",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("ccbot.handlers.message_queue.current_turn_generation", return_value=0),
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+    ):
+        mock_sm.resolve_chat_id.return_value = -100
+        await _process_status_update_task(bot, 1, task)
+
+    assert bot.edit_message_text.await_args.kwargs["message_id"] == 777
+    assert mq._status_msg_info[surface_key] == (777, "@7", "surface update")
+    assert legacy_key not in mq._status_msg_info
+
+    mq._clear_persisted_status_msg_info(legacy_key)
+    mq._clear_persisted_status_msg_info(surface_key)
+    mq._status_msg_info.clear()
+
+
+@pytest.mark.asyncio
+async def test_status_hydration_ignores_cross_window_registry(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    key = mq._topic_state_key(1, 42)
+    mq._persist_status_msg_info(key, (501, "@8", "old status"))
+    sent = AsyncMock()
+    sent.message_id = 777
+
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="new status",
+        turn_generation=0,
+    )
+    bot = AsyncMock()
+
+    with (
+        patch(
+            "ccbot.handlers.message_queue._is_task_binding_active",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("ccbot.handlers.message_queue.current_turn_generation", return_value=0),
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.message_queue.send_with_fallback",
+            new_callable=AsyncMock,
+            return_value=sent,
+        ) as mock_send,
+    ):
+        mock_sm.resolve_chat_id.return_value = 100
+        await _process_status_update_task(bot, 1, task)
+
+    bot.edit_message_text.assert_not_awaited()
+    mock_send.assert_awaited_once()
+    assert mq._status_msg_info[key] == (777, "@7", "new status")
+
+    mq._clear_persisted_status_msg_info(key)
+    mq._status_msg_info.clear()
+
+
+def test_poll_only_and_empty_status_do_not_persist(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    key = mq._topic_state_key(1, 42)
+
+    assert mq._is_poll_only_status_text("🛠 Tool\nwrite_stdin(session 1, poll)")
+    assert mq._normalize_technical_status_text(
+        "↳ Tool Output\n```text\nChunk ID: x\nWall time: 0\nProcess running with session ID 1\nOriginal token count: 0\nOutput:\n```\npreview 0/0 lines"
+    ) == ""
+    assert mq._load_status_artifacts() == {}
+    assert key not in mq._status_msg_info
+
+@pytest.mark.asyncio
+async def test_clear_status_message_deletes_persisted_status_after_restart(
+    monkeypatch, tmp_path
+) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(
+        delivery_audit.config, "telegram_delivery_audit_file", audit_path
+    )
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    key = mq._topic_state_key(1, 42)
+    mq._persist_status_msg_info(key, (501, "@7", "old status"))
+
+    bot = AsyncMock()
+    with patch("ccbot.handlers.message_queue.session_manager") as mock_sm:
+        mock_sm.resolve_chat_id.return_value = 100
+        await mq._do_clear_status_message(bot, 1, 42)
+
+    bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=501)
+    assert mq._load_status_artifacts() == {}
+    assert key not in mq._status_msg_info
+
+@pytest.mark.asyncio
+async def test_clear_status_message_preserves_cross_window_persisted_status(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    key = mq._topic_state_key(1, 42)
+    mq._persist_status_msg_info(key, (501, "@8", "old status"))
+
+    bot = AsyncMock()
+    with patch("ccbot.handlers.message_queue.session_manager") as mock_sm:
+        mock_sm.resolve_chat_id.return_value = 100
+        await mq._do_clear_status_message(bot, 1, 42, expected_window_id="@7")
+
+    bot.delete_message.assert_not_awaited()
+    assert mq._load_status_artifacts()[mq._status_key_to_storage_key(key)]["message_id"] == 501
+    assert key not in mq._status_msg_info
+
+
+@pytest.mark.asyncio
+async def test_direct_send_status_deletes_persisted_status_after_restart(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    key = mq._topic_state_key(1, 42)
+    mq._persist_status_msg_info(key, (501, "@7", "old status"))
+    sent = AsyncMock()
+    sent.message_id = 777
+    bot = AsyncMock()
+
+    with (
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.message_queue.send_with_fallback",
+            new_callable=AsyncMock,
+            return_value=sent,
+        ) as mock_send,
+    ):
+        mock_sm.resolve_chat_id.return_value = 100
+        await mq._do_send_status_message(bot, 1, 42, "@7", "new status")
+
+    bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=501)
+    mock_send.assert_awaited_once()
+    assert mq._status_msg_info[key] == (777, "@7", "new status")
+    assert mq._load_status_artifacts()[mq._status_key_to_storage_key(key)]["message_id"] == 777
+
+@pytest.mark.asyncio
+async def test_queued_status_clear_preserves_cross_window_persisted_status(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    await mq.shutdown_workers()
+    key = mq._topic_state_key(100, 42)
+    mq._persist_status_msg_info(key, (501, "@8", "old status"))
+    bot = AsyncMock()
+
+    await mq.enqueue_status_update(bot, 100, "@7", None, thread_id=42)
+    queue = mq.get_or_create_queue(bot, 100)
+    await queue.join()
+
+    bot.delete_message.assert_not_awaited()
+    assert mq._load_status_artifacts()[mq._status_key_to_storage_key(key)]["message_id"] == 501
+    assert key not in mq._status_msg_info
+
+
+@pytest.mark.asyncio
+async def test_direct_send_status_preserves_cross_window_in_memory_status(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    key = mq._topic_state_key(1, 42)
+    mq._status_msg_info[key] = (501, "@8", "old status")
+    mq._persist_status_msg_info(key, (501, "@8", "old status"))
+    sent = AsyncMock()
+    sent.message_id = 777
+    bot = AsyncMock()
+
+    with (
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.message_queue.send_with_fallback",
+            new_callable=AsyncMock,
+            return_value=sent,
+        ),
+    ):
+        mock_sm.resolve_chat_id.return_value = 100
+        await mq._do_send_status_message(bot, 1, 42, "@7", "new status")
+
+    bot.delete_message.assert_not_awaited()
+    assert mq._status_msg_info[key] == (777, "@7", "new status")
+    assert mq._load_status_artifacts()[mq._status_key_to_storage_key(key)]["message_id"] == 777
+    mq._status_msg_info.clear()
+    mq._clear_persisted_status_msg_info(key)
+
+
+@pytest.mark.asyncio
+async def test_convert_status_to_content_hydrates_persisted_status_after_restart(
+    monkeypatch, tmp_path
+) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(
+        delivery_audit.config, "telegram_delivery_audit_file", audit_path
+    )
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    key = mq._topic_state_key(1, 42)
+    mq._persist_status_msg_info(key, (501, "@7", "old status"))
+
+    bot = AsyncMock()
+    with patch("ccbot.handlers.message_queue.session_manager") as mock_sm:
+        mock_sm.resolve_chat_id.return_value = 100
+        result = await mq._convert_status_to_content(
+            bot,
+            1,
+            42,
+            "@7",
+            "Final content",
+        )
+
+    assert result == 501
+    bot.edit_message_text.assert_awaited_once()
+    assert bot.edit_message_text.await_args.kwargs["message_id"] == 501
+    assert mq._load_status_artifacts() == {}
+    assert key not in mq._status_msg_info
+
+
+@pytest.mark.asyncio
+async def test_convert_status_to_content_ignores_cross_window_persisted_status(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    key = mq._topic_state_key(1, 42)
+    mq._persist_status_msg_info(key, (501, "@8", "old status"))
+
+    bot = AsyncMock()
+    with patch("ccbot.handlers.message_queue.session_manager") as mock_sm:
+        mock_sm.resolve_chat_id.return_value = 100
+        result = await mq._convert_status_to_content(
+            bot,
+            1,
+            42,
+            "@7",
+            "Final content",
+        )
+
+    assert result is None
+    bot.edit_message_text.assert_not_awaited()
+    bot.delete_message.assert_not_awaited()
+    assert mq._load_status_artifacts()[mq._status_key_to_storage_key(key)]["message_id"] == 501
+    mq._clear_persisted_status_msg_info(key)
+
+@pytest.mark.asyncio
+async def test_convert_status_to_content_preserves_cross_window_in_memory_status(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    key = mq._topic_state_key(1, 42)
+    mq._status_msg_info[key] = (501, "@8", "old status")
+    mq._persist_status_msg_info(key, (501, "@8", "old status"))
+
+    bot = AsyncMock()
+    with patch("ccbot.handlers.message_queue.session_manager") as mock_sm:
+        mock_sm.resolve_chat_id.return_value = 100
+        result = await mq._convert_status_to_content(bot, 1, 42, "@7", "Final content")
+
+    assert result is None
+    bot.edit_message_text.assert_not_awaited()
+    bot.delete_message.assert_not_awaited()
+    assert mq._status_msg_info[key] == (501, "@8", "old status")
+    assert mq._load_status_artifacts()[mq._status_key_to_storage_key(key)]["message_id"] == 501
+    mq._status_msg_info.clear()
+    mq._clear_persisted_status_msg_info(key)
+
+
+def test_normalize_bare_command_status_wraps_shell_fence() -> None:
+    rendered = mq._normalize_technical_status_text(
+        "⌘ Command set -euo pipefail preview 1/11 lines"
+    )
+
+    assert rendered == "⌘ Command\n```sh\nset -euo pipefail\n```\npreview 1/11 lines"
+
+
+def test_normalize_already_fenced_command_status_is_idempotent() -> None:
+    text = "⌘ Command\n```sh\necho ok\n```\npreview 1/2 lines"
+
+    assert mq._normalize_technical_status_text(text) == text
+
+
+def test_normalize_command_output_status_keeps_output_category() -> None:
+    text = "⌘ Command output\n```json\n{\"ok\": true}\n```"
+
+    assert mq._normalize_technical_status_text(text) == text
 
 
 @pytest.mark.asyncio

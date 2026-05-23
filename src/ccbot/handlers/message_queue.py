@@ -28,6 +28,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Literal
+from pathlib import Path
 
 from telegram import Bot, InputMediaPhoto
 from telegram.constants import ChatAction
@@ -46,6 +47,8 @@ from ..runtime_types import (
 from ..state_schema import BINDING_STATE_BOUND
 from ..terminal_parser import parse_status_line
 from ..delivery_audit import log_telegram_delivery
+from ..config import config
+from ..utils import atomic_write_json
 from ..tmux_manager import tmux_manager
 from .message_sender import (
     NO_LINK_PREVIEW,
@@ -215,6 +218,77 @@ TopicStateKey = tuple[int, int | str]
 
 # Status message tracking: delivery surface -> (message_id, window_id, last_text)
 _status_msg_info: dict[TopicStateKey, tuple[int, str, str]] = {}
+
+
+_STATUS_ARTIFACTS_FILENAME = "status_message_artifacts.json"
+_BARE_COMMAND_PREVIEW_RE = re.compile(
+    r"^(?P<body>.+?)\s+(?P<footer>preview\s+\d+/\d+\s+lines?)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _status_artifacts_file() -> Path:
+    return config.config_dir / _STATUS_ARTIFACTS_FILENAME
+
+
+def _status_key_to_storage_key(key: TopicStateKey) -> str:
+    return json.dumps([key[0], key[1]], ensure_ascii=False, separators=(",", ":"))
+
+
+def _load_status_artifacts() -> dict[str, dict[str, object]]:
+    path = _status_artifacts_file()
+    try:
+        if not path.exists():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # pragma: no cover - best-effort recovery only
+        logger.debug("Failed to load status artifact registry: %s", exc)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_status_artifacts(data: dict[str, dict[str, object]]) -> None:
+    try:
+        atomic_write_json(_status_artifacts_file(), data)
+    except Exception as exc:  # pragma: no cover - delivery must not fail on registry I/O
+        logger.debug("Failed to write status artifact registry: %s", exc)
+
+
+def _persist_status_msg_info(key: TopicStateKey, info: tuple[int, str, str]) -> None:
+    data = _load_status_artifacts()
+    data[_status_key_to_storage_key(key)] = {
+        "message_id": info[0],
+        "window_id": info[1],
+        "last_text": info[2],
+        "updated_at": time.time(),
+    }
+    _write_status_artifacts(data)
+
+
+def _clear_persisted_status_msg_info(key: TopicStateKey) -> None:
+    data = _load_status_artifacts()
+    storage_key = _status_key_to_storage_key(key)
+    if storage_key in data:
+        data.pop(storage_key, None)
+        _write_status_artifacts(data)
+
+
+def _hydrate_status_msg_info(key: TopicStateKey, window_id: str) -> tuple[int, str, str] | None:
+    raw = _load_status_artifacts().get(_status_key_to_storage_key(key))
+    if not isinstance(raw, dict):
+        return None
+    try:
+        message_id = int(raw.get("message_id"))
+    except (TypeError, ValueError):
+        _clear_persisted_status_msg_info(key)
+        return None
+    stored_window = str(raw.get("window_id") or "")
+    if stored_window != window_id:
+        return None
+    last_text = str(raw.get("last_text") or "")
+    info = (message_id, stored_window, last_text)
+    _status_msg_info[key] = info
+    return info
 
 # Commentary message tracking: delivery surface -> (message_id, window_id, last_text)
 _commentary_msg_info: dict[TopicStateKey, tuple[int, str, str]] = {}
@@ -656,6 +730,7 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                             bot,
                             user_id,
                             task.thread_id or 0,
+                            expected_window_id=task.window_id,
                         )
                     else:
                         await _do_clear_status_message(
@@ -664,6 +739,7 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                             task.thread_id or 0,
                             chat_id=task.chat_id,
                             surface_key=task.surface_key,
+                            expected_window_id=task.window_id,
                         )
                 elif task.task_type == "commentary_clear":
                     await _do_clear_commentary_message(
@@ -733,6 +809,7 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                         task.thread_id or 0,
                         chat_id=task.chat_id,
                         surface_key=task.surface_key,
+                        expected_window_id=task.window_id,
                     )
             except RetryAfter as e:
                 retry_secs = (
@@ -985,12 +1062,34 @@ def _render_clean_tool_output_status(text: str) -> str | None:
     return rendered
 
 
+def _normalize_bare_command_status(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw.startswith("⌘ Command") or raw.startswith("⌘ Command output"):
+        return text
+    if "```" in raw:
+        return text
+    body = raw.removeprefix("⌘ Command").strip()
+    if not body:
+        return text
+    footer = ""
+    match = _BARE_COMMAND_PREVIEW_RE.match(body)
+    if match:
+        body = match.group("body").strip()
+        footer = match.group("footer").strip()
+    if not body:
+        return text
+    rendered = f"⌘ Command\n```sh\n{body}\n```"
+    if footer:
+        rendered = f"{rendered}\n{footer}"
+    return rendered
+
+
 def _normalize_technical_status_text(text: str) -> str:
     """Normalize pane-polled technical status into the human-facing ontology."""
     raw = (text or "").strip()
     if raw.startswith("↳ Tool Output"):
         return _render_clean_tool_output_status(raw) or ""
-    return text
+    return _normalize_bare_command_status(text)
 
 
 async def _send_task_images(bot: Bot, chat_id: int, task: MessageTask) -> bool:
@@ -1433,6 +1532,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             tid,
             chat_id=task.chat_id,
             surface_key=task.surface_key,
+            expected_window_id=wid,
         )
         await _do_clear_commentary_message(
             bot,
@@ -1605,6 +1705,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                 tid,
                 chat_id=task.chat_id,
                 surface_key=task.surface_key,
+                expected_window_id=wid,
             )
             return
 
@@ -1640,6 +1741,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                 tid,
                 chat_id=task.chat_id,
                 surface_key=task.surface_key,
+                expected_window_id=wid,
             )
             # Join all parts for editing (merged content goes together)
             full_text = "\n\n".join(task.parts)
@@ -1875,6 +1977,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             tid,
             chat_id=task.chat_id,
             surface_key=task.surface_key,
+            expected_window_id=wid,
         )
         return
 
@@ -1912,19 +2015,20 @@ async def _convert_status_to_content(
         surface_key=surface_key,
     )
     info = _status_msg_info.pop(skey, None)
+    if info is None:
+        info = _hydrate_status_msg_info(skey, window_id)
+        if info is not None:
+            _status_msg_info.pop(skey, None)
     if not info:
         return None
 
     msg_id, stored_wid, _ = info
+    if stored_wid != window_id:
+        _status_msg_info[skey] = info
+        return None
+    _clear_persisted_status_msg_info(skey)
     if chat_id is None:
         chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
-    if stored_wid != window_id:
-        # Different window, just delete the old status
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
-        except Exception:
-            pass
-        return None
 
     # Edit status message to show content
     try:
@@ -2100,6 +2204,7 @@ async def _process_status_update_task(
             tid,
             chat_id=task.chat_id,
             surface_key=task.surface_key,
+            expected_window_id=wid,
         )
         await _do_clear_commentary_message(
             bot,
@@ -2155,6 +2260,7 @@ async def _process_status_update_task(
             tid,
             chat_id=task.chat_id,
             surface_key=task.surface_key,
+            expected_window_id=wid,
         )
         _audit_task_delivery(
             action="suppress",
@@ -2180,6 +2286,7 @@ async def _process_status_update_task(
             tid,
             chat_id=task.chat_id,
             surface_key=task.surface_key,
+            expected_window_id=wid,
         )
         _audit_task_delivery(
             action="suppress",
@@ -2204,10 +2311,13 @@ async def _process_status_update_task(
             tid,
             chat_id=task.chat_id,
             surface_key=task.surface_key,
+            expected_window_id=wid,
         )
         return
 
     current_info = _status_msg_info.get(skey)
+    if current_info is None:
+        current_info = _hydrate_status_msg_info(skey, wid)
 
     if _is_poll_only_status_text(status_text):
         _audit_task_delivery(
@@ -2251,6 +2361,7 @@ async def _process_status_update_task(
                 tid,
                 chat_id=task.chat_id,
                 surface_key=task.surface_key,
+                expected_window_id=wid,
             )
             await _do_send_status_message(
                 bot,
@@ -2296,11 +2407,13 @@ async def _process_status_update_task(
                     semantic_kind="technical_status",
                 )
                 _status_msg_info[skey] = (msg_id, wid, status_text)
+                _persist_status_msg_info(skey, (msg_id, wid, status_text))
             except RetryAfter:
                 raise
             except (BadRequest, Exception) as exc:
                 if _is_message_not_modified_error(exc):
                     _status_msg_info[skey] = (msg_id, wid, status_text)
+                    _persist_status_msg_info(skey, (msg_id, wid, status_text))
                     _audit_task_delivery(
                         action="edit_noop",
                         user_id=user_id,
@@ -2313,6 +2426,21 @@ async def _process_status_update_task(
                         reason="message_not_modified",
                     )
                     return
+                if _is_message_known_gone_error(exc):
+                    logger.debug("Tracked status message %s is gone: %s", msg_id, exc)
+                    _status_msg_info.pop(skey, None)
+                    _clear_persisted_status_msg_info(skey)
+                    await _do_send_status_message(
+                        bot,
+                        user_id,
+                        tid,
+                        wid,
+                        status_text,
+                        chat_id=chat_id,
+                        state_chat_id=task.chat_id,
+                        surface_key=task.surface_key,
+                    )
+                    return
                 try:
                     await bot.edit_message_text(
                         chat_id=chat_id,
@@ -2321,11 +2449,13 @@ async def _process_status_update_task(
                         link_preview_options=NO_LINK_PREVIEW,
                     )
                     _status_msg_info[skey] = (msg_id, wid, status_text)
+                    _persist_status_msg_info(skey, (msg_id, wid, status_text))
                 except RetryAfter:
                     raise
                 except (BadRequest, Exception) as e:
                     if _is_message_not_modified_error(e):
                         _status_msg_info[skey] = (msg_id, wid, status_text)
+                        _persist_status_msg_info(skey, (msg_id, wid, status_text))
                         _audit_task_delivery(
                             action="edit_noop",
                             user_id=user_id,
@@ -2340,6 +2470,7 @@ async def _process_status_update_task(
                         return
                     logger.debug(f"Failed to edit status message: {e}")
                     _status_msg_info.pop(skey, None)
+                    _clear_persisted_status_msg_info(skey)
                     await _do_send_status_message(
                         bot,
                         user_id,
@@ -2391,9 +2522,18 @@ async def _do_send_status_message(
     if chat_id is None:
         chat_id = session_manager.resolve_chat_id(user_id, thread_id)
     # Safety net: delete any orphaned status message before sending a new one.
-    # This catches edge cases where tracking was cleared without deleting the message.
+    # This catches edge cases where tracking was cleared without deleting the message,
+    # including process restarts where only the persisted artifact registry survived.
     old = _status_msg_info.pop(skey, None)
+    if old is not None and old[1] != window_id:
+        _status_msg_info[skey] = old
+        old = None
+    if old is None:
+        old = _hydrate_status_msg_info(skey, window_id)
+        if old is not None:
+            _status_msg_info.pop(skey, None)
     if old:
+        _clear_persisted_status_msg_info(skey)
         try:
             await bot.delete_message(chat_id=chat_id, message_id=old[0])
         except Exception:
@@ -2427,6 +2567,7 @@ async def _do_send_status_message(
     )
     if sent:
         _status_msg_info[skey] = (sent.message_id, window_id, text)
+        _persist_status_msg_info(skey, (sent.message_id, window_id, text))
 
 
 async def _process_commentary_update_task(
@@ -3193,6 +3334,7 @@ async def _do_clear_status_message(
     *,
     chat_id: int | None = None,
     surface_key: str | None = None,
+    expected_window_id: str | None = None,
 ) -> None:
     """Delete the status message for a user (internal, called from worker)."""
     skey = _topic_state_key(
@@ -3202,6 +3344,27 @@ async def _do_clear_status_message(
         surface_key=surface_key,
     )
     info = _status_msg_info.pop(skey, None)
+    if info is not None and expected_window_id is not None and info[1] != expected_window_id:
+        _status_msg_info[skey] = info
+        return
+    if info is None:
+        persisted = _load_status_artifacts().get(_status_key_to_storage_key(skey))
+        if isinstance(persisted, dict):
+            try:
+                message_id = int(persisted.get("message_id"))
+            except (TypeError, ValueError):
+                message_id = 0
+            stored_window = str(persisted.get("window_id") or "")
+            last_text = str(persisted.get("last_text") or "")
+            if (
+                message_id
+                and stored_window
+                and (expected_window_id is None or stored_window == expected_window_id)
+            ):
+                info = (message_id, stored_window, last_text)
+            elif message_id and stored_window:
+                return
+    _clear_persisted_status_msg_info(skey)
     if info:
         msg_id = info[0]
         if chat_id is None:
@@ -3790,6 +3953,7 @@ async def enqueue_status_update(
     else:
         task = MessageTask(
             task_type="status_clear",
+            window_id=window_id,
             thread_id=thread_id,
             chat_id=chat_id,
             surface_key=surface_key,
@@ -4247,6 +4411,7 @@ def clear_status_msg_info(user_id: int, thread_id: int | None = None) -> None:
     """Clear status message tracking for a user (and optionally a specific thread)."""
     skey = _topic_state_key(user_id, thread_id or 0)
     _status_msg_info.pop(skey, None)
+    _clear_persisted_status_msg_info(skey)
 
 
 async def clear_status_message(

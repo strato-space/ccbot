@@ -268,8 +268,9 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
   - truncation footer lives outside the fenced block
   - outcome footer is separate and should not redundantly say
     `completed · output 1 line(s)` when the preview already conveys the result
-  - shell commands are one mutable command artifact: `exec_command` output edits
-    the command bubble and drops Codex/developer transport metadata before
+  - shell commands are one mutable command artifact: bare command previews are
+    `sh` fenced, and `exec_command` output edits the command bubble while
+    dropping Codex/developer transport metadata before
     showing the real output preview
   - Codex parsed read/list/search commands can surface as `• Explored` so
     operators see which files/searches were inspected without raw shell noise

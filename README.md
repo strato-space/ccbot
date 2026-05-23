@@ -717,6 +717,11 @@ Technical execution classes stay out of permanent bubbles by default:
 - **Tool lifecycle** — Summarized into the mutable status artifact
 - **Command execution / local command** — Summarized into the mutable status
   artifact with compact command text rather than raw shell dumps
+  Bare command previews are normalized into `sh` fences, while command output
+  remains a separate output category with `text`/`json` fences. The active
+  status bubble identity is persisted by surface key and window id so restarts
+  can resume editing or intentionally replace the same artifact instead of
+  leaving duplicates.
 - **Status-polled command output** — Raw wrapper metadata such as `Chunk ID`,
   `Wall time`, process status, token counts, and the literal `Output:` marker
   is stripped before Telegram rendering; poll-only `write_stdin` checks do not
