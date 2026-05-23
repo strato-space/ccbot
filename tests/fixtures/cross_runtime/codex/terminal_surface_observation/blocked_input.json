@@ -1,0 +1,9 @@
+{
+  "runtime_kind": "codex",
+  "surface": "terminal",
+  "prompt_name": "UsageLimitBlockedInput",
+  "visible": true,
+  "should_persist": false,
+  "prompt_text": "You've hit your usage limit. Upgrade to Pro or try again later.",
+  "source_fixture": "../../codex/panes/tmux_session_0_resume_prompt.json"
+}

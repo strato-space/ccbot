@@ -3,9 +3,10 @@
 [English README](README.md)
 [中文文档](README_CN.md)
 
-Удалённое управление `codex`-сессиями в `tmux` через Telegram. Этот fork
-ориентирован на Codex core lane: создать окно, привязать topic, читать rollout,
-отправлять ввод, смотреть историю и возобновлять thread.
+Удалённое управление `codex`-процессами в `tmux` через Telegram. Этот fork
+ориентирован на runtime-neutral core lane: создать окно, привязать topic,
+читать replay evidence, отправлять ввод, смотреть историю и возобновлять
+persisted identity.
 
 https://github.com/user-attachments/assets/15ffb38e-5eb9-4720-93b9-412e4961dc93
 
@@ -15,17 +16,17 @@ CCBot не поднимает отдельную SDK-сессию. Он рабо
 
 - Telegram topic управляет одним `tmux`-окном
 - в окне работает живой процесс `codex`
-- история и уведомления читаются из `~/.codex/session_index.jsonl` и `~/.codex/sessions/...`
+- история и уведомления читаются из replay evidence в `~/.codex/session_index.jsonl` и `~/.codex/sessions/...`
 
 Ключевая модель:
 
-`Telegram topic -> binding -> tmux window -> Codex process -> Codex thread -> rollout log`
+`Telegram topic -> binding -> tmux window -> runtime process -> runtime conversation identity -> replay evidence`
 
 Важно:
 
-- окно не равно thread
-- живой процесс не равен persisted thread
-- rollout log не равен процессу; это только файловый след
+- окно не равно runtime conversation identity
+- живой процесс не равен persisted identity
+- replay evidence не равен процессу; это только файловый след
 
 Подробный операторский путь:
 
@@ -40,7 +41,7 @@ CCBot не поднимает отдельную SDK-сессию. Он рабо
 - prompt-safe input lane: бот различает `input_ready`, `busy`, `blocked_prompt`
 - voice: голосовые сообщения транскрибируются и отправляются как текст
 - raw Codex slash passthrough: часть `/command` можно слать напрямую в живой `codex`
-- thread picker: можно возобновить существующий Codex thread в выбранной директории
+- identity picker: можно возобновить существующую Codex identity в выбранной директории
 - persistent state: bindings и monitor offsets переживают перезапуск
 
 ## Границы релиза
@@ -51,7 +52,7 @@ CCBot не поднимает отдельную SDK-сессию. Он рабо
 
 - `voice`
 - `task`
-- `ACP`
+- `ACP-module`
 
 Эти поверхности должны оставаться совместимыми, но не считаются частью нового
 операторского контракта.
@@ -163,7 +164,7 @@ uv run ccbot
 1. Создайте новый topic в Telegram-группе.
 2. Отправьте любое сообщение.
 3. Бот покажет browser директорий.
-4. Если в директории есть existing Codex threads, появится thread picker.
+4. Если в директории есть existing Codex identities, появится identity picker.
 5. После выбора создаётся live tmux window и запускается `codex`.
 6. Следующие сообщения в этом topic уходят в тот же live process.
 

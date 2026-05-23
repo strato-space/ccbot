@@ -1,0 +1,9 @@
+{
+  "runtime_kind": "codex",
+  "surface": "terminal",
+  "prompt_name": "ResumePromptVisible",
+  "visible": true,
+  "should_persist": false,
+  "prompt_text": "› Explain this codebase",
+  "source_fixture": "../../codex/panes/tmux_session_0_resume_prompt.json"
+}

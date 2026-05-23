@@ -20,6 +20,7 @@ import logging
 from dataclasses import dataclass
 
 from .runtime_types import InputAction
+from .runtime_types import RuntimeCapability, runtime_capability_registry
 from .state_schema import DEFAULT_RUNTIME_KIND, normalize_runtime_kind
 from .tmux_manager import TmuxManager, tmux_manager
 
@@ -36,6 +37,8 @@ _SUPPORTED_SPECIAL_KEYS = {
     "Tab",
     "C-c",
 }
+
+_CODEX_MULTILINE_MIN_SUBMIT_DELAY_SECONDS = 0.1
 
 _SPECIAL_KEY_ALIASES = {
     "esc": "Escape",
@@ -126,6 +129,26 @@ class RuntimeInputDriver:
         self._submit_delay = submit_delay
         self._shell_transition_delay = shell_transition_delay
 
+    def get_runtime_capability(self, runtime_kind: str = DEFAULT_RUNTIME_KIND) -> RuntimeCapability:
+        """Return the capability profile for a runtime kind."""
+        return runtime_capability_registry.get(runtime_kind)
+
+    def supports_message_routing_mode(
+        self, runtime_kind: str, routing_mode: str
+    ) -> bool:
+        """Check whether a runtime supports the requested routing mode."""
+        return runtime_capability_registry.supports_message_routing_mode(
+            runtime_kind, routing_mode
+        )
+
+    def supports_interactive_control(self, runtime_kind: str) -> bool:
+        """Check whether a runtime supports operator control through tmux."""
+        return runtime_capability_registry.supports_interactive_control(runtime_kind)
+
+    def blocked_input_policy(self, runtime_kind: str) -> str:
+        """Return the runtime's blocked-input policy."""
+        return self.get_runtime_capability(runtime_kind).blocked_input_policy
+
     async def send_text(
         self,
         window_id: str,
@@ -166,6 +189,26 @@ class RuntimeInputDriver:
             InputDispatch.special_key(key, runtime_kind=runtime_kind).action,
         )
 
+    async def send_multiline_submit_key(
+        self,
+        window_id: str,
+        *,
+        runtime_kind: str = DEFAULT_RUNTIME_KIND,
+    ) -> tuple[bool, str]:
+        """Submit already-pasted multiline text using runtime-specific semantics."""
+        window = await self._tmux.find_window_by_id(window_id)
+        if not window:
+            return False, "Window not found (may have been closed)"
+
+        normalized_runtime = normalize_runtime_kind(runtime_kind)
+        submitted = await self._send_multiline_submit_key(
+            window.window_id,
+            runtime_kind=normalized_runtime,
+        )
+        if not submitted:
+            return False, "Failed to submit text"
+        return True, f"Submitted text to {window.window_id}"
+
     async def send_dispatch(
         self,
         window_id: str,
@@ -178,6 +221,7 @@ class RuntimeInputDriver:
 
         runtime_kind = normalize_runtime_kind(action.runtime_kind)
         action_type = action.action_type
+        capability = self.get_runtime_capability(runtime_kind)
 
         if action_type in {"submit_text", "paste_text", "raw_slash_command"}:
             return await self._send_text(
@@ -189,6 +233,11 @@ class RuntimeInputDriver:
             )
 
         if action_type == "special_key":
+            if not capability.interactive_control_supported:
+                return (
+                    False,
+                    f"Interactive control is not supported for {capability.display_name}",
+                )
             return await self._send_special_key(
                 window.window_id,
                 action.payload,
@@ -213,6 +262,8 @@ class RuntimeInputDriver:
         if not text:
             return False, "No text to send"
 
+        multiline = "\n" in text
+
         # Codex and Claude both treat a leading ! as a shell command prompt.
         # We split the first character so the terminal can transition into
         # shell mode before the rest of the command arrives.
@@ -225,16 +276,101 @@ class RuntimeInputDriver:
                 if not await self._tmux.send_literal_text(window_id, rest):
                     return False, "Failed to send shell-command body"
         else:
-            if not await self._tmux.send_literal_text(window_id, text):
+            if multiline:
+                if not await self._tmux.send_pasted_text(window_id, text):
+                    return False, "Failed to paste multiline text"
+                logger.info(
+                    "input_delivery: pasted multiline payload to %s "
+                    "(runtime=%s, chars=%d)",
+                    window_id,
+                    runtime_kind,
+                    len(text),
+                )
+            elif not await self._tmux.send_literal_text(window_id, text):
                 return False, "Failed to send text"
 
         if not submit:
             return True, f"Sent text to {window_id}"
 
-        await asyncio.sleep(self._submit_delay)
-        if not await self._tmux.send_enter(window_id):
+        await asyncio.sleep(
+            self._submit_delay_seconds(
+                runtime_kind=runtime_kind,
+                multiline=multiline,
+            )
+        )
+        if multiline:
+            submitted = await self._send_multiline_submit_key(
+                window_id, runtime_kind=runtime_kind
+            )
+            submit_path = "multiline-enter" if runtime_kind == "codex" else "submit-key"
+        else:
+            submitted = await self._send_submit_key(window_id)
+            submit_path = "submit-key"
+        if not submitted:
+            logger.warning(
+                "input_delivery: failed to submit text to %s via %s "
+                "(runtime=%s, multiline=%s, chars=%d)",
+                window_id,
+                submit_path,
+                runtime_kind,
+                multiline,
+                len(text),
+            )
             return False, "Failed to submit text"
+        logger.info(
+            "input_delivery: submitted text to %s via %s "
+            "(runtime=%s, multiline=%s, chars=%d)",
+            window_id,
+            submit_path,
+            runtime_kind,
+            multiline,
+            len(text),
+        )
         return True, f"Sent text to {window_id}"
+
+    def _submit_delay_seconds(self, *, runtime_kind: str, multiline: bool) -> float:
+        """Return the delay between payload delivery and submit key delivery.
+
+        Codex needs a tiny readiness gap after tmux bracketed paste before the
+        submit key. The authoritative success signal is not this delay, but a
+        later persisted Codex JSONL turn event observed by the session layer.
+        Keep the normal fast path for single-line turns and non-Codex runtimes.
+        """
+        if multiline and runtime_kind == "codex":
+            return max(self._submit_delay, _CODEX_MULTILINE_MIN_SUBMIT_DELAY_SECONDS)
+        return self._submit_delay
+
+    async def _send_submit_key(self, window_id: str) -> bool:
+        """Submit typed text using the tmux key path reserved for text turns."""
+        send_submit_key = getattr(self._tmux, "send_submit_key", None)
+        if send_submit_key is not None:
+            return await send_submit_key(window_id)
+        return await self._tmux.send_enter(window_id)
+
+    async def _send_multiline_submit_key(
+        self, window_id: str, *, runtime_kind: str
+    ) -> bool:
+        """Submit bracketed-paste text with runtime-specific semantics.
+
+        Codex accepts pasted multiline composer content as a single payload, but
+        field evidence from `server-np4` showed that `C-m` after tmux
+        paste-buffer can leave the payload sitting in the composer while a
+        normal `send-keys Enter` opens the turn. Keep the regular submit-key
+        path for other runtimes and reserve bare Enter for the Codex post-paste
+        turn opener.
+        """
+        if runtime_kind != "codex":
+            return await self._send_submit_key(window_id)
+
+        send_enter = getattr(self._tmux, "send_enter", None)
+        if send_enter is None:
+            logger.warning(
+                "input_delivery: Codex multiline submit requires send_enter "
+                "for %s; refusing to fall back to C-m",
+                window_id,
+            )
+            return False
+        return await send_enter(window_id)
 
     async def _send_special_key(
         self,

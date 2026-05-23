@@ -1,0 +1,18 @@
+{
+  "runtime_kind": "fast-agent",
+  "session_id": "fa-session-20260403-01",
+  "session_title": "Daily planner",
+  "cwd": "/home/strato-space",
+  "resume_command": "fast-agent --resume fa-session-20260403-01",
+  "session_cookie": {
+    "sessionId": "fa-session-20260403-01",
+    "title": "Daily planner",
+    "data": {
+      "title": "Daily planner",
+      "label": "Daily planner"
+    },
+    "state": "created",
+    "created": "2026-04-03T08:10:00.000Z",
+    "expiresAt": "2026-04-03T10:10:00.000Z"
+  }
+}

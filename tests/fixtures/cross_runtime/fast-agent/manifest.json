@@ -1,0 +1,43 @@
+{
+  "runtime_kind": "fast-agent",
+  "display_name": "fast-agent",
+  "source_note": "Redacted corpus shaped from fast-agent ACP session, progress, history, and terminal surfaces.",
+  "coverage": {
+    "live_semantic_stream": [
+      "session_update",
+      "streaming",
+      "thinking",
+      "tool_call",
+      "tool_call_update",
+      "finished"
+    ],
+    "persisted_replay_evidence": [
+      "fresh_launch_metadata",
+      "resume_case",
+      "session_history",
+      "progress_status_stream",
+      "tool_progress_tool_result_transitions",
+      "degraded_failure_case"
+    ],
+    "terminal_surface_observation": [
+      "blocked_input",
+      "interactive_prompt_visible"
+    ]
+  },
+  "files": {
+    "live_semantic_stream": "live_semantic_stream.jsonl",
+    "persisted_replay_evidence": {
+      "launch_metadata": "persisted_replay_evidence/launch_metadata.json",
+      "resume_case": "persisted_replay_evidence/resume_case.json",
+      "session": "persisted_replay_evidence/session.json",
+      "history": "persisted_replay_evidence/history_agent.json",
+      "progress_status_stream": "persisted_replay_evidence/progress_status_stream.jsonl",
+      "tool_transitions": "persisted_replay_evidence/tool_transitions.jsonl",
+      "degraded_failure_case": "persisted_replay_evidence/degraded_failure_case.jsonl"
+    },
+    "terminal_surface_observation": {
+      "blocked_input": "terminal_surface_observation/blocked_input.json",
+      "interactive_prompt_visible": "terminal_surface_observation/interactive_prompt_visible.json"
+    }
+  }
+}

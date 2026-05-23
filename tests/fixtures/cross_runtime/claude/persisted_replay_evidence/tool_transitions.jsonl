@@ -1,0 +1,2 @@
+{"phase":"tool_use","tool_use_id":"toolu_1","name":"Read","input":{"file_path":"doc/runtime-ontology.md"}}
+{"phase":"tool_result","tool_use_id":"toolu_1","content":"redacted line 1\nredacted line 2","is_error":false}

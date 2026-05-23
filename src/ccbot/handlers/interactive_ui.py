@@ -11,7 +11,7 @@ Provides:
   - Terminal capture and display
   - Interactive mode tracking per user and thread
 
-State dicts are keyed by (user_id, thread_id_or_0) for Telegram topic support.
+State dicts are keyed by canonical delivery surface when available.
 """
 
 import logging
@@ -43,11 +43,42 @@ logger = logging.getLogger(__name__)
 # Tool names that trigger interactive UI via JSONL (terminal capture + inline keyboard)
 INTERACTIVE_TOOL_NAMES = frozenset({"AskUserQuestion", "ExitPlanMode"})
 
-# Track interactive UI message IDs: (user_id, thread_id_or_0) -> message_id
-_interactive_msgs: dict[tuple[int, int], int] = {}
+InteractiveKey = tuple[int, int | str]
 
-# Track interactive mode: (user_id, thread_id_or_0) -> window_id
-_interactive_mode: dict[tuple[int, int], str] = {}
+
+def _interactive_token(
+    thread_id: int | None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
+) -> int | str:
+    if surface_key:
+        return f"surface:{surface_key}"
+    if chat_id is not None:
+        if thread_id is not None:
+            return f"topic:{chat_id}:{thread_id}"
+        return f"chat:{chat_id}"
+    return thread_id or 0
+
+
+def _interactive_key(
+    user_id: int,
+    thread_id: int | None = None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
+) -> InteractiveKey:
+    return (
+        user_id,
+        _interactive_token(thread_id, chat_id=chat_id, surface_key=surface_key),
+    )
+
+
+# Track interactive UI message IDs: delivery surface -> message_id
+_interactive_msgs: dict[InteractiveKey, int] = {}
+
+# Track interactive mode: delivery surface -> window_id
+_interactive_mode: dict[InteractiveKey, str] = {}
 
 READ_ONLY_PROMPT_NOTE = (
     "Remote controls are disabled for this prompt in the core lane."
@@ -67,15 +98,31 @@ VERTICAL_PROMPTS = frozenset(
 TAB_SPACE_PROMPTS = frozenset({"Settings"})
 
 
-def get_interactive_window(user_id: int, thread_id: int | None = None) -> str | None:
+def get_interactive_window(
+    user_id: int,
+    thread_id: int | None = None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
+) -> str | None:
     """Get the window_id for user's interactive mode."""
-    return _interactive_mode.get((user_id, thread_id or 0))
+    return _interactive_mode.get(
+        _interactive_key(
+            user_id,
+            thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        )
+    )
 
 
 def set_interactive_mode(
     user_id: int,
     window_id: str,
     thread_id: int | None = None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> None:
     """Set interactive mode for a user."""
     logger.debug(
@@ -84,18 +131,52 @@ def set_interactive_mode(
         window_id,
         thread_id,
     )
-    _interactive_mode[(user_id, thread_id or 0)] = window_id
+    _interactive_mode[
+        _interactive_key(
+            user_id,
+            thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        )
+    ] = window_id
 
 
-def clear_interactive_mode(user_id: int, thread_id: int | None = None) -> None:
+def clear_interactive_mode(
+    user_id: int,
+    thread_id: int | None = None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
+) -> None:
     """Clear interactive mode for a user (without deleting message)."""
     logger.debug("Clear interactive mode: user=%d, thread=%s", user_id, thread_id)
-    _interactive_mode.pop((user_id, thread_id or 0), None)
+    _interactive_mode.pop(
+        _interactive_key(
+            user_id,
+            thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        ),
+        None,
+    )
 
 
-def get_interactive_msg_id(user_id: int, thread_id: int | None = None) -> int | None:
+def get_interactive_msg_id(
+    user_id: int,
+    thread_id: int | None = None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
+) -> int | None:
     """Get the interactive message ID for a user."""
-    return _interactive_msgs.get((user_id, thread_id or 0))
+    return _interactive_msgs.get(
+        _interactive_key(
+            user_id,
+            thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
+        )
+    )
 
 
 def _build_interactive_keyboard(
@@ -194,6 +275,9 @@ async def handle_interactive_ui(
     user_id: int,
     window_id: str,
     thread_id: int | None = None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> bool:
     """Capture terminal and send interactive UI content to user.
 
@@ -201,8 +285,14 @@ async def handle_interactive_ui(
     RestoreCheckpoint UIs. Returns True if UI was detected and sent,
     False otherwise.
     """
-    ikey = (user_id, thread_id or 0)
-    chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+    ikey = _interactive_key(
+        user_id,
+        thread_id,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
+    if chat_id is None:
+        chat_id = session_manager.resolve_chat_id(user_id, thread_id)
     w = await tmux_manager.find_window_by_id(window_id)
     if not w:
         return False
@@ -285,9 +375,17 @@ async def clear_interactive_msg(
     user_id: int,
     bot: Bot | None = None,
     thread_id: int | None = None,
+    *,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
 ) -> None:
     """Clear tracked interactive message, delete from chat, and exit interactive mode."""
-    ikey = (user_id, thread_id or 0)
+    ikey = _interactive_key(
+        user_id,
+        thread_id,
+        chat_id=chat_id,
+        surface_key=surface_key,
+    )
     msg_id = _interactive_msgs.pop(ikey, None)
     _interactive_mode.pop(ikey, None)
     logger.debug(
@@ -297,7 +395,8 @@ async def clear_interactive_msg(
         msg_id,
     )
     if bot and msg_id:
-        chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+        if chat_id is None:
+            chat_id = session_manager.resolve_chat_id(user_id, thread_id)
         try:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
         except Exception:

@@ -1,0 +1,8 @@
+{
+  "runtime_kind": "claude",
+  "surface": "terminal",
+  "prompt_name": "PermissionPrompt",
+  "visible": true,
+  "should_persist": false,
+  "prompt_text": "Do you want to proceed?\nEsc to cancel"
+}

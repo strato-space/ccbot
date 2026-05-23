@@ -10,10 +10,52 @@ from pathlib import Path
 import pytest
 
 from ccbot.codex_threads import CodexThreadCatalog
+from ccbot.fast_agent_sessions import FastAgentSessionCatalog
 from ccbot.session import SessionManager
 
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "codex"
+
+
+def test_codex_catalog_defaults_to_codex_home_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "runtime-codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    catalog = CodexThreadCatalog()
+
+    assert catalog.codex_home == codex_home
+    assert catalog.session_index_path == codex_home / "session_index.jsonl"
+    assert catalog.sessions_root == codex_home / "sessions"
+
+
+def test_codex_catalog_keeps_home_fallback_with_codex_home_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    service_home = tmp_path / "service-home"
+    runtime_home = tmp_path / "runtime-codex-home"
+    fallback_codex_home = service_home / ".codex"
+    monkeypatch.setenv("HOME", str(service_home))
+    monkeypatch.setenv("CODEX_HOME", str(runtime_home))
+    _write_codex_thread(
+        fallback_codex_home,
+        thread_id="019d4e63-f279-79b1-8dfd-be785dc4a419",
+        cwd="/workspace/app",
+        thread_name="Fallback thread",
+        updated_at="2026-04-02T14:30:00Z",
+    )
+
+    catalog = CodexThreadCatalog()
+
+    assert catalog.codex_home == runtime_home
+    assert catalog.get_candidate("019d4e63-f279-79b1-8dfd-be785dc4a419") is not None
+    assert (
+        catalog.get_candidate_fast("019d4e63-f279-79b1-8dfd-be785dc4a419")
+        is not None
+    )
 
 
 def _build_fixture_codex_home(tmp_path: Path) -> Path:
@@ -42,6 +84,8 @@ def _write_codex_thread(
     cwd: str,
     thread_name: str,
     updated_at: str,
+    originator: str = "codex-tui",
+    source: object = "cli",
 ) -> None:
     sessions_root = codex_home / "sessions" / "2026" / "04" / "02"
     sessions_root.mkdir(parents=True, exist_ok=True)
@@ -65,7 +109,12 @@ def _write_codex_thread(
                     {
                         "timestamp": updated_at,
                         "type": "session_meta",
-                        "payload": {"id": thread_id, "cwd": cwd},
+                        "payload": {
+                            "id": thread_id,
+                            "cwd": cwd,
+                            "originator": originator,
+                            "source": source,
+                        },
                     }
                 ),
                 json.dumps(
@@ -126,7 +175,12 @@ def session_manager(monkeypatch: pytest.MonkeyPatch, fixture_catalog: CodexThrea
         "ccbot.session.config.claude_projects_path",
         fixture_catalog.codex_home / "empty-claude-projects",
     )
-    return SessionManager(codex_thread_catalog=fixture_catalog)
+    return SessionManager(
+        codex_thread_catalog=fixture_catalog,
+        fast_agent_session_catalog=FastAgentSessionCatalog(
+            environment_root=fixture_catalog.codex_home / "empty-fast-agent"
+        ),
+    )
 
 
 def test_catalog_enumerates_available_candidates_and_orphans(
@@ -134,10 +188,8 @@ def test_catalog_enumerates_available_candidates_and_orphans(
 ) -> None:
     candidates = fixture_catalog.candidates
     assert [candidate.thread_id for candidate in candidates] == [
-        "019d4e76-7fae-7a90-bc40-2290ee269660",
         "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9",
         "019d4d8b-65d8-7c60-9317-459cdb087487",
-        "019cd6ee-1188-7640-acbd-2c628477bde5",
         "019d3932-39e4-74e3-9e72-136b65c3841a",
     ]
     assert all(candidate.rollout_file.exists() for candidate in candidates)
@@ -147,6 +199,139 @@ def test_catalog_enumerates_available_candidates_and_orphans(
         "019d4e63-f279-79b1-8dfd-be785dc4a419",
         "019dffff-0000-7000-8000-stale0000000",
     }
+
+
+def test_catalog_hides_codex_exec_helper_sessions_from_resume_candidates(
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / ".codex"
+    _write_codex_thread(
+        codex_home,
+        thread_id="019d5000-0000-7000-8000-000000000010",
+        cwd="/workspace/app",
+        thread_name="Visible interactive thread",
+        updated_at="2026-04-02T14:00:00Z",
+    )
+    _write_codex_thread(
+        codex_home,
+        thread_id="019d5000-0000-7000-8000-000000000011",
+        cwd="/workspace/app",
+        thread_name="Hidden helper thread",
+        updated_at="2026-04-02T14:01:00Z",
+        originator="codex_exec",
+        source="exec",
+    )
+
+    catalog = CodexThreadCatalog(codex_home=codex_home)
+
+    candidates = catalog.list_candidates_for_cwd("/workspace/app")
+    assert [candidate.thread_id for candidate in candidates] == [
+        "019d5000-0000-7000-8000-000000000010",
+    ]
+    assert candidates[0].originator == "codex-tui"
+    assert candidates[0].source == "cli"
+
+
+def test_catalog_hides_codex_native_subagent_sessions_from_resume_candidates(
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / ".codex"
+    parent_id = "019d5000-0000-7000-8000-000000000020"
+    subagent_id = "019d5000-0000-7000-8000-000000000021"
+    _write_codex_thread(
+        codex_home,
+        thread_id=parent_id,
+        cwd="/workspace/app",
+        thread_name="Parent interactive thread",
+        updated_at="2026-04-02T14:00:00Z",
+    )
+    _write_codex_thread(
+        codex_home,
+        thread_id=subagent_id,
+        cwd="/workspace/app",
+        thread_name="Boole helper thread",
+        updated_at="2026-04-02T14:01:00Z",
+        source={
+            "subagent": {
+                "thread_spawn": {
+                    "parent_thread_id": parent_id,
+                    "agent_nickname": "Boole",
+                    "agent_role": "default",
+                }
+            }
+        },
+    )
+
+    catalog = CodexThreadCatalog(codex_home=codex_home)
+
+    assert [candidate.thread_id for candidate in catalog.list_candidates_for_cwd("/workspace/app")] == [
+        parent_id,
+    ]
+    assert catalog.is_helper_thread_fast(subagent_id) is True
+    assert catalog.get_identity_fast(subagent_id).source == "subagent"  # type: ignore[union-attr]
+
+
+def test_catalog_uses_first_human_codex_user_message_as_unnamed_preview(
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / ".codex"
+    sessions_root = codex_home / "sessions" / "2026" / "04" / "02"
+    sessions_root.mkdir(parents=True)
+    thread_id = "019d5000-0000-7000-8000-000000000012"
+    rollout = sessions_root / f"rollout-{thread_id}.jsonl"
+    rollout.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "timestamp": "2026-04-02T14:00:00Z",
+                        "type": "session_meta",
+                        "payload": {
+                            "id": thread_id,
+                            "cwd": "/workspace/app",
+                            "originator": "codex-tui",
+                            "source": "cli",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-04-02T14:00:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": "# AGENTS.md instructions\n<INSTRUCTIONS>\nAUTONOMY DIRECTIVE",
+                                }
+                            ],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-04-02T14:00:01Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "ping"}],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    catalog = CodexThreadCatalog(codex_home=codex_home)
+
+    candidates = catalog.list_candidates_for_cwd("/workspace/app")
+    assert len(candidates) == 1
+    assert candidates[0].summary == "ping"
 
 
 def test_catalog_resolution_prefers_explicit_ids_then_launcher_then_cwd(
@@ -172,18 +357,107 @@ def test_catalog_resolution_prefers_explicit_ids_then_launcher_then_cwd(
     assert launcher.reason == "explicit_launcher_registration"
 
     cwd_resolution = fixture_catalog.resolve(cwd="/home")
-    assert cwd_resolution.status == "ambiguous"
-    assert [candidate.thread_id for candidate in cwd_resolution.candidates] == [
-        "019d4e76-7fae-7a90-bc40-2290ee269660",
-        "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9",
-    ]
-    assert cwd_resolution.reason == "normalized_cwd_ambiguous"
+    assert cwd_resolution.status == "selected"
+    assert cwd_resolution.selected is not None
+    assert cwd_resolution.selected.thread_id == "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9"
+    assert cwd_resolution.reason == "normalized_cwd"
 
     root_resolution = fixture_catalog.resolve(cwd="/root")
     assert root_resolution.status == "selected"
     assert root_resolution.selected is not None
     assert root_resolution.selected.thread_id == "019d3932-39e4-74e3-9e72-136b65c3841a"
     assert root_resolution.reason == "normalized_cwd"
+
+
+def test_codex_resume_and_rename_resolve_exact_name_and_id(
+    fixture_catalog: CodexThreadCatalog,
+) -> None:
+    by_name = fixture_catalog.resolve_resume_target("Investigate ccbot bug")
+    assert by_name.status == "selected"
+    assert by_name.selected is not None
+    assert by_name.selected.thread_id == "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9"
+    assert by_name.reason == "resume_explicit_thread_name"
+
+    by_id = fixture_catalog.resolve_rename_target(
+        "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9"
+    )
+    assert by_id.status == "selected"
+    assert by_id.selected is not None
+    assert by_id.selected.thread_name == "Investigate ccbot bug"
+    assert by_id.reason == "rename_explicit_thread_id"
+
+
+def test_codex_resume_and_rename_fail_closed_for_duplicate_names(tmp_path: Path) -> None:
+    codex_home = _build_fixture_codex_home(tmp_path)
+    _write_codex_thread(
+        codex_home,
+        thread_id="019d5000-0000-7000-8000-dupe-name00001",
+        cwd="/home/alpha",
+        thread_name="Shared Codex Name",
+        updated_at="2026-04-02T23:59:59Z",
+    )
+    _write_codex_thread(
+        codex_home,
+        thread_id="019d5000-0000-7000-8000-dupe-name00002",
+        cwd="/home/beta",
+        thread_name="Shared Codex Name",
+        updated_at="2026-04-03T00:00:59Z",
+    )
+    catalog = CodexThreadCatalog(codex_home=codex_home)
+
+    resume = catalog.resolve_resume_target("Shared Codex Name")
+    rename = catalog.resolve_rename_target("Shared Codex Name")
+
+    assert resume.status == "ambiguous"
+    assert resume.reason == "resume_explicit_thread_name_ambiguous"
+    assert {candidate.thread_id for candidate in resume.candidates} == {
+        "019d5000-0000-7000-8000-dupe-name00001",
+        "019d5000-0000-7000-8000-dupe-name00002",
+    }
+
+    assert rename.status == "ambiguous"
+    assert rename.reason == "rename_explicit_thread_name_ambiguous"
+    assert {candidate.thread_id for candidate in rename.candidates} == {
+        "019d5000-0000-7000-8000-dupe-name00001",
+        "019d5000-0000-7000-8000-dupe-name00002",
+    }
+
+
+def test_codex_resume_and_rename_fail_closed_for_id_name_collision(tmp_path: Path) -> None:
+    codex_home = _build_fixture_codex_home(tmp_path)
+    thread_id = "019d5000-0000-7000-8000-collision00001"
+    _write_codex_thread(
+        codex_home,
+        thread_id=thread_id,
+        cwd="/home/alpha",
+        thread_name="Collision primary thread",
+        updated_at="2026-04-02T23:59:59Z",
+    )
+    _write_codex_thread(
+        codex_home,
+        thread_id="019d5000-0000-7000-8000-collision00002",
+        cwd="/home/beta",
+        thread_name=thread_id,
+        updated_at="2026-04-03T00:00:59Z",
+    )
+    catalog = CodexThreadCatalog(codex_home=codex_home)
+
+    resume = catalog.resolve_resume_target(thread_id)
+    rename = catalog.resolve_rename_target(thread_id)
+
+    assert resume.status == "ambiguous"
+    assert resume.reason == "resume_token_id_name_collision"
+    assert {candidate.thread_id for candidate in resume.candidates} == {
+        thread_id,
+        "019d5000-0000-7000-8000-collision00002",
+    }
+
+    assert rename.status == "ambiguous"
+    assert rename.reason == "rename_token_id_name_collision"
+    assert {candidate.thread_id for candidate in rename.candidates} == {
+        thread_id,
+        "019d5000-0000-7000-8000-collision00002",
+    }
 
 
 def test_catalog_fails_closed_on_missing_rollout_and_session_manager_uses_catalog(
@@ -265,12 +539,10 @@ async def test_session_manager_lists_codex_candidates_for_directory(
     session_manager: SessionManager,
 ) -> None:
     sessions = await session_manager.list_threads_for_directory("/home")
-    assert [session.thread_id for session in sessions] == [
-        "019d4e76-7fae-7a90-bc40-2290ee269660",
+    assert [session.thread_id for session in sessions[:1]] == [
         "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9",
     ]
-    assert [session.summary for session in sessions] == [
-        "Capture Codex evidence fixtures",
+    assert [session.summary for session in sessions[:1]] == [
         "Investigate ccbot bug",
     ]
 
@@ -290,12 +562,12 @@ async def test_session_manager_preserves_legacy_claude_threads_in_mixed_director
 
     sessions = await session_manager.list_threads_for_directory("/home")
 
-    assert [session.thread_id for session in sessions] == [
-        "019d4e76-7fae-7a90-bc40-2290ee269660",
-        "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9",
-        "legacy-claude-thread",
-    ]
-    assert sessions[-1].summary == "Legacy Claude thread"
+    assert sessions[0].thread_id == "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9"
+    assert any(session.thread_id == "legacy-claude-thread" for session in sessions)
+    legacy = next(
+        session for session in sessions if session.thread_id == "legacy-claude-thread"
+    )
+    assert legacy.summary == "Legacy Claude thread"
 
 
 @pytest.mark.asyncio
@@ -325,6 +597,90 @@ async def test_codex_registration_ignores_stale_history_candidates(
     state.registered_at = newest_home_candidate + 1000
 
     assert await session_manager.resolve_thread_for_window("@1") is None
+
+
+@pytest.mark.asyncio
+async def test_codex_fresh_same_cwd_window_does_not_adopt_bound_peer_thread(
+    session_manager: SessionManager,
+) -> None:
+    thread_id = "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9"
+    session_manager.register_live_process(
+        "@1",
+        "/home",
+        runtime_kind="codex",
+        thread_id=thread_id,
+    )
+    session_manager.get_window_state("@1").registered_at = 10.0
+    session_manager.bind_thread(100, 555, "@1", window_name="comfy-agent")
+
+    session_manager.register_live_process("@2", "/home", runtime_kind="codex")
+    session_manager.get_window_state("@2").registered_at = time.time() - 1.0
+    session_manager.bind_thread(100, 8227, "@2", window_name="comfy-agent-ops")
+
+    resolved = await session_manager.resolve_thread_for_window("@2")
+
+    assert resolved is None
+    assert session_manager.get_window_state("@2").thread_id == ""
+
+
+@pytest.mark.asyncio
+async def test_codex_duplicate_thread_state_delivers_only_authoritative_window(
+    session_manager: SessionManager,
+) -> None:
+    thread_id = "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9"
+    session_manager.register_live_process(
+        "@1",
+        "/home",
+        runtime_kind="codex",
+        thread_id=thread_id,
+    )
+    session_manager.get_window_state("@1").registered_at = 10.0
+    session_manager.bind_thread(100, 555, "@1", window_name="comfy-agent")
+    session_manager.register_live_process(
+        "@2",
+        "/home",
+        runtime_kind="codex",
+        thread_id=thread_id,
+    )
+    session_manager.get_window_state("@2").registered_at = 20.0
+    session_manager.bind_thread(100, 8227, "@2", window_name="comfy-agent-ops")
+
+    users = await session_manager.find_users_for_session(thread_id)
+
+    assert users == [(100, "@1", 555)]
+    assert session_manager.get_window_state("@2").thread_id == ""
+
+
+@pytest.mark.asyncio
+async def test_codex_duplicate_thread_prefers_restore_intent_owner_after_restart(
+    session_manager: SessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread_id = "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9"
+    monkeypatch.setenv("CCBOT_RESTORE_RUNTIME_ID", thread_id)
+    monkeypatch.setenv("CCBOT_RESTORE_USER_ID", "100")
+    monkeypatch.setenv("CCBOT_RESTORE_SURFACE_KEY", "t:555")
+
+    session_manager.register_live_process("@1", "/home", runtime_kind="codex")
+    session_manager.get_window_state("@1").registered_at = time.time() - 1.0
+    session_manager.bind_thread(100, 555, "@1", window_name="comfy-agent")
+
+    session_manager.register_live_process(
+        "@2",
+        "/home",
+        runtime_kind="codex",
+        thread_id=thread_id,
+    )
+    session_manager.get_window_state("@2").registered_at = 1.0
+    session_manager.bind_thread(100, 8227, "@2", window_name="mediagen-comfy")
+
+    resolved = await session_manager.resolve_thread_for_window("@1")
+    users = await session_manager.find_users_for_session(thread_id)
+
+    assert resolved is not None
+    assert resolved.thread_id == thread_id
+    assert users == [(100, "@1", 555)]
+    assert session_manager.get_window_state("@2").thread_id == ""
 
 
 @pytest.mark.asyncio

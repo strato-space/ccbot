@@ -1,135 +1,109 @@
-# Runtime Ontology For Codex Adaptation
+# Runtime Ontology For Multi-Runtime Topic Control
 
-This note defines the entities that the Codex adaptation work must keep distinct.
-It is the contract for all implementation tasks in `/home/ccbot-codex-adaptation-plan.md`.
+This file is a derived maintainer note. The master ontology now lives in
+[`/home/tools/ccbot/ontology/README.md`](/home/tools/ccbot/ontology/README.md).
 
-## Why this exists
+If this note conflicts with anything under `ontology/`, `ontology/` wins.
 
-The current codebase is Claude-oriented and often uses the word `session` as if a
-single thing were being launched, controlled, resumed, and read back. That is too
-coarse for Codex.
+## Canonical Ontology Entry Points
 
-For Codex work, the implementation must distinguish the live terminal process from
-the persisted conversation identity and from the rollout evidence on disk.
+- [`/home/tools/ccbot/ontology/README.md`](/home/tools/ccbot/ontology/README.md)
+- [`/home/tools/ccbot/ontology/runtime.md`](/home/tools/ccbot/ontology/runtime.md)
+- [`/home/tools/ccbot/ontology/topic-control.md`](/home/tools/ccbot/ontology/topic-control.md)
+- [`/home/tools/ccbot/ontology/delivery-surface.md`](/home/tools/ccbot/ontology/delivery-surface.md)
+- [`/home/tools/ccbot/ontology/boundaries.md`](/home/tools/ccbot/ontology/boundaries.md)
 
-## Definitions
+## Why This Slave Note Exists
 
-- **Telegram topic**
-  - The user-facing control lane in Telegram.
-  - It is where commands, text input, screenshots, and notifications are shown.
+The older implementation and plan history used `session`, `topic`, `window`,
+and `thread` too loosely. The master ontology now separates those kinds
+explicitly. This file exists only as the expanded explanatory bridge from specs
+and code to that master ontology.
 
-- **Binding**
-  - The bot's persisted association from a Telegram topic to a live tmux window,
-    plus the runtime metadata needed to route notifications and resume safely.
+## Runtime Layer Summary
 
-- **tmux window**
-  - The live terminal container managed by the bot.
-  - It is where the interactive `codex` process runs.
+The runtime layer must keep these kinds distinct:
 
-- **Codex process**
-  - The currently running interactive `codex` CLI instance inside a tmux window.
-  - The bot writes user input to this process through tmux keystrokes.
+- `control surface`
+- `control-surface policy`
+- `binding`
+- `runtime process`
+- `runtime conversation identity`
+- `semantic emitter / supervisor`
+- `live semantic stream`
+- `persisted replay evidence`
+- `input acknowledgement`
 
-- **Codex thread**
-  - The persisted conversation identity that Codex can resume later.
-  - Thread metadata is exposed through the local Codex storage model and related tooling.
+The controlling relation is:
 
-- **Rollout log**
-  - The JSONL event stream on disk under `~/.codex/sessions/.../rollout-*.jsonl`.
-  - This is read-only evidence emitted by Codex and used for history and notifications.
+`Telegram control surface --governed by control-surface policy--> may or may not enter a binding flow`
 
-- **Runtime adapter**
-  - The code layer that translates runtime-specific launch, identity, input, and
-    event semantics into the bot's generic behavior.
+Then:
 
-## Canonical model
+`binding_scope=tmux -> tmux window -> runtime process`
 
-The adaptation must use this chain:
+`binding_scope=external -> runtime conversation identity -> persisted replay evidence`
 
-`Telegram topic -> binding -> tmux window -> Codex process -> Codex thread -> rollout log`
+`runtime process -> semantic emitter / supervisor`
 
-The entities above are related, but they are not interchangeable.
+`semantic emitter / supervisor -> live semantic stream`
 
-## Read path vs write path
+`semantic emitter / supervisor -> persisted replay evidence`
 
-### Write path
+`runtime conversation identity scopes/indexes the live semantic stream and persisted replay evidence`
 
-The bot writes to the live Codex process through tmux.
+`live semantic stream and/or persisted replay evidence -> normalized events`
 
-Allowed write target:
-- `Telegram topic -> binding -> tmux window -> Codex process`
+This remains compatible with the plan language in
+[`/home/tools/ccbot/specs/ccbot-codex-adaptation-plan-2.md`](/home/tools/ccbot/specs/ccbot-codex-adaptation-plan-2.md),
+but the canonical nouns now live under `ontology/`, not under `doc/`.
 
-Not allowed:
-- Writing "to a thread"
-- Writing "to a rollout log"
-- Treating `session_index.jsonl` or rollout JSONL as command targets
+## Topic And Main-Chat Control
 
-### Read path
+The master ontology no longer treats `Telegram topic` as the universal genus.
+The code now models a broader `control surface` with two species:
 
-The bot reads history and notification evidence from normalized rollout events on disk.
+- named topic control surface
+- no-topics main-chat control surface
 
-Allowed read target:
-- `Telegram topic -> binding -> Codex thread -> rollout log -> normalized events`
+That is the minimal repair required by real code:
 
-Not allowed:
-- Treating the live pane buffer as the primary history source
-- Treating tmux pane text as the identity source for a thread
+- `surface_key=t:<chat_id>:<thread_id>` for named topics when Telegram
+  coordinates are known; bare `t:<thread_id>` is legacy mirror/fallback data
+- `surface_key=c:<chat_id>` for no-topics main-chat mode
+- full persisted control-surface identity is `(user_id, surface_key)`; the
+  `surface_key` alone is a local product key, not a globally unique surface
+  identity
 
-tmux pane capture may be used for:
-- screenshots
-- prompt-state hints
-- fail-closed interactive state detection
+`thread_id is None` may canonically mark the no-topics main-chat mode in the
+product surface, but this is still not the same claim as `chat == topic`.
 
-tmux pane capture must not be used as the sole source of truth for:
-- thread identity
-- persisted history
-- resume resolution
+## Capability And Control Notes
 
-## Forbidden equalities
+- `Input injection plane` exists only for live `tmux` bindings.
+- `Input acknowledgement` is persisted proof that an injected message became a
+  runtime turn. For Codex, the proof is an appended rollout JSONL event such as
+  `turn_context` or a matching user-message record; pane reaction is diagnostic only.
+- `binding_scope=external` may preserve replay delivery while staying
+  read-only rather than pretending to send into tmux.
+- `queue` and `steer` remain message-plane routing modes.
+- `literal ACP-protocol-over-stdio` remains rejected as the primary operator
+  surface because tmux stdio stays human-first.
 
-These equalities are false and must stay false in code, docs, and tests:
+## Forbidden Collapses
 
+The master ontology rejects, among others:
+
+- `policy == binding`
+- `bind flow == message routing`
+- `status notification == content delivery`
+- `control surface == topic`
 - `window == thread`
-- `process == thread`
-- `process == rollout log`
-- `thread == rollout log`
-- `topic == thread`
-- `topic == window`
+- `process == replay evidence`
 
-More precise statements:
+## Related Derived Notes
 
-- A tmux window hosts a live process, but it is not the persisted thread.
-- A process may attach to an existing thread via resume, but it is not that thread.
-- A rollout log is emitted evidence from process/thread activity, not the process itself.
-- A Telegram topic is bound to a live control lane, not directly to a persisted log file.
-
-## Operational invariants
-
-- A topic may bind to at most one live tmux window at a time.
-- A tmux window may host at most one active Codex process at a time.
-- A live process may be associated with at most one primary Codex thread at a time.
-- A thread may have multiple historical rollout logs over time.
-- Resume attaches a new or reused live process to an existing thread; it does not restore
-  the previous live process.
-- History is reconstructed from normalized rollout evidence, not from the live process buffer.
-
-## Resolution policy
-
-Thread resolution must be deterministic and fail closed.
-
-Preferred precedence:
-1. Explicit thread id chosen by the operator
-2. Explicit launcher-side registration record
-3. Exact normalized cwd match with a single valid candidate
-4. User-visible disambiguation
-
-Never do this:
-- silently choose between multiple same-cwd thread candidates
-- guess thread identity from pane text alone
-- assume `/root/.codex` is the only valid Codex home
-
-## Scope guard
-
-The Codex adaptation work does not introduce new `voice`, `task`, or `ACP` behavior.
-Those flows are shared-surface compatibility constraints and must be protected by
-non-regression tests while the runtime model changes underneath them.
+- [`/home/tools/ccbot/doc/topic-control-state-machine.md`](/home/tools/ccbot/doc/topic-control-state-machine.md)
+  explains the state machine derived from `ontology/topic-control.md`.
+- [`/home/tools/ccbot/doc/runtime-event-contract.md`](/home/tools/ccbot/doc/runtime-event-contract.md)
+  explains how normalized runtime semantics project onto delivery classes.

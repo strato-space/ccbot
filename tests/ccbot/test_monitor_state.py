@@ -19,6 +19,41 @@ class TestTrackedSession:
         assert restored.file_path == "/tmp/test.jsonl"
         assert restored.last_byte_offset == 42
 
+    def test_thread_and_replay_aliases(self):
+        tracked = TrackedSession(
+            session_id="thread-1",
+            file_path="/tmp/test.jsonl",
+            last_byte_offset=42,
+        )
+
+        assert tracked.thread_id == "thread-1"
+        assert tracked.replay_path == "/tmp/test.jsonl"
+
+        tracked.thread_id = "thread-2"
+        tracked.replay_path = "/tmp/other.jsonl"
+
+        assert tracked.session_id == "thread-2"
+        assert tracked.file_path == "/tmp/other.jsonl"
+
+    def test_to_dict_keeps_compatibility_envelope_keys(self):
+        tracked = TrackedSession(
+            session_id="thread-1",
+            file_path="/tmp/test.jsonl",
+            last_byte_offset=42,
+            runtime_kind="codex",
+        )
+
+        payload = tracked.to_dict()
+
+        assert payload == {
+            "session_id": "thread-1",
+            "file_path": "/tmp/test.jsonl",
+            "last_byte_offset": 42,
+            "runtime_kind": "codex",
+        }
+        assert "thread_id" not in payload
+        assert "replay_path" not in payload
+
     def test_from_dict_missing_fields_uses_defaults(self):
         session = TrackedSession.from_dict({})
         assert session.session_id == ""
@@ -114,6 +149,12 @@ class TestMonitorStateOperations:
         else:
             assert result is None
 
+    def test_get_tracked_source_alias(self, state):
+        tracked = TrackedSession(session_id="thread-1", file_path="/a.jsonl")
+        state.tracked_sessions["thread-1"] = tracked
+
+        assert state.get_tracked_source("thread-1") is tracked
+
     def test_update_session_adds_new(self, state):
         session = TrackedSession(session_id="s1", file_path="/a.jsonl")
         state.update_session(session)
@@ -121,6 +162,14 @@ class TestMonitorStateOperations:
 
     def test_update_session_sets_dirty(self, state):
         state.update_session(TrackedSession(session_id="s1", file_path="/a.jsonl"))
+        assert state._dirty is True
+
+    def test_update_tracked_source_alias(self, state):
+        tracked = TrackedSession(session_id="thread-1", file_path="/a.jsonl")
+
+        state.update_tracked_source(tracked)
+
+        assert state.tracked_sessions["thread-1"] is tracked
         assert state._dirty is True
 
     def test_remove_session_deletes(self, state):
@@ -133,6 +182,15 @@ class TestMonitorStateOperations:
     def test_remove_session_missing_no_error(self, state):
         state.remove_session("nonexistent")
         assert state.tracked_sessions == {}
+
+    def test_remove_tracked_source_alias(self, state):
+        state.tracked_sessions["thread-1"] = TrackedSession(
+            session_id="thread-1", file_path="/a.jsonl"
+        )
+
+        state.remove_tracked_source("thread-1")
+
+        assert "thread-1" not in state.tracked_sessions
 
 
 class TestSaveIfDirty:

@@ -20,7 +20,59 @@ from .state_schema import DEFAULT_RUNTIME_KIND, SCHEMA_VERSION, LEGACY_BACKUP_SU
 logger = logging.getLogger(__name__)
 
 # Env vars that must not leak to child processes (e.g. Claude Code via tmux)
-SENSITIVE_ENV_VARS = {"TELEGRAM_BOT_TOKEN", "ALLOWED_USERS", "OPENAI_API_KEY"}
+SENSITIVE_ENV_VARS = {
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_TOKEN",
+    "ALLOWED_USERS",
+    "OPENAI_API_KEY",
+}
+
+VOICE_STT_PROVIDERS = {"openai", "local_command", "auto", "disabled"}
+
+
+def _bounded_int_env(
+    name: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %d", name, value, default)
+        return default
+    if parsed < minimum:
+        logger.warning(
+            "%s=%d below minimum %d; using %d", name, parsed, minimum, minimum
+        )
+        return minimum
+    if parsed > maximum:
+        logger.warning(
+            "%s=%d above maximum %d; using %d", name, parsed, maximum, maximum
+        )
+        return maximum
+    return parsed
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name, "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on"}
+
+
+def resolve_ccbot_command(environ: dict[str, str] | None = None) -> str:
+    """Resolve the configured runtime launcher command.
+
+    ``CCBOT_COMMAND`` is the runtime-neutral name.  ``CLAUDE_COMMAND`` remains
+    a compatibility fallback for existing deployments.
+    """
+    source = os.environ if environ is None else environ
+    return source.get("CCBOT_COMMAND") or source.get("CLAUDE_COMMAND", "claude")
 
 
 class Config:
@@ -62,13 +114,17 @@ class Config:
         self.tmux_session_name = os.getenv("TMUX_SESSION_NAME", "ccbot")
         self.tmux_main_window_name = "__main__"
 
-        # Claude command to run in new windows
-        self.claude_command = os.getenv("CLAUDE_COMMAND", "claude")
+        # Runtime command to run in new windows.  Keep the legacy
+        # claude_command attribute as a compatibility alias while call sites
+        # migrate to ccbot_command.
+        self.ccbot_command = resolve_ccbot_command()
+        self.claude_command = self.ccbot_command
 
         # All state files live under config_dir
         self.state_file = self.config_dir / "state.json"
         self.session_map_file = self.config_dir / "session_map.json"
         self.monitor_state_file = self.config_dir / "monitor_state.json"
+        self.telegram_delivery_audit_file = self.config_dir / "telegram_delivery_audit.jsonl"
         self.state_schema_version = SCHEMA_VERSION
         self.state_backup_suffix = LEGACY_BACKUP_SUFFIX
         self.default_runtime_kind = DEFAULT_RUNTIME_KIND
@@ -100,6 +156,18 @@ class Config:
             os.getenv("CCBOT_SHOW_TOOL_CALLS", "true").lower() != "false"
         )
 
+        # Telegram delivery policy:
+        # - compact: human-facing chat output only (default)
+        # - verbose: expose more raw execution surface for debugging
+        delivery_mode = os.getenv("CCBOT_TELEGRAM_DELIVERY_MODE", "compact").lower()
+        if delivery_mode not in {"compact", "verbose"}:
+            logger.warning(
+                "Unknown CCBOT_TELEGRAM_DELIVERY_MODE=%s, falling back to compact",
+                delivery_mode,
+            )
+            delivery_mode = "compact"
+        self.telegram_delivery_mode = delivery_mode
+
         # Show hidden (dot) directories in directory browser
         self.show_hidden_dirs = (
             os.getenv("CCBOT_SHOW_HIDDEN_DIRS", "").lower() == "true"
@@ -110,6 +178,37 @@ class Config:
         self.openai_base_url: str = os.getenv(
             "OPENAI_BASE_URL", "https://api.openai.com/v1"
         )
+        voice_stt_provider = (
+            os.getenv("CCBOT_VOICE_STT_PROVIDER", "openai").strip().lower()
+        )
+        if voice_stt_provider not in VOICE_STT_PROVIDERS:
+            logger.warning(
+                "Unknown CCBOT_VOICE_STT_PROVIDER=%s, falling back to openai",
+                voice_stt_provider,
+            )
+            voice_stt_provider = "openai"
+        self.voice_stt_provider = voice_stt_provider
+        self.local_stt_command = os.getenv("CCBOT_LOCAL_STT_COMMAND", "").strip()
+        self.local_stt_model = os.getenv(
+            "CCBOT_LOCAL_STT_MODEL",
+            "antony66/whisper-large-v3-russian",
+        ).strip()
+        self.local_stt_language = (
+            os.getenv("CCBOT_LOCAL_STT_LANGUAGE", "ru").strip() or "ru"
+        )
+        self.local_stt_timeout_seconds = _bounded_int_env(
+            "CCBOT_LOCAL_STT_TIMEOUT_SECONDS",
+            300,
+            minimum=1,
+            maximum=3600,
+        )
+        self.local_stt_max_concurrency = _bounded_int_env(
+            "CCBOT_LOCAL_STT_MAX_CONCURRENCY",
+            1,
+            minimum=1,
+            maximum=8,
+        )
+        self.local_stt_keep_artifacts = _bool_env("CCBOT_LOCAL_STT_KEEP_ARTIFACTS")
 
         # Scrub sensitive vars from os.environ so child processes never inherit them.
         # Values are already captured in Config attributes above.
@@ -129,6 +228,14 @@ class Config:
     def is_user_allowed(self, user_id: int) -> bool:
         """Check if a user is in the allowed list."""
         return user_id in self.allowed_users
+
+    def __setattr__(self, name: str, value: object) -> None:
+        """Keep legacy claude_command and ccbot_command aliases in sync."""
+        object.__setattr__(self, name, value)
+        if name == "ccbot_command":
+            object.__setattr__(self, "claude_command", value)
+        elif name == "claude_command":
+            object.__setattr__(self, "ccbot_command", value)
 
 
 config = Config()

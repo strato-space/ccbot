@@ -117,3 +117,61 @@ class TestConfigOpenAI:
         monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
         Config()
         assert os.environ.get("OPENAI_API_KEY") is None
+
+
+@pytest.mark.usefixtures("_base_env")
+class TestConfigVoiceSTT:
+    def test_voice_stt_defaults(self, monkeypatch):
+        monkeypatch.delenv("CCBOT_VOICE_STT_PROVIDER", raising=False)
+        cfg = Config()
+        assert cfg.voice_stt_provider == "openai"
+        assert cfg.local_stt_language == "ru"
+        assert cfg.local_stt_timeout_seconds == 300
+        assert cfg.local_stt_max_concurrency == 1
+        assert cfg.local_stt_keep_artifacts is False
+
+    def test_voice_stt_local_settings(self, monkeypatch):
+        monkeypatch.setenv("CCBOT_VOICE_STT_PROVIDER", "local_command")
+        monkeypatch.setenv(
+            "CCBOT_LOCAL_STT_COMMAND", "/bin/stt --input_path {input_path}"
+        )
+        monkeypatch.setenv("CCBOT_LOCAL_STT_LANGUAGE", "ru")
+        monkeypatch.setenv("CCBOT_LOCAL_STT_TIMEOUT_SECONDS", "120")
+        monkeypatch.setenv("CCBOT_LOCAL_STT_MAX_CONCURRENCY", "2")
+        monkeypatch.setenv("CCBOT_LOCAL_STT_KEEP_ARTIFACTS", "true")
+        cfg = Config()
+        assert cfg.voice_stt_provider == "local_command"
+        assert cfg.local_stt_command.startswith("/bin/stt")
+        assert cfg.local_stt_timeout_seconds == 120
+        assert cfg.local_stt_max_concurrency == 2
+        assert cfg.local_stt_keep_artifacts is True
+
+    def test_voice_stt_invalid_provider_falls_back(self, monkeypatch):
+        monkeypatch.setenv("CCBOT_VOICE_STT_PROVIDER", "bogus")
+        cfg = Config()
+        assert cfg.voice_stt_provider == "openai"
+
+    def test_voice_stt_bounds_numeric_values(self, monkeypatch):
+        monkeypatch.setenv("CCBOT_LOCAL_STT_TIMEOUT_SECONDS", "0")
+        monkeypatch.setenv("CCBOT_LOCAL_STT_MAX_CONCURRENCY", "999")
+        cfg = Config()
+        assert cfg.local_stt_timeout_seconds == 1
+        assert cfg.local_stt_max_concurrency == 8
+
+
+def test_resolve_ccbot_command_prefers_ccbot_command_over_legacy() -> None:
+    from ccbot.config import resolve_ccbot_command
+
+    assert (
+        resolve_ccbot_command(
+            {"CCBOT_COMMAND": "omx --madmax", "CLAUDE_COMMAND": "codex"}
+        )
+        == "omx --madmax"
+    )
+
+
+def test_resolve_ccbot_command_falls_back_to_legacy_and_default() -> None:
+    from ccbot.config import resolve_ccbot_command
+
+    assert resolve_ccbot_command({"CLAUDE_COMMAND": "codex"}) == "codex"
+    assert resolve_ccbot_command({}) == "claude"

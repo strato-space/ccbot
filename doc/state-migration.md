@@ -1,8 +1,8 @@
 # State Migration And Cutover
 
-This note describes the persisted-state cutover used by the Codex adaptation
-work. The goal is to make the old Claude-era files readable while the bot
-starts writing versioned envelopes.
+This note describes the persisted-state cutover used by the multi-runtime
+adaptation work. The goal is to make the old Claude-era files readable while
+the bot starts writing versioned envelopes.
 
 ## Files
 
@@ -27,11 +27,16 @@ reversed.
 - `state.json` gets a top-level `schema_version` and `runtime_kind`
 - `session_map.json` is stored as a versioned envelope with `schema_version`,
   `runtime_kind`, and `entries`
-- `monitor_state.json` gets a top-level `schema_version` and `runtime_kind`
+- `monitor_state.json` keeps a versioned top-level envelope with
+  `schema_version`, `runtime_kind`, and `tracked_sessions`
+- `tracked_sessions` entries remain on the compatibility envelope
+  with `session_id` and `file_path`
+- `session_id` and `file_path` stay on disk
+- `thread_id` / `replay_path` are API aliases, not persisted schema keys
 
 ## Guarantees
 
 - Existing topic bindings are preserved during migration.
-- Existing monitor offsets are preserved during migration.
+- Existing replay offsets are preserved during migration.
 - Legacy files remain recoverable through the backup sidecar.
 - Readers continue to accept legacy and versioned shapes during cutover.

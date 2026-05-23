@@ -1,0 +1,465 @@
+"""Human-facing Telegram delivery policy.
+
+The runtime layer emits normalized semantic events. This module decides how
+much of that execution surface reaches Telegram in the default human-facing
+chat mode.
+
+`compact` is the production default:
+- hide internal injected user payloads (`<skill>`, local command XML, etc.)
+- keep only the latest human-facing narrative visible; `commentary` and
+  orchestration milestones collapse into one mutable surface
+- keep reasoning/tool/command/file-change updates in the mutable status
+  artifact instead of as permanent content bubbles
+- keep warning artifacts as Telegram-visible system notices
+- suppress placeholder reasoning with no human-readable summary
+
+`verbose` leaves the existing runtime-visible behavior intact for debugging.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import stat
+from dataclasses import replace
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+
+from .runtime_types import (
+    ASSISTANT_FINAL_SEMANTIC_KIND,
+    COMMAND_EXECUTION_SEMANTIC_KIND,
+    COMMENTARY_SEMANTIC_KIND,
+    DELIVERY_CLASS_HISTORY,
+    FILE_CHANGE_SEMANTIC_KIND,
+    GENERATED_IMAGE_PREVIEW_CONTENT_TYPE,
+    IMAGE_PREVIEW_SEMANTIC_KIND,
+    ORCHESTRATION_SEMANTIC_KIND,
+    PLAN_UPDATE_SEMANTIC_KIND,
+    REASONING_SEMANTIC_KIND,
+    TOOL_RESULT_SEMANTIC_KIND,
+    TOOL_START_SEMANTIC_KIND,
+    USER_ECHO_SEMANTIC_KIND,
+    WARNING_SEMANTIC_KIND,
+    NormalizedEvent,
+)
+
+_INTERNAL_USER_ECHO_RE = re.compile(
+    r"^\s*<("
+    r"skill|command-name|local-command-stdout|bash-input|bash-stdout|bash-stderr|"
+    r"subagent_notification|"
+    r"local-command-caveat|system-reminder"
+    r")\b",
+    re.IGNORECASE,
+)
+_PLACEHOLDER_REASONING = {"[reasoning]", "(thinking)"}
+_STATUS_ONLY_SEMANTIC_KINDS = {
+    REASONING_SEMANTIC_KIND,
+    TOOL_START_SEMANTIC_KIND,
+    TOOL_RESULT_SEMANTIC_KIND,
+    COMMAND_EXECUTION_SEMANTIC_KIND,
+    FILE_CHANGE_SEMANTIC_KIND,
+}
+_COMPACT_STATUS_LIMIT = 560
+_GENERATED_IMAGE_TOOL_NAMES = {
+    "gpt-image-2",
+    "image_gen",
+    "image_gen.imagegen",
+    "imagegen",
+    "media-gen",
+    "media_gen",
+}
+_GENERATED_IMAGE_SAVED_TO_RE = re.compile(r"saved\s+to:\s*(file://\S+)", re.IGNORECASE)
+_GENERATED_IMAGE_FIELD_RE = re.compile(r"^\s*(?:[•*-]\s*)?└\s*([^:]+):\s*(.*)$")
+_GENERATED_IMAGE_MAX_BYTES = 10 * 1024 * 1024
+_GENERATED_IMAGE_CAPTION_LIMIT = 900
+_IMAGE_SIGNATURES: dict[str, tuple[str, bytes]] = {
+    ".png": ("image/png", b"\x89PNG\r\n\x1a\n"),
+    ".jpg": ("image/jpeg", b"\xff\xd8\xff"),
+    ".jpeg": ("image/jpeg", b"\xff\xd8\xff"),
+    ".webp": ("image/webp", b"RIFF"),
+}
+
+
+def is_internal_user_payload(text: str) -> bool:
+    stripped = text.strip()
+    if _INTERNAL_USER_ECHO_RE.match(stripped):
+        return True
+    if stripped.startswith("<turn_aborted>"):
+        return True
+    return False
+
+
+def is_non_turn_user_notification(text: str) -> bool:
+    """Return True for hidden user payloads that do not open a new turn."""
+    stripped = text.strip()
+    if stripped.startswith("<turn_aborted>"):
+        return True
+    return _INTERNAL_USER_ECHO_RE.match(stripped) is not None
+
+
+def _clip_inline(text: str, *, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
+
+
+def _compact_single_block(text: str, *, max_chars: int = _COMPACT_STATUS_LIMIT) -> str:
+    text = text.strip()
+    if "```" in text:
+        lines = text.splitlines()
+        fence_start = next(
+            (index for index, line in enumerate(lines) if line.startswith("```")),
+            None,
+        )
+        if fence_start is not None:
+            close_index = next(
+                (
+                    index
+                    for index, line in enumerate(
+                        lines[fence_start + 1 :],
+                        start=fence_start + 1,
+                    )
+                    if line.startswith("```")
+                ),
+                None,
+            )
+            if close_index is None:
+                body = lines[fence_start + 1 :]
+                trailing: list[str] = []
+            else:
+                body = lines[fence_start + 1 : close_index]
+                trailing = lines[close_index + 1 :]
+            if (
+                len(text) <= max_chars
+                and len([line for line in body if line.strip()]) <= 10
+                and not [line for line in trailing if line.strip()]
+            ):
+                return text
+            prefix_lines = [
+                _clip_inline(line, max_chars=80)
+                for line in lines[:fence_start]
+                if line.strip()
+            ][:2]
+            clipped_body = [
+                _clip_inline(line, max_chars=72) for line in body[:10]
+            ]
+            compact_lines = [*prefix_lines, lines[fence_start], *clipped_body, "```"]
+            omitted = (
+                max(
+                    0,
+                    len([line for line in lines[:fence_start] if line.strip()])
+                    - len(prefix_lines),
+                )
+                + max(0, len(body) - len(clipped_body))
+                + len([line for line in trailing if line.strip()])
+            )
+            if omitted > 0:
+                compact_lines.extend(
+                    ["", f"preview {len(clipped_body)}/{len(clipped_body) + omitted} lines"]
+                )
+            compact = "\n".join(compact_lines)
+            if len(compact) <= max_chars:
+                return compact
+            trailing_nonempty = [line for line in trailing if line.strip()]
+            fallback_lines = prefix_lines[:1]
+            if body:
+                fallback_lines.append(_clip_inline(body[0], max_chars=80))
+            elif trailing_nonempty:
+                fallback_lines.append(_clip_inline(trailing_nonempty[0], max_chars=80))
+            omitted_plain = (
+                max(
+                    0,
+                    len([line for line in lines[:fence_start] if line.strip()])
+                    - len(prefix_lines[:1]),
+                )
+                + max(0, len(body) - (1 if body else 0))
+                + max(0, len(trailing_nonempty) - (0 if body else 1 if trailing_nonempty else 0))
+            )
+            plain = "\n".join(line for line in fallback_lines if line)
+            if omitted_plain > 0:
+                shown_plain = 1 if (body or trailing_nonempty) else 0
+                plain = "\n".join(
+                    part
+                    for part in (
+                        plain,
+                        f"preview {shown_plain}/{shown_plain + omitted_plain} lines",
+                    )
+                    if part
+                )
+            if len(plain) <= max_chars:
+                return plain
+            return _clip_inline(" ".join(plain.split()), max_chars=max_chars)
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
+
+
+def _strip_outer_text_fence(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if len(lines) >= 3 and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return stripped
+
+
+def _generated_image_roots() -> list[Path]:
+    roots = [
+        Path.home() / ".codex" / "generated_images",
+        Path("/data/iqdoctor/.codex/generated_images"),
+    ]
+    extra = os.environ.get("CCBOT_GENERATED_ARTIFACT_ROOTS", "")
+    for raw in extra.split(os.pathsep):
+        raw = raw.strip()
+        if raw:
+            roots.append(Path(raw).expanduser())
+    resolved: list[Path] = []
+    for root in roots:
+        try:
+            resolved.append(root.resolve(strict=False))
+        except OSError:
+            continue
+    return resolved
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _path_under_generated_root(path: Path) -> bool:
+    return any(_is_relative_to(path, root) for root in _generated_image_roots())
+
+
+def _media_type_for_image(path: Path, header: bytes) -> str | None:
+    suffix = path.suffix.lower()
+    signature = _IMAGE_SIGNATURES.get(suffix)
+    if signature is None:
+        return None
+    media_type, prefix = signature
+    if suffix == ".webp":
+        if len(header) >= 12 and header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+            return media_type
+        return None
+    if header.startswith(prefix):
+        return media_type
+    return None
+
+
+def _load_generated_image_bytes(file_url: str) -> tuple[str, bytes] | None:
+    parsed = urlparse(file_url)
+    if parsed.scheme != "file":
+        return None
+    if parsed.netloc not in {"", "localhost"}:
+        return None
+    decoded_path = unquote(parsed.path)
+    if "\x00" in decoded_path:
+        return None
+    candidate = Path(decoded_path)
+    if not candidate.is_absolute():
+        return None
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError:
+        return None
+    if not _path_under_generated_root(resolved):
+        return None
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd: int | None = None
+    try:
+        fd = os.open(resolved, flags)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        if st.st_size <= 0 or st.st_size > _GENERATED_IMAGE_MAX_BYTES:
+            return None
+        try:
+            opened_path = Path(f"/proc/self/fd/{fd}").resolve(strict=True)
+            if not _path_under_generated_root(opened_path):
+                return None
+        except OSError:
+            # /proc may be unavailable in some test sandboxes; pre-open resolve
+            # and O_NOFOLLOW still preserve the main disclosure boundary.
+            pass
+        with os.fdopen(fd, "rb") as handle:
+            fd = None
+            header = handle.read(16)
+            media_type = _media_type_for_image(resolved, header)
+            if media_type is None:
+                return None
+            return media_type, header + handle.read()
+    except OSError:
+        return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _extract_generated_image_fields(text: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    current_key = ""
+    for line in _strip_outer_text_fence(text).splitlines():
+        match = _GENERATED_IMAGE_FIELD_RE.match(line)
+        if match:
+            current_key = " ".join(match.group(1).strip().casefold().split())
+            fields[current_key] = match.group(2).strip()
+            continue
+        if current_key and line.startswith(("    ", "      ")) and line.strip():
+            fields[current_key] = f"{fields[current_key]} {line.strip()}".strip()
+    return fields
+
+
+def _generated_image_caption(text: str, file_url: str) -> str:
+    fields = _extract_generated_image_fields(text)
+    parsed = urlparse(file_url)
+    basename = Path(unquote(parsed.path)).name
+    lines = ["🖼 Generated Image"]
+    for label, key, limit in (
+        ("Use case", "use case", 120),
+        ("Asset", "asset type", 160),
+        ("Request", "primary request", 360),
+    ):
+        value = fields.get(key, "").strip()
+        if value:
+            lines.append(f"{label}: {_clip_inline(value, max_chars=limit)}")
+    if basename:
+        lines.append(f"File: {_clip_inline(basename, max_chars=120)}")
+    caption = "\n".join(lines)
+    return _clip_inline(caption, max_chars=_GENERATED_IMAGE_CAPTION_LIMIT)
+
+
+def _generated_image_preview_payload(text: str) -> tuple[list[tuple[str, bytes]], str] | None:
+    match = _GENERATED_IMAGE_SAVED_TO_RE.search(_strip_outer_text_fence(text))
+    if not match:
+        return None
+    file_url = match.group(1).rstrip("`'\".,)")
+    loaded = _load_generated_image_bytes(file_url)
+    if loaded is None:
+        return None
+    media_type, raw_bytes = loaded
+    return [(media_type, raw_bytes)], _generated_image_caption(text, file_url)
+
+
+def is_generated_image_success_text(text: str, tool_name: str | None = None) -> bool:
+    """Return True for image-generation success text that substitutes for final."""
+    lowered = text.lower()
+    if "generated image" not in lowered or "saved to:" not in lowered:
+        return False
+    if not any(marker in lowered for marker in ("file://", "generated_images", ".png")):
+        return False
+    normalized_tool = (tool_name or "").strip().lower()
+    if not normalized_tool:
+        return True
+    return normalized_tool in _GENERATED_IMAGE_TOOL_NAMES or "image" in normalized_tool
+
+
+def _suppress(event: NormalizedEvent) -> NormalizedEvent:
+    event.dispatch_to_telegram = False
+    event.include_in_history = False
+    event.status_message_eligible = False
+    return event
+
+
+def apply_telegram_delivery_policy(
+    event: NormalizedEvent,
+    *,
+    mode: str = "compact",
+) -> NormalizedEvent:
+    """Project a normalized runtime event into Telegram-facing delivery behavior."""
+    if mode != "compact":
+        return event
+
+    projected = replace(event)
+    text = projected.text.strip()
+
+    if projected.role == "user" and is_internal_user_payload(text):
+        return _suppress(projected)
+
+    if projected.semantic_kind == USER_ECHO_SEMANTIC_KIND:
+        # Ordinary user echo stays visible in compact mode even if upstream
+        # normalizers set dispatch_to_telegram=False on user events.
+        projected.include_in_history = True
+        projected.dispatch_to_telegram = True
+        projected.status_message_eligible = False
+        projected.is_complete = True
+        return projected
+
+    if projected.semantic_kind == WARNING_SEMANTIC_KIND:
+        projected.include_in_history = True
+        projected.dispatch_to_telegram = True
+        projected.status_message_eligible = False
+        projected.is_complete = True
+        return projected
+
+    if projected.semantic_kind == IMAGE_PREVIEW_SEMANTIC_KIND:
+        projected.include_in_history = True
+        projected.dispatch_to_telegram = True
+        projected.status_message_eligible = False
+        projected.is_complete = True
+        return projected
+
+    if projected.semantic_kind in {
+        COMMENTARY_SEMANTIC_KIND,
+        ORCHESTRATION_SEMANTIC_KIND,
+        PLAN_UPDATE_SEMANTIC_KIND,
+    }:
+        if projected.semantic_kind == ORCHESTRATION_SEMANTIC_KIND:
+            projected.text = _compact_single_block(text)
+        else:
+            projected.text = text
+        projected.include_in_history = False
+        projected.dispatch_to_telegram = True
+        projected.status_message_eligible = False
+        projected.is_complete = True
+        return projected
+
+    if projected.semantic_kind == REASONING_SEMANTIC_KIND:
+        if not text or text in _PLACEHOLDER_REASONING:
+            return _suppress(projected)
+        projected.text = _compact_single_block(text)
+        projected.status_message_eligible = True
+        projected.is_complete = False
+        projected.include_in_history = False
+        return projected
+
+    if projected.content_type == "tool_use" and (projected.tool_name or "").lower() == "skill":
+        return _suppress(projected)
+
+    if projected.content_type == "tool_result" and (projected.tool_name or "").lower() == "skill":
+        return _suppress(projected)
+
+    if projected.content_type == "tool_result" and is_generated_image_success_text(
+        text,
+        projected.tool_name,
+    ):
+        preview_payload = _generated_image_preview_payload(text)
+        if preview_payload is not None:
+            image_data, image_caption = preview_payload
+            projected.content_type = GENERATED_IMAGE_PREVIEW_CONTENT_TYPE
+            projected.image_data = image_data
+            projected.image_caption = image_caption
+        else:
+            projected.content_type = "text"
+        projected.semantic_kind = ASSISTANT_FINAL_SEMANTIC_KIND
+        projected.delivery_class = DELIVERY_CLASS_HISTORY
+        projected.include_in_history = True
+        projected.dispatch_to_telegram = True
+        projected.status_message_eligible = False
+        projected.is_complete = True
+        return projected
+
+    if projected.semantic_kind in _STATUS_ONLY_SEMANTIC_KINDS:
+        projected.text = _compact_single_block(text)
+        projected.status_message_eligible = True
+        projected.is_complete = False
+        projected.include_in_history = False
+        return projected
+
+    return projected

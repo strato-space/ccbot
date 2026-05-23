@@ -34,6 +34,7 @@ from .callback_data import (
     CB_WIN_BIND,
     CB_WIN_CANCEL,
     CB_WIN_NEW,
+    append_bind_flow_token,
 )
 
 # Directories per page in directory browser
@@ -46,6 +47,7 @@ STATE_SELECTING_WINDOW = "selecting_window"
 BROWSE_PATH_KEY = "browse_path"
 BROWSE_PAGE_KEY = "browse_page"
 BROWSE_DIRS_KEY = "browse_dirs"  # Cache of subdirs for current path
+BROWSE_SURFACE_SLOTS_KEY = "browse_surface_slots"
 UNBOUND_WINDOWS_KEY = "unbound_windows"  # Cache of (name, cwd) tuples
 STATE_SELECTING_THREAD = "selecting_thread"
 THREADS_KEY = "cached_threads"  # Cache of ThreadLocator list
@@ -62,6 +64,24 @@ def clear_browse_state(user_data: dict | None) -> None:
         user_data.pop(BROWSE_PATH_KEY, None)
         user_data.pop(BROWSE_PAGE_KEY, None)
         user_data.pop(BROWSE_DIRS_KEY, None)
+
+
+def default_browse_root() -> str:
+    """Return a cwd-neutral default root for the bind directory browser."""
+    for env_name in (
+        "CCBOT_BIND_DEFAULT_ROOT",
+        "CCBOT_WORKSPACE_ROOT",
+    ):
+        raw = os.environ.get(env_name, "").strip()
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        if path.exists() and path.is_dir():
+            return str(path.resolve())
+    home_tools = Path("/home/tools")
+    if home_tools.exists() and home_tools.is_dir():
+        return str(home_tools)
+    return str(Path.home())
 
 
 def clear_window_picker_state(user_data: dict | None) -> None:
@@ -85,11 +105,18 @@ def clear_session_picker_state(user_data: dict | None) -> None:
 
 def build_window_picker(
     windows: list[tuple[str, str, str]],
+    *,
+    bind_flow_version: int = 0,
+    bind_flow_nonce: str = "",
 ) -> tuple[str, InlineKeyboardMarkup, list[str]]:
     """Build window picker UI for unbound tmux windows.
 
     Args:
         windows: List of (window_id, window_name, cwd) tuples.
+        bind_flow_version: Bind-flow credential version embedded in callbacks
+            so stale picker actions cannot mutate a newer bind flow.
+        bind_flow_nonce: Bind-flow credential nonce embedded in callbacks so
+            stale picker actions cannot mutate a newer bind flow.
 
     Returns: (text, keyboard, window_ids) where window_ids is the ordered list for caching.
     """
@@ -112,15 +139,34 @@ def build_window_picker(
             display = name[:12] + "…" if len(name) > 13 else name
             row.append(
                 InlineKeyboardButton(
-                    f"🖥 {display}", callback_data=f"{CB_WIN_BIND}{i + j}"
+                    f"🖥 {display}",
+                    callback_data=append_bind_flow_token(
+                        f"{CB_WIN_BIND}{i + j}",
+                        version=bind_flow_version,
+                        nonce=bind_flow_nonce,
+                    ),
                 )
             )
         buttons.append(row)
 
     buttons.append(
         [
-            InlineKeyboardButton("➕ New Thread", callback_data=CB_WIN_NEW),
-            InlineKeyboardButton("Cancel", callback_data=CB_WIN_CANCEL),
+            InlineKeyboardButton(
+                "➕ New Thread",
+                callback_data=append_bind_flow_token(
+                    CB_WIN_NEW,
+                    version=bind_flow_version,
+                    nonce=bind_flow_nonce,
+                ),
+            ),
+            InlineKeyboardButton(
+                "Cancel",
+                callback_data=append_bind_flow_token(
+                    CB_WIN_CANCEL,
+                    version=bind_flow_version,
+                    nonce=bind_flow_nonce,
+                ),
+            ),
         ]
     )
 
@@ -129,7 +175,11 @@ def build_window_picker(
 
 
 def build_directory_browser(
-    current_path: str, page: int = 0
+    current_path: str,
+    page: int = 0,
+    *,
+    bind_flow_version: int = 0,
+    bind_flow_nonce: str = "",
 ) -> tuple[str, InlineKeyboardMarkup, list[str]]:
     """Build directory browser UI.
 
@@ -137,7 +187,7 @@ def build_directory_browser(
     """
     path = Path(current_path).expanduser().resolve()
     if not path.exists() or not path.is_dir():
-        path = Path.cwd()
+        path = Path(default_browse_root())
 
     try:
         subdirs = sorted(
@@ -165,7 +215,12 @@ def build_directory_browser(
             idx = start + i + j
             row.append(
                 InlineKeyboardButton(
-                    f"📁 {display}", callback_data=f"{CB_DIR_SELECT}{idx}"
+                    f"📁 {display}",
+                    callback_data=append_bind_flow_token(
+                        f"{CB_DIR_SELECT}{idx}",
+                        version=bind_flow_version,
+                        nonce=bind_flow_nonce,
+                    ),
                 )
             )
         buttons.append(row)
@@ -174,23 +229,64 @@ def build_directory_browser(
         nav: list[InlineKeyboardButton] = []
         if page > 0:
             nav.append(
-                InlineKeyboardButton("◀", callback_data=f"{CB_DIR_PAGE}{page - 1}")
+                InlineKeyboardButton(
+                    "◀",
+                    callback_data=append_bind_flow_token(
+                        f"{CB_DIR_PAGE}{page - 1}",
+                        version=bind_flow_version,
+                        nonce=bind_flow_nonce,
+                    ),
+                )
             )
         nav.append(
             InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop")
         )
         if page < total_pages - 1:
             nav.append(
-                InlineKeyboardButton("▶", callback_data=f"{CB_DIR_PAGE}{page + 1}")
+                InlineKeyboardButton(
+                    "▶",
+                    callback_data=append_bind_flow_token(
+                        f"{CB_DIR_PAGE}{page + 1}",
+                        version=bind_flow_version,
+                        nonce=bind_flow_nonce,
+                    ),
+                )
             )
         buttons.append(nav)
 
     action_row: list[InlineKeyboardButton] = []
     # Allow going up unless at filesystem root
     if path != path.parent:
-        action_row.append(InlineKeyboardButton("..", callback_data=CB_DIR_UP))
-    action_row.append(InlineKeyboardButton("Select", callback_data=CB_DIR_CONFIRM))
-    action_row.append(InlineKeyboardButton("Cancel", callback_data=CB_DIR_CANCEL))
+        action_row.append(
+            InlineKeyboardButton(
+                "..",
+                callback_data=append_bind_flow_token(
+                    CB_DIR_UP,
+                    version=bind_flow_version,
+                    nonce=bind_flow_nonce,
+                ),
+            )
+        )
+    action_row.append(
+        InlineKeyboardButton(
+            "Select",
+            callback_data=append_bind_flow_token(
+                CB_DIR_CONFIRM,
+                version=bind_flow_version,
+                nonce=bind_flow_nonce,
+            ),
+        )
+    )
+    action_row.append(
+        InlineKeyboardButton(
+            "Cancel",
+            callback_data=append_bind_flow_token(
+                CB_DIR_CANCEL,
+                version=bind_flow_version,
+                nonce=bind_flow_nonce,
+            ),
+        )
+    )
     buttons.append(action_row)
 
     display_path = str(path).replace(str(Path.home()), "~")
@@ -223,11 +319,18 @@ def _relative_time(file_path: str) -> str:
 
 def build_thread_picker(
     threads: list[ThreadLocator],
+    *,
+    bind_flow_version: int = 0,
+    bind_flow_nonce: str = "",
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Build thread picker UI for resuming an existing persisted thread.
 
     Args:
         threads: List of ThreadLocator objects (sorted by recency).
+        bind_flow_version: Bind-flow credential version embedded in callbacks
+            so stale picker actions cannot mutate a newer bind flow.
+        bind_flow_nonce: Bind-flow credential nonce embedded in callbacks so
+            stale picker actions cannot mutate a newer bind flow.
 
     Returns: (text, keyboard).
     """
@@ -241,9 +344,7 @@ def build_thread_picker(
         )
         rel = _relative_time(thread.file_path)
         time_str = f" ({rel})" if rel else ""
-        lines.append(
-            f"{i + 1}. {summary} — {thread.message_count} messages{time_str}"
-        )
+        lines.append(f"{i + 1}. {summary} — {thread.message_count} messages{time_str}")
 
     buttons: list[list[InlineKeyboardButton]] = []
     for i in range(0, len(threads), 2):
@@ -251,19 +352,40 @@ def build_thread_picker(
         for j in range(min(2, len(threads) - i)):
             thread = threads[i + j]
             label = (
-                thread.summary[:14] + "…" if len(thread.summary) > 14 else thread.summary
+                thread.summary[:14] + "…"
+                if len(thread.summary) > 14
+                else thread.summary
             )
             row.append(
                 InlineKeyboardButton(
-                    f"↺ {label}", callback_data=f"{CB_THREAD_SELECT}{i + j}"
+                    f"↺ {label}",
+                    callback_data=append_bind_flow_token(
+                        f"{CB_THREAD_SELECT}{i + j}",
+                        version=bind_flow_version,
+                        nonce=bind_flow_nonce,
+                    ),
                 )
             )
         buttons.append(row)
 
     buttons.append(
         [
-            InlineKeyboardButton("➕ Fresh Thread", callback_data=CB_THREAD_NEW),
-            InlineKeyboardButton("Cancel", callback_data=CB_THREAD_CANCEL),
+            InlineKeyboardButton(
+                "➕ Fresh Thread",
+                callback_data=append_bind_flow_token(
+                    CB_THREAD_NEW,
+                    version=bind_flow_version,
+                    nonce=bind_flow_nonce,
+                ),
+            ),
+            InlineKeyboardButton(
+                "Cancel",
+                callback_data=append_bind_flow_token(
+                    CB_THREAD_CANCEL,
+                    version=bind_flow_version,
+                    nonce=bind_flow_nonce,
+                ),
+            ),
         ]
     )
 
@@ -273,6 +395,13 @@ def build_thread_picker(
 
 def build_session_picker(
     sessions: list[ThreadLocator],
+    *,
+    bind_flow_version: int = 0,
+    bind_flow_nonce: str = "",
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Backward-compatible alias for build_thread_picker()."""
-    return build_thread_picker(sessions)
+    return build_thread_picker(
+        sessions,
+        bind_flow_version=bind_flow_version,
+        bind_flow_nonce=bind_flow_nonce,
+    )

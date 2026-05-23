@@ -1,14 +1,18 @@
-"""Rollout monitoring service for normalized runtime events.
+"""Replay-evidence monitor for normalized runtime events.
 
 Runs an async polling loop that:
   1. Loads the current binding map to know which thread ids are active.
   2. Detects binding changes (new/changed/deleted windows) and cleans up.
-  3. Reads new JSONL lines from each rollout source using byte-offset tracking.
+  3. Reads new JSONL lines from each tracked replay source using byte-offset tracking.
   4. Parses entries via TranscriptParser and emits NormalizedEvent objects.
 
 Optimizations: mtime cache skips unchanged files; byte offset avoids re-reading.
 
-Legacy Claude-shaped names remain as compatibility aliases for the wider codebase.
+The monitor observes the live semantic stream of each runtime by tailing the
+runtime's replay evidence artifact. For Claude this is the transcript tail,
+for Codex it is rollout JSONL, and for fast-agent it is the ACP-equivalent
+side-channel mirror. Legacy Claude-shaped names remain as compatibility
+aliases for the wider codebase.
 """
 
 import asyncio
@@ -21,9 +25,9 @@ import aiofiles
 
 from .config import config
 from .codex_threads import normalize_cwd
-from .codex_rollout import CodexRolloutNormalizer
+from .codex_rollout import CodexRolloutNormalizer, CodexRolloutState
 from .monitor_state import MonitorState, TrackedSession
-from .runtime_types import NormalizedEvent, RolloutSource
+from .runtime_types import NormalizedEvent, RolloutSource, USER_ECHO_SEMANTIC_KIND
 from .tmux_manager import tmux_manager
 from .transcript_parser import TranscriptParser
 from .utils import read_cwd_from_jsonl
@@ -63,6 +67,10 @@ class SessionMonitor:
         # Track last known binding map for detecting changes
         # Keys may be window_id (@12) or window_name (old format) during transition
         self._last_binding_map: dict[str, str] = {}  # window_key -> thread_id
+        # Active runtime-resolved replay sources for the current binding map.
+        self._active_rollout_sources: dict[str, RolloutSource] = {}
+        # Per-thread Codex rollout synthesis state carried across poll cycles.
+        self._codex_rollout_states: dict[str, CodexRolloutState] = {}
         # In-memory mtime cache for quick file change detection (not persisted)
         self._file_mtimes: dict[str, float] = {}  # thread_id -> last_seen_mtime
 
@@ -70,6 +78,48 @@ class SessionMonitor:
         self, callback: Callable[[NormalizedEvent], Awaitable[None]]
     ) -> None:
         self._message_callback = callback
+
+    @staticmethod
+    def _normalized_event_from_parsed_entry(
+        thread_id: str, entry: NormalizedEvent
+    ) -> NormalizedEvent | None:
+        """Convert a parsed replay entry into a dispatchable monitor event."""
+        if (
+            not entry.text
+            and not entry.image_data
+            and not entry.document_data
+            and entry.delivery_class != "lifecycle"
+        ):
+            return None
+
+        dispatch_to_telegram = entry.dispatch_to_telegram
+        if (
+            entry.role == "user"
+            and not config.show_user_messages
+            and dispatch_to_telegram
+        ):
+            dispatch_to_telegram = False
+
+        return NormalizedEvent(
+            thread_id=thread_id,
+            text=entry.text,
+            is_complete=entry.is_complete,
+            content_type=entry.content_type,
+            tool_use_id=entry.tool_use_id,
+            role=entry.role,
+            tool_name=entry.tool_name,
+            image_data=entry.image_data,
+            image_caption=entry.image_caption,
+            document_data=entry.document_data,
+            timestamp=entry.timestamp,
+            runtime_kind=entry.runtime_kind,
+            event_kind=entry.event_kind,
+            semantic_kind=entry.semantic_kind,
+            delivery_class=entry.delivery_class,
+            include_in_history=entry.include_in_history,
+            dispatch_to_telegram=dispatch_to_telegram,
+            status_message_eligible=entry.status_message_eligible,
+        )
 
     async def _get_active_cwds(self) -> set[str]:
         """Get normalized cwds of all active tmux windows."""
@@ -170,9 +220,9 @@ class SessionMonitor:
         return await self.scan_rollout_sources()
 
     async def _read_new_lines(
-        self, session: TrackedSession, file_path: Path
+        self, tracked_source: TrackedSession, file_path: Path
     ) -> list[dict]:
-        """Read new lines from a session file using byte offset for efficiency.
+        """Read new lines from replay evidence using byte offset for efficiency.
 
         Detects file truncation (e.g. after /clear) and resets offset.
         Recovers from corrupted offsets (mid-line) by scanning to next line.
@@ -185,41 +235,43 @@ class SessionMonitor:
                 file_size = await f.tell()
 
                 # Detect file truncation: if offset is beyond file size, reset
-                if session.last_byte_offset > file_size:
+                if tracked_source.last_byte_offset > file_size:
                     logger.info(
-                        "File truncated for session %s "
+                        "Replay evidence truncated for thread %s "
                         "(offset %d > size %d). Resetting.",
-                        session.session_id,
-                        session.last_byte_offset,
+                        tracked_source.thread_id,
+                        tracked_source.last_byte_offset,
                         file_size,
                     )
-                    session.last_byte_offset = 0
+                    tracked_source.last_byte_offset = 0
+                    self._codex_rollout_states.pop(tracked_source.thread_id, None)
 
                 # Seek to last read position for incremental reading
-                await f.seek(session.last_byte_offset)
+                await f.seek(tracked_source.last_byte_offset)
 
                 # Detect corrupted offset: if we're mid-line (not at '{'),
                 # scan forward to the next line start. This can happen if
                 # the state file was manually edited or corrupted.
-                if session.last_byte_offset > 0:
+                if tracked_source.last_byte_offset > 0:
                     first_char = await f.read(1)
                     if first_char and first_char != "{":
                         logger.warning(
-                            "Corrupted offset %d in session %s (mid-line), "
+                            "Corrupted offset %d in thread %s replay evidence "
+                            "(mid-line), "
                             "scanning to next line",
-                            session.last_byte_offset,
-                            session.session_id,
+                            tracked_source.last_byte_offset,
+                            tracked_source.thread_id,
                         )
                         await f.readline()  # Skip rest of partial line
-                        session.last_byte_offset = await f.tell()
+                        tracked_source.last_byte_offset = await f.tell()
                         return []
-                    await f.seek(session.last_byte_offset)  # Reset for normal read
+                    await f.seek(tracked_source.last_byte_offset)  # Reset for normal read
 
                 # Read only new lines from the offset.
                 # Track safe_offset: advance past valid lines and past
                 # malformed complete lines, but stop on a trailing partial
                 # write so the next poll can finish the line.
-                safe_offset = session.last_byte_offset
+                safe_offset = tracked_source.last_byte_offset
                 async for line in f:
                     line_end = await f.tell()
                     data = TranscriptParser.parse_line(line)
@@ -229,25 +281,108 @@ class SessionMonitor:
                     elif line.strip():
                         if line.endswith("\n"):
                             logger.warning(
-                                "Corrupted JSONL line in session %s, skipping",
-                                session.session_id,
+                                "Corrupted JSONL line in thread %s replay evidence, skipping",
+                                tracked_source.thread_id,
                             )
                             safe_offset = line_end
                             continue
                         logger.warning(
-                            "Partial JSONL line in session %s, will retry next cycle",
-                            session.session_id,
+                            "Partial JSONL line in thread %s replay evidence, will retry next cycle",
+                            tracked_source.thread_id,
                         )
                         break
                     else:
                         # Empty line — safe to skip
                         safe_offset = line_end
 
-                session.last_byte_offset = safe_offset
+                tracked_source.last_byte_offset = safe_offset
 
         except OSError as e:
-            logger.error("Error reading session file %s: %s", file_path, e)
+            logger.error("Error reading replay evidence %s: %s", file_path, e)
         return new_entries
+
+    async def _hydrate_codex_rollout_state(
+        self,
+        tracked_source: TrackedSession,
+        file_path: Path,
+        *,
+        up_to_offset: int | None = None,
+    ) -> CodexRolloutState:
+        """Rebuild cross-poll Codex synthesis state up to the tracked offset."""
+        state = CodexRolloutState()
+        target_offset = tracked_source.last_byte_offset if up_to_offset is None else up_to_offset
+        if target_offset <= 0:
+            return state
+
+        def _read_prefix() -> list[dict]:
+            entries: list[dict] = []
+            with file_path.open("r", encoding="utf-8") as handle:
+                while handle.tell() < target_offset:
+                    line = handle.readline()
+                    if not line:
+                        break
+                    if handle.tell() > target_offset and not line.endswith("\n"):
+                        break
+                    data = TranscriptParser.parse_line(line)
+                    if data:
+                        entries.append(data)
+            return entries
+
+        try:
+            prefix_entries = await asyncio.to_thread(_read_prefix)
+        except OSError as e:
+            logger.debug(
+                "Failed to hydrate Codex rollout state for %s: %s",
+                tracked_source.thread_id,
+                e,
+            )
+            return state
+
+        if prefix_entries:
+            TranscriptParser.parse_codex_rollout_entries(
+                prefix_entries,
+                thread_id=tracked_source.thread_id,
+                state=state,
+            )
+            # Historical replay rebuilds long-lived synthesis state, not
+            # in-flight duplicate buffers. Otherwise unmatched historical
+            # `event_msg` copies can flush again after restart/state eviction.
+            state.pending_event_messages.clear()
+            # Preserve duplicate-suppression buffers only for the active turn.
+            # This lets the later canonical user copy for the same turn collapse
+            # correctly after restart, while still preventing historical
+            # unmatched event_msg fallbacks from re-flushing.
+            active_turn_key = state.current_turn_key or f"surrogate:{state.turn_generation}"
+            state.recent_user_event_messages = {
+                signature: emitted_at
+                for signature, emitted_at in state.recent_user_event_messages.items()
+                if signature[0] == active_turn_key
+            }
+            state.canonical_message_signatures = {
+                signature
+                for signature in state.canonical_message_signatures
+                if signature[0] == active_turn_key
+            }
+        return state
+
+    async def _codex_rollout_state_for_thread(
+        self,
+        tracked_source: TrackedSession,
+        rollout_source: RolloutSource,
+        *,
+        up_to_offset: int | None = None,
+    ) -> CodexRolloutState:
+        """Return the incremental Codex rollout state for a thread."""
+        existing = self._codex_rollout_states.get(tracked_source.thread_id)
+        if existing is not None:
+            return existing
+        state = await self._hydrate_codex_rollout_state(
+            tracked_source,
+            rollout_source.file_path,
+            up_to_offset=up_to_offset,
+        )
+        self._codex_rollout_states[tracked_source.thread_id] = state
+        return state
 
     async def check_for_updates(
         self, active_thread_ids: set[str]
@@ -262,15 +397,30 @@ class SessionMonitor:
         """
         new_messages = []
 
-        # Scan projects to get available rollout sources
-        rollout_sources = await self.scan_rollout_sources()
+        rollout_sources: list[RolloutSource] = [
+            rollout_source
+            for thread_id, rollout_source in self._active_rollout_sources.items()
+            if thread_id in active_thread_ids
+        ]
+        known_thread_ids = {rollout_source.thread_id for rollout_source in rollout_sources}
+        missing_thread_ids = active_thread_ids - known_thread_ids
+
+        # Legacy fallback: old tests and Claude-only flows may still patch the
+        # project scanner directly. Runtime-aware sources win when available.
+        if missing_thread_ids:
+            for rollout_source in await self.scan_rollout_sources():
+                if rollout_source.thread_id not in missing_thread_ids:
+                    continue
+                rollout_sources.append(rollout_source)
+                known_thread_ids.add(rollout_source.thread_id)
+                missing_thread_ids.discard(rollout_source.thread_id)
 
         # Only process sources that are bound through the current topic/window map
         for rollout_source in rollout_sources:
             if rollout_source.thread_id not in active_thread_ids:
                 continue
             try:
-                tracked = self.state.get_session(rollout_source.thread_id)
+                tracked = self.state.get_tracked_source(rollout_source.thread_id)
 
                 if tracked is None:
                     # For new threads, initialize offset to end of file
@@ -285,8 +435,9 @@ class SessionMonitor:
                         session_id=rollout_source.thread_id,
                         file_path=str(rollout_source.file_path),
                         last_byte_offset=file_size,
+                        runtime_kind=rollout_source.runtime_kind,
                     )
-                    self.state.update_session(tracked)
+                    self.state.update_tracked_source(tracked)
                     self._file_mtimes[rollout_source.thread_id] = current_mtime
                     logger.info(
                         "Started tracking rollout source for thread: %s",
@@ -307,10 +458,30 @@ class SessionMonitor:
                     current_mtime <= last_mtime
                     and current_size <= tracked.last_byte_offset
                 ):
+                    if rollout_source.runtime_kind == "codex":
+                        codex_state = self._codex_rollout_states.get(
+                            rollout_source.thread_id
+                        )
+                        if (
+                            codex_state is not None
+                            and codex_state.pending_event_messages
+                        ):
+                            parsed_entries = TranscriptParser.parse_codex_rollout_entries(
+                                [],
+                                thread_id=rollout_source.thread_id,
+                                state=codex_state,
+                            )
+                            for entry in parsed_entries:
+                                event = self._normalized_event_from_parsed_entry(
+                                    rollout_source.thread_id, entry
+                                )
+                                if event is not None:
+                                    new_messages.append(event)
                     # File hasn't changed, skip reading
                     continue
 
                 # File changed, read new content from last offset
+                previous_offset = tracked.last_byte_offset
                 new_entries = await self._read_new_lines(tracked, rollout_source.file_path)
                 self._file_mtimes[rollout_source.thread_id] = current_mtime
 
@@ -327,9 +498,15 @@ class SessionMonitor:
                     for entry in new_entries
                     if isinstance(entry, dict)
                 ):
+                    codex_state = await self._codex_rollout_state_for_thread(
+                        tracked,
+                        rollout_source,
+                        up_to_offset=previous_offset,
+                    )
                     parsed_entries = TranscriptParser.parse_codex_rollout_entries(
                         new_entries,
                         thread_id=rollout_source.thread_id,
+                        state=codex_state,
                     )
                     self._pending_tools.pop(rollout_source.thread_id, None)
                 else:
@@ -344,28 +521,13 @@ class SessionMonitor:
                         self._pending_tools.pop(rollout_source.thread_id, None)
 
                 for entry in parsed_entries:
-                    if not entry.text and not entry.image_data and entry.event_kind != "lifecycle":
-                        continue
-                    # Skip user messages unless show_user_messages is enabled
-                    if entry.role == "user" and not config.show_user_messages:
-                        continue
-                    new_messages.append(
-                        NormalizedEvent(
-                            thread_id=rollout_source.thread_id,
-                            text=entry.text,
-                            is_complete=entry.is_complete,
-                            content_type=entry.content_type,
-                            tool_use_id=entry.tool_use_id,
-                            role=entry.role,
-                            tool_name=entry.tool_name,
-                            image_data=entry.image_data,
-                            timestamp=entry.timestamp,
-                            runtime_kind=entry.runtime_kind,
-                            event_kind=entry.event_kind,
-                        )
+                    event = self._normalized_event_from_parsed_entry(
+                        rollout_source.thread_id, entry
                     )
+                    if event is not None:
+                        new_messages.append(event)
 
-                self.state.update_session(tracked)
+                self.state.update_tracked_source(tracked)
 
             except OSError as e:
                 logger.debug(
@@ -386,15 +548,53 @@ class SessionMonitor:
         from .session import session_manager
 
         await session_manager.load_session_map()
-        live_window_ids = {window.window_id for window in await tmux_manager.list_windows()}
+        live_windows = {
+            window.window_id: window for window in await tmux_manager.list_windows()
+        }
+        for binding in session_manager.iter_topic_bindings():
+            if binding.binding_scope != "tmux":
+                continue
+            live_window = live_windows.get(binding.window_id)
+            if live_window is None:
+                continue
+            session_manager.reconcile_live_tmux_window(
+                window_id=binding.window_id,
+                cwd=str(getattr(live_window, "cwd", "") or ""),
+                window_name=str(getattr(live_window, "window_name", "") or ""),
+                pane_current_command=str(
+                    getattr(live_window, "pane_current_command", "") or ""
+                ),
+                pane_pid=str(getattr(live_window, "pane_pid", "") or ""),
+            )
+        session_manager.cleanup_helper_window_bindings()
+        live_window_ids = set(live_windows)
         window_to_session: dict[str, str] = {}
+        active_rollout_sources: dict[str, RolloutSource] = {}
 
         for binding in session_manager.iter_topic_bindings():
-            if binding.window_id not in live_window_ids:
-                continue
+            tmux_window_missing = (
+                binding.binding_scope == "tmux"
+                and binding.window_id not in live_window_ids
+            )
             resolved = await session_manager.resolve_thread_for_window(binding.window_id)
+            if tmux_window_missing and (
+                resolved is None
+                or not resolved.thread_id
+                or not resolved.file_path
+                or not Path(resolved.file_path).exists()
+            ):
+                continue
             if resolved is not None and resolved.thread_id:
                 window_to_session[binding.window_id] = resolved.thread_id
+                if resolved.file_path:
+                    active_rollout_sources[resolved.thread_id] = RolloutSource(
+                        thread_id=resolved.thread_id,
+                        file_path=Path(resolved.file_path),
+                        runtime_kind=resolved.runtime_kind,
+                        cwd=resolved.cwd,
+                    )
+
+        self._active_rollout_sources = active_rollout_sources
 
         return window_to_session
 
@@ -413,8 +613,9 @@ class SessionMonitor:
                 f"[Startup cleanup] Removing {len(stale_sessions)} stale sessions"
             )
             for session_id in stale_sessions:
-                self.state.remove_session(session_id)
+                self.state.remove_tracked_source(session_id)
                 self._file_mtimes.pop(session_id, None)
+                self._codex_rollout_states.pop(session_id, None)
             self.state.save_if_dirty()
 
     async def _detect_and_cleanup_changes(self) -> dict[str, str]:
@@ -445,6 +646,13 @@ class SessionMonitor:
 
         for window_id in deleted_windows:
             old_session_id = self._last_binding_map[window_id]
+            if old_session_id in current_map.values():
+                logger.info(
+                    "Window '%s' disappeared but thread %s is still reachable via another binding",
+                    window_id,
+                    old_session_id,
+                )
+                continue
             logger.info(
                 "Window '%s' deleted, removing tracked thread %s",
                 window_id,
@@ -455,8 +663,9 @@ class SessionMonitor:
         # Perform cleanup
         if sessions_to_remove:
             for session_id in sessions_to_remove:
-                self.state.remove_session(session_id)
+                self.state.remove_tracked_source(session_id)
                 self._file_mtimes.pop(session_id, None)
+                self._codex_rollout_states.pop(session_id, None)
             self.state.save_if_dirty()
 
         # Update last known map
@@ -465,7 +674,7 @@ class SessionMonitor:
         return current_map
 
     async def _monitor_loop(self) -> None:
-        """Background loop for checking session updates.
+        """Background loop for checking replay-evidence updates.
 
         Uses simple async polling with aiofiles for non-blocking I/O.
         """
@@ -492,11 +701,14 @@ class SessionMonitor:
                 new_messages = await self.check_for_updates(active_thread_ids)
 
                 for msg in new_messages:
-                    if msg.event_kind == "lifecycle":
+                    if (
+                        not msg.dispatch_to_telegram
+                        and msg.semantic_kind != USER_ECHO_SEMANTIC_KIND
+                    ):
                         logger.debug(
                             "Lifecycle marker thread=%s: %s",
                             msg.thread_id,
-                            msg.tool_name or msg.content_type,
+                            msg.tool_name or msg.semantic_kind,
                         )
                         continue
                     status = "complete" if msg.is_complete else "streaming"

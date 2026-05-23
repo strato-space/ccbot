@@ -1,0 +1,12 @@
+{
+  "runtime_kind": "fast-agent",
+  "surface": "prompt_toolkit",
+  "prompt_name": "SessionPicker",
+  "visible": true,
+  "should_persist": false,
+  "prompt_text": "Choose a session to resume",
+  "choices": [
+    "fa-session-20260403-01",
+    "fa-session-20260402-09"
+  ]
+}

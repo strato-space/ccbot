@@ -1,0 +1,14 @@
+{
+  "captured_at": "2026-04-03",
+  "description": "Cross-runtime fixture corpus for Claude Code, Codex, and fast-agent.",
+  "coverage": [
+    "live_semantic_stream",
+    "persisted_replay_evidence",
+    "terminal_surface_observation"
+  ],
+  "runtimes": {
+    "claude": "claude/manifest.json",
+    "codex": "codex/manifest.json",
+    "fast-agent": "fast-agent/manifest.json"
+  }
+}

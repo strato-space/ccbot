@@ -25,6 +25,7 @@ class TestLiveProcessDescriptor:
             "session_id": "thread-1",
             "cwd": "/tmp/project",
             "window_name": "proj",
+            "runtime_kind": "claude",
         }
         restored = LiveProcessDescriptor.from_dict(payload)
         assert restored.thread_id == "thread-1"
@@ -56,6 +57,7 @@ class TestThreadLocator:
 
         assert locator.session_id == "thread-1"
         assert locator.file_path == "/tmp/thread.jsonl"
+        assert locator.replay_path == "/tmp/thread.jsonl"
 
 
 class TestRolloutSource:
@@ -64,6 +66,7 @@ class TestRolloutSource:
 
         assert source.file_path == Path("/tmp/thread.jsonl")
         assert source.session_id == "thread-1"
+        assert source.replay_path == Path("/tmp/thread.jsonl")
 
 
 class TestNormalizedEvent:
@@ -74,6 +77,35 @@ class TestNormalizedEvent:
 
         assert event.thread_id == "thread-1"
         assert event.session_id == "thread-1"
+
+    def test_lifecycle_events_are_not_dispatched_or_persisted(self) -> None:
+        event = NormalizedEvent(content_type="lifecycle", event_kind="lifecycle")
+
+        assert event.semantic_kind == "lifecycle"
+        assert event.delivery_class == "lifecycle"
+        assert event.include_in_history is False
+        assert event.dispatch_to_telegram is False
+
+    def test_reasoning_events_are_progress_eligible(self) -> None:
+        event = NormalizedEvent(content_type="thinking", event_kind="reasoning")
+
+        assert event.semantic_kind == "reasoning"
+        assert event.delivery_class == "progress"
+        assert event.status_message_eligible is True
+        assert event.include_in_history is True
+
+    def test_local_command_maps_to_command_execution_contract(self) -> None:
+        event = NormalizedEvent(content_type="local_command", role="assistant")
+
+        assert event.semantic_kind == "command_execution"
+        assert event.delivery_class == "history"
+
+    def test_tool_progress_is_not_included_in_history(self) -> None:
+        event = NormalizedEvent(content_type="tool_progress", event_kind="tool_progress")
+
+        assert event.semantic_kind == "tool_progress"
+        assert event.status_message_eligible is True
+        assert event.include_in_history is False
 
 
 class TestInputAction:

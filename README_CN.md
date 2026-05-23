@@ -1,36 +1,36 @@
 # CCBot
 
-通过 Telegram 远程控制 Claude Code 会话 — 监控、交互、管理运行在 tmux 中的 AI 编程会话。
+通过 Telegram 远程控制 tmux 中的 Codex 运行过程 — 监控、交互、管理运行中的 AI 编程工作流。
 
 https://github.com/user-attachments/assets/15ffb38e-5eb9-4720-93b9-412e4961dc93
 
 ## 为什么做 CCBot？
 
-Claude Code 运行在终端里。当你离开电脑 — 通勤路上、躺在沙发上、或者只是不在工位 — 会话仍在继续，但你失去了查看和控制的能力。
+Codex 运行在终端里。当你离开电脑 — 通勤路上、躺在沙发上、或者只是不在工位 — 运行过程仍在继续，但你失去了查看和控制的能力。
 
-CCBot 让你**通过 Telegram 无缝接管同一个会话**。核心设计思路是：它操作的是 **tmux**，而不是 Claude Code SDK。你的 Claude Code 进程始终在 tmux 窗口里运行，CCBot 只是读取它的输出并向它发送按键。这意味着：
+CCBot 让你**通过 Telegram 无缝接管同一个运行过程**。核心设计思路是：它操作的是 **tmux**，而不是 hosted agent API。你的 Codex 进程始终在 tmux 窗口里运行，CCBot 只是读取它的输出并向它发送按键。这意味着：
 
-- **从电脑无缝切换到手机** — Claude 正在执行重构？走开就是了，继续在 Telegram 上监控和回复。
+- **从电脑无缝切换到手机** — 进程正在执行重构？走开就是了，继续在 Telegram 上监控和回复。
 - **随时切换回电脑** — tmux 会话从未中断，直接 `tmux attach` 就能回到终端，完整的滚动历史和上下文都在。
-- **并行运行多个会话** — 每个 Telegram 话题对应一个独立的 tmux 窗口，一个聊天组里就能管理多个项目。
+- **并行运行多个运行过程** — 每个 Telegram 话题对应一个独立的 tmux 窗口，一个聊天组里就能管理多个项目。
 
-市面上其他 Claude Code Telegram Bot 通常封装 Claude Code SDK 来创建独立的 API 会话，这些会话是隔离的 — 你无法在终端里恢复它们。CCBot 采取了不同的方式：它只是 tmux 之上的一个薄控制层，终端始终是数据源，你永远不会失去切换回去的能力。
+市面上其他 Telegram Bot 通常封装独立的 API 会话，这些会话是隔离的 — 你无法在终端里恢复它们。CCBot 采取了不同的方式：它只是 tmux 之上的一个薄控制层，终端始终是数据源，你永远不会失去切换回去的能力。
 
-实际上，CCBot 自身就是用这种方式开发的 — 通过 CCBot 在 Telegram 上监控和驱动 Claude Code 会话来迭代自身。
+实际上，CCBot 自身就是用这种方式开发的 — 通过 CCBot 在 Telegram 上监控和驱动 Codex 运行过程来迭代自身。
 
 ## 功能特性
 
-- **基于话题的会话** — 每个 Telegram 话题 1:1 映射到一个 tmux 窗口和 Claude 会话
+- **基于话题的控制** — 每个 Telegram 话题 1:1 映射到一个 tmux 窗口和 persisted identity
 - **实时通知** — 接收助手回复、思考过程、工具调用/结果、本地命令输出的 Telegram 消息
 - **交互式 UI** — 通过内联键盘操作 AskUserQuestion、ExitPlanMode 和权限提示
 - **语音消息** — 语音消息通过 OpenAI 转录为文字并转发
-- **发送消息** — 通过 tmux 按键将文字转发给 Claude Code
-- **斜杠命令转发** — 任何 `/command` 直接发送给 Claude Code（如 `/clear`、`/compact`、`/cost`）
-- **创建新会话** — 通过目录浏览器从 Telegram 启动 Claude Code 会话
-- **恢复会话** — 选择目录中已有的 Claude 会话继续上次的工作
-- **关闭会话** — 关闭话题自动终止关联的 tmux 窗口
+- **发送消息** — 通过 tmux 按键将文字转发给 Codex
+- **斜杠命令转发** — 任何 `/command` 直接发送给 Codex（如 `/clear`、`/compact`、`/cost`）
+- **创建新运行** — 通过目录浏览器从 Telegram 启动 Codex 过程
+- **恢复运行** — 选择目录中已有的 persisted identity 继续上次的工作
+- **关闭绑定** — 关闭话题自动终止关联的 tmux 窗口
 - **消息历史** — 分页浏览对话历史（默认显示最新）
-- **Hook 会话追踪** — 通过 `SessionStart` hook 自动关联 tmux 窗口与 Claude 会话
+- **Hook 运行追踪** — 通过 `SessionStart` hook 自动关联 tmux 窗口与 persisted identity
 - **持久化状态** — 话题绑定和读取偏移量在重启后保持
 
 ## 前置要求

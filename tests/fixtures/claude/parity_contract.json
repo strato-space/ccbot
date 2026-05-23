@@ -1,0 +1,78 @@
+{
+  "description": "Claude-only parity baseline derived from upstream ccbot behavior and frozen for the multi-runtime rewrite.",
+  "upstream_sources": [
+    "src/ccbot/transcript_parser.py",
+    "src/ccbot/handlers/message_queue.py",
+    "src/ccbot/handlers/interactive_ui.py",
+    "src/ccbot/handlers/status_polling.py"
+  ],
+  "telegram_delivery_categories": [
+    "text",
+    "thinking",
+    "tool_use",
+    "tool_result",
+    "local_command"
+  ],
+  "status_message_lifecycle": [
+    "send status when a status line appears",
+    "edit the same status message in place while the text changes",
+    "convert the status message into the first content part when content arrives",
+    "clear the status message when the turn is complete or no longer relevant"
+  ],
+  "tool_use_result_contract": {
+    "pairing_key": "tool_use_id",
+    "tool_use_behavior": [
+      "track the tool_use message id for later editing",
+      "emit tool_use as a visible Telegram message"
+    ],
+    "tool_result_behavior": [
+      "edit the earlier tool_use message in place when the pair is known",
+      "fall back to a new message when the original tool_use cannot be edited"
+    ]
+  },
+  "final_result_delivery": {
+    "target": "bound topic chat",
+    "ordering": [
+      "status updates",
+      "tool_use/tool_result edits",
+      "final assistant text"
+    ],
+    "contract": "the final assistant result is the last semantic content delivered for the turn"
+  },
+  "interactive_gate": {
+    "blocked_prompts": [
+      "AskUserQuestion",
+      "ExitPlanMode",
+      "PermissionPrompt",
+      "RestoreCheckpoint"
+    ],
+    "delivery_gate": "normal message delivery is suppressed while a blocked prompt surface is visible",
+    "read_only_surface_note": "read-only prompt surfaces must not be treated as ordinary chat content"
+  },
+  "prompt_samples": [
+    {
+      "fixture_id": "ask-user-question",
+      "pane_text": "☐ Choose one\n✔ Keep this answer\nEnter to select",
+      "expected": {
+        "kind": "blocked_prompt",
+        "prompt_name": "AskUserQuestion"
+      }
+    },
+    {
+      "fixture_id": "exit-plan-mode",
+      "pane_text": "Would you like to proceed?\n\nctrl-g to edit in Claude\nEsc to cancel",
+      "expected": {
+        "kind": "blocked_prompt",
+        "prompt_name": "ExitPlanMode"
+      }
+    },
+    {
+      "fixture_id": "permission-prompt",
+      "pane_text": "Do you want to proceed?\n\n❯ 1. Yes\n  2. No\n\nEsc to cancel",
+      "expected": {
+        "kind": "blocked_prompt",
+        "prompt_name": "PermissionPrompt"
+      }
+    }
+  ]
+}

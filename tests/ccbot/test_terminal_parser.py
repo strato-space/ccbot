@@ -7,6 +7,7 @@ import pytest
 
 from ccbot.terminal_parser import (
     classify_input_surface,
+    extract_pending_input_preview,
     extract_bash_output,
     extract_interactive_content,
     is_interactive_ui,
@@ -22,6 +23,7 @@ class TestParseStatusLine:
         ("spinner", "rest", "expected"),
         [
             ("·", "Working on task", "Working on task"),
+            ("•", " Working on task", "Working on task"),
             ("✻", "  Reading file  ", "Reading file"),
             ("✽", "Thinking deeply", "Thinking deeply"),
             ("✶", "Analyzing code", "Analyzing code"),
@@ -293,6 +295,21 @@ class TestClassifyInputSurface:
         assert surface.has_visible_prompt is True
         assert surface.prompt_name == "VisiblePromptError"
 
+    def test_conversation_interrupted_prompt_is_input_ready(self):
+        pane = (
+            "previous output\n"
+            "■ Conversation interrupted - tell the model what to do differently. "
+            "Something went wrong? Hit `/feedback` to report the issue.\n"
+            "› Find and fix a bug in @filename\n"
+            "  gpt-5.5 high · main · Context 29% left\n"
+        )
+
+        surface = classify_input_surface(pane)
+
+        assert surface.kind == "input_ready"
+        assert surface.has_visible_prompt is True
+        assert surface.prompt_name == "CodexConversationInterrupted"
+
     def test_detects_blocked_prompt_from_real_codex_fixture(self):
         fixture = Path(__file__).resolve().parents[1] / "fixtures" / "codex" / "panes" / "tmux_session_0_resume_prompt.json"
         payload = json.loads(fixture.read_text(encoding="utf-8"))
@@ -309,6 +326,141 @@ class TestClassifyInputSurface:
 
         assert surface.kind == "unknown"
         assert surface.has_visible_prompt is False
+
+
+class TestExtractPendingInputPreview:
+    def test_extracts_queued_follow_up_messages(self):
+        pane = (
+            "some output\n"
+            "Queued follow-up messages\n"
+            "◻ update docs\n"
+            "◻ continue infra\n"
+            "shift+← edit last queued message\n"
+            "──────────────────────────────\n"
+            "❯\n"
+        )
+
+        preview = extract_pending_input_preview(pane)
+
+        assert preview.queued_messages == ("update docs", "continue infra")
+        assert preview.edit_hint == "shift+← edit last queued message"
+
+    def test_returns_empty_when_no_pending_input_preview_exists(self):
+        preview = extract_pending_input_preview("Working (2m 03s • esc to interrupt)")
+
+        assert preview.is_empty is True
+
+    def test_preserves_literal_message_text_inside_pending_section(self):
+        pane = (
+            "Queued follow-up messages\n"
+            "> quote this\n"
+            "Waiting for deploy confirmation\n"
+            "/review\n"
+            "# heading\n"
+            "$ echo hi\n"
+            "shift+← edit last queued message\n"
+            "──────────────────────────────\n"
+            "❯\n"
+        )
+
+        preview = extract_pending_input_preview(pane)
+
+        assert preview.queued_messages == (
+            "> quote this",
+            "Waiting for deploy confirmation",
+            "/review",
+            "# heading",
+            "$ echo hi",
+        )
+
+    def test_strips_only_known_codex_checkbox_markers(self):
+        pane = (
+            "Queued follow-up messages\n"
+            "☐ update docs\n"
+            "↳ continue infra\n"
+            "• run smoke\n"
+            "shift+← edit last queued message\n"
+            "──────────────────────────────\n"
+            "❯\n"
+        )
+
+        preview = extract_pending_input_preview(pane)
+
+        assert preview.queued_messages == (
+            "update docs",
+            "continue infra",
+            "run smoke",
+        )
+
+    def test_extracts_codex_pending_and_rejected_steers_sections(self):
+        pane = (
+            "Messages to be submitted after next tool call\n"
+            "• continue infra\n"
+            "• git commit push\n"
+            "Messages to be submitted at end of turn\n"
+            "• send executive summary\n"
+            "Queued follow-up messages\n"
+            "◻ review rollout\n"
+            "shift+← edit last queued message\n"
+            "──────────────────────────────\n"
+            "❯\n"
+        )
+
+        preview = extract_pending_input_preview(pane)
+
+        assert preview.pending_steers == (
+            "continue infra",
+            "git commit push",
+        )
+        assert preview.rejected_steers == ("send executive summary",)
+        assert preview.queued_messages == ("review rollout",)
+        assert preview.edit_hint == "shift+← edit last queued message"
+
+    def test_prefers_last_pending_header_block_when_multiple_are_visible(self):
+        pane = (
+            "Queued follow-up messages\n"
+            "◻ stale old item\n"
+            "some unrelated transcript text\n"
+            "Messages to be submitted after next tool call\n"
+            "• continue infra\n"
+            "Queued follow-up messages\n"
+            "◻ fresh item\n"
+            "shift+← edit last queued message\n"
+            "──────────────────────────────\n"
+            "❯\n"
+        )
+
+        preview = extract_pending_input_preview(pane)
+
+        assert preview.pending_steers == ("continue infra",)
+        assert preview.queued_messages == ("fresh item",)
+
+    def test_does_not_merge_repeated_same_header_blocks_from_older_slice(self):
+        pane = (
+            "Queued follow-up messages\n"
+            "◻ update docs\n"
+            "Queued follow-up messages\n"
+            "◻ update docs\n"
+            "shift+← edit last queued message\n"
+            "──────────────────────────────\n"
+            "❯\n"
+        )
+
+        preview = extract_pending_input_preview(pane)
+
+        assert preview.queued_messages == ("update docs",)
+
+    def test_stops_pending_parse_on_status_or_prompt_noise(self):
+        pane = (
+            "Queued follow-up messages\n"
+            "◻ update docs\n"
+            "✻ Working on task\n"
+            "❯\n"
+        )
+
+        preview = extract_pending_input_preview(pane)
+
+        assert preview.queued_messages == ("update docs",)
 
 
 # ── strip_pane_chrome ───────────────────────────────────────────────────

@@ -5,7 +5,7 @@ now exposes runtime-neutral nouns so later Codex work can distinguish:
 
 - topic binding: Telegram topic -> tmux window
 - live process descriptor: current process metadata for a window
-- thread locator: persisted conversation identity and rollout path
+- thread locator: persisted conversation identity and replay evidence path
 
 Legacy method names remain as compatibility wrappers while the rest of the bot
 is migrated task by task.
@@ -14,11 +14,14 @@ is migrated task by task.
 import asyncio
 import json
 import logging
+import os
 import re
+import secrets
+import shlex
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 
 import aiofiles
@@ -29,13 +32,40 @@ from .codex_threads import (
     CodexThreadCandidate,
     CodexThreadCatalog,
     CodexThreadResolution,
+    normalize_cwd,
+)
+from .delivery_audit import log_telegram_delivery
+from .fast_agent_sessions import (
+    FastAgentSessionCatalog,
+    FastAgentSessionResolution,
 )
 from .input_driver import runtime_input_driver
-from .runtime_types import InputAction, LiveProcessDescriptor, ThreadLocator, TopicBinding
+from .runtime_types import (
+    InputAction,
+    LiveProcessDescriptor,
+    RuntimeCapability,
+    ThreadLocator,
+    TopicBinding,
+    runtime_capability_registry,
+)
 from .state_schema import (
+    BINDING_STATE_BIND_FLOW,
+    BINDING_STATE_BOUND,
+    BINDING_STATE_NONE,
+    EXTERNAL_TOPIC_BINDINGS_KEY,
+    TOPIC_BIND_FLOW_NONCES_KEY,
+    TOPIC_BIND_FLOW_VERSIONS_KEY,
+    TOPIC_BINDING_STATES_KEY,
+    TOPIC_POLICIES_KEY,
+    TOPIC_POLICY_IMPLICIT_BIND_ALLOWED,
+    TOPIC_POLICY_MANUAL_BIND_REQUIRED,
     build_session_map_payload,
     ensure_legacy_backup,
     infer_runtime_kind,
+    normalize_bind_flow_nonce,
+    normalize_bind_flow_version,
+    normalize_binding_state,
+    normalize_topic_policy,
     split_session_map_payload,
 )
 from .terminal_parser import classify_input_surface
@@ -46,9 +76,394 @@ from .utils import atomic_write_json
 logger = logging.getLogger(__name__)
 
 BLOCKED_PROMPT_SEND_MESSAGE = "Input blocked by a visible prompt in the terminal"
+TMUX_PANE_MODE_ESCAPE_FAILED_MESSAGE = (
+    "Input blocked: target tmux pane is in {mode} and ccbot could not exit it "
+    "with Escape."
+)
+TMUX_MODE_ESCAPE_SETTLE_SECONDS = 0.1
+CODEX_RUNTIME_NOT_ACTIVE_MESSAGE = (
+    "Codex live process is not active in this tmux window; use /resume or /bind "
+    "to attach a live Codex window before sending input."
+)
 
 WindowState = LiveProcessDescriptor
 ClaudeSession = ThreadLocator
+
+EXTERNAL_BINDING_PREFIX = "external"
+EXTERNAL_BINDING_WINDOW_PREFIX = f"{EXTERNAL_BINDING_PREFIX}:"
+EXTERNAL_BINDING_READ_ONLY_MESSAGE = (
+    "Topic is bound to an external persisted thread in read-only mode. "
+    "Attach a live tmux window via /bind or /resume to inject input."
+)
+CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS = 0.1
+CODEX_MULTILINE_ACK_TIMEOUT_SECONDS = 6.5
+CODEX_MULTILINE_ACK_POLL_SECONDS = 0.1
+CODEX_MULTILINE_ACK_RETRY_SECONDS = 2.0
+CODEX_MULTILINE_ACK_MAX_ATTEMPTS = 3
+FAST_CODEX_ACK_TIMEOUT_SECONDS = CODEX_MULTILINE_ACK_TIMEOUT_SECONDS
+FAST_CODEX_ACK_POLL_SECONDS = CODEX_MULTILINE_ACK_POLL_SECONDS
+CODEX_DELIVERED_NO_ACK_STATUS = "delivered_no_ack"
+CODEX_EXPIRED_WITHOUT_ACK_STATUS = "expired_without_ack"
+CODEX_DELIVERED_NO_ACK_MESSAGE = (
+    "Codex input was delivered to tmux; waiting for persisted replay ACK"
+)
+CODEX_DELIVERED_NO_ACK_MATCH_SECONDS = 10 * 60
+_SHELL_COMMAND_NAMES = {"bash", "dash", "fish", "sh", "zsh"}
+_CODEX_ROLLOUT_THREAD_RE = re.compile(
+    r"rollout-[^/]*?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$",
+    re.IGNORECASE,
+)
+
+SURFACE_BINDINGS_KEY = "surface_bindings"
+EXTERNAL_SURFACE_BINDINGS_KEY = "external_surface_bindings"
+SURFACE_POLICIES_KEY = "surface_policies"
+SURFACE_BINDING_STATES_KEY = "surface_binding_states"
+SURFACE_BIND_FLOW_VERSIONS_KEY = "surface_bind_flow_versions"
+SURFACE_BIND_FLOW_NONCES_KEY = "surface_bind_flow_nonces"
+SURFACE_PENDING_SLOTS_KEY = "surface_pending_slots"
+SURFACE_TITLES_KEY = "surface_titles"
+TOPIC_SURFACE_PREFIX = "t:"
+CHAT_SURFACE_PREFIX = "c:"
+PENDING_SLOT_STATUS_PENDING = "pending"
+PENDING_SLOT_STATUS_CONSUMED = "consumed"
+SURFACE_PENDING_STATUS_PENDING = PENDING_SLOT_STATUS_PENDING
+SURFACE_PENDING_STATUS_CONSUMED = PENDING_SLOT_STATUS_CONSUMED
+
+
+@dataclass(frozen=True)
+class PendingSurfaceSlot:
+    """Deferred user input for one canonical Telegram control surface."""
+
+    text: str
+    revision: int
+    status: str = PENDING_SLOT_STATUS_PENDING
+    consumed_by_activation_id: str = ""
+
+    @classmethod
+    def from_record(cls, record: Any) -> "PendingSurfaceSlot | None":
+        """Normalize persisted or in-memory pending-slot records."""
+        if isinstance(record, cls):
+            return record
+        if not isinstance(record, dict):
+            return None
+        text = str(record.get("text") or "")
+        if not text:
+            return None
+        try:
+            revision = max(int(record.get("revision") or 0), 1)
+        except (TypeError, ValueError):
+            revision = 1
+        status = str(record.get("status") or PENDING_SLOT_STATUS_PENDING)
+        consumed_by_activation_id = str(record.get("consumed_by_activation_id") or "")
+        if status != PENDING_SLOT_STATUS_CONSUMED:
+            status = PENDING_SLOT_STATUS_PENDING
+            consumed_by_activation_id = ""
+        return cls(
+            text=text,
+            revision=revision,
+            status=status,
+            consumed_by_activation_id=consumed_by_activation_id,
+        )
+
+    def consume(self, activation_id: str) -> "PendingSurfaceSlot":
+        """Mark this pending slot as consumed by one writable activation."""
+        return PendingSurfaceSlot(
+            text=self.text,
+            revision=self.revision,
+            status=PENDING_SLOT_STATUS_CONSUMED,
+            consumed_by_activation_id=activation_id,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to the stable JSON storage shape."""
+        return {
+            "text": self.text,
+            "revision": self.revision,
+            "status": self.status,
+            "consumed_by_activation_id": self.consumed_by_activation_id,
+        }
+
+
+def _codex_rollout_file_size(file_path: Path) -> int:
+    try:
+        return file_path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _truthy_tmux_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _tmux_pane_in_mode(window: Any) -> bool:
+    """Return True when tmux itself is intercepting runtime input."""
+    return _truthy_tmux_flag(getattr(window, "pane_in_mode", False))
+
+
+def _tmux_pane_mode_escape_failed(window: Any) -> str:
+    mode = str(getattr(window, "pane_mode", "") or "").strip() or "tmux mode"
+    return TMUX_PANE_MODE_ESCAPE_FAILED_MESSAGE.format(mode=mode)
+
+
+def _command_basename(command: str) -> str:
+    try:
+        tokens = shlex.split(command or "")
+    except ValueError:
+        tokens = (command or "").split()
+    if not tokens:
+        return ""
+    return Path(tokens[0]).name.casefold()
+
+
+def _codex_has_live_input_plane(
+    *,
+    pane_command: str,
+    pane_text: str | None,
+) -> bool:
+    """Return True when a Codex-bound tmux pane still has a live input plane."""
+    surface = classify_input_surface(pane_text or "")
+
+    if (
+        runtime_capability_registry.known_runtime_kind_from_command(pane_command)
+        == "codex"
+    ):
+        return True
+
+    command_name = _command_basename(pane_command)
+    if command_name in _SHELL_COMMAND_NAMES:
+        return False
+
+    if surface.kind in {"busy", "input_ready", "blocked_prompt"}:
+        return True
+
+    # Codex TUI commonly appears as a node process in tmux. Unknown non-shell
+    # commands are treated as live so we fail closed on shell fallbacks without
+    # rejecting legitimate Codex panes whose footer scrolled out of view.
+    return bool(command_name)
+
+
+def _codex_composer_completion_popup_open(pane_text: str | None) -> bool:
+    """Return True when Codex composer autocomplete is intercepting Enter."""
+    text = " ".join((pane_text or "").split()).casefold()
+    if not text:
+        return False
+    return (
+        "no matches" in text
+        and "press enter to insert" in text
+        and "esc to close" in text
+    )
+
+
+def _workflow_command_aliases(text: str) -> set[str]:
+    """Return acceptable composer forms for a simple workflow command."""
+    stripped = (text or "").strip()
+    if not stripped or "\n" in stripped:
+        return set()
+    if not stripped.startswith("$") or len(stripped.split()) != 1:
+        return set()
+    aliases = {stripped}
+    command_name = stripped[1:]
+    if command_name and ":" not in command_name:
+        aliases.add(f"$oh-my-codex:{command_name}")
+    return aliases
+
+
+def _codex_composer_holds_workflow_command(
+    pane_text: str | None,
+    expected_text: str,
+) -> bool:
+    """Return True when Enter selected workflow autocomplete but did not submit."""
+    aliases = {alias.casefold() for alias in _workflow_command_aliases(expected_text)}
+    if not aliases:
+        return False
+    for line in (pane_text or "").splitlines()[-12:]:
+        candidate = line.strip()
+        if candidate.startswith(("›", ">")):
+            candidate = candidate[1:].strip()
+        candidate = " ".join(candidate.split()).casefold()
+        if candidate in aliases:
+            return True
+    return False
+
+
+def _codex_content_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(
+                    str(
+                        item.get("text")
+                        or item.get("content")
+                        or item.get("message")
+                        or ""
+                    )
+                )
+            else:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part)
+    if isinstance(content, dict):
+        return str(
+            content.get("text")
+            or content.get("content")
+            or content.get("message")
+            or ""
+        )
+    return str(content)
+
+
+def _canonical_codex_ack_text(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return "\n".join(line.rstrip() for line in normalized.split("\n")).strip()
+
+
+def _codex_text_matches_expected(observed: str, expected: str) -> bool:
+    observed_norm = _canonical_codex_ack_text(observed)
+    expected_norm = _canonical_codex_ack_text(expected)
+    return bool(
+        observed_norm
+        and expected_norm
+        and (observed_norm == expected_norm or expected_norm in observed_norm)
+    )
+
+
+def _codex_text_matches_expected_exact(observed: str, expected: str) -> bool:
+    observed_norm = _canonical_codex_ack_text(observed)
+    expected_norm = _canonical_codex_ack_text(expected)
+    return bool(observed_norm and expected_norm and observed_norm == expected_norm)
+
+
+def _codex_record_confirms_submit(
+    record: dict[str, Any],
+    expected_text: str,
+    *,
+    allow_turn_context: bool = False,
+) -> bool:
+    """Return True when a Codex rollout record proves a submitted turn exists."""
+    record_type = str(record.get("type") or "").strip()
+    payload = record.get("payload")
+    if record_type == "turn_context" and allow_turn_context:
+        return True
+    if not isinstance(payload, dict):
+        return False
+    payload_type = str(payload.get("type") or "").strip()
+    if record_type == "response_item" and payload_type == "message":
+        if str(payload.get("role") or "").strip() != "user":
+            return False
+        return _codex_text_matches_expected(
+            _codex_content_text(payload.get("content")),
+            expected_text,
+        )
+    if record_type == "event_msg" and payload_type == "user_message":
+        return _codex_text_matches_expected(
+            _codex_content_text(
+                payload.get("message") or payload.get("content") or payload.get("text")
+            ),
+            expected_text,
+        )
+    return False
+
+
+def _codex_record_confirms_strict_user_submit(
+    record: dict[str, Any],
+    expected_text: str,
+) -> bool:
+    record_type = str(record.get("type") or "").strip()
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    payload_type = str(payload.get("type") or "").strip()
+    if record_type == "response_item" and payload_type == "message":
+        if str(payload.get("role") or "").strip() != "user":
+            return False
+        return _codex_text_matches_expected_exact(
+            _codex_content_text(payload.get("content")),
+            expected_text,
+        )
+    if record_type == "event_msg" and payload_type == "user_message":
+        return _codex_text_matches_expected_exact(
+            _codex_content_text(
+                payload.get("message") or payload.get("content") or payload.get("text")
+            ),
+            expected_text,
+        )
+    return False
+
+
+def _stable_text_hash(text: str) -> str:
+    import hashlib
+
+    normalized = _canonical_codex_ack_text(text)
+    return hashlib.sha256(normalized.encode("utf-8", "replace")).hexdigest()
+
+
+@dataclass
+class FastRuntimeInputProof:
+    """In-memory proof state for an optimistic Codex input attempt."""
+
+    proof_id: str
+    user_id: int
+    chat_id: int | None
+    thread_id: int | None
+    surface_key: str | None
+    window_id: str
+    runtime_kind: str
+    runtime_thread_id: str
+    text_hash: str
+    text_len: int
+    text_preview: str
+    rollout_file: str
+    start_byte: int
+    created_at_monotonic: float
+    status: str = "pending"
+    failure_reason: str | None = None
+    confirmed_byte: int | None = None
+    ack_confirmed_at_monotonic: float | None = None
+    turn_generation_status: str = "not_opened"
+    receipt_message_id: int | None = None
+
+    def matches_user_echo(
+        self,
+        *,
+        window_id: str,
+        thread_id: int | None,
+        runtime_thread_id: str,
+        text: str,
+        now: float,
+        max_ack_age_seconds: float = 15.0,
+        include_pending: bool = False,
+    ) -> bool:
+        if self.status == "ack_confirmed":
+            if self.ack_confirmed_at_monotonic is None:
+                return False
+            if now - self.ack_confirmed_at_monotonic > max_ack_age_seconds:
+                return False
+        elif include_pending and self.status in (
+            "pending",
+            CODEX_DELIVERED_NO_ACK_STATUS,
+        ):
+            max_age = (
+                CODEX_DELIVERED_NO_ACK_MATCH_SECONDS
+                if self.status == CODEX_DELIVERED_NO_ACK_STATUS
+                else max_ack_age_seconds
+            )
+            if now - self.created_at_monotonic > max_age:
+                return False
+        else:
+            return False
+        return (
+            self.window_id == window_id
+            and self.thread_id == thread_id
+            and self.runtime_thread_id == runtime_thread_id
+            and (self.status == "ack_confirmed" or include_pending)
+            and self.text_hash == _stable_text_hash(text)
+        )
 
 
 @dataclass
@@ -60,14 +475,40 @@ class SessionManager:
 
     window_states: window_id -> LiveProcessDescriptor
     user_window_offsets: user_id -> {window_id -> byte_offset}
-    thread_bindings: user_id -> {thread_id -> window_id}
+    surface_bindings: user_id -> {surface_key -> window_id}
+    external_surface_bindings: user_id -> {surface_key -> external-thread metadata}
+    surface_policies: user_id -> {surface_key -> topic policy}
+    surface_binding_states: user_id -> {surface_key -> binding state}
+    surface_bind_flow_versions/nonces: user_id -> {surface_key -> bind-flow credentials}
+    surface_pending_slots: user_id -> {surface_key -> PendingSurfaceSlot}
+    surface_titles: user_id -> {title_surface_key -> Telegram-visible title}
+    thread_bindings/external_topic_bindings/topic_*: compatibility-only topic mirrors
     window_display_names: window_id -> window_name (for display)
     group_chat_ids: "user_id:thread_id" -> group chat_id (for supergroup routing)
     """
 
     window_states: dict[str, LiveProcessDescriptor] = field(default_factory=dict)
     user_window_offsets: dict[int, dict[str, int]] = field(default_factory=dict)
+    surface_bindings: dict[int, dict[str, str]] = field(default_factory=dict)
+    external_surface_bindings: dict[int, dict[str, dict[str, Any]]] = field(
+        default_factory=dict
+    )
+    surface_policies: dict[int, dict[str, str]] = field(default_factory=dict)
+    surface_binding_states: dict[int, dict[str, str]] = field(default_factory=dict)
+    surface_bind_flow_versions: dict[int, dict[str, int]] = field(default_factory=dict)
+    surface_bind_flow_nonces: dict[int, dict[str, str]] = field(default_factory=dict)
+    surface_pending_slots: dict[int, dict[str, PendingSurfaceSlot]] = field(
+        default_factory=dict
+    )
+    surface_titles: dict[int, dict[str, str]] = field(default_factory=dict)
     thread_bindings: dict[int, dict[int, str]] = field(default_factory=dict)
+    external_topic_bindings: dict[int, dict[int, dict[str, Any]]] = field(
+        default_factory=dict
+    )
+    topic_policies: dict[int, dict[int, str]] = field(default_factory=dict)
+    topic_binding_states: dict[int, dict[int, str]] = field(default_factory=dict)
+    topic_bind_flow_versions: dict[int, dict[int, int]] = field(default_factory=dict)
+    topic_bind_flow_nonces: dict[int, dict[int, str]] = field(default_factory=dict)
     # window_id -> display name (window_name)
     window_display_names: dict[str, str] = field(default_factory=dict)
     # "user_id:thread_id" -> group chat_id (for supergroup forum topic routing)
@@ -78,27 +519,118 @@ class SessionManager:
     # See: https://core.telegram.org/bots/api#sendmessage
     # History: originally added in 5afc111, erroneously removed in 26cb81f,
     # restored in PR #23.
+    # Fast-path input proof state is intentionally process-local. Replay/audit
+    # evidence remains the durable source of truth after controller restarts.
+    fast_input_proofs: dict[str, FastRuntimeInputProof] = field(default_factory=dict)
+    _fast_input_pending_by_window: dict[str, str] = field(default_factory=dict)
+    _fast_input_represented_proofs: set[str] = field(default_factory=set)
     group_chat_ids: dict[str, int] = field(default_factory=dict)
     codex_thread_catalog: CodexThreadCatalog | None = field(default=None, repr=False)
+    fast_agent_session_catalog: FastAgentSessionCatalog | None = field(
+        default=None, repr=False
+    )
+    _codex_ack_locks: dict[str, asyncio.Lock] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.codex_thread_catalog is None:
             self.codex_thread_catalog = CodexThreadCatalog()
+        if self.fast_agent_session_catalog is None:
+            self.fast_agent_session_catalog = FastAgentSessionCatalog()
         self._load_state()
 
     def _save_state(self) -> None:
+        self._sync_legacy_topic_views_from_surface()
         state: dict[str, Any] = {
             "schema_version": config.state_schema_version,
             "runtime_kind": infer_runtime_kind(
-                window_state.runtime_kind for window_state in self.window_states.values()
+                window_state.runtime_kind
+                for window_state in self.window_states.values()
             ),
             "window_states": {k: v.to_dict() for k, v in self.window_states.items()},
             "user_window_offsets": {
                 str(uid): offsets for uid, offsets in self.user_window_offsets.items()
             },
+            SURFACE_BINDINGS_KEY: {
+                str(uid): {surface_key: wid for surface_key, wid in bindings.items()}
+                for uid, bindings in self.surface_bindings.items()
+            },
+            EXTERNAL_SURFACE_BINDINGS_KEY: {
+                str(uid): {
+                    surface_key: dict(meta)
+                    for surface_key, meta in bindings.items()
+                    if isinstance(meta, dict)
+                }
+                for uid, bindings in self.external_surface_bindings.items()
+            },
+            SURFACE_POLICIES_KEY: {
+                str(uid): {
+                    surface_key: policy for surface_key, policy in policies.items()
+                }
+                for uid, policies in self.surface_policies.items()
+            },
+            SURFACE_BINDING_STATES_KEY: {
+                str(uid): {
+                    surface_key: binding_state
+                    for surface_key, binding_state in states.items()
+                }
+                for uid, states in self.surface_binding_states.items()
+            },
+            SURFACE_BIND_FLOW_VERSIONS_KEY: {
+                str(uid): {
+                    surface_key: version for surface_key, version in versions.items()
+                }
+                for uid, versions in self.surface_bind_flow_versions.items()
+            },
+            SURFACE_BIND_FLOW_NONCES_KEY: {
+                str(uid): {surface_key: nonce for surface_key, nonce in nonces.items()}
+                for uid, nonces in self.surface_bind_flow_nonces.items()
+            },
+            SURFACE_PENDING_SLOTS_KEY: {
+                str(uid): {
+                    surface_key: normalized_pending.to_dict()
+                    for surface_key, pending in pending_slots.items()
+                    if (
+                        normalized_pending := self._normalize_pending_slot_record(
+                            pending
+                        )
+                    )
+                    is not None
+                }
+                for uid, pending_slots in self.surface_pending_slots.items()
+            },
+            SURFACE_TITLES_KEY: {
+                str(uid): {
+                    surface_key: title
+                    for surface_key, title in titles.items()
+                    if str(title or "").strip()
+                }
+                for uid, titles in self.surface_titles.items()
+            },
             "thread_bindings": {
                 str(uid): {str(tid): wid for tid, wid in bindings.items()}
                 for uid, bindings in self.thread_bindings.items()
+            },
+            EXTERNAL_TOPIC_BINDINGS_KEY: {
+                str(uid): {str(tid): dict(meta) for tid, meta in bindings.items()}
+                for uid, bindings in self.external_topic_bindings.items()
+            },
+            "topic_policies": {
+                str(uid): {str(tid): policy for tid, policy in policies.items()}
+                for uid, policies in self.topic_policies.items()
+            },
+            "topic_binding_states": {
+                str(uid): {str(tid): state for tid, state in states.items()}
+                for uid, states in self.topic_binding_states.items()
+            },
+            "topic_bind_flow_versions": {
+                str(uid): {str(tid): version for tid, version in versions.items()}
+                for uid, versions in self.topic_bind_flow_versions.items()
+            },
+            "topic_bind_flow_nonces": {
+                str(uid): {str(tid): nonce for tid, nonce in nonces.items()}
+                for uid, nonces in self.topic_bind_flow_nonces.items()
             },
             "window_display_names": self.window_display_names,
             "group_chat_ids": self.group_chat_ids,
@@ -106,9 +638,482 @@ class SessionManager:
         atomic_write_json(config.state_file, state)
         logger.debug("State saved to %s", config.state_file)
 
-    def _is_window_id(self, key: str) -> bool:
+    @staticmethod
+    def _is_window_id(key: str) -> bool:
         """Check if a key looks like a tmux window ID (e.g. '@0', '@12')."""
         return key.startswith("@") and len(key) > 1 and key[1:].isdigit()
+
+    @staticmethod
+    def make_external_binding_window_id(
+        runtime_kind: str, source_thread_id: str
+    ) -> str:
+        """Build a synthetic window key for external non-tmux binds."""
+        safe_runtime = (runtime_kind or "codex").strip() or "codex"
+        safe_thread = source_thread_id.strip()
+        return f"{EXTERNAL_BINDING_WINDOW_PREFIX}{safe_runtime}:{safe_thread}"
+
+    @staticmethod
+    def parse_external_binding_window_id(window_id: str) -> tuple[str, str] | None:
+        """Parse a synthetic external binding key into runtime/thread ids."""
+        if not window_id.startswith(EXTERNAL_BINDING_WINDOW_PREFIX):
+            return None
+        payload = window_id[len(EXTERNAL_BINDING_WINDOW_PREFIX) :]
+        runtime, sep, thread_id = payload.partition(":")
+        if not sep or not runtime.strip() or not thread_id.strip():
+            return None
+        return runtime.strip(), thread_id.strip()
+
+    @classmethod
+    def is_external_binding_window_id(cls, window_id: str) -> bool:
+        """Return True when a binding key targets external non-tmux replay."""
+        return cls.parse_external_binding_window_id(window_id) is not None
+
+    @classmethod
+    def _is_binding_id(cls, key: str) -> bool:
+        """Return True for supported persisted topic binding ids."""
+        return cls._is_window_id(key) or cls.is_external_binding_window_id(key)
+
+    @staticmethod
+    def make_surface_key(
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Build the canonical persisted key for a control surface."""
+        if thread_id is not None:
+            if chat_id is not None:
+                return f"{TOPIC_SURFACE_PREFIX}{int(chat_id)}:{int(thread_id)}"
+            return f"{TOPIC_SURFACE_PREFIX}{int(thread_id)}"
+        if chat_id is not None:
+            return f"{CHAT_SURFACE_PREFIX}{int(chat_id)}"
+        raise ValueError("surface key requires thread_id or chat_id")
+
+    @classmethod
+    def make_surface_title_key(
+        cls,
+        *,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Build the persisted key for display-only control-surface titles.
+
+        Unlike legacy topic binding keys, topic titles are chat-qualified when
+        Telegram chat coordinates are known. Equal numeric forum topic ids in
+        different groups are different user-facing surfaces and must not share
+        display metadata.
+        """
+        if thread_id is not None:
+            if chat_id is not None:
+                return f"{TOPIC_SURFACE_PREFIX}{int(chat_id)}:{int(thread_id)}"
+            return cls.make_surface_key(thread_id=thread_id)
+        if chat_id is not None:
+            return cls.make_surface_key(chat_id=chat_id)
+        raise ValueError("surface title key requires thread_id or chat_id")
+
+    @staticmethod
+    def _parse_surface_key(
+        surface_key: str,
+    ) -> tuple[str, int | None, int | None] | None:
+        """Parse a persisted surface key into (kind, chat_id, thread_id)."""
+        if surface_key.startswith(TOPIC_SURFACE_PREFIX):
+            payload = surface_key[len(TOPIC_SURFACE_PREFIX) :]
+            parts = payload.split(":")
+            try:
+                if len(parts) == 1:
+                    return "topic", None, int(parts[0])
+                if len(parts) == 2:
+                    return "topic", int(parts[0]), int(parts[1])
+            except (TypeError, ValueError):
+                return None
+            return None
+        elif surface_key.startswith(CHAT_SURFACE_PREFIX):
+            payload = surface_key[len(CHAT_SURFACE_PREFIX) :]
+            try:
+                return "chat", int(payload), None
+            except (TypeError, ValueError):
+                return None
+        else:
+            return None
+
+    @staticmethod
+    def _parse_surface_title_key(
+        surface_key: str,
+    ) -> tuple[str, int | None, int | None] | None:
+        """Parse a persisted title key into (kind, chat_id, thread_id)."""
+        raw_key = str(surface_key or "").strip()
+        if raw_key.startswith(TOPIC_SURFACE_PREFIX):
+            payload = raw_key[len(TOPIC_SURFACE_PREFIX) :]
+            parts = payload.split(":")
+            try:
+                if len(parts) == 1:
+                    return "topic", None, int(parts[0])
+                if len(parts) == 2:
+                    return "topic", int(parts[0]), int(parts[1])
+            except (TypeError, ValueError):
+                return None
+            return None
+        if raw_key.startswith(CHAT_SURFACE_PREFIX):
+            payload = raw_key[len(CHAT_SURFACE_PREFIX) :]
+            try:
+                return "chat", int(payload), None
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    @classmethod
+    def _topic_thread_id_from_surface_key(cls, surface_key: str) -> int | None:
+        parsed = cls._parse_surface_key(surface_key)
+        if parsed is None or parsed[0] != "topic":
+            return None
+        return parsed[2]
+
+    @classmethod
+    def _legacy_topic_surface_key(cls, surface_key: str) -> str | None:
+        parsed = cls._parse_surface_key(surface_key)
+        if parsed is None:
+            return None
+        kind, chat_id, thread_id = parsed
+        if kind != "topic" or chat_id is None or thread_id is None:
+            return None
+        return cls.make_surface_key(thread_id=thread_id)
+
+    def _legacy_topic_surface_matches_chat(
+        self,
+        user_id: int,
+        surface_key: str,
+    ) -> bool:
+        parsed = self._parse_surface_key(surface_key)
+        if parsed is None:
+            return False
+        kind, chat_id, thread_id = parsed
+        if kind != "topic" or chat_id is None or thread_id is None:
+            return False
+        return self.resolve_chat_id(user_id, thread_id) == chat_id
+
+    def _stored_topic_chat_id(self, user_id: int, thread_id: int | None) -> int | None:
+        """Return an explicitly stored Telegram group chat id for a topic."""
+        if thread_id is None:
+            return None
+        chat_id = self.group_chat_ids.get(f"{int(user_id)}:{int(thread_id)}")
+        return chat_id if isinstance(chat_id, int) else None
+
+    def _resolve_surface_key(
+        self,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Resolve either a direct surface key or thread/chat coordinates."""
+        if surface_key is not None:
+            parsed = self._parse_surface_key(surface_key)
+            if parsed is None:
+                raise ValueError(f"invalid surface key: {surface_key!r}")
+            kind, parsed_chat_id, parsed_thread_id = parsed
+            return self.make_surface_key(
+                thread_id=parsed_thread_id if kind == "topic" else None,
+                chat_id=parsed_chat_id,
+            )
+        return self.make_surface_key(thread_id=thread_id, chat_id=chat_id)
+
+    def _resolve_surface_title_key(
+        self,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Resolve a persisted display-title key.
+
+        Passing explicit chat/thread coordinates takes precedence over a legacy
+        bare topic key so callers can keep topic titles group-scoped.
+        """
+        if thread_id is not None or chat_id is not None:
+            return self.make_surface_title_key(
+                thread_id=thread_id,
+                chat_id=chat_id,
+            )
+        if surface_key is not None:
+            parsed = self._parse_surface_title_key(surface_key)
+            if parsed is None:
+                raise ValueError(f"invalid surface title key: {surface_key!r}")
+            kind, parsed_chat_id, parsed_thread_id = parsed
+            if kind == "topic":
+                return self.make_surface_title_key(
+                    chat_id=parsed_chat_id,
+                    thread_id=parsed_thread_id,
+                )
+            return self.make_surface_title_key(chat_id=parsed_chat_id)
+        raise ValueError(
+            "surface title key requires surface_key, thread_id, or chat_id"
+        )
+
+    @classmethod
+    def _normalize_surface_map(cls, raw: Any) -> dict[int, dict[str, Any]]:
+        """Normalize nested user_id -> surface_key payloads from JSON state."""
+        normalized: dict[int, dict[str, Any]] = {}
+        if not isinstance(raw, dict):
+            return normalized
+        for uid, payload in raw.items():
+            try:
+                user_id = int(uid)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            normalized_payload: dict[str, Any] = {}
+            for key, value in payload.items():
+                normalized_key = cls._normalize_surface_key(key)
+                if normalized_key is None:
+                    continue
+                normalized_payload[normalized_key] = value
+            if normalized_payload:
+                normalized[user_id] = normalized_payload
+        return normalized
+
+    @staticmethod
+    def _prune_empty_surface_entry(
+        store: dict[int, dict[str, Any]], user_id: int
+    ) -> None:
+        if user_id in store and not store[user_id]:
+            store.pop(user_id, None)
+
+    @classmethod
+    def _normalize_surface_key(cls, surface_key: Any) -> str | None:
+        raw_key = str(surface_key or "").strip()
+        parsed = cls._parse_surface_key(raw_key)
+        if parsed is None:
+            return None
+        kind, chat_id, thread_id = parsed
+        if kind == "topic":
+            return cls.make_surface_key(thread_id=thread_id, chat_id=chat_id)
+        return cls.make_surface_key(chat_id=chat_id)
+
+    @classmethod
+    def _normalize_surface_title_key(cls, surface_key: Any) -> str | None:
+        parsed = cls._parse_surface_title_key(str(surface_key or "").strip())
+        if parsed is None:
+            return None
+        kind, chat_id, thread_id = parsed
+        if kind == "topic":
+            return cls.make_surface_title_key(chat_id=chat_id, thread_id=thread_id)
+        return cls.make_surface_title_key(chat_id=chat_id)
+
+    @classmethod
+    def _normalize_surface_title_map(cls, raw: Any) -> dict[int, dict[str, Any]]:
+        """Normalize nested user_id -> title-surface-key payloads from state."""
+        normalized: dict[int, dict[str, Any]] = {}
+        if not isinstance(raw, dict):
+            return normalized
+        for uid, payload in raw.items():
+            try:
+                user_id = int(uid)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            normalized_payload: dict[str, Any] = {}
+            for key, value in payload.items():
+                normalized_key = cls._normalize_surface_title_key(key)
+                if normalized_key is None:
+                    continue
+                normalized_payload[normalized_key] = value
+            if normalized_payload:
+                normalized[user_id] = normalized_payload
+        return normalized
+
+    @staticmethod
+    def _normalize_pending_slot_record(record: Any) -> PendingSurfaceSlot | None:
+        return PendingSurfaceSlot.from_record(record)
+
+    @classmethod
+    def _normalize_surface_pending_slots(
+        cls,
+        raw: Any,
+    ) -> dict[int, dict[str, PendingSurfaceSlot]]:
+        normalized: dict[int, dict[str, PendingSurfaceSlot]] = {}
+        for user_id, payload in cls._normalize_surface_map(raw).items():
+            normalized_payload: dict[str, PendingSurfaceSlot] = {}
+            for surface_key, record in payload.items():
+                normalized_record = cls._normalize_pending_slot_record(record)
+                if normalized_record is None:
+                    continue
+                normalized_payload[surface_key] = normalized_record
+            if normalized_payload:
+                normalized[user_id] = normalized_payload
+        return normalized
+
+    def _sync_legacy_topic_views_from_surface(self) -> bool:
+        """Rebuild legacy topic-keyed mirrors from canonical surface state."""
+        thread_bindings: dict[int, dict[int, str]] = {}
+        external_topic_bindings: dict[int, dict[int, dict[str, Any]]] = {}
+        topic_policies: dict[int, dict[int, str]] = {}
+        topic_binding_states: dict[int, dict[int, str]] = {}
+        topic_bind_flow_versions: dict[int, dict[int, int]] = {}
+        topic_bind_flow_nonces: dict[int, dict[int, str]] = {}
+
+        for user_id, bindings in self.surface_bindings.items():
+            for surface_key, window_id in bindings.items():
+                thread_id = self._topic_thread_id_from_surface_key(surface_key)
+                if thread_id is None:
+                    continue
+                thread_bindings.setdefault(user_id, {})[thread_id] = window_id
+
+        for user_id, bindings in self.external_surface_bindings.items():
+            for surface_key, metadata in bindings.items():
+                thread_id = self._topic_thread_id_from_surface_key(surface_key)
+                if thread_id is None or not isinstance(metadata, dict):
+                    continue
+                external_topic_bindings.setdefault(user_id, {})[thread_id] = dict(
+                    metadata
+                )
+
+        for user_id, policies in self.surface_policies.items():
+            for surface_key, policy in policies.items():
+                thread_id = self._topic_thread_id_from_surface_key(surface_key)
+                if thread_id is None:
+                    continue
+                topic_policies.setdefault(user_id, {})[thread_id] = (
+                    normalize_topic_policy(policy)
+                )
+
+        for user_id, states in self.surface_binding_states.items():
+            for surface_key, binding_state in states.items():
+                thread_id = self._topic_thread_id_from_surface_key(surface_key)
+                if thread_id is None:
+                    continue
+                topic_binding_states.setdefault(user_id, {})[thread_id] = (
+                    normalize_binding_state(binding_state)
+                )
+
+        for user_id, versions in self.surface_bind_flow_versions.items():
+            for surface_key, version in versions.items():
+                thread_id = self._topic_thread_id_from_surface_key(surface_key)
+                if thread_id is None:
+                    continue
+                topic_bind_flow_versions.setdefault(user_id, {})[thread_id] = (
+                    normalize_bind_flow_version(version)
+                )
+
+        for user_id, nonces in self.surface_bind_flow_nonces.items():
+            for surface_key, nonce in nonces.items():
+                thread_id = self._topic_thread_id_from_surface_key(surface_key)
+                if thread_id is None:
+                    continue
+                topic_bind_flow_nonces.setdefault(user_id, {})[thread_id] = (
+                    normalize_bind_flow_nonce(nonce)
+                )
+
+        changed = (
+            self.thread_bindings != thread_bindings
+            or self.external_topic_bindings != external_topic_bindings
+            or self.topic_policies != topic_policies
+            or self.topic_binding_states != topic_binding_states
+            or self.topic_bind_flow_versions != topic_bind_flow_versions
+            or self.topic_bind_flow_nonces != topic_bind_flow_nonces
+        )
+
+        self.thread_bindings = thread_bindings
+        self.external_topic_bindings = external_topic_bindings
+        self.topic_policies = topic_policies
+        self.topic_binding_states = topic_binding_states
+        self.topic_bind_flow_versions = topic_bind_flow_versions
+        self.topic_bind_flow_nonces = topic_bind_flow_nonces
+        return changed
+
+    def _merge_legacy_topic_state_into_surface(
+        self, *, overwrite: bool = False
+    ) -> bool:
+        """Merge legacy topic-keyed state into canonical surface maps."""
+        changed = False
+
+        for user_id, bindings in self.thread_bindings.items():
+            target = self.surface_bindings.setdefault(user_id, {})
+            for thread_id, window_id in bindings.items():
+                surface_key = self.make_surface_key(thread_id=thread_id)
+                if overwrite or surface_key not in target:
+                    if target.get(surface_key) != window_id:
+                        target[surface_key] = window_id
+                        changed = True
+
+        for user_id, bindings in self.external_topic_bindings.items():
+            target = self.external_surface_bindings.setdefault(user_id, {})
+            for thread_id, metadata in bindings.items():
+                surface_key = self.make_surface_key(thread_id=thread_id)
+                normalized_metadata = (
+                    dict(metadata) if isinstance(metadata, dict) else {}
+                )
+                if overwrite or surface_key not in target:
+                    if target.get(surface_key) != normalized_metadata:
+                        target[surface_key] = normalized_metadata
+                        changed = True
+
+        for user_id, policies in self.topic_policies.items():
+            target = self.surface_policies.setdefault(user_id, {})
+            for thread_id, policy in policies.items():
+                surface_key = self.make_surface_key(thread_id=thread_id)
+                normalized = normalize_topic_policy(policy)
+                if overwrite or surface_key not in target:
+                    if target.get(surface_key) != normalized:
+                        target[surface_key] = normalized
+                        changed = True
+
+        for user_id, states in self.topic_binding_states.items():
+            target = self.surface_binding_states.setdefault(user_id, {})
+            for thread_id, binding_state in states.items():
+                surface_key = self.make_surface_key(thread_id=thread_id)
+                normalized = normalize_binding_state(binding_state)
+                if overwrite or surface_key not in target:
+                    if target.get(surface_key) != normalized:
+                        target[surface_key] = normalized
+                        changed = True
+
+        for user_id, versions in self.topic_bind_flow_versions.items():
+            target = self.surface_bind_flow_versions.setdefault(user_id, {})
+            for thread_id, version in versions.items():
+                surface_key = self.make_surface_key(thread_id=thread_id)
+                normalized = normalize_bind_flow_version(version)
+                if overwrite or surface_key not in target:
+                    if target.get(surface_key) != normalized:
+                        target[surface_key] = normalized
+                        changed = True
+
+        for user_id, nonces in self.topic_bind_flow_nonces.items():
+            target = self.surface_bind_flow_nonces.setdefault(user_id, {})
+            for thread_id, nonce in nonces.items():
+                surface_key = self.make_surface_key(thread_id=thread_id)
+                normalized = normalize_bind_flow_nonce(nonce)
+                if overwrite or surface_key not in target:
+                    if target.get(surface_key) != normalized:
+                        target[surface_key] = normalized
+                        changed = True
+
+        for user_id, bindings in self.surface_bindings.items():
+            policy_map = self.surface_policies.setdefault(user_id, {})
+            state_map = self.surface_binding_states.setdefault(user_id, {})
+            for surface_key in bindings:
+                if surface_key not in policy_map:
+                    policy_map[surface_key] = TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
+                    changed = True
+                if surface_key not in state_map:
+                    state_map[surface_key] = BINDING_STATE_BOUND
+                    changed = True
+
+        for user_id, states in self.surface_binding_states.items():
+            version_map = self.surface_bind_flow_versions.setdefault(user_id, {})
+            nonce_map = self.surface_bind_flow_nonces.setdefault(user_id, {})
+            for surface_key, binding_state in states.items():
+                if normalize_binding_state(binding_state) != BINDING_STATE_BIND_FLOW:
+                    continue
+                version = normalize_bind_flow_version(version_map.get(surface_key))
+                nonce = normalize_bind_flow_nonce(nonce_map.get(surface_key))
+                if version <= 0 or not nonce:
+                    version_map[surface_key] = version + 1
+                    nonce_map[surface_key] = secrets.token_urlsafe(16)
+                    changed = True
+
+        if self._sync_legacy_topic_views_from_surface():
+            changed = True
+        return changed
 
     def _load_state(self) -> None:
         """Load state synchronously during initialization.
@@ -119,7 +1124,9 @@ class SessionManager:
         if config.state_file.exists():
             try:
                 state = json.loads(config.state_file.read_text())
-                migrate_legacy = "schema_version" not in state
+                migrate_legacy = int(state.get("schema_version", 0) or 0) < (
+                    config.state_schema_version
+                )
                 if migrate_legacy:
                     ensure_legacy_backup(config.state_file)
                 self.window_states = {
@@ -134,6 +1141,115 @@ class SessionManager:
                     int(uid): {int(tid): wid for tid, wid in bindings.items()}
                     for uid, bindings in state.get("thread_bindings", {}).items()
                 }
+                self.external_topic_bindings = {
+                    int(uid): {
+                        int(tid): dict(meta)
+                        for tid, meta in bindings.items()
+                        if isinstance(meta, dict)
+                    }
+                    for uid, bindings in state.get(
+                        EXTERNAL_TOPIC_BINDINGS_KEY, {}
+                    ).items()
+                    if isinstance(bindings, dict)
+                }
+                self.topic_policies = {
+                    int(uid): {
+                        int(tid): normalize_topic_policy(policy)
+                        for tid, policy in policies.items()
+                    }
+                    for uid, policies in state.get(TOPIC_POLICIES_KEY, {}).items()
+                }
+                self.topic_binding_states = {
+                    int(uid): {
+                        int(tid): normalize_binding_state(binding_state)
+                        for tid, binding_state in states.items()
+                    }
+                    for uid, states in state.get(TOPIC_BINDING_STATES_KEY, {}).items()
+                }
+                self.topic_bind_flow_versions = {
+                    int(uid): {
+                        int(tid): normalize_bind_flow_version(version)
+                        for tid, version in versions.items()
+                    }
+                    for uid, versions in state.get(
+                        TOPIC_BIND_FLOW_VERSIONS_KEY, {}
+                    ).items()
+                }
+                self.topic_bind_flow_nonces = {
+                    int(uid): {
+                        int(tid): normalize_bind_flow_nonce(nonce)
+                        for tid, nonce in nonces.items()
+                    }
+                    for uid, nonces in state.get(TOPIC_BIND_FLOW_NONCES_KEY, {}).items()
+                }
+                self.surface_bindings = {
+                    user_id: {
+                        surface_key: str(window_id)
+                        for surface_key, window_id in bindings.items()
+                    }
+                    for user_id, bindings in self._normalize_surface_map(
+                        state.get(SURFACE_BINDINGS_KEY, {})
+                    ).items()
+                }
+                self.external_surface_bindings = {
+                    user_id: {
+                        surface_key: dict(metadata)
+                        for surface_key, metadata in bindings.items()
+                        if isinstance(metadata, dict)
+                    }
+                    for user_id, bindings in self._normalize_surface_map(
+                        state.get(EXTERNAL_SURFACE_BINDINGS_KEY, {})
+                    ).items()
+                }
+                self.surface_policies = {
+                    user_id: {
+                        surface_key: normalize_topic_policy(policy)
+                        for surface_key, policy in policies.items()
+                    }
+                    for user_id, policies in self._normalize_surface_map(
+                        state.get(SURFACE_POLICIES_KEY, {})
+                    ).items()
+                }
+                self.surface_binding_states = {
+                    user_id: {
+                        surface_key: normalize_binding_state(binding_state)
+                        for surface_key, binding_state in states.items()
+                    }
+                    for user_id, states in self._normalize_surface_map(
+                        state.get(SURFACE_BINDING_STATES_KEY, {})
+                    ).items()
+                }
+                self.surface_bind_flow_versions = {
+                    user_id: {
+                        surface_key: normalize_bind_flow_version(version)
+                        for surface_key, version in versions.items()
+                    }
+                    for user_id, versions in self._normalize_surface_map(
+                        state.get(SURFACE_BIND_FLOW_VERSIONS_KEY, {})
+                    ).items()
+                }
+                self.surface_bind_flow_nonces = {
+                    user_id: {
+                        surface_key: normalize_bind_flow_nonce(nonce)
+                        for surface_key, nonce in nonces.items()
+                    }
+                    for user_id, nonces in self._normalize_surface_map(
+                        state.get(SURFACE_BIND_FLOW_NONCES_KEY, {})
+                    ).items()
+                }
+                self.surface_pending_slots = self._normalize_surface_pending_slots(
+                    state.get(SURFACE_PENDING_SLOTS_KEY, {})
+                )
+                self.surface_titles = {
+                    user_id: {
+                        surface_key: str(title).strip()
+                        for surface_key, title in titles.items()
+                        if str(title or "").strip()
+                    }
+                    for user_id, titles in self._normalize_surface_title_map(
+                        state.get(SURFACE_TITLES_KEY, {})
+                    ).items()
+                }
                 self.window_display_names = state.get("window_display_names", {})
                 self.group_chat_ids = {
                     k: int(v) for k, v in state.get("group_chat_ids", {}).items()
@@ -142,13 +1258,21 @@ class SessionManager:
                 # Detect old format: keys that don't look like window IDs
                 needs_migration = False
                 for k in self.window_states:
-                    if not self._is_window_id(k):
+                    if not self._is_binding_id(k):
                         needs_migration = True
                         break
                 if not needs_migration:
                     for bindings in self.thread_bindings.values():
                         for wid in bindings.values():
-                            if not self._is_window_id(wid):
+                            if not self._is_binding_id(wid):
+                                needs_migration = True
+                                break
+                        if needs_migration:
+                            break
+                if not needs_migration:
+                    for bindings in self.surface_bindings.values():
+                        for wid in bindings.values():
+                            if not self._is_binding_id(wid):
                                 needs_migration = True
                                 break
                         if needs_migration:
@@ -166,10 +1290,81 @@ class SessionManager:
                 self.window_states = {}
                 self.user_window_offsets = {}
                 self.thread_bindings = {}
+                self.external_topic_bindings = {}
+                self.topic_policies = {}
+                self.topic_binding_states = {}
+                self.topic_bind_flow_versions = {}
+                self.topic_bind_flow_nonces = {}
+                self.surface_bindings = {}
+                self.external_surface_bindings = {}
+                self.surface_policies = {}
+                self.surface_binding_states = {}
+                self.surface_bind_flow_versions = {}
+                self.surface_bind_flow_nonces = {}
+                self.surface_pending_slots = {}
                 self.window_display_names = {}
                 self.group_chat_ids = {}
                 migrate_legacy = False
             else:
+                if TOPIC_POLICIES_KEY not in state:
+                    self.topic_policies = {}
+                    migrate_legacy = True
+                if TOPIC_BINDING_STATES_KEY not in state:
+                    self.topic_binding_states = {}
+                    migrate_legacy = True
+                if TOPIC_BIND_FLOW_VERSIONS_KEY not in state:
+                    self.topic_bind_flow_versions = {}
+                    migrate_legacy = True
+                if TOPIC_BIND_FLOW_NONCES_KEY not in state:
+                    self.topic_bind_flow_nonces = {}
+                    migrate_legacy = True
+                if EXTERNAL_TOPIC_BINDINGS_KEY not in state:
+                    self.external_topic_bindings = {}
+                    migrate_legacy = True
+                if SURFACE_BINDINGS_KEY not in state:
+                    self.surface_bindings = {}
+                    migrate_legacy = True
+                if EXTERNAL_SURFACE_BINDINGS_KEY not in state:
+                    self.external_surface_bindings = {}
+                    migrate_legacy = True
+                if SURFACE_POLICIES_KEY not in state:
+                    self.surface_policies = {}
+                    migrate_legacy = True
+                if SURFACE_BINDING_STATES_KEY not in state:
+                    self.surface_binding_states = {}
+                    migrate_legacy = True
+                if SURFACE_BIND_FLOW_VERSIONS_KEY not in state:
+                    self.surface_bind_flow_versions = {}
+                    migrate_legacy = True
+                if SURFACE_BIND_FLOW_NONCES_KEY not in state:
+                    self.surface_bind_flow_nonces = {}
+                    migrate_legacy = True
+                if SURFACE_PENDING_SLOTS_KEY not in state:
+                    self.surface_pending_slots = {}
+                    migrate_legacy = True
+
+                if self.topic_policies:
+                    for uid, policies in self.topic_policies.items():
+                        for tid, policy in list(policies.items()):
+                            policies[tid] = normalize_topic_policy(policy)
+                if self.topic_binding_states:
+                    for uid, states in self.topic_binding_states.items():
+                        for tid, binding_state in list(states.items()):
+                            states[tid] = normalize_binding_state(binding_state)
+                if self.topic_bind_flow_versions:
+                    for uid, versions in self.topic_bind_flow_versions.items():
+                        for tid, version in list(versions.items()):
+                            versions[tid] = normalize_bind_flow_version(version)
+                if self.topic_bind_flow_nonces:
+                    for uid, nonces in self.topic_bind_flow_nonces.items():
+                        for tid, nonce in list(nonces.items()):
+                            nonces[tid] = normalize_bind_flow_nonce(nonce)
+
+                migrated = self._merge_legacy_topic_state_into_surface(overwrite=False)
+                if migrated:
+                    migrate_legacy = True
+                self._sync_legacy_topic_views_from_surface()
+
                 if migrate_legacy:
                     self._save_state()
 
@@ -248,6 +1443,8 @@ class SessionManager:
                             "Dropping stale window_state: %s (name=%s)", key, display
                         )
                         changed = True
+            elif self.is_external_binding_window_id(key):
+                new_window_states[key] = ws
             else:
                 # Old format: key is window_name
                 new_id = live_by_name.get(key)
@@ -265,6 +1462,7 @@ class SessionManager:
         self.window_states = new_window_states
 
         # --- Migrate thread_bindings ---
+        dropped_bindings: list[tuple[int, int]] = []
         for uid, bindings in self.thread_bindings.items():
             new_bindings: dict[int, str] = {}
             for tid, val in bindings.items():
@@ -284,6 +1482,9 @@ class SessionManager:
                             new_bindings[tid] = new_id
                             self.window_display_names[new_id] = display
                             changed = True
+                            self.topic_binding_states.setdefault(uid, {})[tid] = (
+                                BINDING_STATE_BOUND
+                            )
                         else:
                             logger.info(
                                 "Dropping stale thread binding: user=%d, thread=%d, wid=%s",
@@ -291,7 +1492,43 @@ class SessionManager:
                                 tid,
                                 val,
                             )
+                            dropped_bindings.append((uid, tid))
                             changed = True
+                elif self.is_external_binding_window_id(val):
+                    new_bindings[tid] = val
+                    parsed = self.parse_external_binding_window_id(val)
+                    runtime_kind = (
+                        parsed[0] if parsed is not None else config.default_runtime_kind
+                    ) or config.default_runtime_kind
+                    source_thread_id = parsed[1] if parsed is not None else ""
+                    external = self.external_topic_bindings.setdefault(uid, {})
+                    meta = external.get(tid)
+                    if not isinstance(meta, dict):
+                        external[tid] = {
+                            "runtime_kind": runtime_kind,
+                            "source_thread_id": source_thread_id,
+                            "summary": "",
+                            "cwd": "",
+                            "file_path": "",
+                            "read_only": True,
+                        }
+                        changed = True
+                    else:
+                        if not str(meta.get("runtime_kind") or "").strip():
+                            meta["runtime_kind"] = runtime_kind
+                            changed = True
+                        if (
+                            not str(meta.get("source_thread_id") or "").strip()
+                            and source_thread_id
+                        ):
+                            meta["source_thread_id"] = source_thread_id
+                            changed = True
+                        if "read_only" not in meta:
+                            meta["read_only"] = True
+                            changed = True
+                    self.topic_binding_states.setdefault(uid, {})[tid] = (
+                        BINDING_STATE_BOUND
+                    )
                 else:
                     # Old format: val is window_name
                     new_id = live_by_name.get(val)
@@ -299,6 +1536,9 @@ class SessionManager:
                         logger.info("Migrating thread binding %s -> %s", val, new_id)
                         new_bindings[tid] = new_id
                         self.window_display_names[new_id] = val
+                        self.topic_binding_states.setdefault(uid, {})[tid] = (
+                            BINDING_STATE_BOUND
+                        )
                         changed = True
                     else:
                         logger.info(
@@ -307,6 +1547,7 @@ class SessionManager:
                             tid,
                             val,
                         )
+                        dropped_bindings.append((uid, tid))
                         changed = True
             self.thread_bindings[uid] = new_bindings
 
@@ -314,6 +1555,30 @@ class SessionManager:
         empty_users = [uid for uid, b in self.thread_bindings.items() if not b]
         for uid in empty_users:
             del self.thread_bindings[uid]
+
+        for uid, tid in dropped_bindings:
+            self.topic_binding_states.setdefault(uid, {})[tid] = BINDING_STATE_NONE
+
+        for uid, external in list(self.external_topic_bindings.items()):
+            bindings = self.thread_bindings.get(uid, {})
+            for tid in list(external.keys()):
+                current_binding = bindings.get(tid)
+                if current_binding is None or not self.is_external_binding_window_id(
+                    current_binding
+                ):
+                    del external[tid]
+                    changed = True
+            if not external:
+                del self.external_topic_bindings[uid]
+                changed = True
+
+        # Ensure every live binding has an explicit policy/state record.
+        for uid, bindings in self.thread_bindings.items():
+            policy_map = self.topic_policies.setdefault(uid, {})
+            state_map = self.topic_binding_states.setdefault(uid, {})
+            for tid in bindings:
+                policy_map.setdefault(tid, TOPIC_POLICY_IMPLICIT_BIND_ALLOWED)
+                state_map[tid] = BINDING_STATE_BOUND
 
         # --- Migrate user_window_offsets ---
         for uid, offsets in self.user_window_offsets.items():
@@ -330,6 +1595,8 @@ class SessionManager:
                             changed = True
                         else:
                             changed = True
+                elif self.is_external_binding_window_id(key):
+                    new_offsets[key] = offset
                 else:
                     new_id = live_by_name.get(key)
                     if new_id:
@@ -340,6 +1607,7 @@ class SessionManager:
             self.user_window_offsets[uid] = new_offsets
 
         if changed:
+            self._merge_legacy_topic_state_into_surface(overwrite=True)
             self._save_state()
             logger.info("Startup re-resolution complete")
 
@@ -412,6 +1680,88 @@ class SessionManager:
         self._save_state()
         logger.info("Updated display name: window_id %s -> '%s'", window_id, new_name)
 
+    # --- Control surface title management ---
+
+    def set_surface_title(
+        self,
+        user_id: int,
+        title: str,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> bool:
+        """Persist a Telegram-visible control-surface title.
+
+        This is display metadata only: it is not a binding, tmux window id,
+        runtime conversation identity, or replay-evidence proof.
+        """
+        normalized_title = str(title or "").strip()
+        if not normalized_title:
+            return False
+        resolved_surface_key = self._resolve_surface_title_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        titles = self.surface_titles.setdefault(user_id, {})
+        if titles.get(resolved_surface_key) == normalized_title:
+            return False
+        titles[resolved_surface_key] = normalized_title
+        self._save_state()
+        logger.info(
+            "Stored surface title: user=%d surface=%s title=%r",
+            user_id,
+            resolved_surface_key,
+            normalized_title,
+        )
+        return True
+
+    def get_surface_title(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Return a stored Telegram-visible control-surface title."""
+        resolved_surface_key = self._resolve_surface_title_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        titles = self.surface_titles.get(user_id)
+        if not titles:
+            return ""
+        return str(titles.get(resolved_surface_key) or "").strip()
+
+    def get_shared_surface_title(
+        self,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Return display title metadata for an exact control surface.
+
+        Topic create/edit Telegram service updates are actor-delivered, but the
+        title is a property of the chat-qualified Telegram control surface. In a
+        shared group, one allowed user may create or rename the topic and another
+        allowed user may later bind it. This lookup intentionally ignores actor
+        ownership while still requiring the exact title surface key.
+        """
+        resolved_surface_key = self._resolve_surface_title_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        for _user_id, titles in sorted(self.surface_titles.items()):
+            title = str(titles.get(resolved_surface_key) or "").strip()
+            if title:
+                return title
+        return ""
+
     # --- Group chat ID management (supergroup forum topic routing) ---
 
     def set_group_chat_id(
@@ -444,18 +1794,19 @@ class SessionManager:
         """Resolve the correct chat_id for sending messages.
 
         Returns the stored group chat_id when a thread_id is present and a
-        mapping exists, otherwise falls back to user_id (for private chats).
+        mapping exists. When thread_id is None, this also checks the chat-wide
+        no-topics slot (`user_id:0`) before falling back to user_id.
 
         Every outbound Telegram API call (send_message, edit_message_text,
         delete_message, send_chat_action, edit_forum_topic, etc.) MUST use
         this method instead of raw user_id. Using user_id directly breaks
         supergroup forum topic routing.
         """
-        if thread_id is not None:
-            key = f"{user_id}:{thread_id}"
-            group_id = self.group_chat_ids.get(key)
-            if group_id is not None:
-                return group_id
+        lookup_thread_id = thread_id if thread_id is not None else 0
+        key = f"{user_id}:{lookup_thread_id}"
+        group_id = self.group_chat_ids.get(key)
+        if group_id is not None:
+            return group_id
         return user_id
 
     async def wait_for_session_map_entry(
@@ -522,6 +1873,7 @@ class SessionManager:
                 legacy_keys_seen = True
             if (
                 (new_sid and state.thread_id != new_sid)
+                or (new_sid and state.requires_live_proof)
                 or state.cwd != new_cwd
                 or state.runtime_kind != new_runtime_kind
             ):
@@ -534,6 +1886,7 @@ class SessionManager:
                 )
                 if new_sid:
                     state.thread_id = new_sid
+                    state.requires_live_proof = False
                 state.cwd = new_cwd
                 state.runtime_kind = new_runtime_kind
                 changed = True
@@ -558,18 +1911,31 @@ class SessionManager:
             self._save_state()
         if not versioned:
             self._write_session_map_entries(session_map)
+        self.cleanup_helper_window_bindings()
 
     # --- Window state management ---
 
-    def get_process_descriptor(self, window_id: str) -> LiveProcessDescriptor:
-        """Get or create the live process descriptor for a tmux window."""
+    def get_process_descriptor(self, window_id: str) -> LiveProcessDescriptor | None:
+        """Return the live process descriptor for a tmux window without mutation."""
+        return self.window_states.get(window_id)
+
+    def get_or_create_process_descriptor(self, window_id: str) -> LiveProcessDescriptor:
+        """Return the live process descriptor, creating it for write-path callers."""
         if window_id not in self.window_states:
             self.window_states[window_id] = LiveProcessDescriptor()
         return self.window_states[window_id]
 
+    def get_runtime_capability(
+        self, runtime_kind: str | None = None
+    ) -> RuntimeCapability:
+        """Return the capability profile for the requested runtime kind."""
+        return runtime_capability_registry.get(
+            runtime_kind or config.default_runtime_kind
+        )
+
     def get_window_state(self, window_id: str) -> WindowState:
-        """Backward-compatible alias for get_process_descriptor()."""
-        return self.get_process_descriptor(window_id)
+        """Backward-compatible mutating alias for legacy write-path callers."""
+        return self.get_or_create_process_descriptor(window_id)
 
     def register_live_process(
         self,
@@ -581,7 +1947,7 @@ class SessionManager:
         thread_id: str = "",
     ) -> WindowState:
         """Register a live process before its persisted thread is known."""
-        state = self.get_process_descriptor(window_id)
+        state = self.get_or_create_process_descriptor(window_id)
         state.cwd = cwd
         if window_name:
             state.window_name = window_name
@@ -589,15 +1955,407 @@ class SessionManager:
             state.runtime_kind = runtime_kind
         state.registered_at = time.time()
         state.thread_id = thread_id
+        state.requires_live_proof = state.runtime_kind == "codex" and not thread_id
         self._save_state()
         return state
 
-    def clear_window_session(self, window_id: str) -> None:
-        """Clear the persisted thread association for a window."""
-        state = self.get_process_descriptor(window_id)
+    def clear_duplicate_thread_claims_for_window(
+        self,
+        owner_window_id: str,
+        *,
+        reason: str,
+    ) -> list[str]:
+        """Clear stale duplicate runtime-thread claims for an explicit owner.
+
+        Startup restore has stronger authority than persisted stale descriptors:
+        it validates a specific tmux window against the configured runtime id.
+        When that proof re-binds the owner window, any other distinct bound tmux
+        window carrying the same runtime id must become replay-silent.
+        """
+        owner = self.get_process_descriptor(owner_window_id)
+        if owner is None or not owner.thread_id:
+            return []
+        bound_window_ids = self._bound_tmux_window_ids()
+        cleared: list[str] = []
+        for peer_window_id, peer in self.window_states.items():
+            if peer_window_id == owner_window_id:
+                continue
+            if peer_window_id not in bound_window_ids:
+                continue
+            if peer.thread_id != owner.thread_id:
+                continue
+            if (
+                owner.runtime_kind
+                and peer.runtime_kind
+                and peer.runtime_kind != owner.runtime_kind
+            ):
+                continue
+            peer.thread_id = ""
+            cleared.append(peer_window_id)
+        if not cleared:
+            return []
+        self._save_state()
+        logger.warning(
+            "Cleared duplicate runtime thread claims for owner %s: thread %s "
+            "cleared from %s reason=%s",
+            owner_window_id,
+            owner.thread_id,
+            sorted(cleared),
+            reason,
+        )
+        return cleared
+
+    def reconcile_live_tmux_window(
+        self,
+        *,
+        window_id: str,
+        cwd: str,
+        window_name: str = "",
+        pane_current_command: str = "",
+        pane_pid: str = "",
+    ) -> bool:
+        """Refresh a bound tmux descriptor from live tmux topology.
+
+        Same-cwd Codex restarts require direct live-process proof: a descendant
+        of the bound tmux pane must have the target rollout JSONL open. Without
+        that proof, only cwd drift is auto-adopted; helper/reviewer threads can
+        share cwd and must not be selected just because they are newer.
+        """
+        if not window_id:
+            return False
+        state = self.get_or_create_process_descriptor(window_id)
+        changed = False
+
+        inferred_runtime = runtime_capability_registry.known_runtime_kind_from_command(
+            pane_current_command
+        )
+        if not state.runtime_kind and inferred_runtime:
+            state.runtime_kind = inferred_runtime
+            changed = True
+
+        if window_name and state.window_name != window_name:
+            state.window_name = window_name
+            changed = True
+
+        live_cwd = cwd.strip()
+        live_codex_candidate = self._resolve_live_codex_rollout_from_pane_pid(
+            pane_pid=pane_pid,
+            cwd=live_cwd or state.cwd,
+        )
+        if live_codex_candidate is not None and (
+            state.thread_id != live_codex_candidate.thread_id
+            or state.requires_live_proof
+            or normalize_cwd(state.cwd) != live_codex_candidate.normalized_cwd
+        ):
+            old_thread_id = state.thread_id
+            old_cwd = state.cwd
+            state.thread_id = live_codex_candidate.thread_id
+            state.cwd = live_codex_candidate.cwd
+            if not state.runtime_kind:
+                state.runtime_kind = "codex"
+            state.requires_live_proof = False
+            state.registered_at = time.time()
+            logger.info(
+                "Adopted live Codex thread for window %s from process fd proof: "
+                "%s (%s) -> %s (%s)",
+                window_id,
+                old_thread_id or "<none>",
+                old_cwd or "<none>",
+                live_codex_candidate.thread_id,
+                live_codex_candidate.cwd,
+            )
+            self._save_state()
+            return True
+
+        cwd_changed = bool(live_cwd) and normalize_cwd(live_cwd) != normalize_cwd(
+            state.cwd
+        )
+        if not cwd_changed:
+            if changed:
+                self._save_state()
+            return changed
+
+        old_thread_id = state.thread_id
+        old_cwd = state.cwd
+        state.cwd = live_cwd
+        state.registered_at = time.time()
+        changed = True
+
+        if state.runtime_kind == "codex" and self.codex_thread_catalog is not None:
+            if state.requires_live_proof:
+                state.thread_id = ""
+                logger.info(
+                    "Kept fresh Codex window %s replay-silent after cwd drift "
+                    "without fd proof: %s (%s) -> <proof-required> (%s)",
+                    window_id,
+                    old_thread_id or "<none>",
+                    old_cwd or "<none>",
+                    live_cwd,
+                )
+            else:
+                try:
+                    self.codex_thread_catalog.refresh()
+                    candidates = sorted(
+                        self.codex_thread_catalog.list_candidates_for_cwd(live_cwd),
+                        key=lambda candidate: (
+                            candidate.mtime,
+                            candidate.ordering_timestamp,
+                            candidate.thread_id,
+                        ),
+                        reverse=True,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Unable to resolve live Codex thread for cwd drift on %s: %s",
+                        window_id,
+                        exc,
+                    )
+                    candidates = []
+                if candidates:
+                    selected = candidates[0]
+                    state.thread_id = selected.thread_id
+                    logger.info(
+                        "Adopted live Codex thread for window %s after cwd drift: "
+                        "%s (%s) -> %s (%s)",
+                        window_id,
+                        old_thread_id or "<none>",
+                        old_cwd or "<none>",
+                        selected.thread_id,
+                        live_cwd,
+                    )
+                else:
+                    state.thread_id = ""
+                    logger.info(
+                        "Cleared thread for window %s after cwd drift without "
+                        "matching Codex rollout: %s (%s) -> <none> (%s)",
+                        window_id,
+                        old_thread_id or "<none>",
+                        old_cwd or "<none>",
+                        live_cwd,
+                    )
+        elif old_thread_id:
+            state.thread_id = ""
+            logger.info(
+                "Cleared thread for window %s after runtime cwd drift: "
+                "%s (%s) -> <none> (%s)",
+                window_id,
+                old_thread_id,
+                old_cwd or "<none>",
+                live_cwd,
+            )
+
+        self._save_state()
+        return changed
+
+    def _resolve_live_codex_rollout_from_pane_pid(
+        self,
+        *,
+        pane_pid: str,
+        cwd: str,
+    ) -> CodexThreadCandidate | None:
+        """Return the Codex rollout currently open under a tmux pane process."""
+        if self.codex_thread_catalog is None:
+            return None
+        try:
+            root_pid = int(str(pane_pid).strip())
+        except (TypeError, ValueError):
+            return None
+        if root_pid <= 0:
+            return None
+
+        candidates: list[CodexThreadCandidate] = []
+        normalized_cwd = normalize_cwd(cwd)
+        for rollout_path in self._iter_open_rollout_paths_under_pid(root_pid):
+            match = _CODEX_ROLLOUT_THREAD_RE.search(str(rollout_path))
+            if match is None:
+                continue
+            thread_id = match.group(1)
+            candidate = self.codex_thread_catalog.get_candidate_fast(thread_id)
+            if candidate is None:
+                continue
+            if normalized_cwd and candidate.normalized_cwd != normalized_cwd:
+                continue
+            try:
+                if candidate.rollout_file.resolve() != rollout_path.resolve():
+                    continue
+            except OSError:
+                continue
+            candidates.append(candidate)
+
+        if not candidates:
+            return None
+        return max(
+            candidates,
+            key=lambda candidate: (
+                candidate.mtime,
+                candidate.ordering_timestamp,
+                candidate.thread_id,
+            ),
+        )
+
+    @staticmethod
+    def _iter_open_rollout_paths_under_pid(root_pid: int) -> Iterator[Path]:
+        """Yield open Codex rollout files for root_pid and descendants."""
+        children_by_parent: dict[int, list[int]] = {}
+        for proc_dir in Path("/proc").iterdir():
+            if not proc_dir.name.isdigit():
+                continue
+            try:
+                stat_text = (proc_dir / "stat").read_text(encoding="utf-8")
+                after_name = stat_text.rsplit(")", 1)[1].strip().split()
+                ppid = int(after_name[1])
+                pid = int(proc_dir.name)
+            except (OSError, IndexError, ValueError):
+                continue
+            children_by_parent.setdefault(ppid, []).append(pid)
+
+        stack = [root_pid]
+        seen: set[int] = set()
+        while stack:
+            pid = stack.pop()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            stack.extend(children_by_parent.get(pid, ()))
+            fd_dir = Path("/proc") / str(pid) / "fd"
+            try:
+                fd_entries = tuple(fd_dir.iterdir())
+            except OSError:
+                continue
+            for fd in fd_entries:
+                try:
+                    target = os.readlink(fd)
+                except OSError:
+                    continue
+                if "/sessions/" not in target or "rollout-" not in target:
+                    continue
+                path = Path(target)
+                if path.suffix == ".jsonl":
+                    yield path
+
+    def clear_window_binding(self, window_id: str) -> None:
+        """Clear the persisted identity binding for a live window."""
+        state = self.get_or_create_process_descriptor(window_id)
         state.thread_id = ""
         self._save_state()
-        logger.info("Cleared session for window_id %s", window_id)
+        logger.info("Cleared persisted binding for window_id %s", window_id)
+
+    def clear_window_session(self, window_id: str) -> None:
+        """Backward-compatible alias for clear_window_binding()."""
+        self.clear_window_binding(window_id)
+
+    def _is_codex_helper_window(self, window_id: str) -> bool:
+        """Return True when a tmux window is a Codex helper/subagent session."""
+        state = self.window_states.get(window_id)
+        if (
+            state is None
+            or state.runtime_kind != "codex"
+            or not state.thread_id
+            or self.codex_thread_catalog is None
+        ):
+            return False
+        try:
+            return bool(
+                self.codex_thread_catalog.is_helper_thread_fast(state.thread_id)
+            )
+        except Exception as exc:
+            logger.warning(
+                "Unable to classify Codex helper window %s (%s): %s",
+                window_id,
+                state.thread_id,
+                exc,
+            )
+            return False
+
+    def _is_inactive_or_helper_tmux_binding(self, window_id: str) -> bool:
+        """Return True for tmux bindings that must fail closed.
+
+        External persisted-thread bindings are intentionally not tmux windows.
+        For real tmux ids, absence of a live process descriptor means the
+        binding has lost the metadata needed to prove it is a writable user
+        surface; fail closed instead of delivering or accepting input.
+        """
+        if self.is_external_binding_window_id(window_id):
+            return False
+        if not self._is_window_id(window_id):
+            return False
+        if window_id not in self.window_states:
+            return True
+        return self._is_codex_helper_window(window_id)
+
+    def cleanup_helper_window_bindings(self) -> list[TopicBinding]:
+        """Remove persisted topic bindings that point at helper/inactive windows.
+
+        Codex native subagent/helper windows may share the parent's cwd and can
+        appear in tmux, but they are not user-addressable control surfaces.
+        Existing bindings from older bot versions must be pruned fail-closed so
+        a helper transcript cannot keep delivering into its own Telegram topic
+        or accept user input as if it were an independent session. A tmux id
+        without a process descriptor is also inactive because the bot cannot
+        prove it is a writable user surface.
+        """
+        removed: list[TopicBinding] = []
+        helper_window_ids = {
+            window_id
+            for window_id in {
+                bound_window_id
+                for bindings in self.surface_bindings.values()
+                for bound_window_id in bindings.values()
+            }
+            if self._is_inactive_or_helper_tmux_binding(window_id)
+        }
+        if not helper_window_ids:
+            return removed
+
+        changed = False
+        for user_id, bindings in list(self.surface_bindings.items()):
+            for surface_key, window_id in list(bindings.items()):
+                if window_id not in helper_window_ids:
+                    continue
+                descriptor = self.get_process_descriptor(window_id)
+                removed.append(
+                    TopicBinding(
+                        user_id=user_id,
+                        thread_id=self._topic_thread_id_from_surface_key(surface_key),
+                        window_id=window_id,
+                        window_name=self.get_display_name(window_id),
+                        runtime_kind=descriptor.runtime_kind
+                        if descriptor is not None
+                        else config.default_runtime_kind,
+                    )
+                )
+                del bindings[surface_key]
+                self.surface_binding_states.setdefault(user_id, {})[surface_key] = (
+                    BINDING_STATE_NONE
+                )
+                external = self.external_surface_bindings.get(user_id)
+                if external and surface_key in external:
+                    del external[surface_key]
+                    self._prune_empty_surface_entry(
+                        self.external_surface_bindings,
+                        user_id,
+                    )
+                changed = True
+                logger.warning(
+                    "Removed binding from surface %s to inactive/helper window %s for user %d",
+                    surface_key,
+                    window_id,
+                    user_id,
+                )
+            self._prune_empty_surface_entry(self.surface_bindings, user_id)
+
+        for user_id, offsets in list(self.user_window_offsets.items()):
+            for window_id in helper_window_ids:
+                if window_id in offsets:
+                    del offsets[window_id]
+                    changed = True
+            if not offsets:
+                del self.user_window_offsets[user_id]
+
+        if changed:
+            self._sync_legacy_topic_views_from_surface()
+            self._save_state()
+        return removed
 
     @staticmethod
     def _encode_cwd(cwd: str) -> str:
@@ -667,13 +2425,13 @@ class SessionManager:
             summary=summary,
             message_count=message_count,
             file_path=str(file_path),
+            runtime_kind="claude",
             cwd=cwd,
         )
 
     async def _get_session_direct(
         self, session_id: str, cwd: str
     ) -> ClaudeSession | None:
-        """Backward-compatible wrapper for Claude-shaped call sites."""
         return await self._get_thread_locator_direct(session_id, cwd)
 
     # --- Directory session listing ---
@@ -681,7 +2439,8 @@ class SessionManager:
     async def list_threads_for_directory(self, cwd: str) -> list[ThreadLocator]:
         """List persisted threads for a directory.
 
-        Returns Codex candidates plus any legacy Claude threads for the same cwd.
+        Returns Codex candidates, fast-agent sessions, plus any legacy Claude
+        threads for the same cwd.
 
         Mixed-runtime directories must not hide older Claude transcripts simply
         because Codex candidates exist for the same path.
@@ -696,6 +2455,19 @@ class SessionManager:
             )
             for candidate in candidates:
                 locator = candidate.to_locator()
+                sessions.append(locator)
+                seen_thread_ids.add(locator.thread_id)
+
+        if self.fast_agent_session_catalog is not None:
+            self.fast_agent_session_catalog.refresh()
+            fast_agent_candidates = await asyncio.to_thread(
+                self.fast_agent_session_catalog.list_candidates_for_directory,
+                cwd,
+            )
+            for candidate in fast_agent_candidates:
+                locator = candidate.to_locator()
+                if locator.thread_id in seen_thread_ids:
+                    continue
                 sessions.append(locator)
                 seen_thread_ids.add(locator.thread_id)
 
@@ -727,7 +2499,6 @@ class SessionManager:
         return sessions
 
     async def list_sessions_for_directory(self, cwd: str) -> list[ClaudeSession]:
-        """Backward-compatible wrapper for legacy callers."""
         return await self.list_threads_for_directory(cwd)
 
     # --- Window -> thread resolution ---
@@ -738,13 +2509,47 @@ class SessionManager:
         Uses the explicit launcher registration first, then exact cwd-based
         resolution. Ambiguity is fail-closed.
         """
+        if self.is_external_binding_window_id(window_id):
+            return await self._resolve_external_thread_for_window(window_id)
+
         state = self.get_process_descriptor(window_id)
+        if state is None:
+            return None
+        restore_locator = self._restore_intent_locator_for_window(window_id)
+        if restore_locator is not None:
+            changed = False
+            if state.thread_id != restore_locator.thread_id:
+                state.thread_id = restore_locator.thread_id
+                changed = True
+            if restore_locator.cwd and state.cwd != restore_locator.cwd:
+                state.cwd = restore_locator.cwd
+                changed = True
+            if changed:
+                self._save_state()
+            return restore_locator
         resolution = await self.resolve_thread_candidate(window_id)
         if resolution is None:
             return None
 
         if resolution.status == "selected" and resolution.selected is not None:
             selected = resolution.selected
+            duplicate_owner = self._duplicate_thread_owner_window(
+                selected.thread_id,
+                window_id,
+                runtime_kind=state.runtime_kind,
+            )
+            if duplicate_owner is not None:
+                if state.thread_id == selected.thread_id:
+                    state.thread_id = ""
+                    self._save_state()
+                logger.warning(
+                    "Suppressing duplicate runtime thread resolution for window %s: "
+                    "thread %s is already owned by bound window %s",
+                    window_id,
+                    selected.thread_id,
+                    duplicate_owner,
+                )
+                return None
             changed = False
             if state.thread_id != selected.thread_id:
                 state.thread_id = selected.thread_id
@@ -764,17 +2569,272 @@ class SessionManager:
             )
         return None
 
+    def _bound_tmux_window_ids(self) -> set[str]:
+        """Return tmux window ids currently bound to Telegram control surfaces."""
+        return {
+            window_id
+            for bindings in self.surface_bindings.values()
+            for window_id in bindings.values()
+            if self._is_window_id(window_id)
+        }
+
+    def _duplicate_thread_owner_window(
+        self,
+        thread_id: str,
+        window_id: str,
+        *,
+        runtime_kind: str | None = None,
+    ) -> str | None:
+        """Return another bound window that authoritatively owns a thread id.
+
+        Distinct tmux windows resolving to the same runtime conversation identity
+        are ambiguous. Replay delivery may fan out to multiple Telegram surfaces
+        only when those surfaces share the same tmux window id.
+        """
+        if not thread_id:
+            return None
+        restore_owner = self._restore_intent_owner_window_for_thread(
+            thread_id,
+            runtime_kind=runtime_kind,
+        )
+        if restore_owner:
+            return None if restore_owner == window_id else restore_owner
+        bound_window_ids = self._bound_tmux_window_ids()
+        candidates: list[tuple[float, str]] = []
+        for candidate_window_id, peer in self.window_states.items():
+            if candidate_window_id not in bound_window_ids:
+                continue
+            if peer.thread_id != thread_id:
+                continue
+            if runtime_kind and peer.runtime_kind and peer.runtime_kind != runtime_kind:
+                continue
+            candidates.append((float(peer.registered_at or 0.0), candidate_window_id))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        owner = candidates[0][1]
+        if owner == window_id:
+            return None
+        return owner
+
+    def _restore_intent_owner_window_for_thread(
+        self,
+        thread_id: str,
+        *,
+        runtime_kind: str | None = None,
+    ) -> str | None:
+        """Return the configured startup-restore window for a runtime thread."""
+        if not thread_id:
+            return None
+        if str(os.environ.get("CCBOT_RESTORE_RUNTIME_ID") or "").strip() != thread_id:
+            return None
+        try:
+            user_id = int(str(os.environ.get("CCBOT_RESTORE_USER_ID") or "").strip())
+        except (TypeError, ValueError):
+            return None
+        raw_surface_key = str(os.environ.get("CCBOT_RESTORE_SURFACE_KEY") or "").strip()
+        surface_key = self._normalize_surface_key(raw_surface_key)
+        if surface_key is None:
+            return None
+        owner = self.surface_bindings.get(user_id, {}).get(surface_key)
+        if not owner or not self._is_window_id(owner):
+            return None
+        state = self.window_states.get(owner)
+        if (
+            runtime_kind
+            and state is not None
+            and state.runtime_kind
+            and state.runtime_kind != runtime_kind
+        ):
+            return None
+        return owner
+
+    def _restore_intent_locator_for_window(
+        self,
+        window_id: str,
+    ) -> ThreadLocator | None:
+        """Resolve the configured startup-restore owner from replay evidence."""
+        thread_id = str(os.environ.get("CCBOT_RESTORE_RUNTIME_ID") or "").strip()
+        if not thread_id:
+            return None
+        owner = self._restore_intent_owner_window_for_thread(thread_id)
+        if owner != window_id:
+            return None
+        state = self.get_process_descriptor(window_id)
+        runtime_kind = str(os.environ.get("CCBOT_RESTORE_RUNTIME_KIND") or "").strip()
+        if not runtime_kind:
+            runtime_kind = state.runtime_kind if state is not None else ""
+        if runtime_kind != "codex" or self.codex_thread_catalog is None:
+            return None
+        self.codex_thread_catalog.refresh()
+        candidate = self.codex_thread_catalog.get_candidate_fast(
+            thread_id
+        ) or self.codex_thread_catalog.get_candidate(thread_id)
+        if candidate is None:
+            return None
+        expected_cwd = normalize_cwd(
+            (state.cwd if state is not None and state.cwd else "")
+            or str(os.environ.get("CCBOT_RESTORE_CWD") or "")
+        )
+        if expected_cwd and candidate.normalized_cwd != expected_cwd:
+            return None
+        return candidate.to_locator()
+
+    def _find_external_binding_record_by_window(
+        self,
+        window_id: str,
+    ) -> tuple[int, str, dict[str, Any]] | None:
+        """Return (user_id, surface_key, metadata) for an external binding id."""
+        for user_id, bindings in self.surface_bindings.items():
+            for surface_key, bound_window_id in bindings.items():
+                if bound_window_id != window_id:
+                    continue
+                metadata = (
+                    self.get_external_surface_binding(
+                        user_id,
+                        surface_key=surface_key,
+                    )
+                    or {}
+                )
+                return user_id, surface_key, dict(metadata)
+        return None
+
+    def get_surface_coordinates_for_window(
+        self,
+        user_id: int,
+        window_id: str,
+    ) -> tuple[str | None, int | None, int | None]:
+        """Return the bound surface key and coordinates for a user/window pair."""
+        bindings = self.surface_bindings.get(user_id) or {}
+        for surface_key, bound_window_id in bindings.items():
+            if bound_window_id != window_id:
+                continue
+            parsed = self._parse_surface_key(surface_key)
+            if parsed is None:
+                return surface_key, None, None
+            kind, chat_id, thread_id = parsed
+            if kind == "chat":
+                return surface_key, chat_id, None
+            if thread_id is not None and chat_id is None:
+                stored_chat_id = self._stored_topic_chat_id(user_id, thread_id)
+                if stored_chat_id is not None:
+                    return (
+                        self.make_surface_key(
+                            thread_id=thread_id,
+                            chat_id=stored_chat_id,
+                        ),
+                        stored_chat_id,
+                        thread_id,
+                    )
+            return surface_key, chat_id, thread_id
+        return None, None, None
+
+    async def _resolve_external_thread_for_window(
+        self,
+        window_id: str,
+    ) -> ThreadLocator | None:
+        """Resolve a non-tmux external binding to a persisted thread locator."""
+        parsed = self.parse_external_binding_window_id(window_id)
+        if parsed is None:
+            return None
+
+        parsed_runtime_kind, parsed_thread_id = parsed
+        record = self._find_external_binding_record_by_window(window_id)
+        metadata = record[2] if record is not None else {}
+        runtime_kind = (
+            str(metadata.get("runtime_kind") or parsed_runtime_kind).strip()
+            or config.default_runtime_kind
+        )
+        source_thread_id = (
+            str(metadata.get("source_thread_id") or parsed_thread_id).strip()
+            or parsed_thread_id
+        )
+        summary = (
+            str(metadata.get("summary") or source_thread_id).strip() or source_thread_id
+        )
+        cwd = str(metadata.get("cwd") or "").strip()
+        file_path = str(metadata.get("file_path") or "").strip()
+        message_count = 0
+
+        if runtime_kind == "codex" and self.codex_thread_catalog is not None:
+            self.codex_thread_catalog.refresh()
+            candidate = await asyncio.to_thread(
+                self.codex_thread_catalog.get_candidate_fast,
+                source_thread_id,
+            )
+            if candidate is None:
+                resolution = await asyncio.to_thread(
+                    self.codex_thread_catalog.resolve_resume_target,
+                    source_thread_id,
+                )
+                if resolution.status == "selected" and resolution.selected is not None:
+                    candidate = resolution.selected
+            if candidate is not None:
+                summary = candidate.summary
+                cwd = candidate.cwd
+                file_path = str(candidate.rollout_file)
+                message_count = candidate.message_count
+
+        if not file_path:
+            return None
+
+        if record is not None:
+            user_id, surface_key, _ = record
+            external = self.external_surface_bindings.setdefault(user_id, {})
+            current = external.setdefault(surface_key, {})
+            changed = False
+            for key, value in (
+                ("runtime_kind", runtime_kind),
+                ("source_thread_id", source_thread_id),
+                ("summary", summary),
+                ("cwd", cwd),
+                ("file_path", file_path),
+            ):
+                if str(current.get(key) or "") != value:
+                    current[key] = value
+                    changed = True
+            if "read_only" not in current:
+                current["read_only"] = True
+                changed = True
+            if changed:
+                self._save_state()
+
+        return ThreadLocator(
+            thread_id=source_thread_id,
+            summary=summary,
+            message_count=message_count,
+            file_path=file_path,
+            runtime_kind=runtime_kind,
+            cwd=cwd,
+        )
+
     async def resolve_thread_candidate(
         self, window_id: str
-    ) -> CodexThreadResolution | None:
-        """Resolve a live window to a Codex thread candidate without mutating state."""
+    ) -> CodexThreadResolution | FastAgentSessionResolution | None:
+        """Resolve a live window to a runtime-specific thread candidate."""
         state = self.get_process_descriptor(window_id)
+        if state is None:
+            return None
         if not state.cwd:
             return None
 
-        if state.runtime_kind == "codex" and self.codex_thread_catalog is not None:
+        capability = self.get_runtime_capability(state.runtime_kind)
+
+        if (
+            capability.replay_evidence_discovery == "rollout_jsonl"
+            and self.codex_thread_catalog is not None
+        ):
+            if state.requires_live_proof and state.registered_at > 0:
+                return CodexThreadResolution(
+                    status="ambiguous",
+                    selected=None,
+                    candidates=(),
+                    reason="live_process_rollout_proof_required",
+                )
             if state.thread_id:
-                candidate = self.codex_thread_catalog.get_candidate_fast(state.thread_id)
+                candidate = self.codex_thread_catalog.get_candidate_fast(
+                    state.thread_id
+                )
                 if candidate is not None:
                     return CodexThreadResolution(
                         status="selected",
@@ -782,10 +2842,29 @@ class SessionManager:
                         candidates=(candidate,),
                         reason="explicit_thread_id_fast_path",
                     )
+            if state.registered_at <= 0 and not state.thread_id:
+                same_cwd_live_peers = [
+                    wid
+                    for wid, peer in self.window_states.items()
+                    if wid != window_id
+                    and peer.runtime_kind == state.runtime_kind
+                    and peer.cwd == state.cwd
+                    and not peer.thread_id
+                    and peer.registered_at <= 0
+                ]
+                if same_cwd_live_peers:
+                    return CodexThreadResolution(
+                        status="ambiguous",
+                        selected=None,
+                        candidates=(),
+                        reason="parallel_live_window_same_cwd",
+                    )
             if state.registered_at > 0:
-                recent_resolution = self.codex_thread_catalog.resolve_recent_for_registration(
-                    cwd=state.cwd,
-                    registered_at=state.registered_at,
+                recent_resolution = (
+                    self.codex_thread_catalog.resolve_recent_for_registration(
+                        cwd=state.cwd,
+                        registered_at=state.registered_at,
+                    )
                 )
                 if recent_resolution.status != "not_found":
                     return recent_resolution
@@ -796,7 +2875,22 @@ class SessionManager:
                 registered_at=state.registered_at,
             )
 
-        if state.thread_id and state.cwd:
+        if capability.replay_evidence_discovery == "acp_log_jsonl":
+            if self.fast_agent_session_catalog is None:
+                return None
+            self.fast_agent_session_catalog.refresh()
+            return await asyncio.to_thread(
+                self.fast_agent_session_catalog.resolve_for_registration,
+                registered_session_id=state.thread_id or None,
+                cwd=state.cwd,
+                registered_at=state.registered_at,
+            )
+
+        if (
+            capability.replay_evidence_discovery == "transcript_jsonl"
+            and state.thread_id
+            and state.cwd
+        ):
             session = await self._get_thread_locator_direct(state.thread_id, state.cwd)
             if session:
                 return CodexThreadResolution(
@@ -816,7 +2910,6 @@ class SessionManager:
         return None
 
     async def resolve_session_for_window(self, window_id: str) -> ClaudeSession | None:
-        """Backward-compatible wrapper for legacy callers."""
         return await self.resolve_thread_for_window(window_id)
 
     # --- User window offset management ---
@@ -832,97 +2925,874 @@ class SessionManager:
 
     # --- Thread binding management ---
 
-    def bind_thread(
-        self, user_id: int, thread_id: int, window_id: str, window_name: str = ""
-    ) -> None:
-        """Bind a Telegram topic thread to a tmux window.
+    def _rotate_surface_bind_flow_credentials(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> tuple[int, str]:
+        """Issue fresh bind-flow credentials and persist them for a surface."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        version_map = self.surface_bind_flow_versions.setdefault(user_id, {})
+        nonce_map = self.surface_bind_flow_nonces.setdefault(user_id, {})
+        version = normalize_bind_flow_version(version_map.get(resolved_surface_key)) + 1
+        nonce = secrets.token_urlsafe(16)
+        version_map[resolved_surface_key] = version
+        nonce_map[resolved_surface_key] = nonce
+        return version, nonce
 
-        Args:
-            user_id: Telegram user ID
-            thread_id: Telegram topic thread ID
-            window_id: Tmux window ID (e.g. '@0')
-            window_name: Display name for the window (optional)
-        """
-        if user_id not in self.thread_bindings:
-            self.thread_bindings[user_id] = {}
-        self.thread_bindings[user_id][thread_id] = window_id
+    def get_surface_bind_flow_version(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> int:
+        """Return the current bind-flow version for a surface."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        versions = self.surface_bind_flow_versions.get(user_id)
+        if not versions:
+            return 0
+        return normalize_bind_flow_version(versions.get(resolved_surface_key))
+
+    def get_surface_bind_flow_nonce(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Return the current bind-flow nonce for a surface."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        nonces = self.surface_bind_flow_nonces.get(user_id)
+        if not nonces:
+            return ""
+        return normalize_bind_flow_nonce(nonces.get(resolved_surface_key))
+
+    def get_surface_bind_flow_credentials(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> tuple[int, str]:
+        """Return the current bind-flow version and nonce for a surface."""
+        return (
+            self.get_surface_bind_flow_version(
+                user_id,
+                surface_key=surface_key,
+                thread_id=thread_id,
+                chat_id=chat_id,
+            ),
+            self.get_surface_bind_flow_nonce(
+                user_id,
+                surface_key=surface_key,
+                thread_id=thread_id,
+                chat_id=chat_id,
+            ),
+        )
+
+    def validate_surface_bind_flow_callback(
+        self,
+        user_id: int,
+        version: int,
+        nonce: str,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> bool:
+        """Check whether a callback matches the current bind-flow credentials."""
+        current_version, current_nonce = self.get_surface_bind_flow_credentials(
+            user_id,
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        return (
+            version > 0
+            and bool(nonce)
+            and current_version == version
+            and current_nonce == nonce
+        )
+
+    def get_window_for_surface(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str | None:
+        """Look up the window_id bound to a control surface."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        bindings = self.surface_bindings.get(user_id)
+        if not bindings:
+            return None
+        window_id = bindings.get(resolved_surface_key)
+        if window_id is None:
+            legacy_surface_key = self._legacy_topic_surface_key(resolved_surface_key)
+            if legacy_surface_key and self._legacy_topic_surface_matches_chat(
+                user_id,
+                resolved_surface_key,
+            ):
+                window_id = bindings.get(legacy_surface_key)
+        if window_id and self._is_inactive_or_helper_tmux_binding(window_id):
+            return None
+        return window_id
+
+    def resolve_window_for_surface(
+        self,
+        user_id: int,
+        surface_key: str | None = None,
+        *,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str | None:
+        """Resolve the tmux window_id for a control surface."""
+        return self.get_window_for_surface(
+            user_id,
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+
+    def get_external_surface_binding(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Return external bind metadata for a control surface, if present."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        bindings = self.external_surface_bindings.get(user_id)
+        if not bindings:
+            return None
+        binding = bindings.get(resolved_surface_key)
+        if binding is None:
+            legacy_surface_key = self._legacy_topic_surface_key(resolved_surface_key)
+            if legacy_surface_key and self._legacy_topic_surface_matches_chat(
+                user_id,
+                resolved_surface_key,
+            ):
+                binding = bindings.get(legacy_surface_key)
+        if not isinstance(binding, dict):
+            return None
+        return dict(binding)
+
+    def bind_surface(
+        self,
+        user_id: int,
+        window_id: str,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+        window_name: str = "",
+    ) -> None:
+        """Bind a control surface to a live tmux window."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        bindings = self.surface_bindings.setdefault(user_id, {})
+        bindings[resolved_surface_key] = window_id
+        if self._is_window_id(window_id):
+            self.get_or_create_process_descriptor(window_id)
+        external = self.external_surface_bindings.get(user_id)
+        if external and resolved_surface_key in external:
+            del external[resolved_surface_key]
+            self._prune_empty_surface_entry(self.external_surface_bindings, user_id)
+        states = self.surface_binding_states.setdefault(user_id, {})
+        states[resolved_surface_key] = BINDING_STATE_BOUND
+        policies = self.surface_policies.setdefault(user_id, {})
+        policies.setdefault(resolved_surface_key, TOPIC_POLICY_IMPLICIT_BIND_ALLOWED)
+        self._rotate_surface_bind_flow_credentials(
+            user_id, surface_key=resolved_surface_key
+        )
         if window_name:
             self.window_display_names[window_id] = window_name
+        self._sync_legacy_topic_views_from_surface()
         self._save_state()
         display = window_name or self.get_display_name(window_id)
         logger.info(
-            "Bound thread %d -> window_id %s (%s) for user %d",
-            thread_id,
+            "Bound surface %s -> window_id %s (%s) for user %d",
+            resolved_surface_key,
             window_id,
             display,
             user_id,
         )
 
-    def unbind_thread(self, user_id: int, thread_id: int) -> str | None:
-        """Remove a thread binding. Returns the previously bound window_id, or None."""
-        bindings = self.thread_bindings.get(user_id)
-        if not bindings or thread_id not in bindings:
-            return None
-        window_id = bindings.pop(thread_id)
-        if not bindings:
-            del self.thread_bindings[user_id]
+    def bind_external_surface(
+        self,
+        user_id: int,
+        *,
+        runtime_kind: str,
+        source_thread_id: str,
+        summary: str = "",
+        cwd: str = "",
+        file_path: str = "",
+        read_only: bool = True,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Bind a control surface to an external persisted thread without tmux."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        binding_window_id = self.make_external_binding_window_id(
+            runtime_kind,
+            source_thread_id,
+        )
+        self.surface_bindings.setdefault(user_id, {})[resolved_surface_key] = (
+            binding_window_id
+        )
+        self.external_surface_bindings.setdefault(user_id, {})[resolved_surface_key] = {
+            "runtime_kind": runtime_kind,
+            "source_thread_id": source_thread_id,
+            "summary": summary,
+            "cwd": cwd,
+            "file_path": file_path,
+            "read_only": bool(read_only),
+        }
+        if summary:
+            self.window_display_names[binding_window_id] = summary
+        self.surface_binding_states.setdefault(user_id, {})[resolved_surface_key] = (
+            BINDING_STATE_BOUND
+        )
+        self.surface_policies.setdefault(user_id, {}).setdefault(
+            resolved_surface_key,
+            TOPIC_POLICY_IMPLICIT_BIND_ALLOWED,
+        )
+        self._rotate_surface_bind_flow_credentials(
+            user_id, surface_key=resolved_surface_key
+        )
+        self._sync_legacy_topic_views_from_surface()
         self._save_state()
         logger.info(
-            "Unbound thread %d (was %s) for user %d",
-            thread_id,
+            "Bound surface %s -> external %s thread=%s (read_only=%s) for user %d",
+            resolved_surface_key,
+            runtime_kind,
+            source_thread_id,
+            read_only,
+            user_id,
+        )
+        return binding_window_id
+
+    def unbind_surface(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str | None:
+        """Remove a control-surface binding and return the previous window_id."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        self._rotate_surface_bind_flow_credentials(
+            user_id, surface_key=resolved_surface_key
+        )
+        bindings = self.surface_bindings.get(user_id)
+        if not bindings or resolved_surface_key not in bindings:
+            self.surface_binding_states.setdefault(user_id, {})[
+                resolved_surface_key
+            ] = BINDING_STATE_NONE
+            self._sync_legacy_topic_views_from_surface()
+            self._save_state()
+            return None
+        window_id = bindings.pop(resolved_surface_key)
+        self._prune_empty_surface_entry(self.surface_bindings, user_id)
+        external = self.external_surface_bindings.get(user_id)
+        if external and resolved_surface_key in external:
+            del external[resolved_surface_key]
+            self._prune_empty_surface_entry(self.external_surface_bindings, user_id)
+        self.surface_binding_states.setdefault(user_id, {})[resolved_surface_key] = (
+            BINDING_STATE_NONE
+        )
+        self._sync_legacy_topic_views_from_surface()
+        self._save_state()
+        logger.info(
+            "Unbound surface %s (was %s) for user %d",
+            resolved_surface_key,
             window_id,
             user_id,
         )
         return window_id
 
-    def get_window_for_thread(self, user_id: int, thread_id: int) -> str | None:
-        """Look up the window_id bound to a thread."""
-        bindings = self.thread_bindings.get(user_id)
-        if not bindings:
+    def get_surface_policy(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Return the persisted policy for a control surface."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        policies = self.surface_policies.get(user_id)
+        if not policies:
+            return TOPIC_POLICY_IMPLICIT_BIND_ALLOWED
+        return normalize_topic_policy(policies.get(resolved_surface_key))
+
+    def set_surface_policy(
+        self,
+        user_id: int,
+        policy: str,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> None:
+        """Persist the control-surface policy without changing the binding."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        normalized = normalize_topic_policy(policy)
+        policies = self.surface_policies.setdefault(user_id, {})
+        if policies.get(resolved_surface_key) == normalized:
+            return
+        policies[resolved_surface_key] = normalized
+        self._sync_legacy_topic_views_from_surface()
+        self._save_state()
+        logger.info(
+            "Set surface policy for user %d surface %s -> %s",
+            user_id,
+            resolved_surface_key,
+            normalized,
+        )
+
+    def get_surface_binding_state(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Return the persisted binding state for a control surface."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        states = self.surface_binding_states.get(user_id)
+        if states and resolved_surface_key in states:
+            return normalize_binding_state(states[resolved_surface_key])
+        return (
+            BINDING_STATE_BOUND
+            if self.get_window_for_surface(user_id, surface_key=resolved_surface_key)
+            else BINDING_STATE_NONE
+        )
+
+    def set_surface_binding_state(
+        self,
+        user_id: int,
+        binding_state: str,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> None:
+        """Persist the binding state without changing the control-surface policy."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        normalized = normalize_binding_state(binding_state)
+        states = self.surface_binding_states.setdefault(user_id, {})
+        if states.get(resolved_surface_key) == normalized:
+            return
+        states[resolved_surface_key] = normalized
+        self._sync_legacy_topic_views_from_surface()
+        self._save_state()
+        logger.info(
+            "Set surface binding state for user %d surface %s -> %s",
+            user_id,
+            resolved_surface_key,
+            normalized,
+        )
+
+    def start_surface_bind_flow(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> None:
+        """Mark a control surface as being in an active bind flow."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        self.surface_binding_states.setdefault(user_id, {})[resolved_surface_key] = (
+            BINDING_STATE_BIND_FLOW
+        )
+        self._rotate_surface_bind_flow_credentials(
+            user_id, surface_key=resolved_surface_key
+        )
+        self._sync_legacy_topic_views_from_surface()
+        self._save_state()
+
+    def require_manual_bind_for_surface(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> None:
+        """Force a control surface into manual-bind mode without changing its binding."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        self.surface_policies.setdefault(user_id, {})[resolved_surface_key] = (
+            TOPIC_POLICY_MANUAL_BIND_REQUIRED
+        )
+        self.surface_binding_states.setdefault(user_id, {})[resolved_surface_key] = (
+            BINDING_STATE_NONE
+        )
+        self._rotate_surface_bind_flow_credentials(
+            user_id, surface_key=resolved_surface_key
+        )
+        self._sync_legacy_topic_views_from_surface()
+        self._save_state()
+
+    def allow_implicit_bind_for_surface(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> None:
+        """Allow implicit binding again for a control surface."""
+        self.set_surface_policy(
+            user_id,
+            TOPIC_POLICY_IMPLICIT_BIND_ALLOWED,
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+
+    def peek_surface_pending_slot(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the current pending-slot payload for a surface without consuming it."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        pending_slots = self.surface_pending_slots.get(user_id)
+        if not pending_slots:
             return None
-        return bindings.get(thread_id)
+        pending = self._normalize_pending_slot_record(
+            pending_slots.get(resolved_surface_key)
+        )
+        if pending is None:
+            return None
+        return pending.to_dict()
+
+    def set_surface_pending_slot(
+        self,
+        user_id: int,
+        text: str,
+        *,
+        revision: int | None = None,
+        status: str = PENDING_SLOT_STATUS_PENDING,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Persist or overwrite the latest pending-slot payload for a surface."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        current = (
+            self.peek_surface_pending_slot(
+                user_id,
+                surface_key=resolved_surface_key,
+            )
+            or {}
+        )
+        next_revision = revision
+        if next_revision is None:
+            next_revision = normalize_bind_flow_version(current.get("revision")) + 1
+        record = PendingSurfaceSlot.from_record(
+            {
+                "text": text,
+                "revision": next_revision,
+                "status": status or PENDING_SLOT_STATUS_PENDING,
+                "consumed_by_activation_id": "",
+            }
+        )
+        assert record is not None
+        self.surface_pending_slots.setdefault(user_id, {})[resolved_surface_key] = (
+            record
+        )
+        self._save_state()
+        return record.to_dict()
+
+    def clear_surface_pending_slot(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Remove any pending-slot payload associated with a surface."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        pending_slots = self.surface_pending_slots.get(user_id)
+        if not pending_slots:
+            return None
+        pending = self._normalize_pending_slot_record(
+            pending_slots.pop(resolved_surface_key, None)
+        )
+        if pending is None:
+            self._prune_empty_surface_entry(self.surface_pending_slots, user_id)
+            return None
+        self._prune_empty_surface_entry(self.surface_pending_slots, user_id)
+        self._save_state()
+        return pending.to_dict()
+
+    def consume_surface_pending_slot(
+        self,
+        user_id: int,
+        activation_id: str,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Consume a pending-slot payload exactly once for a writable activation."""
+        resolved_surface_key = self._resolve_surface_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        pending_slots = self.surface_pending_slots.get(user_id)
+        if not pending_slots:
+            return None
+        pending = self._normalize_pending_slot_record(
+            pending_slots.get(resolved_surface_key)
+        )
+        if pending is None:
+            return None
+        if pending.status == PENDING_SLOT_STATUS_CONSUMED:
+            return None
+        consumed = pending.consume(activation_id)
+        pending_slots[resolved_surface_key] = consumed
+        self._save_state()
+        return consumed.to_dict()
+
+    # Legacy topic wrappers preserve older thread_id call sites while the
+    # surface-keyed API remains the authoritative implementation. Keep these
+    # wrappers thin and avoid per-method docstrings that only restate forwarding.
+
+    def _rotate_topic_bind_flow_credentials(
+        self, user_id: int, thread_id: int
+    ) -> tuple[int, str]:
+        return self._rotate_surface_bind_flow_credentials(user_id, thread_id=thread_id)
+
+    def get_topic_bind_flow_version(self, user_id: int, thread_id: int) -> int:
+        return self.get_surface_bind_flow_version(user_id, thread_id=thread_id)
+
+    def get_topic_bind_flow_nonce(self, user_id: int, thread_id: int) -> str:
+        return self.get_surface_bind_flow_nonce(user_id, thread_id=thread_id)
+
+    def get_topic_bind_flow_credentials(
+        self, user_id: int, thread_id: int
+    ) -> tuple[int, str]:
+        return self.get_surface_bind_flow_credentials(user_id, thread_id=thread_id)
+
+    def validate_topic_bind_flow_callback(
+        self,
+        user_id: int,
+        thread_id: int,
+        version: int,
+        nonce: str,
+    ) -> bool:
+        return self.validate_surface_bind_flow_callback(
+            user_id,
+            version,
+            nonce,
+            thread_id=thread_id,
+        )
+
+    def bind_thread(
+        self, user_id: int, thread_id: int, window_id: str, window_name: str = ""
+    ) -> None:
+        self.bind_surface(
+            user_id,
+            window_id,
+            thread_id=thread_id,
+            window_name=window_name,
+        )
+
+    def bind_external_thread(
+        self,
+        user_id: int,
+        thread_id: int,
+        *,
+        runtime_kind: str,
+        source_thread_id: str,
+        summary: str = "",
+        cwd: str = "",
+        file_path: str = "",
+        read_only: bool = True,
+    ) -> str:
+        return self.bind_external_surface(
+            user_id,
+            runtime_kind=runtime_kind,
+            source_thread_id=source_thread_id,
+            summary=summary,
+            cwd=cwd,
+            file_path=file_path,
+            read_only=read_only,
+            thread_id=thread_id,
+        )
+
+    def unbind_thread(self, user_id: int, thread_id: int) -> str | None:
+        return self.unbind_surface(user_id, thread_id=thread_id)
+
+    def get_window_for_thread(self, user_id: int, thread_id: int) -> str | None:
+        return self.get_window_for_surface(user_id, thread_id=thread_id)
+
+    def get_external_topic_binding(
+        self,
+        user_id: int,
+        thread_id: int,
+    ) -> dict[str, Any] | None:
+        return self.get_external_surface_binding(user_id, thread_id=thread_id)
+
+    def get_topic_policy(self, user_id: int, thread_id: int) -> str:
+        return self.get_surface_policy(user_id, thread_id=thread_id)
+
+    def set_topic_policy(self, user_id: int, thread_id: int, policy: str) -> None:
+        self.set_surface_policy(user_id, policy, thread_id=thread_id)
+
+    def get_topic_binding_state(self, user_id: int, thread_id: int) -> str:
+        return self.get_surface_binding_state(user_id, thread_id=thread_id)
+
+    def set_topic_binding_state(
+        self, user_id: int, thread_id: int, binding_state: str
+    ) -> None:
+        self.set_surface_binding_state(user_id, binding_state, thread_id=thread_id)
+
+    def start_topic_bind_flow(self, user_id: int, thread_id: int) -> None:
+        self.start_surface_bind_flow(user_id, thread_id=thread_id)
+
+    def require_manual_bind(self, user_id: int, thread_id: int) -> None:
+        self.require_manual_bind_for_surface(user_id, thread_id=thread_id)
+
+    def allow_implicit_bind(self, user_id: int, thread_id: int) -> None:
+        self.allow_implicit_bind_for_surface(user_id, thread_id=thread_id)
 
     def resolve_window_for_thread(
         self,
         user_id: int,
         thread_id: int | None,
+        *,
+        chat_id: int | None = None,
     ) -> str | None:
         """Resolve the tmux window_id for a user's thread.
 
         Returns None if thread_id is None or the thread is not bound.
         """
         if thread_id is None:
-            return None
+            if chat_id is None:
+                return None
+            return self.get_window_for_surface(user_id, chat_id=chat_id)
         return self.get_window_for_thread(user_id, thread_id)
 
-    def get_topic_binding(
-        self, user_id: int, thread_id: int
-    ) -> TopicBinding | None:
+    def get_topic_binding(self, user_id: int, thread_id: int) -> TopicBinding | None:
         """Resolve a persisted topic binding object."""
         window_id = self.get_window_for_thread(user_id, thread_id)
         if not window_id:
             return None
+        surface_key, chat_id, _resolved_thread_id = self.get_surface_coordinates_for_window(
+            user_id,
+            window_id,
+        )
+        if self._is_inactive_or_helper_tmux_binding(window_id):
+            return None
+        if self.is_external_binding_window_id(window_id):
+            external = self.get_external_topic_binding(user_id, thread_id) or {}
+            runtime_kind = (
+                str(external.get("runtime_kind") or config.default_runtime_kind).strip()
+                or config.default_runtime_kind
+            )
+            source_thread_id = str(external.get("source_thread_id") or "").strip()
+            return TopicBinding(
+                user_id=user_id,
+                thread_id=thread_id,
+                window_id=window_id,
+                window_name=self.get_display_name(window_id),
+                runtime_kind=runtime_kind,
+                binding_scope="external",
+                source_thread_id=source_thread_id,
+                read_only=bool(external.get("read_only", True)),
+                surface_key=surface_key or self.make_surface_key(thread_id=thread_id),
+                chat_id=chat_id,
+            )
+        descriptor = self.get_process_descriptor(window_id)
         return TopicBinding(
             user_id=user_id,
             thread_id=thread_id,
             window_id=window_id,
             window_name=self.get_display_name(window_id),
-            runtime_kind=self.get_process_descriptor(window_id).runtime_kind,
+            runtime_kind=descriptor.runtime_kind
+            if descriptor is not None
+            else config.default_runtime_kind,
+            surface_key=surface_key or self.make_surface_key(thread_id=thread_id),
+            chat_id=chat_id,
         )
 
     def iter_topic_bindings(self) -> Iterator[TopicBinding]:
         """Iterate persisted topic bindings as structured runtime-neutral objects."""
-        for user_id, bindings in self.thread_bindings.items():
-            for thread_id, window_id in bindings.items():
+        for user_id, bindings in self.surface_bindings.items():
+            seen_surface_keys: set[str] = set()
+            sorted_bindings = sorted(
+                bindings.items(),
+                key=lambda item: (
+                    self._parse_surface_key(item[0]) == ("topic", None, self._topic_thread_id_from_surface_key(item[0])),
+                    item[0],
+                ),
+            )
+            for surface_key, window_id in sorted_bindings:
+                parsed_surface = self._parse_surface_key(surface_key)
+                chat_id = parsed_surface[1] if parsed_surface is not None else None
+                thread_id = (
+                    parsed_surface[2]
+                    if parsed_surface is not None
+                    else self._topic_thread_id_from_surface_key(surface_key)
+                )
+                delivery_surface_key = surface_key
+                if (
+                    parsed_surface is not None
+                    and parsed_surface[0] == "topic"
+                    and thread_id is not None
+                    and chat_id is None
+                ):
+                    stored_chat_id = self._stored_topic_chat_id(user_id, thread_id)
+                    if stored_chat_id is not None:
+                        chat_id = stored_chat_id
+                        delivery_surface_key = self.make_surface_key(
+                            thread_id=thread_id,
+                            chat_id=stored_chat_id,
+                        )
+                if delivery_surface_key in seen_surface_keys:
+                    continue
+                seen_surface_keys.add(delivery_surface_key)
+                if self.is_external_binding_window_id(window_id):
+                    external = (
+                        self.get_external_surface_binding(
+                            user_id,
+                            surface_key=delivery_surface_key,
+                        )
+                        or {}
+                    )
+                    runtime_kind = (
+                        str(
+                            external.get("runtime_kind") or config.default_runtime_kind
+                        ).strip()
+                        or config.default_runtime_kind
+                    )
+                    source_thread_id = str(
+                        external.get("source_thread_id") or ""
+                    ).strip()
+                    yield TopicBinding(
+                        user_id=user_id,
+                        thread_id=thread_id,
+                        window_id=window_id,
+                        window_name=self.get_display_name(window_id),
+                        runtime_kind=runtime_kind,
+                        binding_scope="external",
+                        source_thread_id=source_thread_id,
+                        read_only=bool(external.get("read_only", True)),
+                        surface_key=delivery_surface_key,
+                        chat_id=chat_id,
+                    )
+                    continue
+                if self._is_inactive_or_helper_tmux_binding(window_id):
+                    logger.warning(
+                        "Skipping persisted binding to inactive/helper window %s for user %d",
+                        window_id,
+                        user_id,
+                    )
+                    continue
+                descriptor = self.get_process_descriptor(window_id)
                 yield TopicBinding(
                     user_id=user_id,
                     thread_id=thread_id,
                     window_id=window_id,
                     window_name=self.get_display_name(window_id),
-                    runtime_kind=self.get_process_descriptor(window_id).runtime_kind,
+                    runtime_kind=descriptor.runtime_kind
+                    if descriptor is not None
+                    else config.default_runtime_kind,
+                    surface_key=delivery_surface_key,
+                    chat_id=chat_id,
                 )
 
-    def iter_thread_bindings(self) -> Iterator[tuple[int, int, str]]:
+    def iter_thread_bindings(self) -> Iterator[tuple[int, int | None, str]]:
         """Backward-compatible tuple view over iter_topic_bindings()."""
         for binding in self.iter_topic_bindings():
             yield binding.user_id, binding.thread_id, binding.window_id
@@ -934,7 +3804,39 @@ class SessionManager:
             resolved = await self.resolve_thread_for_window(binding.window_id)
             if resolved and resolved.thread_id == thread_id:
                 result.append(binding)
-        return result
+        distinct_windows = {binding.window_id for binding in result}
+        if len(distinct_windows) <= 1:
+            return result
+        owner = self._authoritative_window_for_thread_id(thread_id, distinct_windows)
+        logger.warning(
+            "Suppressing duplicate runtime thread fan-out for %s across windows %s; "
+            "owner=%s",
+            thread_id,
+            sorted(distinct_windows),
+            owner or "<none>",
+        )
+        if owner is None:
+            return []
+        return [binding for binding in result if binding.window_id == owner]
+
+    def _authoritative_window_for_thread_id(
+        self,
+        thread_id: str,
+        candidate_window_ids: set[str],
+    ) -> str | None:
+        restore_owner = self._restore_intent_owner_window_for_thread(thread_id)
+        if restore_owner in candidate_window_ids:
+            return restore_owner
+        candidates: list[tuple[float, str]] = []
+        for window_id in candidate_window_ids:
+            state = self.window_states.get(window_id)
+            if state is None or state.thread_id != thread_id:
+                continue
+            candidates.append((float(state.registered_at or 0.0), window_id))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        return candidates[0][1]
 
     async def find_users_for_session(
         self,
@@ -952,8 +3854,562 @@ class SessionManager:
 
     # --- Tmux helpers ---
 
+    async def _codex_rollout_has_submit_ack(
+        self,
+        *,
+        file_path: Path,
+        start_byte: int,
+        expected_text: str,
+        allow_turn_context: bool = False,
+        turn_context_start_byte: int | None = None,
+    ) -> bool:
+        """Check appended Codex JSONL for a persisted event proving submit."""
+        if not file_path.exists():
+            return False
+        try:
+            with file_path.open("rb") as f:
+                f.seek(start_byte)
+                while True:
+                    line_start = f.tell()
+                    raw_line = f.readline()
+                    if not raw_line:
+                        break
+                    if not raw_line.strip():
+                        continue
+                    try:
+                        record = json.loads(raw_line.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        continue
+                    record_allows_turn_context = (
+                        allow_turn_context
+                        and turn_context_start_byte is not None
+                        and line_start >= turn_context_start_byte
+                    )
+                    if isinstance(record, dict) and _codex_record_confirms_submit(
+                        record,
+                        expected_text,
+                        allow_turn_context=record_allows_turn_context,
+                    ):
+                        return True
+        except OSError as exc:
+            logger.warning("codex_submit_ack: failed to read %s: %s", file_path, exc)
+        return False
+
+    async def _codex_rollout_has_strict_user_ack(
+        self,
+        *,
+        file_path: Path,
+        start_byte: int,
+        expected_text: str,
+    ) -> tuple[bool, int | None]:
+        """Return strict persisted user-message ACK evidence after ``start_byte``.
+
+        Fast-path ACK is intentionally stricter than the legacy synchronous
+        submit path: ``turn_context`` is supporting evidence only and never
+        sufficient for proof promotion.
+        """
+        if not file_path.exists():
+            return False, None
+        try:
+            with file_path.open("rb") as f:
+                f.seek(start_byte)
+                while True:
+                    line_start = f.tell()
+                    raw_line = f.readline()
+                    if not raw_line:
+                        break
+                    if not raw_line.strip():
+                        continue
+                    try:
+                        record = json.loads(raw_line.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        continue
+                    if isinstance(
+                        record, dict
+                    ) and _codex_record_confirms_strict_user_submit(
+                        record,
+                        expected_text,
+                    ):
+                        return True, line_start
+        except OSError as exc:
+            logger.warning("fast_codex_ack: failed to read %s: %s", file_path, exc)
+        return False, None
+
+    def has_pending_fast_input(self, window_id: str) -> bool:
+        proof_id = self._fast_input_pending_by_window.get(window_id)
+        if not proof_id:
+            return False
+        proof = self.fast_input_proofs.get(proof_id)
+        return bool(proof and proof.status == "pending")
+
+    def match_fast_user_echo_proof(
+        self,
+        *,
+        window_id: str,
+        thread_id: int | None,
+        runtime_thread_id: str,
+        text: str,
+        include_pending: bool = False,
+    ) -> FastRuntimeInputProof | None:
+        now = time.monotonic()
+        matches: list[FastRuntimeInputProof] = []
+        for proof in self.fast_input_proofs.values():
+            if proof.proof_id in self._fast_input_represented_proofs:
+                continue
+            if proof.matches_user_echo(
+                window_id=window_id,
+                thread_id=thread_id,
+                runtime_thread_id=runtime_thread_id,
+                text=text,
+                now=now,
+                include_pending=include_pending,
+            ):
+                matches.append(proof)
+        if len(matches) != 1:
+            if matches:
+                logger.info(
+                    "fast_user_echo_match: refusing ambiguous duplicate match "
+                    "window=%s thread=%s runtime_thread=%s candidates=%s",
+                    window_id,
+                    thread_id,
+                    runtime_thread_id,
+                    [proof.proof_id for proof in matches],
+                )
+            return None
+        return matches[0]
+
+    def is_fast_user_echo_represented(self, proof_id: str) -> bool:
+        return proof_id in self._fast_input_represented_proofs
+
+    def mark_fast_user_echo_represented(self, proof_id: str) -> None:
+        proof = self.fast_input_proofs.get(proof_id)
+        if proof is not None:
+            proof.turn_generation_status = "suppressed_duplicate"
+        self._fast_input_represented_proofs.add(proof_id)
+
+    def update_fast_proof_receipt_message_id(
+        self,
+        proof_id: str,
+        message_id: int | None,
+    ) -> None:
+        proof = self.fast_input_proofs.get(proof_id)
+        if proof is not None:
+            proof.receipt_message_id = message_id
+
+    def _log_fast_input_stage(
+        self,
+        proof: FastRuntimeInputProof,
+        stage: str,
+        *,
+        success: bool = True,
+        error: str | None = None,
+    ) -> None:
+        log_telegram_delivery(
+            action="runtime_input_latency",
+            user_id=proof.user_id,
+            chat_id=proof.chat_id,
+            thread_id=proof.thread_id,
+            window_id=proof.window_id,
+            task_type="runtime_input_fast_path",
+            content_type="runtime_input_stage",
+            semantic_kind=stage,
+            text=proof.text_preview,
+            success=success,
+            error=error,
+            reason=f"proof:{proof.proof_id}:hash:{proof.text_hash[:16]}",
+        )
+
+    async def _monitor_fast_codex_ack(
+        self,
+        proof_id: str,
+        expected_text: str,
+        on_complete: Callable[[FastRuntimeInputProof], Awaitable[None]] | None,
+    ) -> None:
+        proof = self.fast_input_proofs[proof_id]
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + FAST_CODEX_ACK_TIMEOUT_SECONDS
+        file_path = Path(proof.rollout_file)
+        try:
+            while loop.time() < deadline:
+                confirmed, byte_offset = await self._codex_rollout_has_strict_user_ack(
+                    file_path=file_path,
+                    start_byte=proof.start_byte,
+                    expected_text=expected_text,
+                )
+                if confirmed:
+                    proof.status = "ack_confirmed"
+                    proof.confirmed_byte = byte_offset
+                    proof.ack_confirmed_at_monotonic = time.monotonic()
+                    self._log_fast_input_stage(proof, "runtime_ack_confirmed")
+                    return
+                await asyncio.sleep(FAST_CODEX_ACK_POLL_SECONDS)
+            proof.status = CODEX_DELIVERED_NO_ACK_STATUS
+            proof.failure_reason = "Codex did not persist a matching user message within the short ACK window"
+            self._log_fast_input_stage(
+                proof,
+                "runtime_ack_delayed",
+                success=True,
+                error=proof.failure_reason,
+            )
+        finally:
+            self._fast_input_pending_by_window.pop(proof.window_id, None)
+            lock = self._codex_ack_lock(proof.window_id)
+            if lock.locked():
+                lock.release()
+            if on_complete is not None:
+                try:
+                    await on_complete(proof)
+                except Exception as exc:
+                    logger.warning(
+                        "fast_codex_ack: completion callback failed for %s: %s",
+                        proof_id,
+                        exc,
+                    )
+
+    async def _ensure_tmux_mode_allows_input(
+        self,
+        window: Any,
+    ) -> tuple[bool, str, Any | None]:
+        """Exit tmux copy-mode before injecting runtime input when possible."""
+        if not _tmux_pane_in_mode(window):
+            return True, "", window
+
+        window_id = str(getattr(window, "window_id", "") or "")
+        if not window_id:
+            return False, _tmux_pane_mode_escape_failed(window), None
+
+        logger.info(
+            "runtime_input: target %s is in tmux %s; sending Escape before input",
+            window_id,
+            str(getattr(window, "pane_mode", "") or "mode"),
+        )
+        escaped = await tmux_manager.send_key(window_id, "Escape")
+        if not escaped:
+            return False, _tmux_pane_mode_escape_failed(window), None
+
+        await asyncio.sleep(TMUX_MODE_ESCAPE_SETTLE_SECONDS)
+        refreshed = await tmux_manager.find_window_by_id(window_id)
+        if not refreshed:
+            return False, "Window not found after exiting tmux mode", None
+        if _tmux_pane_in_mode(refreshed):
+            return False, _tmux_pane_mode_escape_failed(refreshed), refreshed
+        return True, "", refreshed
+
+    async def send_to_window_fast_unverified(
+        self,
+        window_id: str,
+        text: str,
+        *,
+        proof_id: str,
+        user_id: int,
+        chat_id: int | None,
+        thread_id: int | None,
+        surface_key: str | None,
+        on_complete: Callable[[FastRuntimeInputProof], Awaitable[None]] | None = None,
+    ) -> tuple[bool, str, FastRuntimeInputProof | None]:
+        """Start an eligible Codex input attempt and verify proof asynchronously."""
+        if self.is_external_binding_window_id(window_id):
+            return False, EXTERNAL_BINDING_READ_ONLY_MESSAGE, None
+        if self.has_pending_fast_input(window_id):
+            return (
+                False,
+                "Another Telegram input is still waiting for Codex replay ACK",
+                None,
+            )
+        window = await tmux_manager.find_window_by_id(window_id)
+        if not window:
+            return False, "Window not found (may have been closed)", None
+        runtime_kind = (
+            self.window_states[window_id].runtime_kind
+            if window_id in self.window_states
+            else config.default_runtime_kind
+        )
+        if runtime_kind != "codex":
+            return False, "Fast input proof is only supported for Codex windows", None
+        mode_ok, mode_message, window = await self._ensure_tmux_mode_allows_input(
+            window
+        )
+        if not mode_ok or window is None:
+            return False, mode_message, None
+
+        lock = self._codex_ack_lock(window.window_id)
+        if lock.locked():
+            return (
+                False,
+                "Another Codex input is still waiting for replay ACK",
+                None,
+            )
+        await lock.acquire()
+        proof: FastRuntimeInputProof | None = None
+        try:
+            session = await self.resolve_thread_for_window(window_id)
+            if not self._codex_thread_locator_matches_live_identity(
+                window_id=window_id,
+                locator=session,
+            ):
+                return (
+                    False,
+                    "Cannot verify Codex submit: missing or mismatched persisted "
+                    "rollout evidence for the live runtime identity",
+                    None,
+                )
+            assert session is not None
+            rollout_file = Path(session.file_path)
+            start_byte = _codex_rollout_file_size(rollout_file)
+            proof = FastRuntimeInputProof(
+                proof_id=proof_id,
+                user_id=user_id,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                surface_key=surface_key,
+                window_id=window.window_id,
+                runtime_kind="codex",
+                runtime_thread_id=str(session.thread_id),
+                text_hash=_stable_text_hash(text),
+                text_len=len(text),
+                text_preview=text[:160],
+                rollout_file=str(rollout_file),
+                start_byte=start_byte,
+                created_at_monotonic=time.monotonic(),
+            )
+            self.fast_input_proofs[proof_id] = proof
+            self._fast_input_pending_by_window[window.window_id] = proof_id
+            self._log_fast_input_stage(proof, "runtime_injection_attempt_started")
+
+            success, message = await runtime_input_driver.send_text(
+                window.window_id,
+                text,
+                runtime_kind="codex",
+                submit=False,
+            )
+            if not success:
+                proof.status = "ack_failed"
+                proof.failure_reason = message
+                self._log_fast_input_stage(
+                    proof,
+                    "runtime_ack_failed",
+                    success=False,
+                    error=message,
+                )
+                return False, message, proof
+            self._log_fast_input_stage(proof, "tmux_payload_delivered")
+            success, message = await runtime_input_driver.send_multiline_submit_key(
+                window.window_id,
+                runtime_kind="codex",
+            )
+            if not success:
+                proof.status = "ack_failed"
+                proof.failure_reason = message
+                self._log_fast_input_stage(
+                    proof,
+                    "runtime_ack_failed",
+                    success=False,
+                    error=message,
+                )
+                return False, message, proof
+            self._log_fast_input_stage(proof, "submit_key_sent")
+            if _workflow_command_aliases(text):
+                await asyncio.sleep(FAST_CODEX_ACK_POLL_SECONDS)
+                pane_text = await tmux_manager.capture_pane(window.window_id)
+            else:
+                pane_text = None
+            if _codex_composer_holds_workflow_command(pane_text, text):
+                success, message = await runtime_input_driver.send_multiline_submit_key(
+                    window.window_id,
+                    runtime_kind="codex",
+                )
+                if not success:
+                    proof.status = "ack_failed"
+                    proof.failure_reason = message
+                    self._log_fast_input_stage(
+                        proof,
+                        "runtime_ack_failed",
+                        success=False,
+                        error=message,
+                    )
+                    return False, message, proof
+                self._log_fast_input_stage(proof, "autocomplete_submit_key_sent")
+            asyncio.create_task(
+                self._monitor_fast_codex_ack(proof_id, text, on_complete)
+            )
+            return True, f"Sent text to {window.window_id}", proof
+        except Exception:
+            if proof is not None:
+                proof.status = "ack_failed"
+                proof.failure_reason = "fast input send raised unexpectedly"
+            raise
+        finally:
+            if proof is None or proof.status == "ack_failed":
+                self._fast_input_pending_by_window.pop(window.window_id, None)
+                if lock.locked():
+                    lock.release()
+
+    def _codex_ack_lock(self, window_id: str) -> asyncio.Lock:
+        """Return the per-window guard for Codex conversational input ACKs."""
+        lock = self._codex_ack_locks.get(window_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._codex_ack_locks[window_id] = lock
+        return lock
+
+    def _codex_thread_locator_matches_live_identity(
+        self,
+        *,
+        window_id: str,
+        locator: ThreadLocator | None,
+    ) -> bool:
+        """Return True when replay evidence belongs to the live Codex identity."""
+        if not locator or not locator.file_path:
+            return False
+        live = self.window_states.get(window_id)
+        if live is None:
+            return False
+        live_thread_id = str(live.thread_id or "").strip()
+        locator_thread_id = str(locator.thread_id or "").strip()
+        if not live_thread_id or not locator_thread_id:
+            return False
+        if live_thread_id != locator_thread_id:
+            return False
+        locator_runtime = str(locator.runtime_kind or "").strip()
+        return not locator_runtime or locator_runtime == "codex"
+
+    async def _submit_codex_text_with_rollout_ack(
+        self,
+        *,
+        window_id: str,
+        file_path: Path,
+        start_byte: int,
+        text: str,
+        allow_turn_context: bool = False,
+    ) -> tuple[bool, str]:
+        """Submit a Codex conversational turn and wait for JSONL ACK."""
+        await asyncio.sleep(CODEX_MULTILINE_ACK_INITIAL_DELAY_SECONDS)
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + CODEX_MULTILINE_ACK_TIMEOUT_SECONDS
+        attempts = 0
+        turn_context_start_byte: int | None = None
+
+        while attempts < CODEX_MULTILINE_ACK_MAX_ATTEMPTS and loop.time() < deadline:
+            if attempts and await self._codex_rollout_has_submit_ack(
+                file_path=file_path,
+                start_byte=start_byte,
+                expected_text=text,
+                allow_turn_context=allow_turn_context,
+                turn_context_start_byte=turn_context_start_byte,
+            ):
+                return True, f"Sent text to {window_id}"
+            attempts += 1
+            turn_context_start_byte = _codex_rollout_file_size(file_path)
+            success, message = await runtime_input_driver.send_multiline_submit_key(
+                window_id,
+                runtime_kind="codex",
+            )
+            if not success:
+                return False, message
+            logger.info(
+                "codex_submit_ack: sent submit attempt %d/%d to %s; "
+                "rollout=%s offset=%d",
+                attempts,
+                CODEX_MULTILINE_ACK_MAX_ATTEMPTS,
+                window_id,
+                file_path,
+                start_byte,
+            )
+
+            retry_deadline = min(
+                deadline,
+                loop.time() + CODEX_MULTILINE_ACK_RETRY_SECONDS,
+            )
+            while loop.time() < retry_deadline:
+                if await self._codex_rollout_has_submit_ack(
+                    file_path=file_path,
+                    start_byte=start_byte,
+                    expected_text=text,
+                    allow_turn_context=allow_turn_context,
+                    turn_context_start_byte=turn_context_start_byte,
+                ):
+                    logger.info(
+                        "codex_submit_ack: confirmed submit to %s after %d attempt(s)",
+                        window_id,
+                        attempts,
+                    )
+                    return True, f"Sent text to {window_id}"
+                await asyncio.sleep(CODEX_MULTILINE_ACK_POLL_SECONDS)
+
+            pane_text = await tmux_manager.capture_pane(window_id)
+            if _codex_composer_holds_workflow_command(pane_text, text):
+                logger.info(
+                    "codex_submit_ack: workflow autocomplete left command "
+                    "in composer; sending confirming Enter to %s",
+                    window_id,
+                )
+                success, message = await runtime_input_driver.send_multiline_submit_key(
+                    window_id,
+                    runtime_kind="codex",
+                )
+                if not success:
+                    return False, message
+                await asyncio.sleep(CODEX_MULTILINE_ACK_POLL_SECONDS)
+                continue
+            if _codex_composer_completion_popup_open(pane_text):
+                logger.info(
+                    "codex_submit_ack: closing composer completion popup "
+                    "before retrying submit to %s",
+                    window_id,
+                )
+                escaped, escape_message = await runtime_input_driver.send_special_key(
+                    window_id,
+                    "Escape",
+                    runtime_kind="codex",
+                )
+                if not escaped:
+                    logger.warning(
+                        "codex_submit_ack: failed to close composer completion "
+                        "popup before retrying submit to %s: %s",
+                        window_id,
+                        escape_message,
+                    )
+                    return False, escape_message
+                await asyncio.sleep(CODEX_MULTILINE_ACK_POLL_SECONDS)
+
+        if await self._codex_rollout_has_submit_ack(
+            file_path=file_path,
+            start_byte=start_byte,
+            expected_text=text,
+            allow_turn_context=allow_turn_context,
+            turn_context_start_byte=turn_context_start_byte,
+        ):
+            return True, f"Sent text to {window_id}"
+        logger.warning(
+            "codex_submit_ack: no JSONL ACK for submit to %s "
+            "within %.1fs after %d attempt(s)",
+            window_id,
+            CODEX_MULTILINE_ACK_TIMEOUT_SECONDS,
+            attempts,
+        )
+        return True, CODEX_DELIVERED_NO_ACK_MESSAGE
+
+    async def _submit_codex_multiline_with_rollout_ack(
+        self,
+        *,
+        window_id: str,
+        file_path: Path,
+        start_byte: int,
+        text: str,
+    ) -> tuple[bool, str]:
+        """Backward-compatible wrapper for Codex text ACK submit."""
+        return await self._submit_codex_text_with_rollout_ack(
+            window_id=window_id,
+            file_path=file_path,
+            start_byte=start_byte,
+            text=text,
+            allow_turn_context=False,
+        )
+
     async def send_to_window(self, window_id: str, text: str) -> tuple[bool, str]:
         """Send text to a tmux window by ID."""
+        if self.is_external_binding_window_id(window_id):
+            return False, EXTERNAL_BINDING_READ_ONLY_MESSAGE
         display = self.get_display_name(window_id)
         logger.debug(
             "send_to_window: window_id=%s (%s), text_len=%d",
@@ -964,18 +4420,31 @@ class SessionManager:
         window = await tmux_manager.find_window_by_id(window_id)
         if not window:
             return False, "Window not found (may have been closed)"
-
-        pane_text = await tmux_manager.capture_pane(window.window_id)
-        if pane_text:
-            surface = classify_input_surface(pane_text)
-            if surface.kind == "blocked_prompt":
-                return False, BLOCKED_PROMPT_SEND_MESSAGE
+        mode_ok, mode_message, window = await self._ensure_tmux_mode_allows_input(
+            window
+        )
+        if not mode_ok or window is None:
+            return False, mode_message
 
         runtime_kind = (
             self.window_states[window_id].runtime_kind
             if window_id in self.window_states
             else config.default_runtime_kind
         )
+        capability = self.get_runtime_capability(runtime_kind)
+        pane_text = await tmux_manager.capture_pane(window.window_id)
+        surface = classify_input_surface(pane_text or "")
+        if runtime_kind == "codex" and not _codex_has_live_input_plane(
+            pane_command=getattr(window, "pane_current_command", ""),
+            pane_text=pane_text,
+        ):
+            return False, CODEX_RUNTIME_NOT_ACTIVE_MESSAGE
+        if (
+            capability.blocked_input_policy == "fail_closed_on_visible_prompt"
+            and surface.kind == "blocked_prompt"
+        ):
+            return False, BLOCKED_PROMPT_SEND_MESSAGE
+
         trimmed = text.lstrip()
         if trimmed.startswith("/"):
             success, message = await runtime_input_driver.send_raw_slash_command(
@@ -983,6 +4452,47 @@ class SessionManager:
                 text,
                 runtime_kind=runtime_kind,
             )
+        elif trimmed.startswith("!"):
+            success, message = await runtime_input_driver.send_text(
+                window.window_id,
+                text,
+                runtime_kind=runtime_kind,
+            )
+        elif runtime_kind == "codex":
+            if surface.kind == "busy":
+                return (
+                    False,
+                    "Codex is still working; Telegram input requires an "
+                    "idle/input-ready pane so ccbot can verify the JSONL turn ACK",
+                )
+            async with self._codex_ack_lock(window.window_id):
+                session = await self.resolve_thread_for_window(window_id)
+                if not self._codex_thread_locator_matches_live_identity(
+                    window_id=window_id,
+                    locator=session,
+                ):
+                    return (
+                        False,
+                        "Cannot verify Codex submit: missing or mismatched persisted "
+                        "rollout evidence for the live runtime identity",
+                    )
+                assert session is not None  # narrowed by identity check
+                rollout_file = Path(session.file_path)
+                start_byte = _codex_rollout_file_size(rollout_file)
+                success, message = await runtime_input_driver.send_text(
+                    window.window_id,
+                    text,
+                    runtime_kind=runtime_kind,
+                    submit=False,
+                )
+                if success:
+                    success, message = await self._submit_codex_text_with_rollout_ack(
+                        window_id=window.window_id,
+                        file_path=rollout_file,
+                        start_byte=start_byte,
+                        text=text,
+                        allow_turn_context=True,
+                    )
         else:
             success, message = await runtime_input_driver.send_text(
                 window.window_id,
@@ -990,6 +4500,8 @@ class SessionManager:
                 runtime_kind=runtime_kind,
             )
         if success:
+            if message == CODEX_DELIVERED_NO_ACK_MESSAGE:
+                return True, message
             return True, f"Sent to {display}"
         return False, message
 
@@ -997,6 +4509,8 @@ class SessionManager:
         self, window_id: str, key: str
     ) -> tuple[bool, str]:
         """Send a control key through the runtime input driver."""
+        if self.is_external_binding_window_id(window_id):
+            return False, EXTERNAL_BINDING_READ_ONLY_MESSAGE
         window = await tmux_manager.find_window_by_id(window_id)
         if not window:
             return False, "Window not found (may have been closed)"
@@ -1006,6 +4520,12 @@ class SessionManager:
             if window_id in self.window_states
             else config.default_runtime_kind
         )
+        capability = self.get_runtime_capability(runtime_kind)
+        if not capability.interactive_control_supported:
+            return (
+                False,
+                f"Interactive control is not supported for {capability.display_name}",
+            )
         return await runtime_input_driver.send_special_key(
             window.window_id,
             key,
@@ -1016,10 +4536,44 @@ class SessionManager:
         self, window_id: str, action: InputAction
     ) -> tuple[bool, str]:
         """Send a runtime-neutral input action to the live window."""
+        if self.is_external_binding_window_id(window_id):
+            return False, EXTERNAL_BINDING_READ_ONLY_MESSAGE
         window = await tmux_manager.find_window_by_id(window_id)
         if not window:
             return False, "Window not found (may have been closed)"
         return await runtime_input_driver.send_dispatch(window.window_id, action)
+
+    async def rename_runtime_identity_for_window(
+        self,
+        window_id: str,
+        new_name: str,
+    ) -> tuple[bool, str]:
+        """Rename the persisted runtime identity when the runtime supports it."""
+        state = self.get_process_descriptor(window_id)
+        if state is None:
+            return False, "runtime metadata unavailable"
+        capability = self.get_runtime_capability(state.runtime_kind)
+
+        if capability.rename_identity_mode != "title_only":
+            return False, "persisted identity unchanged"
+
+        if self.fast_agent_session_catalog is None:
+            return False, "fast-agent session catalog unavailable"
+        if not state.thread_id or not state.cwd:
+            return False, "fast-agent session metadata unavailable"
+
+        self.fast_agent_session_catalog.refresh()
+        result = await asyncio.to_thread(
+            self.fast_agent_session_catalog.rename_title,
+            session_id=state.thread_id,
+            cwd=state.cwd,
+            title=new_name,
+        )
+        if result.status == "selected":
+            return True, "fast-agent session title metadata updated"
+        if result.reason == "title_rename_write_failed":
+            return False, "fast-agent session title metadata update failed"
+        return False, "fast-agent session title metadata not found"
 
     # --- Message history ---
 
@@ -1087,9 +4641,11 @@ class SessionManager:
                 "content_type": e.content_type,
                 "timestamp": e.timestamp,
                 "event_kind": getattr(e, "event_kind", "message"),
+                "semantic_kind": getattr(e, "semantic_kind", "assistant_final"),
+                "delivery_class": getattr(e, "delivery_class", "history"),
             }
             for e in parsed_entries
-            if getattr(e, "event_kind", "message") != "lifecycle"
+            if getattr(e, "include_in_history", True)
         ]
 
         return all_messages, len(all_messages)

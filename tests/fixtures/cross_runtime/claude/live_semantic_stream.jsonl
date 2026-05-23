@@ -1,0 +1,3 @@
+{"type":"assistant","timestamp":"2026-04-03T08:00:00.000Z","message":{"content":[{"type":"thinking","thinking":"Redacted planning note"},{"type":"text","text":"Reviewing the task surface and checking fixture coverage."},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"doc/runtime-ontology.md"}}]}}
+{"type":"user","timestamp":"2026-04-03T08:00:01.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"redacted line 1\nredacted line 2"}]}]}}
+{"type":"assistant","timestamp":"2026-04-03T08:00:02.000Z","message":{"content":[{"type":"text","text":"Final answer for the bound topic chat."}]}}
