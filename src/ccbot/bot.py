@@ -1602,6 +1602,20 @@ def _surface_subject(surface: ControlSurface) -> str:
     return "chat" if surface.kind == "group_main_chat" else "topic"
 
 
+def _stored_surface_title_for_window_name(
+    user_id: int,
+    surface: ControlSurface | None,
+) -> str:
+    """Return a stored Telegram topic/control-surface title for tmux naming."""
+    if surface is None:
+        return ""
+    return session_manager.get_surface_title(
+        user_id,
+        chat_id=surface.chat_id,
+        thread_id=surface.thread_id,
+    )
+
+
 def _unsupported_surface_message(surface: ControlSurface) -> str:
     if surface.kind == "unsupported":
         return (
@@ -2452,6 +2466,12 @@ async def topic_edited_handler(
     thread_id = _get_thread_id(update)
     if thread_id is None:
         return
+    session_manager.set_surface_title(
+        user.id,
+        new_name,
+        thread_id=thread_id,
+        chat_id=update.effective_chat.id if update.effective_chat else None,
+    )
 
     surface = control_surface_classifier(update)
     wid, _ = _get_writable_window_for_surface(context, user.id, surface)
@@ -2506,6 +2526,38 @@ async def topic_edited_handler(
         old_name,
         final_name,
         wid,
+        user.id,
+        thread_id,
+    )
+
+
+async def topic_created_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Record newly created topic titles before any bind flow starts."""
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        return
+
+    msg = update.message
+    topic_created = getattr(msg, "forum_topic_created", None) if msg else None
+    if not topic_created:
+        return
+    title = str(getattr(topic_created, "name", "") or "").strip()
+    if not title:
+        return
+    thread_id = _get_thread_id(update)
+    if thread_id is None:
+        return
+    session_manager.set_surface_title(
+        user.id,
+        title,
+        thread_id=thread_id,
+        chat_id=update.effective_chat.id if update.effective_chat else None,
+    )
+    logger.info(
+        "Topic created title stored: %r (user=%d, thread=%d)",
+        title,
         user.id,
         thread_id,
     )
@@ -4645,6 +4697,10 @@ async def _create_and_bind_window(
     pending_surface = pending_surface or _pending_surface_from_user_data(
         context.user_data
     )
+    preferred_window_name = _stored_surface_title_for_window_name(
+        user.id,
+        pending_surface,
+    )
 
     resolved_runtime_kind = runtime_kind or _default_launch_runtime_kind()
     if reuse_existing:
@@ -4656,6 +4712,7 @@ async def _create_and_bind_window(
             _reused_existing,
         ) = await tmux_manager.create_or_reuse_window(
             selected_path,
+            window_name=preferred_window_name or None,
             start_claude=True,
             resume_session_id=resume_session_id,
             runtime_kind=resolved_runtime_kind,
@@ -4665,6 +4722,7 @@ async def _create_and_bind_window(
     else:
         success, message, created_wname, created_wid = await tmux_manager.create_window(
             selected_path,
+            window_name=preferred_window_name or None,
             resume_session_id=resume_session_id,
             runtime_kind=resolved_runtime_kind,
             launch_command=launch_command,
@@ -4705,6 +4763,10 @@ async def _create_and_bind_window(
                 resume_session_id=resume_session_id,
                 sync_topic_title=(
                     pending_surface.message_thread_id is not None
+                    and (
+                        bool(resume_session_id)
+                        or bool(preferred_window_name)
+                    )
                     if pending_surface is not None
                     else True
                 ),
@@ -6090,6 +6152,13 @@ def create_bot() -> Application:
         MessageHandler(
             filters.StatusUpdate.FORUM_TOPIC_CLOSED,
             topic_closed_handler,
+        )
+    )
+    # Topic created event — remember the user-facing topic title for later bind.
+    application.add_handler(
+        MessageHandler(
+            filters.StatusUpdate.FORUM_TOPIC_CREATED,
+            topic_created_handler,
         )
     )
     # Topic edited event — sync renamed topic to tmux window

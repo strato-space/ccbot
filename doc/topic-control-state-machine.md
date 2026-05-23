@@ -27,6 +27,7 @@ Canonical persisted control-state maps are surface-scoped:
 - `surface_binding_states[user_id][surface_key]`
 - `surface_bindings[user_id][surface_key] -> window_id`
 - `surface_pending_slots[user_id][surface_key] -> deferred explicit pre-bind input`
+- `surface_titles[user_id][title_surface_key] -> Telegram-visible title`
 - `group_chat_ids[user_id:thread_id_or_0] -> Telegram group chat_id`
 
 In shared group topics and no-topics group main chats, a persisted binding under
@@ -42,6 +43,15 @@ The `group_chat_ids` map stores Telegram transport routing coordinates for
 outbound delivery and topic title sync. It is not the control-surface identity.
 Command-only entry must refresh it directly because shared group mentions are
 not bind-flow openers.
+
+The `surface_titles` map stores optional human-facing title metadata captured
+from Telegram topic create/edit service updates. Named-topic title keys are
+chat-qualified as `t:<chat_id>:<thread_id>` when Telegram coordinates are known,
+so same-numbered topics in different groups cannot bleed display names into one
+another. A stored title may seed a fresh tmux window name, but it is not the
+binding, not the cwd, and not runtime/replay identity. When no title is known,
+fresh bind must not rename the Telegram topic to a cwd basename just because a
+directory was selected.
 
 Compatibility topic mirrors still exist for topic-shaped callers:
 
@@ -113,6 +123,8 @@ Compatibility topic mirrors still exist for topic-shaped callers:
 - Picker selection or directory confirm
   - enters `bound`
   - writes `surface_bindings`
+  - may use stored `surface_titles` for the tmux display name
+  - keeps replay delivery silent until the bound runtime identity is proven
 - Explicit `/unbind`
   - clears `surface_bindings`
   - sets `surface_policy = manual_bind_required`

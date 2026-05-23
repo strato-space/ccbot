@@ -23,6 +23,12 @@ The precedence is:
 When collision suffixes are required, the applied tmux name is authoritative
 and the Telegram topic title is normalized to that suffix-applied name.
 
+Fresh `/bind` is different from `/rename`: when the bot has captured a Telegram
+surface title from topic create/edit events, that title may seed the new tmux
+window name. If no title is known, the bot may fall back to cwd-derived tmux
+naming, but it must not overwrite the existing Telegram topic title with the cwd
+basename. The cwd is workspace metadata, not the surface name.
+
 ## `/resume <thread-name|id>`
 
 - The token must match exactly by persisted thread id or by exact thread name.
@@ -47,6 +53,12 @@ and the Telegram topic title is normalized to that suffix-applied name.
   as a preview, skipping injected service context such as `AGENTS.md`.
 - A raw thread id is only a last-resort label when neither a name nor a safe
   human preview exists.
+- A fresh Codex/OMX bind in a cwd that already has another active bound runtime
+  must not adopt that older runtime's rollout by cwd or recent mtime alone. The
+  new window stays replay-silent until its own runtime identity is proven.
+- If two distinct tmux windows resolve to the same runtime thread id, delivery
+  fails closed for the ambiguous duplicate instead of fanning one replay stream
+  into multiple unrelated Telegram topics.
 
 ## `/rename <new-name>`
 

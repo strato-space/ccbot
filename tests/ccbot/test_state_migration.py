@@ -552,6 +552,53 @@ def test_surface_state_is_persisted_as_canonical_maps(tmp_path, monkeypatch):
     assert saved["thread_bindings"]["100"]["43"] == "@7"
 
 
+def test_surface_titles_round_trip_in_state(tmp_path, monkeypatch):
+    state_file = tmp_path / "state.json"
+    original_load_state = SessionManager._load_state
+    monkeypatch.setattr(session_module.config, "state_file", state_file)
+    monkeypatch.setattr(session_module.SessionManager, "_load_state", lambda self: None)
+
+    manager = SessionManager()
+    changed = manager.set_surface_title(
+        100,
+        "comfy-agent-ops",
+        thread_id=8227,
+        chat_id=-100200,
+    )
+
+    assert changed is True
+    saved = json.loads(state_file.read_text())
+    assert saved["surface_titles"]["100"]["t:-100200:8227"] == "comfy-agent-ops"
+
+    monkeypatch.setattr(session_module.SessionManager, "_load_state", original_load_state)
+    reloaded = SessionManager()
+    assert (
+        reloaded.get_surface_title(100, thread_id=8227, chat_id=-100200)
+        == "comfy-agent-ops"
+    )
+
+
+def test_surface_titles_are_chat_qualified_for_equal_topic_ids(tmp_path, monkeypatch):
+    state_file = tmp_path / "state.json"
+    monkeypatch.setattr(session_module.config, "state_file", state_file)
+    monkeypatch.setattr(session_module.SessionManager, "_load_state", lambda self: None)
+
+    manager = SessionManager()
+    manager.set_surface_title(100, "comfy-agent", thread_id=42, chat_id=-1001)
+    manager.set_surface_title(100, "comfy-agent-ops", thread_id=42, chat_id=-1002)
+
+    assert manager.get_surface_title(100, thread_id=42, chat_id=-1001) == "comfy-agent"
+    assert (
+        manager.get_surface_title(100, thread_id=42, chat_id=-1002)
+        == "comfy-agent-ops"
+    )
+    assert manager.get_surface_title(100, thread_id=42, chat_id=-1003) == ""
+
+    saved = json.loads(state_file.read_text())
+    assert saved["surface_titles"]["100"]["t:-1001:42"] == "comfy-agent"
+    assert saved["surface_titles"]["100"]["t:-1002:42"] == "comfy-agent-ops"
+
+
 def test_surface_key_migration_from_legacy_topic_maps(tmp_path, monkeypatch):
     state_file = tmp_path / "state.json"
     state_file.write_text(

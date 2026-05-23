@@ -600,6 +600,58 @@ async def test_codex_registration_ignores_stale_history_candidates(
 
 
 @pytest.mark.asyncio
+async def test_codex_fresh_same_cwd_window_does_not_adopt_bound_peer_thread(
+    session_manager: SessionManager,
+) -> None:
+    thread_id = "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9"
+    session_manager.register_live_process(
+        "@1",
+        "/home",
+        runtime_kind="codex",
+        thread_id=thread_id,
+    )
+    session_manager.get_window_state("@1").registered_at = 10.0
+    session_manager.bind_thread(100, 555, "@1", window_name="comfy-agent")
+
+    session_manager.register_live_process("@2", "/home", runtime_kind="codex")
+    session_manager.get_window_state("@2").registered_at = time.time() - 1.0
+    session_manager.bind_thread(100, 8227, "@2", window_name="comfy-agent-ops")
+
+    resolved = await session_manager.resolve_thread_for_window("@2")
+
+    assert resolved is None
+    assert session_manager.get_window_state("@2").thread_id == ""
+
+
+@pytest.mark.asyncio
+async def test_codex_duplicate_thread_state_delivers_only_authoritative_window(
+    session_manager: SessionManager,
+) -> None:
+    thread_id = "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9"
+    session_manager.register_live_process(
+        "@1",
+        "/home",
+        runtime_kind="codex",
+        thread_id=thread_id,
+    )
+    session_manager.get_window_state("@1").registered_at = 10.0
+    session_manager.bind_thread(100, 555, "@1", window_name="comfy-agent")
+    session_manager.register_live_process(
+        "@2",
+        "/home",
+        runtime_kind="codex",
+        thread_id=thread_id,
+    )
+    session_manager.get_window_state("@2").registered_at = 20.0
+    session_manager.bind_thread(100, 8227, "@2", window_name="comfy-agent-ops")
+
+    users = await session_manager.find_users_for_session(thread_id)
+
+    assert users == [(100, "@1", 555)]
+    assert session_manager.get_window_state("@2").thread_id == ""
+
+
+@pytest.mark.asyncio
 async def test_codex_resume_registration_prefers_explicit_thread_id(
     session_manager: SessionManager,
 ) -> None:

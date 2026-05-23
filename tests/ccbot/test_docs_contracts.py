@@ -245,6 +245,9 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "equal `thread_id` values in different groups are not the same control surface" in topic_control
     assert "Telegram group routing coordinates" in topic_control
     assert "group_chat_ids[user_id:thread_id] -> Telegram group chat_id" in topic_control
+    assert "Surface title" in topic_control
+    assert "surface_titles[user_id][title_surface_key] -> title" in topic_control
+    assert "t:<chat_id>:<thread_id>" in topic_control
     assert "command-only entry must not depend on prior text, mention, or callback input" in topic_control
     assert "photo/document/sticker/audio/video ingress is not an addressed entry" in topic_control
     assert "HUD/helper pane" in topic_control
@@ -346,6 +349,8 @@ def test_codex_command_semantics_doc_captures_resume_and_rename_contract() -> No
     assert "duplicate thread names" in doc
     assert "Non-interactive helper sessions such as `originator=codex_exec`" in doc
     assert "raw thread id is only a last-resort label" in doc
+    assert "must not overwrite the existing Telegram topic title with the cwd" in doc
+    assert "stays replay-silent until its own runtime identity is proven" in doc
     assert "tmux is the authoritative operator intervention surface" in doc
     assert "Codex Conversational Submit ACK" in doc
     assert "turn-acceptance" in doc

@@ -54,6 +54,15 @@ If this note conflicts with any explanatory note in `doc/`, this note wins.
   - these coordinates are not the product control-surface identity; they are
     the transport routing data used for topic title sync and outbound delivery
 
+- **Surface title**
+  - optional human-facing title captured from Telegram topic create/edit events
+  - current persisted shape is `surface_titles[user_id][title_surface_key] -> title`
+  - for named topics with known Telegram coordinates,
+    `title_surface_key` is chat-qualified (`t:<chat_id>:<thread_id>`) so equal
+    numeric `thread_id` values in different groups cannot share title metadata
+  - it may seed a fresh tmux window display name, but it is not a binding,
+    runtime conversation identity, replay proof, or cwd/workspace claim
+
 - **Surface policy**
   - persisted rule governing whether plain user text may enter bind flow or
     whether explicit bind is required
@@ -175,6 +184,12 @@ No-topics main-chat variant:
   to populate `group_chat_ids`
 - outbound topic delivery and topic title synchronization must resolve through
   stored Telegram group `chat_id` coordinates, not through the Telegram user id
+- a fresh bind may use a stored surface title as the tmux display name, but must
+  not overwrite an existing Telegram topic title with a cwd basename when no
+  title proof is available
+- distinct tmux windows resolving to the same runtime conversation identity are
+  ambiguous; replay delivery must fail closed instead of fanning one stream out
+  to unrelated topics
 - pending-slot state is owned by the control surface, not by a runtime turn
 - explicitly captured text before writable activation may auto-send once after
   activation succeeds, but must not execute early

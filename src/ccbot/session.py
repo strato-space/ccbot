@@ -116,6 +116,7 @@ SURFACE_BINDING_STATES_KEY = "surface_binding_states"
 SURFACE_BIND_FLOW_VERSIONS_KEY = "surface_bind_flow_versions"
 SURFACE_BIND_FLOW_NONCES_KEY = "surface_bind_flow_nonces"
 SURFACE_PENDING_SLOTS_KEY = "surface_pending_slots"
+SURFACE_TITLES_KEY = "surface_titles"
 TOPIC_SURFACE_PREFIX = "t:"
 CHAT_SURFACE_PREFIX = "c:"
 PENDING_SLOT_STATUS_PENDING = "pending"
@@ -456,6 +457,7 @@ class SessionManager:
     surface_binding_states: user_id -> {surface_key -> binding state}
     surface_bind_flow_versions/nonces: user_id -> {surface_key -> bind-flow credentials}
     surface_pending_slots: user_id -> {surface_key -> PendingSurfaceSlot}
+    surface_titles: user_id -> {title_surface_key -> Telegram-visible title}
     thread_bindings/external_topic_bindings/topic_*: compatibility-only topic mirrors
     window_display_names: window_id -> window_name (for display)
     group_chat_ids: "user_id:thread_id" -> group chat_id (for supergroup routing)
@@ -474,6 +476,7 @@ class SessionManager:
     surface_pending_slots: dict[int, dict[str, PendingSurfaceSlot]] = field(
         default_factory=dict
     )
+    surface_titles: dict[int, dict[str, str]] = field(default_factory=dict)
     thread_bindings: dict[int, dict[int, str]] = field(default_factory=dict)
     external_topic_bindings: dict[int, dict[int, dict[str, Any]]] = field(
         default_factory=dict
@@ -563,6 +566,14 @@ class SessionManager:
                 }
                 for uid, pending_slots in self.surface_pending_slots.items()
             },
+            SURFACE_TITLES_KEY: {
+                str(uid): {
+                    surface_key: title
+                    for surface_key, title in titles.items()
+                    if str(title or "").strip()
+                }
+                for uid, titles in self.surface_titles.items()
+            },
             "thread_bindings": {
                 str(uid): {str(tid): wid for tid, wid in bindings.items()}
                 for uid, bindings in self.thread_bindings.items()
@@ -640,6 +651,28 @@ class SessionManager:
             return f"{CHAT_SURFACE_PREFIX}{int(chat_id)}"
         raise ValueError("surface key requires thread_id or chat_id")
 
+    @classmethod
+    def make_surface_title_key(
+        cls,
+        *,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Build the persisted key for display-only control-surface titles.
+
+        Unlike legacy topic binding keys, topic titles are chat-qualified when
+        Telegram chat coordinates are known. Equal numeric forum topic ids in
+        different groups are different user-facing surfaces and must not share
+        display metadata.
+        """
+        if thread_id is not None:
+            if chat_id is not None:
+                return f"{TOPIC_SURFACE_PREFIX}{int(chat_id)}:{int(thread_id)}"
+            return cls.make_surface_key(thread_id=thread_id)
+        if chat_id is not None:
+            return cls.make_surface_key(chat_id=chat_id)
+        raise ValueError("surface title key requires thread_id or chat_id")
+
     @staticmethod
     def _parse_surface_key(surface_key: str) -> tuple[str, int] | None:
         """Parse a persisted surface key into (kind, numeric id)."""
@@ -655,6 +688,31 @@ class SessionManager:
             return kind, int(payload)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _parse_surface_title_key(
+        surface_key: str,
+    ) -> tuple[str, int | None, int | None] | None:
+        """Parse a persisted title key into (kind, chat_id, thread_id)."""
+        raw_key = str(surface_key or "").strip()
+        if raw_key.startswith(TOPIC_SURFACE_PREFIX):
+            payload = raw_key[len(TOPIC_SURFACE_PREFIX) :]
+            parts = payload.split(":")
+            try:
+                if len(parts) == 1:
+                    return "topic", None, int(parts[0])
+                if len(parts) == 2:
+                    return "topic", int(parts[0]), int(parts[1])
+            except (TypeError, ValueError):
+                return None
+            return None
+        if raw_key.startswith(CHAT_SURFACE_PREFIX):
+            payload = raw_key[len(CHAT_SURFACE_PREFIX) :]
+            try:
+                return "chat", int(payload), None
+            except (TypeError, ValueError):
+                return None
+        return None
 
     @classmethod
     def _topic_thread_id_from_surface_key(cls, surface_key: str) -> int | None:
@@ -680,6 +738,36 @@ class SessionManager:
                 chat_id=parsed[1] if parsed[0] == "chat" else None,
             )
         return self.make_surface_key(thread_id=thread_id, chat_id=chat_id)
+
+    def _resolve_surface_title_key(
+        self,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Resolve a persisted display-title key.
+
+        Passing explicit chat/thread coordinates takes precedence over a legacy
+        bare topic key so callers can keep topic titles group-scoped.
+        """
+        if thread_id is not None or chat_id is not None:
+            return self.make_surface_title_key(
+                thread_id=thread_id,
+                chat_id=chat_id,
+            )
+        if surface_key is not None:
+            parsed = self._parse_surface_title_key(surface_key)
+            if parsed is None:
+                raise ValueError(f"invalid surface title key: {surface_key!r}")
+            kind, parsed_chat_id, parsed_thread_id = parsed
+            if kind == "topic":
+                return self.make_surface_title_key(
+                    chat_id=parsed_chat_id,
+                    thread_id=parsed_thread_id,
+                )
+            return self.make_surface_title_key(chat_id=parsed_chat_id)
+        raise ValueError("surface title key requires surface_key, thread_id, or chat_id")
 
     @classmethod
     def _normalize_surface_map(cls, raw: Any) -> dict[int, dict[str, Any]]:
@@ -719,6 +807,39 @@ class SessionManager:
         if kind == "topic":
             return cls.make_surface_key(thread_id=numeric_id)
         return cls.make_surface_key(chat_id=numeric_id)
+
+    @classmethod
+    def _normalize_surface_title_key(cls, surface_key: Any) -> str | None:
+        parsed = cls._parse_surface_title_key(str(surface_key or "").strip())
+        if parsed is None:
+            return None
+        kind, chat_id, thread_id = parsed
+        if kind == "topic":
+            return cls.make_surface_title_key(chat_id=chat_id, thread_id=thread_id)
+        return cls.make_surface_title_key(chat_id=chat_id)
+
+    @classmethod
+    def _normalize_surface_title_map(cls, raw: Any) -> dict[int, dict[str, Any]]:
+        """Normalize nested user_id -> title-surface-key payloads from state."""
+        normalized: dict[int, dict[str, Any]] = {}
+        if not isinstance(raw, dict):
+            return normalized
+        for uid, payload in raw.items():
+            try:
+                user_id = int(uid)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            normalized_payload: dict[str, Any] = {}
+            for key, value in payload.items():
+                normalized_key = cls._normalize_surface_title_key(key)
+                if normalized_key is None:
+                    continue
+                normalized_payload[normalized_key] = value
+            if normalized_payload:
+                normalized[user_id] = normalized_payload
+        return normalized
 
     @staticmethod
     def _normalize_pending_slot_record(record: Any) -> PendingSurfaceSlot | None:
@@ -1025,6 +1146,16 @@ class SessionManager:
                 self.surface_pending_slots = self._normalize_surface_pending_slots(
                     state.get(SURFACE_PENDING_SLOTS_KEY, {})
                 )
+                self.surface_titles = {
+                    user_id: {
+                        surface_key: str(title).strip()
+                        for surface_key, title in titles.items()
+                        if str(title or "").strip()
+                    }
+                    for user_id, titles in self._normalize_surface_title_map(
+                        state.get(SURFACE_TITLES_KEY, {})
+                    ).items()
+                }
                 self.window_display_names = state.get("window_display_names", {})
                 self.group_chat_ids = {
                     k: int(v) for k, v in state.get("group_chat_ids", {}).items()
@@ -1455,6 +1586,62 @@ class SessionManager:
             self.window_states[window_id].window_name = new_name
         self._save_state()
         logger.info("Updated display name: window_id %s -> '%s'", window_id, new_name)
+
+    # --- Control surface title management ---
+
+    def set_surface_title(
+        self,
+        user_id: int,
+        title: str,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> bool:
+        """Persist a Telegram-visible control-surface title.
+
+        This is display metadata only: it is not a binding, tmux window id,
+        runtime conversation identity, or replay-evidence proof.
+        """
+        normalized_title = str(title or "").strip()
+        if not normalized_title:
+            return False
+        resolved_surface_key = self._resolve_surface_title_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        titles = self.surface_titles.setdefault(user_id, {})
+        if titles.get(resolved_surface_key) == normalized_title:
+            return False
+        titles[resolved_surface_key] = normalized_title
+        self._save_state()
+        logger.info(
+            "Stored surface title: user=%d surface=%s title=%r",
+            user_id,
+            resolved_surface_key,
+            normalized_title,
+        )
+        return True
+
+    def get_surface_title(
+        self,
+        user_id: int,
+        *,
+        surface_key: str | None = None,
+        thread_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> str:
+        """Return a stored Telegram-visible control-surface title."""
+        resolved_surface_key = self._resolve_surface_title_key(
+            surface_key=surface_key,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        titles = self.surface_titles.get(user_id)
+        if not titles:
+            return ""
+        return str(titles.get(resolved_surface_key) or "").strip()
 
     # --- Group chat ID management (supergroup forum topic routing) ---
 
@@ -2151,6 +2338,23 @@ class SessionManager:
 
         if resolution.status == "selected" and resolution.selected is not None:
             selected = resolution.selected
+            duplicate_owner = self._duplicate_thread_owner_window(
+                selected.thread_id,
+                window_id,
+                runtime_kind=state.runtime_kind,
+            )
+            if duplicate_owner is not None:
+                if state.thread_id == selected.thread_id:
+                    state.thread_id = ""
+                    self._save_state()
+                logger.warning(
+                    "Suppressing duplicate runtime thread resolution for window %s: "
+                    "thread %s is already owned by bound window %s",
+                    window_id,
+                    selected.thread_id,
+                    duplicate_owner,
+                )
+                return None
             changed = False
             if state.thread_id != selected.thread_id:
                 state.thread_id = selected.thread_id
@@ -2169,6 +2373,48 @@ class SessionManager:
                 state.cwd,
             )
         return None
+
+    def _bound_tmux_window_ids(self) -> set[str]:
+        """Return tmux window ids currently bound to Telegram control surfaces."""
+        return {
+            window_id
+            for bindings in self.surface_bindings.values()
+            for window_id in bindings.values()
+            if self._is_window_id(window_id)
+        }
+
+    def _duplicate_thread_owner_window(
+        self,
+        thread_id: str,
+        window_id: str,
+        *,
+        runtime_kind: str | None = None,
+    ) -> str | None:
+        """Return another bound window that authoritatively owns a thread id.
+
+        Distinct tmux windows resolving to the same runtime conversation identity
+        are ambiguous. Replay delivery may fan out to multiple Telegram surfaces
+        only when those surfaces share the same tmux window id.
+        """
+        if not thread_id:
+            return None
+        bound_window_ids = self._bound_tmux_window_ids()
+        candidates: list[tuple[float, str]] = []
+        for candidate_window_id, peer in self.window_states.items():
+            if candidate_window_id not in bound_window_ids:
+                continue
+            if peer.thread_id != thread_id:
+                continue
+            if runtime_kind and peer.runtime_kind and peer.runtime_kind != runtime_kind:
+                continue
+            candidates.append((float(peer.registered_at or 0.0), candidate_window_id))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        owner = candidates[0][1]
+        if owner == window_id:
+            return None
+        return owner
 
     def _find_external_binding_record_by_window(
         self,
@@ -3191,7 +3437,36 @@ class SessionManager:
             resolved = await self.resolve_thread_for_window(binding.window_id)
             if resolved and resolved.thread_id == thread_id:
                 result.append(binding)
-        return result
+        distinct_windows = {binding.window_id for binding in result}
+        if len(distinct_windows) <= 1:
+            return result
+        owner = self._authoritative_window_for_thread_id(thread_id, distinct_windows)
+        logger.warning(
+            "Suppressing duplicate runtime thread fan-out for %s across windows %s; "
+            "owner=%s",
+            thread_id,
+            sorted(distinct_windows),
+            owner or "<none>",
+        )
+        if owner is None:
+            return []
+        return [binding for binding in result if binding.window_id == owner]
+
+    def _authoritative_window_for_thread_id(
+        self,
+        thread_id: str,
+        candidate_window_ids: set[str],
+    ) -> str | None:
+        candidates: list[tuple[float, str]] = []
+        for window_id in candidate_window_ids:
+            state = self.window_states.get(window_id)
+            if state is None or state.thread_id != thread_id:
+                continue
+            candidates.append((float(state.registered_at or 0.0), window_id))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        return candidates[0][1]
 
     async def find_users_for_session(
         self,
