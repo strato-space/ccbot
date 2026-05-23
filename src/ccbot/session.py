@@ -3688,7 +3688,15 @@ class SessionManager:
     def iter_topic_bindings(self) -> Iterator[TopicBinding]:
         """Iterate persisted topic bindings as structured runtime-neutral objects."""
         for user_id, bindings in self.surface_bindings.items():
-            for surface_key, window_id in bindings.items():
+            seen_surface_keys: set[str] = set()
+            sorted_bindings = sorted(
+                bindings.items(),
+                key=lambda item: (
+                    self._parse_surface_key(item[0]) == ("topic", None, self._topic_thread_id_from_surface_key(item[0])),
+                    item[0],
+                ),
+            )
+            for surface_key, window_id in sorted_bindings:
                 parsed_surface = self._parse_surface_key(surface_key)
                 chat_id = parsed_surface[1] if parsed_surface is not None else None
                 thread_id = (
@@ -3710,6 +3718,9 @@ class SessionManager:
                             thread_id=thread_id,
                             chat_id=stored_chat_id,
                         )
+                if delivery_surface_key in seen_surface_keys:
+                    continue
+                seen_surface_keys.add(delivery_surface_key)
                 if self.is_external_binding_window_id(window_id):
                     external = (
                         self.get_external_surface_binding(

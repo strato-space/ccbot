@@ -105,6 +105,23 @@ class TestThreadBindings:
         assert binding.chat_id == -100200300
         assert binding.thread_id == 42
 
+    def test_iter_topic_bindings_deduplicates_canonical_and_legacy_topic_mirrors(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.set_group_chat_id(100, 42, -100200300)
+        mgr.bind_surface(100, "@1", surface_key="t:42", window_name="one")
+        mgr.bind_surface(
+            100,
+            "@1",
+            surface_key="t:-100200300:42",
+            window_name="one",
+        )
+
+        bindings = list(mgr.iter_topic_bindings())
+
+        assert len(bindings) == 1
+        assert bindings[0].surface_key == "t:-100200300:42"
+
     def test_iter_topic_bindings_preserves_runtime_kind(
         self, mgr: SessionManager
     ) -> None:

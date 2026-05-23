@@ -298,10 +298,23 @@ def _bound_candidates(
     window_id: str | None,
 ) -> list[RuntimeBindingFacts]:
     candidates: list[RuntimeBindingFacts] = []
+    seen: set[tuple[int, str, str]] = set()
     for candidate_user_id, bindings in sorted(manager.surface_bindings.items()):
         if user_id is not None and candidate_user_id != user_id:
             continue
-        for candidate_surface_key, candidate_window_id in sorted(bindings.items()):
+        sorted_bindings = sorted(
+            bindings.items(),
+            key=lambda item: (
+                _canonical_binding_surface_key(
+                    manager,
+                    user_id=candidate_user_id,
+                    surface_key=item[0],
+                )
+                != item[0],
+                item[0],
+            ),
+        )
+        for candidate_surface_key, candidate_window_id in sorted_bindings:
             delivery_surface_key = _canonical_binding_surface_key(
                 manager,
                 user_id=candidate_user_id,
@@ -315,6 +328,14 @@ def _bound_candidates(
                 continue
             if window_id is not None and candidate_window_id != window_id:
                 continue
+            dedupe_key = (
+                candidate_user_id,
+                delivery_surface_key,
+                candidate_window_id,
+            )
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
             candidates.append(
                 _facts_for_binding(
                     manager,
