@@ -405,10 +405,19 @@ class TestBotRegistration:
         monkeypatch.setenv("CCBOT_TELEGRAM_GET_UPDATES_POOL_SIZE", "bad")
         monkeypatch.setenv("CCBOT_TELEGRAM_GET_UPDATES_POOL_TIMEOUT", "bad")
         monkeypatch.setenv("CCBOT_TELEGRAM_POLL_TIMEOUT", "bad")
+        monkeypatch.setenv("CCBOT_TELEGRAM_BOOTSTRAP_RETRIES", "bad")
 
         assert bot_mod._env_int("CCBOT_TELEGRAM_GET_UPDATES_POOL_SIZE", 4) == 4
         assert bot_mod._env_float("CCBOT_TELEGRAM_GET_UPDATES_POOL_TIMEOUT", 10.0) == 10.0
         assert bot_mod.telegram_poll_timeout() == 10
+        assert bot_mod.telegram_bootstrap_retries() == -1
+
+    def test_telegram_bootstrap_retries_allows_negative_values(self, monkeypatch):
+        monkeypatch.setenv("CCBOT_TELEGRAM_BOOTSTRAP_RETRIES", "-1")
+        assert bot_mod.telegram_bootstrap_retries() == -1
+
+        monkeypatch.setenv("CCBOT_TELEGRAM_BOOTSTRAP_RETRIES", "3")
+        assert bot_mod.telegram_bootstrap_retries() == 3
 
     def test_build_bot_commands_advertises_only_codex_core_lane(self):
         with patch.object(bot_mod.config, "claude_command", "codex"):

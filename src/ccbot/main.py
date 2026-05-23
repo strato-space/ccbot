@@ -103,11 +103,12 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("Tmux session will be resolved by startup restore or first use")
 
     logger.info("Starting Telegram bot...")
-    from .bot import create_bot, telegram_poll_timeout
+    from .bot import create_bot, telegram_bootstrap_retries, telegram_poll_timeout
 
     application = create_bot()
     application.run_polling(
         allowed_updates=["message", "callback_query"],
+        bootstrap_retries=telegram_bootstrap_retries(),
         timeout=telegram_poll_timeout(),
     )
 

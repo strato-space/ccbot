@@ -339,6 +339,7 @@ _DEFAULT_GET_UPDATES_CONNECT_TIMEOUT = 10.0
 _DEFAULT_GET_UPDATES_READ_TIMEOUT = 30.0
 _DEFAULT_GET_UPDATES_WRITE_TIMEOUT = 10.0
 _DEFAULT_TELEGRAM_POLL_TIMEOUT = 10
+_DEFAULT_TELEGRAM_BOOTSTRAP_RETRIES = -1
 _DEFAULT_POLL_HEALTH_INTERVAL_SECONDS = 60.0
 _DEFAULT_POLL_STALE_SECONDS = 180.0
 _DEFAULT_POLL_PENDING_THRESHOLD = 1
@@ -1307,6 +1308,17 @@ def _env_int(name: str, default: int) -> int:
     return max(0, parsed)
 
 
+def _env_signed_int(name: str, default: int) -> int:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %d", name, value, default)
+        return default
+
+
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name, "").strip().lower()
     if not value:
@@ -1322,6 +1334,19 @@ def _env_bool(name: str, default: bool) -> bool:
 def telegram_poll_timeout() -> int:
     """Return long-poll timeout used by Application.run_polling."""
     return _env_int("CCBOT_TELEGRAM_POLL_TIMEOUT", _DEFAULT_TELEGRAM_POLL_TIMEOUT)
+
+
+def telegram_bootstrap_retries() -> int:
+    """Return Telegram bootstrap retry count used by Application.run_polling.
+
+    PTB interprets negative values as "retry indefinitely".  ccbot defaults to
+    that behavior so a transient Bot API/proxy timeout during deleteWebhook does
+    not put the user service into a restart loop before polling starts.
+    """
+    return _env_signed_int(
+        "CCBOT_TELEGRAM_BOOTSTRAP_RETRIES",
+        _DEFAULT_TELEGRAM_BOOTSTRAP_RETRIES,
+    )
 
 
 def _polling_health_enabled() -> bool:

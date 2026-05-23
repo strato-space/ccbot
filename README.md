@@ -264,6 +264,7 @@ ALLOWED_USERS=your_telegram_user_id
 | `CCBOT_TELEGRAM_GET_UPDATES_READ_TIMEOUT` | `30.0` | Read timeout for Telegram long-poll requests; should exceed `CCBOT_TELEGRAM_POLL_TIMEOUT` |
 | `CCBOT_TELEGRAM_GET_UPDATES_WRITE_TIMEOUT` | `10.0` | Write timeout for Telegram long-poll requests |
 | `CCBOT_TELEGRAM_POLL_TIMEOUT` | `10` | Telegram long-poll timeout passed to `run_polling` |
+| `CCBOT_TELEGRAM_BOOTSTRAP_RETRIES` | `-1` | PTB polling bootstrap retries; negative values retry indefinitely so transient Bot API/proxy timeouts do not restart-loop the service before polling starts |
 | `CCBOT_TELEGRAM_POLL_HEALTH_ENABLED` | `true` | Enable watchdog that exits the process when Bot API has pending updates but no Telegram update handler has run recently |
 | `CCBOT_TELEGRAM_POLL_HEALTH_INTERVAL` | `60.0` | Watchdog check interval in seconds |
 | `CCBOT_TELEGRAM_POLL_STALE_SECONDS` | `180.0` | Stale dispatcher age that allows watchdog restart when pending updates exist |
@@ -400,8 +401,11 @@ starvation cases where the health probe itself cannot complete. Logs include
 key/value fields such as `event=telegram_polling_pending_stalled`,
 `event=telegram_polling_health_timeout_stalled`, failure counts, age, thresholds,
 and exit code; token/proxy credentials are redacted from health error text. The
-watchdog does not drain updates and does not mutate topic bindings; it only
-recovers a service-alive-but-polling-dead process.
+initial PTB polling bootstrap uses `CCBOT_TELEGRAM_BOOTSTRAP_RETRIES=-1` by
+default, so a temporary Bot API/proxy timeout during `deleteWebhook` is retried
+in-process instead of creating a user-service restart loop. The watchdog does
+not drain updates and does not mutate topic bindings; it only recovers a
+service-alive-but-polling-dead process.
 
 ### Topic Workflow
 

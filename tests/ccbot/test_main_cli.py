@@ -43,6 +43,7 @@ def test_no_args_starts_bot_with_configured_poll_timeout(monkeypatch):
 
     fake_bot_mod = SimpleNamespace(
         create_bot=lambda: _FakeApplication(),
+        telegram_bootstrap_retries=lambda: -1,
         telegram_poll_timeout=lambda: 17,
     )
     monkeypatch.setitem(sys.modules, "ccbot.config", fake_config_mod)
@@ -50,7 +51,13 @@ def test_no_args_starts_bot_with_configured_poll_timeout(monkeypatch):
 
     main_mod.main([])
 
-    assert calls == [{"allowed_updates": ["message", "callback_query"], "timeout": 17}]
+    assert calls == [
+        {
+            "allowed_updates": ["message", "callback_query"],
+            "bootstrap_retries": -1,
+            "timeout": 17,
+        }
+    ]
 
 
 def test_send_help_keeps_delivery_alias(capsys):
