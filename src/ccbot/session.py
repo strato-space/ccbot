@@ -2378,6 +2378,18 @@ class SessionManager:
         state = self.get_process_descriptor(window_id)
         if state is None:
             return None
+        restore_locator = self._restore_intent_locator_for_window(window_id)
+        if restore_locator is not None:
+            changed = False
+            if state.thread_id != restore_locator.thread_id:
+                state.thread_id = restore_locator.thread_id
+                changed = True
+            if restore_locator.cwd and state.cwd != restore_locator.cwd:
+                state.cwd = restore_locator.cwd
+                changed = True
+            if changed:
+                self._save_state()
+            return restore_locator
         resolution = await self.resolve_thread_candidate(window_id)
         if resolution is None:
             return None
@@ -2444,6 +2456,12 @@ class SessionManager:
         """
         if not thread_id:
             return None
+        restore_owner = self._restore_intent_owner_window_for_thread(
+            thread_id,
+            runtime_kind=runtime_kind,
+        )
+        if restore_owner:
+            return None if restore_owner == window_id else restore_owner
         bound_window_ids = self._bound_tmux_window_ids()
         candidates: list[tuple[float, str]] = []
         for candidate_window_id, peer in self.window_states.items():
@@ -2461,6 +2479,69 @@ class SessionManager:
         if owner == window_id:
             return None
         return owner
+
+    def _restore_intent_owner_window_for_thread(
+        self,
+        thread_id: str,
+        *,
+        runtime_kind: str | None = None,
+    ) -> str | None:
+        """Return the configured startup-restore window for a runtime thread."""
+        if not thread_id:
+            return None
+        if str(os.environ.get("CCBOT_RESTORE_RUNTIME_ID") or "").strip() != thread_id:
+            return None
+        try:
+            user_id = int(str(os.environ.get("CCBOT_RESTORE_USER_ID") or "").strip())
+        except (TypeError, ValueError):
+            return None
+        raw_surface_key = str(os.environ.get("CCBOT_RESTORE_SURFACE_KEY") or "").strip()
+        surface_key = self._normalize_surface_key(raw_surface_key)
+        if surface_key is None:
+            return None
+        owner = self.surface_bindings.get(user_id, {}).get(surface_key)
+        if not owner or not self._is_window_id(owner):
+            return None
+        state = self.window_states.get(owner)
+        if (
+            runtime_kind
+            and state is not None
+            and state.runtime_kind
+            and state.runtime_kind != runtime_kind
+        ):
+            return None
+        return owner
+
+    def _restore_intent_locator_for_window(
+        self,
+        window_id: str,
+    ) -> ThreadLocator | None:
+        """Resolve the configured startup-restore owner from replay evidence."""
+        thread_id = str(os.environ.get("CCBOT_RESTORE_RUNTIME_ID") or "").strip()
+        if not thread_id:
+            return None
+        owner = self._restore_intent_owner_window_for_thread(thread_id)
+        if owner != window_id:
+            return None
+        state = self.get_process_descriptor(window_id)
+        runtime_kind = str(os.environ.get("CCBOT_RESTORE_RUNTIME_KIND") or "").strip()
+        if not runtime_kind:
+            runtime_kind = state.runtime_kind if state is not None else ""
+        if runtime_kind != "codex" or self.codex_thread_catalog is None:
+            return None
+        self.codex_thread_catalog.refresh()
+        candidate = self.codex_thread_catalog.get_candidate_fast(
+            thread_id
+        ) or self.codex_thread_catalog.get_candidate(thread_id)
+        if candidate is None:
+            return None
+        expected_cwd = normalize_cwd(
+            (state.cwd if state is not None and state.cwd else "")
+            or str(os.environ.get("CCBOT_RESTORE_CWD") or "")
+        )
+        if expected_cwd and candidate.normalized_cwd != expected_cwd:
+            return None
+        return candidate.to_locator()
 
     def _find_external_binding_record_by_window(
         self,
@@ -3503,6 +3584,9 @@ class SessionManager:
         thread_id: str,
         candidate_window_ids: set[str],
     ) -> str | None:
+        restore_owner = self._restore_intent_owner_window_for_thread(thread_id)
+        if restore_owner in candidate_window_ids:
+            return restore_owner
         candidates: list[tuple[float, str]] = []
         for window_id in candidate_window_ids:
             state = self.window_states.get(window_id)

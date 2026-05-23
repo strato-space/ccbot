@@ -652,6 +652,38 @@ async def test_codex_duplicate_thread_state_delivers_only_authoritative_window(
 
 
 @pytest.mark.asyncio
+async def test_codex_duplicate_thread_prefers_restore_intent_owner_after_restart(
+    session_manager: SessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread_id = "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9"
+    monkeypatch.setenv("CCBOT_RESTORE_RUNTIME_ID", thread_id)
+    monkeypatch.setenv("CCBOT_RESTORE_USER_ID", "100")
+    monkeypatch.setenv("CCBOT_RESTORE_SURFACE_KEY", "t:555")
+
+    session_manager.register_live_process("@1", "/home", runtime_kind="codex")
+    session_manager.get_window_state("@1").registered_at = time.time() - 1.0
+    session_manager.bind_thread(100, 555, "@1", window_name="comfy-agent")
+
+    session_manager.register_live_process(
+        "@2",
+        "/home",
+        runtime_kind="codex",
+        thread_id=thread_id,
+    )
+    session_manager.get_window_state("@2").registered_at = 1.0
+    session_manager.bind_thread(100, 8227, "@2", window_name="mediagen-comfy")
+
+    resolved = await session_manager.resolve_thread_for_window("@1")
+    users = await session_manager.find_users_for_session(thread_id)
+
+    assert resolved is not None
+    assert resolved.thread_id == thread_id
+    assert users == [(100, "@1", 555)]
+    assert session_manager.get_window_state("@2").thread_id == ""
+
+
+@pytest.mark.asyncio
 async def test_codex_resume_registration_prefers_explicit_thread_id(
     session_manager: SessionManager,
 ) -> None:
