@@ -826,6 +826,8 @@ class SessionManager:
         chat_id: int | None = None,
     ) -> str:
         """Resolve either a direct surface key or thread/chat coordinates."""
+        if thread_id is not None or chat_id is not None:
+            return self.make_surface_key(thread_id=thread_id, chat_id=chat_id)
         if surface_key is not None:
             parsed = self._parse_surface_key(surface_key)
             if parsed is None:
@@ -3493,6 +3495,17 @@ class SessionManager:
             chat_id=chat_id,
         )
 
+    def _routing_mode_owner_id(self, user_id: int, surface_key: str) -> int:
+        parsed = self._parse_surface_key(surface_key)
+        if parsed is None:
+            return user_id
+        kind, chat_id, thread_id = parsed
+        if kind == "chat" and chat_id is not None:
+            return 0
+        if kind == "topic" and chat_id is not None and thread_id is not None:
+            return 0
+        return user_id
+
     def get_surface_routing_mode(
         self,
         user_id: int,
@@ -3512,7 +3525,8 @@ class SessionManager:
             thread_id=thread_id,
             chat_id=chat_id,
         )
-        mode = self.surface_routing_modes.get(user_id, {}).get(resolved_surface_key)
+        owner_id = self._routing_mode_owner_id(user_id, resolved_surface_key)
+        mode = self.surface_routing_modes.get(owner_id, {}).get(resolved_surface_key)
         if mode:
             return self.normalize_routing_mode(mode)
         if str(runtime_kind or "").strip().casefold() == "codex":
@@ -3534,8 +3548,9 @@ class SessionManager:
             thread_id=thread_id,
             chat_id=chat_id,
         )
+        owner_id = self._routing_mode_owner_id(user_id, resolved_surface_key)
         normalized = self.normalize_routing_mode(mode)
-        self.surface_routing_modes.setdefault(user_id, {})[resolved_surface_key] = (
+        self.surface_routing_modes.setdefault(owner_id, {})[resolved_surface_key] = (
             normalized
         )
         self._save_state()

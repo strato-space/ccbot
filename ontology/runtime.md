@@ -129,7 +129,7 @@ This note defines the core runtime nouns for `ccbot`.
 - **Routing mode**
   - semantic handling mode for a submitted message
   - current required modes: `queue`, `steer`
-  - ccbot persists the selected mode per Telegram control surface
+  - ccbot persists the selected mode per effective Telegram `chat_id`/`message_thread_id` control surface
   - Codex-bound Telegram text defaults to `steer`; `/switch`, `/steer`, and
     `/queue` expose explicit surface and one-shot mode selection
 

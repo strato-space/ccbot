@@ -218,8 +218,13 @@ from .tmux_manager import tmux_manager
 from .transcribe import close_client as close_transcribe_client
 from .transcribe import transcribe_voice, voice_transcription_config_error
 from .utils import ccbot_dir
+from .typing_indicator import clear_runtime_update_typing_state, send_runtime_update_typing_once
 
 logger = logging.getLogger(__name__)
+
+
+def clear_runtime_update_typing_state_for_tests() -> None:
+    clear_runtime_update_typing_state()
 
 # Session monitor instance
 session_monitor: SessionMonitor | None = None
@@ -230,6 +235,7 @@ _status_poll_task: asyncio.Task | None = None
 # Telegram polling liveness watchdog task
 _polling_health_task: asyncio.Task | None = None
 _startup_restore_retry_task: asyncio.Task | None = None
+
 _last_telegram_update_monotonic: float | None = None
 _attachment_batcher = AttachmentBatcher()
 _attachment_flush_tasks: dict[IngressBatchKey, asyncio.Task] = {}
@@ -1431,6 +1437,28 @@ async def _safe_send_typing(
         )
     except Exception:
         logger.debug("Failed to send early typing indicator", exc_info=True)
+
+
+async def _send_runtime_update_typing_once(
+    bot: Bot,
+    user_id: int,
+    *,
+    thread_id: int | None,
+    chat_id: int | None = None,
+    surface_key: str | None = None,
+    window_id: str | None = None,
+) -> bool:
+    resolved_chat_id = chat_id
+    if resolved_chat_id is None:
+        resolved_chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+    return await send_runtime_update_typing_once(
+        bot,
+        user_id,
+        chat_id=resolved_chat_id,
+        thread_id=thread_id,
+        surface_key=surface_key,
+        window_id=window_id,
+    )
 
 
 async def _handle_fast_input_proof_complete(
@@ -5047,6 +5075,7 @@ async def _handle_text_payload(
                 wid,
                 text,
                 proof_id=proof_id,
+                receipt_status="queued_runtime",
                 thread_id=surface.message_thread_id,
                 **surface_identity_kwargs,
             )
@@ -6602,6 +6631,13 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 content_type=msg.content_type,
                 role=msg.role,
             )
+            await _send_runtime_update_typing_once(
+                bot,
+                user_id,
+                thread_id=thread_id,
+                window_id=wid,
+                **delivery_surface_kwargs,
+            )
             await enqueue_status_update(
                 bot,
                 user_id,
@@ -6636,6 +6672,13 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                     turn_generation=turn_generation,
                 )
                 continue
+            await _send_runtime_update_typing_once(
+                bot,
+                user_id,
+                thread_id=thread_id,
+                window_id=wid,
+                **delivery_surface_kwargs,
+            )
             await enqueue_plan_update(
                 bot,
                 user_id,
@@ -6685,6 +6728,13 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 role=msg.role,
             )
             commentary_text = "\n\n".join(commentary_parts)
+            await _send_runtime_update_typing_once(
+                bot,
+                user_id,
+                thread_id=thread_id,
+                window_id=wid,
+                **delivery_surface_kwargs,
+            )
             await enqueue_commentary_update(
                 bot,
                 user_id,
@@ -6722,6 +6772,13 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
             # Enqueue content message task
             # Note: tool_result editing is handled inside _process_content_task
             # to ensure sequential processing with tool_use message sending
+            await _send_runtime_update_typing_once(
+                bot,
+                user_id,
+                thread_id=thread_id,
+                window_id=wid,
+                **delivery_surface_kwargs,
+            )
             await enqueue_content_message(
                 bot=bot,
                 user_id=user_id,

@@ -562,7 +562,29 @@ class TestSurfaceRoutingModes:
 
         assert saved == "queue"
         assert mgr.get_surface_routing_mode(100, chat_id=-100200300) == "queue"
-        assert mgr.toggle_surface_routing_mode(100, chat_id=-100200300) == "steer"
+        assert mgr.get_surface_routing_mode(200, chat_id=-100200300) == "queue"
+        assert mgr.toggle_surface_routing_mode(200, chat_id=-100200300) == "steer"
+        assert mgr.get_surface_routing_mode(100, chat_id=-100200300) == "steer"
+
+
+    def test_surface_routing_mode_explicit_chat_thread_overrides_legacy_surface_key(self, mgr: SessionManager) -> None:
+        mgr.set_surface_routing_mode(
+            100,
+            "queue",
+            surface_key="t:42",
+            chat_id=-100200300,
+            thread_id=42,
+        )
+
+        assert (
+            mgr.get_surface_routing_mode(
+                200,
+                chat_id=-100200300,
+                thread_id=42,
+            )
+            == "queue"
+        )
+        assert "t:-100200300:42" in mgr.surface_routing_modes[0]
 
     @pytest.mark.asyncio
     async def test_send_to_window_queued_codex_allows_busy_pane_without_rollout_ack(

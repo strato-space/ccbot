@@ -310,7 +310,7 @@ ccbot --help
 | `/unbind`     | Detach this topic or supported main chat from its live window |
 | `/resume`     | Bind this topic or supported main chat to a persisted runtime thread when the configured lane supports deterministic explicit resume |
 | `/rename`     | Rename the current tmux window and sync the topic title |
-| `/switch [steer|queue]` | Toggle this Telegram surface between `steer` and `queue`, or set the named mode explicitly |
+| `/switch [steer|queue]` | Toggle this Telegram `chat_id`/`message_thread_id` surface between `steer` and `queue`, or set the named mode explicitly |
 | `/steer <prompt>` | Send one prompt with immediate steer semantics; without a prompt, set this surface to `steer` |
 | `/queue <prompt>` | Send one prompt with runtime queue semantics; without a prompt, set this surface to `queue` |
 
@@ -585,8 +585,9 @@ binding proof may bypass the attachment text lead-hold and synchronous ACK wait.
 If the target pane is in tmux copy-mode/scrollback, ccbot first sends `Escape`
 and verifies that tmux mode cleared before injecting text; if the mode remains,
 it fails closed before payload delivery. The fast path sends a Telegram ingress
-receipt (`↗ Получил, отправляю в runtime…`) as current-update acknowledgement,
-then updates it to confirmed, delayed (`⏳ Delivered to tmux; waiting for Codex
+receipt that explicitly names the routing mode: `↗ Steer mode: received; sending to runtime now…`
+for immediate steer delivery or `⏭ Queue mode: received; queued for runtime submit:`
+for queued delivery. It then updates the receipt to confirmed, delayed (`⏳ Delivered to tmux; waiting for Codex
 replay ACK`), or failed after the bounded ACK window. Receipts may include the
 resolved tmux target hint (`window_id`, name, cwd); before ACK they are not
 replay-backed `user_echo` and do not open the runtime turn.
@@ -613,6 +614,12 @@ active writable runtime binding, it is ignored silently. Use `/bind` or
 
 If the topic is bound to an external persisted thread without live tmux, input
 injection fails closed with an explicit read-only warning and a reattach hint.
+
+Transport note: for runtime updates that are actually dispatched to Telegram,
+ccbot sends a `typing` chat action to the same topic/chat as a non-durable
+activity hint. This hint is rate-limited per effective `chat_id`/`message_thread_id` delivery
+surface to no more than once every three seconds and is not emitted for
+suppressed internal events.
 
 Routing note:
 - Codex-bound Telegram text uses `steer` mode by default, preserving the

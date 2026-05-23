@@ -3,6 +3,7 @@
 import asyncio
 import json
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -65,6 +66,15 @@ def test_can_merge_tasks_rejects_mixed_content_types():
 
     assert _can_merge_tasks(base, candidate) is False
 
+
+
+
+def test_ingress_receipt_render_distinguishes_steer_and_queue_modes() -> None:
+    steer_text = _render_ingress_receipt_text("hello", "pending")
+    queue_text = _render_ingress_receipt_text("hello", "queued_runtime")
+
+    assert steer_text.startswith("↗ Steer mode")
+    assert queue_text.startswith("⏭ Queue mode")
 
 def test_ingress_receipt_render_distinguishes_delivered_no_ack() -> None:
     text = _render_ingress_receipt_text("hello", "delayed_runtime")
@@ -3769,3 +3779,33 @@ async def test_user_echo_does_not_convert_existing_status_to_content(
     finally:
         mq._status_msg_info.clear()
         clear_commentary_lane_state(1, 42)
+
+
+@pytest.mark.asyncio
+async def test_status_send_typing_uses_throttled_surface_helper() -> None:
+    bot = AsyncMock()
+
+    with (
+        patch("ccbot.handlers.message_queue.send_runtime_update_typing_once", new_callable=AsyncMock) as mock_typing,
+        patch("ccbot.handlers.message_queue.send_with_fallback", new_callable=AsyncMock) as mock_send,
+    ):
+        mock_send.return_value = SimpleNamespace(message_id=77)
+        await mq._do_send_status_message(
+            bot,
+            1,
+            42,
+            "@7",
+            "Working (1m • esc to interrupt)",
+            chat_id=-100200300,
+            surface_key="t:-100200300:42",
+        )
+
+    mock_typing.assert_awaited_once_with(
+        bot,
+        1,
+        chat_id=-100200300,
+        thread_id=42,
+        surface_key="t:-100200300:42",
+        window_id="@7",
+    )
+    bot.send_chat_action.assert_not_awaited()

@@ -31,7 +31,6 @@ from typing import Literal
 from pathlib import Path
 
 from telegram import Bot, InputMediaPhoto
-from telegram.constants import ChatAction
 from telegram.error import BadRequest, RetryAfter
 
 from ..markdown_v2 import convert_markdown
@@ -50,6 +49,7 @@ from ..delivery_audit import log_telegram_delivery
 from ..config import config
 from ..utils import atomic_write_json
 from ..tmux_manager import tmux_manager
+from ..typing_indicator import send_runtime_update_typing_once
 from .message_sender import (
     NO_LINK_PREVIEW,
     PARSE_MODE,
@@ -2378,16 +2378,15 @@ async def _process_status_update_task(
             return
         else:
             # Same window, text changed - edit in place
-            # Send typing indicator when Claude is working
             if "esc to interrupt" in status_text.lower():
-                try:
-                    await bot.send_chat_action(
-                        chat_id=chat_id, action=ChatAction.TYPING
-                    )
-                except RetryAfter:
-                    raise
-                except Exception:
-                    pass
+                await send_runtime_update_typing_once(
+                    bot,
+                    user_id,
+                    chat_id=chat_id,
+                    thread_id=tid if tid != 0 else None,
+                    surface_key=task.surface_key,
+                    window_id=wid,
+                )
             try:
                 await bot.edit_message_text(
                     chat_id=chat_id,
@@ -2538,14 +2537,15 @@ async def _do_send_status_message(
             await bot.delete_message(chat_id=chat_id, message_id=old[0])
         except Exception:
             pass
-    # Send typing indicator when Claude is working
     if "esc to interrupt" in text.lower():
-        try:
-            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-        except RetryAfter:
-            raise
-        except Exception:
-            pass
+        await send_runtime_update_typing_once(
+            bot,
+            user_id,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            surface_key=surface_key,
+            window_id=window_id,
+        )
     sent = await send_with_fallback(
         bot,
         chat_id,
@@ -3100,13 +3100,13 @@ def _render_ingress_receipt_text(
             "⚠️ Delivered to tmux, but Codex replay ACK did not arrive:"
             f"{target_line}\n{compact}"
         )
-    if status == "queued_after_tool":
-        return f"⏭ Queued in Codex after the current tool call:{target_line}\n{compact}"
+    if status in {"queued_after_tool", "queued_runtime"}:
+        return f"⏭ Queue mode: received; queued for runtime submit:{target_line}\n{compact}"
     if status == "composer_staged":
         return f"📝 Staged in Codex composer; not yet persisted:{target_line}\n{compact}"
     if status == "failed":
         return f"❌ Runtime input was not confirmed:{target_line}\n{compact}"
-    return f"↗ Получил, отправляю в runtime…{target_line}\n{compact}"
+    return f"↗ Steer mode: received; sending to runtime now…{target_line}\n{compact}"
 
 
 async def _process_ingress_receipt_task(

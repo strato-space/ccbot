@@ -13,9 +13,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from telegram import CallbackQuery, MessageEntity, User
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter
 
 from ccbot import bot as bot_mod
+from ccbot import typing_indicator as typing_indicator_mod
 from ccbot.input_safety import (
     clear_window_input_safety_snapshot,
     get_window_input_safety_snapshot,
@@ -146,6 +147,7 @@ def _make_document(
 @pytest.fixture(autouse=True)
 def _reset_attachment_batch_state():
     bot_mod._attachment_batcher.clear()
+    bot_mod.clear_runtime_update_typing_state_for_tests()
     clear_window_input_safety_snapshot()
     for task in list(bot_mod._attachment_flush_tasks.values()):
         task.cancel()
@@ -153,6 +155,7 @@ def _reset_attachment_batch_state():
     bot_mod._attachment_batch_bots.clear()
     yield
     bot_mod._attachment_batcher.clear()
+    bot_mod.clear_runtime_update_typing_state_for_tests()
     clear_window_input_safety_snapshot()
     for task in list(bot_mod._attachment_flush_tasks.values()):
         task.cancel()
@@ -5519,6 +5522,182 @@ class TestThreadPickerFlow:
 
 
 class TestTelegramDelivery:
+
+    @pytest.mark.asyncio
+    async def test_runtime_update_typing_is_rate_limited_per_surface(self, monkeypatch):
+        bot = AsyncMock()
+        now = 1000.0
+        monkeypatch.setattr(typing_indicator_mod.time, "monotonic", lambda: now)
+
+        with patch("ccbot.bot.session_manager") as mock_sm:
+            mock_sm.resolve_chat_id.return_value = -100200300
+
+            first = await bot_mod._send_runtime_update_typing_once(
+                bot,
+                1,
+                thread_id=42,
+                window_id="@7",
+            )
+            second = await bot_mod._send_runtime_update_typing_once(
+                bot,
+                1,
+                thread_id=42,
+                window_id="@7",
+            )
+            now = 1003.1
+            third = await bot_mod._send_runtime_update_typing_once(
+                bot,
+                1,
+                thread_id=42,
+                window_id="@7",
+            )
+
+        assert first is True
+        assert second is False
+        assert third is True
+        assert bot.send_chat_action.await_count == 2
+        bot.send_chat_action.assert_awaited_with(
+            chat_id=-100200300,
+            action=bot_mod.ChatAction.TYPING,
+            message_thread_id=42,
+        )
+
+    @pytest.mark.asyncio
+    async def test_runtime_update_typing_is_scoped_by_surface(self, monkeypatch):
+        bot = AsyncMock()
+        monkeypatch.setattr(typing_indicator_mod.time, "monotonic", lambda: 1000.0)
+
+        await bot_mod._send_runtime_update_typing_once(
+            bot,
+            1,
+            chat_id=-100200300,
+            thread_id=42,
+            surface_key="t:-100200300:42",
+        )
+        await bot_mod._send_runtime_update_typing_once(
+            bot,
+            1,
+            chat_id=-100200300,
+            thread_id=43,
+            surface_key="t:-100200300:43",
+        )
+
+        assert bot.send_chat_action.await_count == 2
+
+
+    @pytest.mark.asyncio
+    async def test_runtime_update_typing_throttle_ignores_optional_surface_key(self, monkeypatch):
+        bot = AsyncMock()
+        monkeypatch.setattr(typing_indicator_mod.time, "monotonic", lambda: 1000.0)
+
+        first = await bot_mod._send_runtime_update_typing_once(
+            bot,
+            1,
+            chat_id=-100200300,
+            thread_id=42,
+            surface_key=None,
+        )
+        second = await bot_mod._send_runtime_update_typing_once(
+            bot,
+            2,
+            chat_id=-100200300,
+            thread_id=42,
+            surface_key="t:-100200300:42",
+        )
+
+        assert first is True
+        assert second is False
+        assert bot.send_chat_action.await_count == 1
+
+
+    @pytest.mark.asyncio
+    async def test_runtime_update_typing_retryafter_does_not_block_delivery(self, monkeypatch):
+        bot = AsyncMock()
+        bot.send_chat_action.side_effect = RetryAfter(1)
+        monkeypatch.setattr(typing_indicator_mod.time, "monotonic", lambda: 1000.0)
+
+        sent = await bot_mod._send_runtime_update_typing_once(
+            bot,
+            1,
+            chat_id=-100200300,
+            thread_id=42,
+        )
+
+        assert sent is False
+        bot.send_chat_action.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_new_message_sends_runtime_update_typing_before_content(self, monkeypatch):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="done",
+            is_complete=True,
+            content_type="text",
+            role="assistant",
+            event_kind="assistant_message",
+            runtime_kind="codex",
+            semantic_kind=ASSISTANT_FINAL_SEMANTIC_KIND,
+        )
+        monkeypatch.setattr(typing_indicator_mod.time, "monotonic", lambda: 1000.0)
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot._session_has_method", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.mark_runtime_presence_active"),
+            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock) as mock_content,
+            patch("ccbot.bot.get_interactive_msg_id", return_value=None),
+        ):
+            mock_sm.find_bindings_for_thread = AsyncMock(
+                return_value=[
+                    bot_mod.TopicBinding(
+                        user_id=1,
+                        thread_id=42,
+                        window_id="@7",
+                        surface_key="t:-100200300:42",
+                        chat_id=-100200300,
+                        runtime_kind="codex",
+                    )
+                ]
+            )
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        bot.send_chat_action.assert_awaited_once_with(
+            chat_id=-100200300,
+            action=bot_mod.ChatAction.TYPING,
+            message_thread_id=42,
+        )
+        mock_content.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_new_message_does_not_type_for_non_dispatched_event(self, monkeypatch):
+        bot = AsyncMock()
+        msg = NormalizedEvent(
+            thread_id="thread-1",
+            text="started",
+            is_complete=True,
+            content_type="lifecycle",
+            role="assistant",
+            event_kind="lifecycle",
+            runtime_kind="codex",
+            dispatch_to_telegram=False,
+        )
+        monkeypatch.setattr(typing_indicator_mod.time, "monotonic", lambda: 1000.0)
+
+        with (
+            patch.object(bot_mod.config, "telegram_delivery_mode", "compact"),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.enqueue_content_message", new_callable=AsyncMock),
+        ):
+            mock_sm.find_users_for_session = AsyncMock(return_value=[(1, "@7", 42)])
+
+            await bot_mod.handle_new_message(msg, bot)
+
+        bot.send_chat_action.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_handle_new_message_compact_mode_routes_commentary_to_latest_visible_artifact(
         self,

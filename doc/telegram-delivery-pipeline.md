@@ -526,6 +526,16 @@ This prevents:
 - progress artifacts surviving after teardown
 - stale tool-result edits targeting an old topic binding
 
+## Runtime Update Typing Indicator
+
+For runtime-originated updates that ccbot will dispatch to Telegram, ccbot sends
+a Telegram `typing` chat action to the same delivery surface before enqueueing
+the update. This is a transport hint only; it does not create durable content and
+does not change compact bubble ordering. Typing actions are throttled per
+effective Telegram `chat_id`/`message_thread_id` control surface to at most once
+every three seconds so streaming runtime updates cannot overload Telegram Bot API request limits. Suppressed or
+non-dispatched internal events do not emit typing.
+
 ## Queue And Steer
 
 Message-layer sources are equal:
@@ -549,7 +559,7 @@ Routing mode affects semantics:
 
 Telegram controls:
 
-- `/switch` toggles the persisted mode for the current control surface.
+- `/switch` toggles the persisted mode for the current `chat_id`/`message_thread_id` control surface.
 - `/switch steer` and `/switch queue` set the persisted mode explicitly.
 - `/steer <prompt>` and `/queue <prompt>` send one prompt with the named
   semantics; without a prompt they set the persisted mode.
