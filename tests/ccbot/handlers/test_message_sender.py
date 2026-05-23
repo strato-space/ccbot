@@ -25,6 +25,22 @@ async def test_safe_edit_returns_plain_fallback_message() -> None:
 
 
 @pytest.mark.asyncio
+async def test_safe_edit_supports_message_edit_text_method() -> None:
+    target = AsyncMock()
+    target.edit_message_text = None
+    edited_message = object()
+    target.edit_text = AsyncMock(return_value=edited_message)
+
+    result = await safe_edit(target, "progress update")
+
+    assert result is edited_message
+    target.edit_text.assert_awaited_once()
+    kwargs = target.edit_text.await_args.kwargs
+    assert kwargs["parse_mode"] == "MarkdownV2"
+    assert "link_preview_options" in kwargs
+
+
+@pytest.mark.asyncio
 async def test_safe_edit_returns_none_after_final_failure() -> None:
     target = AsyncMock()
     target.edit_message_text = AsyncMock(

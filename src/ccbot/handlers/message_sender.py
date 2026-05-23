@@ -245,11 +245,23 @@ async def safe_reply(message: Message, text: str, **kwargs: Any) -> Message:
             raise
 
 
+async def _edit_message_text(target: Any, text: str, **kwargs: Any) -> Message | None:
+    """Edit a callback/message target using the PTB method it exposes."""
+    edit_message_text = getattr(target, "edit_message_text", None)
+    if callable(edit_message_text):
+        return await edit_message_text(text, **kwargs)
+    edit_text = getattr(target, "edit_text", None)
+    if callable(edit_text):
+        return await edit_text(text, **kwargs)
+    raise AttributeError("target does not support text edits")
+
+
 async def safe_edit(target: Any, text: str, **kwargs: Any) -> Message | None:
     """Edit message with formatting, returning None only after final failure."""
     kwargs.setdefault("link_preview_options", NO_LINK_PREVIEW)
     try:
-        return await target.edit_message_text(
+        return await _edit_message_text(
+            target,
             _ensure_formatted(text),
             parse_mode=PARSE_MODE,
             **kwargs,
@@ -258,7 +270,7 @@ async def safe_edit(target: Any, text: str, **kwargs: Any) -> Message | None:
         raise
     except Exception:
         try:
-            return await target.edit_message_text(strip_sentinels(text), **kwargs)
+            return await _edit_message_text(target, strip_sentinels(text), **kwargs)
         except RetryAfter:
             raise
         except Exception as e:
