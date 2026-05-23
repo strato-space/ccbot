@@ -15,6 +15,7 @@ import binascii
 import io
 import json
 import os
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -65,6 +66,8 @@ _MIME_TYPE_EXTENSIONS: dict[str, str] = {
     "video/quicktime": "mov",
 }
 
+_DEFAULT_VIDEO_PROBE_TIMEOUT_SECONDS = 10.0
+
 
 class DeliveryTargetError(ValueError):
     """Raised when the CLI cannot resolve an unambiguous Telegram target."""
@@ -79,6 +82,52 @@ class DeliveryTarget:
     user_id: int | None = None
     surface_key: str | None = None
     reason: str = ""
+
+
+@dataclass(frozen=True)
+class VideoSendMetadata:
+    """Metadata sent with Telegram video uploads and recorded as request evidence."""
+
+    width: int | None = None
+    height: int | None = None
+    duration: int | None = None
+    supports_streaming: bool | None = None
+    thumbnail_path: Path | None = None
+    source: str | None = None
+
+    def send_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {}
+        if self.width is not None:
+            kwargs["width"] = self.width
+        if self.height is not None:
+            kwargs["height"] = self.height
+        if self.duration is not None:
+            kwargs["duration"] = self.duration
+        if self.supports_streaming is not None:
+            kwargs["supports_streaming"] = self.supports_streaming
+        if self.thumbnail_path is not None:
+            kwargs["thumbnail"] = InputFile(
+                self.thumbnail_path.read_bytes(),
+                filename=self.thumbnail_path.name,
+            )
+        return kwargs
+
+    def request_evidence(self) -> dict[str, Any]:
+        evidence: dict[str, Any] = {
+            "type": "video",
+            "width": self.width,
+            "height": self.height,
+            "duration": self.duration,
+            "supports_streaming": self.supports_streaming,
+        }
+        if self.source:
+            evidence["source"] = self.source
+        if self.thumbnail_path is not None:
+            evidence["thumbnail"] = {
+                "provided": True,
+                "filename": self.thumbnail_path.name,
+            }
+        return {key: value for key, value in evidence.items() if value is not None}
 
 
 def _get_config() -> Any:
@@ -124,6 +173,28 @@ def _parse_optional_int(value: Any, *, field_name: str) -> int | None:
         return int(raw)
     except (TypeError, ValueError) as exc:
         raise DeliveryTargetError(f"{field_name} must be an integer") from exc
+
+
+def _parse_optional_positive_int(value: Any, *, field_name: str) -> int | None:
+    parsed = _parse_optional_int(value, field_name=field_name)
+    if parsed is not None and parsed <= 0:
+        raise ValueError(f"{field_name} must be a positive integer")
+    return parsed
+
+
+def _duration_to_telegram_seconds(value: Any, *, field_name: str) -> int | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if raw == "":
+        return None
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a positive number of seconds") from exc
+    if seconds <= 0:
+        raise ValueError(f"{field_name} must be a positive number of seconds")
+    return max(1, int(round(seconds)))
 
 
 def normalize_chat_id(chat_id: str | int) -> int:
@@ -506,6 +577,126 @@ def _default_attachment_filename(
     return _DEFAULT_ATTACHMENT_FILENAMES[file_type]
 
 
+def _video_probe_timeout_seconds() -> float:
+    raw = os.getenv("CCBOT_VIDEO_PROBE_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return _DEFAULT_VIDEO_PROBE_TIMEOUT_SECONDS
+    try:
+        timeout = float(raw)
+    except ValueError:
+        return _DEFAULT_VIDEO_PROBE_TIMEOUT_SECONDS
+    return timeout if timeout > 0 else _DEFAULT_VIDEO_PROBE_TIMEOUT_SECONDS
+
+
+def _probe_video_metadata(path: Path) -> dict[str, int]:
+    """Return safe Telegram video metadata by probing one local file.
+
+    The probe is best-effort and bounded. Failure returns an empty dict so
+    generic file delivery continues, while JSON request evidence remains honest.
+    """
+
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height,duration:format=duration",
+                "-of",
+                "json",
+                str(path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_video_probe_timeout_seconds(),
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return {}
+    if proc.returncode != 0:
+        return {}
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return {}
+    streams = payload.get("streams")
+    stream = streams[0] if isinstance(streams, list) and streams else {}
+    if not isinstance(stream, dict):
+        stream = {}
+    metadata: dict[str, int] = {}
+    for source_key, output_key in (("width", "width"), ("height", "height")):
+        try:
+            value = int(stream.get(source_key))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            metadata[output_key] = value
+    duration = stream.get("duration")
+    if duration in (None, "N/A"):
+        fmt = payload.get("format")
+        if isinstance(fmt, dict):
+            duration = fmt.get("duration")
+    try:
+        parsed_duration = _duration_to_telegram_seconds(
+            duration,
+            field_name="video_duration",
+        )
+    except ValueError:
+        parsed_duration = None
+    if parsed_duration is not None:
+        metadata["duration"] = parsed_duration
+    return metadata
+
+
+def _resolve_video_send_metadata(
+    *,
+    path: Path | None,
+    width: Any = None,
+    height: Any = None,
+    duration: Any = None,
+    thumbnail_path: str | Path | None = None,
+    supports_streaming: bool | None = None,
+    auto_probe: bool = True,
+) -> VideoSendMetadata:
+    explicit_width = _parse_optional_positive_int(width, field_name="video_width")
+    explicit_height = _parse_optional_positive_int(height, field_name="video_height")
+    explicit_duration = _duration_to_telegram_seconds(
+        duration,
+        field_name="video_duration",
+    )
+    probe_metadata: dict[str, int] = {}
+    if auto_probe and path is not None:
+        probe_metadata = _probe_video_metadata(path)
+
+    resolved_thumbnail: Path | None = None
+    if thumbnail_path:
+        resolved_thumbnail = Path(str(thumbnail_path)).expanduser()
+        if not resolved_thumbnail.is_file():
+            raise ValueError(f"Video thumbnail file not found: {thumbnail_path}")
+
+    source_parts: list[str] = []
+    if any(value is not None for value in (explicit_width, explicit_height, explicit_duration)):
+        source_parts.append("explicit")
+    if probe_metadata:
+        source_parts.append("ffprobe")
+    if resolved_thumbnail is not None:
+        source_parts.append("thumbnail")
+
+    return VideoSendMetadata(
+        width=explicit_width if explicit_width is not None else probe_metadata.get("width"),
+        height=explicit_height if explicit_height is not None else probe_metadata.get("height"),
+        duration=explicit_duration
+        if explicit_duration is not None
+        else probe_metadata.get("duration"),
+        supports_streaming=True if supports_streaming is None else supports_streaming,
+        thumbnail_path=resolved_thumbnail,
+        source="+".join(source_parts) if source_parts else "default",
+    )
+
+
 def _build_message_url(
     *,
     chat_id: int | None,
@@ -533,7 +724,75 @@ def _build_message_url(
     return None
 
 
-def _message_result(msg: Any, target: DeliveryTarget) -> dict[str, Any]:
+def _optional_media_int(media: Any, name: str) -> int | None:
+    value = getattr(media, name, None)
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _optional_media_str(media: Any, name: str) -> str | None:
+    value = getattr(media, name, None)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _telegram_video_evidence(msg: Any) -> dict[str, Any]:
+    video = getattr(msg, "video", None)
+    if video is None:
+        return {}
+    video_evidence = {
+        key: value
+        for key, value in {
+            "width": _optional_media_int(video, "width"),
+            "height": _optional_media_int(video, "height"),
+            "duration": _optional_media_int(video, "duration"),
+            "mime_type": _optional_media_str(video, "mime_type"),
+            "file_size": _optional_media_int(video, "file_size"),
+        }.items()
+        if value is not None
+    }
+    out: dict[str, Any] = {"video": video_evidence}
+    thumbnail = getattr(video, "thumbnail", None)
+    if thumbnail is not None:
+        thumbnail_evidence = {
+            key: value
+            for key, value in {
+                "width": _optional_media_int(thumbnail, "width"),
+                "height": _optional_media_int(thumbnail, "height"),
+                "file_size": _optional_media_int(thumbnail, "file_size"),
+            }.items()
+            if value is not None
+        }
+        if thumbnail_evidence:
+            out["thumbnail"] = thumbnail_evidence
+    return out
+
+
+def _video_evidence_status(telegram_media: dict[str, Any]) -> str:
+    video = telegram_media.get("video")
+    if not isinstance(video, dict):
+        return "request_only"
+    required = ("width", "height", "duration", "mime_type")
+    if all(video.get(key) is not None for key in required):
+        return "complete"
+    if any(video.get(key) is not None for key in required):
+        return "partial"
+    return "request_only"
+
+
+def _message_result(
+    msg: Any,
+    target: DeliveryTarget,
+    *,
+    media_request: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     msg_id = getattr(msg, "message_id", None)
     msg_chat = getattr(msg, "chat", None)
     msg_chat_id = getattr(msg_chat, "id", None)
@@ -556,6 +815,13 @@ def _message_result(msg: Any, target: DeliveryTarget) -> dict[str, Any]:
     )
     if url is not None:
         result["url"] = url
+    if media_request is not None:
+        telegram_media = _telegram_video_evidence(msg)
+        result["media"] = {
+            "request": media_request,
+            "telegram": telegram_media,
+            "evidence_status": _video_evidence_status(telegram_media),
+        }
     return result
 
 
@@ -567,6 +833,7 @@ def _log_delivery(
     success: bool,
     message_id: int | None = None,
     error: str | None = None,
+    media: dict[str, Any] | None = None,
 ) -> None:
     try:
         from .delivery_audit import log_telegram_delivery
@@ -584,6 +851,7 @@ def _log_delivery(
             success=success,
             error=error,
             reason=target.reason,
+            media=media,
         )
     except Exception:
         return
@@ -607,6 +875,12 @@ async def send_bot_message(
     file_type: str | None = "document",
     filename: str | None = None,
     state_path: str | Path | None = None,
+    video_width: str | int | None = None,
+    video_height: str | int | None = None,
+    video_duration: str | int | float | None = None,
+    video_thumbnail_path: str | Path | None = None,
+    video_supports_streaming: bool | None = None,
+    video_auto_probe: bool = True,
 ) -> dict[str, Any]:
     """Send text and optional file payload to a resolved ccbot Telegram target."""
     bot_token = token or os.getenv("TELEGRAM_TOKEN") or _get_default_bot_token()
@@ -674,6 +948,22 @@ async def send_bot_message(
                         "status": "error",
                         "message": f"File not found: {file_path}",
                     }
+                try:
+                    video_metadata = (
+                        _resolve_video_send_metadata(
+                            path=path,
+                            width=video_width,
+                            height=video_height,
+                            duration=video_duration,
+                            thumbnail_path=video_thumbnail_path,
+                            supports_streaming=video_supports_streaming,
+                            auto_probe=video_auto_probe,
+                        )
+                        if normalized_file_type == "video"
+                        else None
+                    )
+                except ValueError as exc:
+                    return {"status": "error", "message": str(exc)}
                 if edit_id is not None:
                     return await _edit_attachment(
                         bot,
@@ -684,6 +974,7 @@ async def send_bot_message(
                         target=send_target,
                         common_kwargs=common_kwargs,
                         edit_message_id=edit_id,
+                        video_metadata=video_metadata,
                     )
                 with path.open("rb") as handle:
                     attachment = InputFile(handle, filename=filename or path.name)
@@ -694,10 +985,27 @@ async def send_bot_message(
                         caption=message,
                         target=send_target,
                         common_kwargs=common_kwargs,
+                        video_metadata=video_metadata,
                     )
 
             try:
                 file_bytes, mime_type = _decode_file_base64(file_base64 or "")
+            except ValueError as exc:
+                return {"status": "error", "message": str(exc)}
+            try:
+                video_metadata = (
+                    _resolve_video_send_metadata(
+                        path=None,
+                        width=video_width,
+                        height=video_height,
+                        duration=video_duration,
+                        thumbnail_path=video_thumbnail_path,
+                        supports_streaming=video_supports_streaming,
+                        auto_probe=False,
+                    )
+                    if normalized_file_type == "video"
+                    else None
+                )
             except ValueError as exc:
                 return {"status": "error", "message": str(exc)}
             attachment = InputFile(
@@ -722,6 +1030,7 @@ async def send_bot_message(
                     target=send_target,
                     common_kwargs=common_kwargs,
                     edit_message_id=edit_id,
+                    video_metadata=video_metadata,
                 )
             return await _send_attachment(
                 bot,
@@ -730,6 +1039,7 @@ async def send_bot_message(
                 caption=message,
                 target=send_target,
                 common_kwargs=common_kwargs,
+                video_metadata=video_metadata,
             )
 
         if edit_id is not None:
@@ -828,6 +1138,7 @@ async def send_bot_message(
             else "text",
             success=True,
             message_id=result.get("message_id"),
+            media=result.get("media") if isinstance(result.get("media"), dict) else None,
         )
     else:
         _log_delivery(
@@ -851,14 +1162,19 @@ async def _send_attachment(
     caption: str,
     target: DeliveryTarget,
     common_kwargs: dict[str, Any],
+    video_metadata: VideoSendMetadata | None = None,
 ) -> dict[str, Any]:
     send_kwargs = dict(common_kwargs)
     send_kwargs["caption"] = caption or None
+    media_request: dict[str, Any] | None = None
     if file_type == "document":
         msg = await bot.send_document(document=attachment, **send_kwargs)
     elif file_type == "photo":
         msg = await bot.send_photo(photo=attachment, **send_kwargs)
     elif file_type == "video":
+        if video_metadata is not None:
+            send_kwargs.update(video_metadata.send_kwargs())
+            media_request = video_metadata.request_evidence()
         msg = await bot.send_video(video=attachment, **send_kwargs)
     elif file_type == "audio":
         msg = await bot.send_audio(audio=attachment, **send_kwargs)
@@ -866,7 +1182,7 @@ async def _send_attachment(
         msg = await bot.send_animation(animation=attachment, **send_kwargs)
     return {
         "status": "success",
-        **_message_result(msg, target),
+        **_message_result(msg, target, media_request=media_request),
         "target": asdict(target),
     }
 
@@ -878,6 +1194,7 @@ def _input_media_for_attachment(
     file_type: str,
     caption: str,
     parse_mode: ParseMode | None,
+    video_metadata: VideoSendMetadata | None = None,
 ) -> Any:
     kwargs = {
         "media": attachment,
@@ -890,6 +1207,8 @@ def _input_media_for_attachment(
     if file_type == "photo":
         return InputMediaPhoto(**kwargs)
     if file_type == "video":
+        if video_metadata is not None:
+            kwargs.update(video_metadata.send_kwargs())
         return InputMediaVideo(**kwargs)
     if file_type == "audio":
         return InputMediaAudio(**kwargs)
@@ -906,6 +1225,7 @@ async def _edit_attachment(
     target: DeliveryTarget,
     common_kwargs: dict[str, Any],
     edit_message_id: int,
+    video_metadata: VideoSendMetadata | None = None,
 ) -> dict[str, Any]:
     edit_kwargs = dict(common_kwargs)
     edit_kwargs.pop("disable_notification", None)
@@ -918,6 +1238,7 @@ async def _edit_attachment(
         file_type=file_type,
         caption=caption,
         parse_mode=parse_mode,
+        video_metadata=video_metadata,
     )
     msg = await bot.edit_message_media(
         message_id=edit_message_id,
@@ -926,7 +1247,13 @@ async def _edit_attachment(
     )
     return {
         "status": "success",
-        **_message_result(msg, target),
+        **_message_result(
+            msg,
+            target,
+            media_request=video_metadata.request_evidence()
+            if file_type == "video" and video_metadata is not None
+            else None,
+        ),
         "target": asdict(target),
     }
 
@@ -995,6 +1322,38 @@ def _build_parser(prog: str = "ccbot send_bot_message") -> argparse.ArgumentPars
     parser.add_argument("--file-base64")
     parser.add_argument("--file-type", default="document")
     parser.add_argument("--filename")
+    parser.add_argument(
+        "--video-width",
+        help="Explicit Telegram send_video width in pixels; overrides ffprobe",
+    )
+    parser.add_argument(
+        "--video-height",
+        help="Explicit Telegram send_video height in pixels; overrides ffprobe",
+    )
+    parser.add_argument(
+        "--video-duration",
+        help="Explicit Telegram send_video duration in seconds; overrides ffprobe",
+    )
+    parser.add_argument(
+        "--video-thumbnail-path",
+        "--thumbnail-path",
+        dest="video_thumbnail_path",
+        help="JPEG thumbnail to upload with --file-type video",
+    )
+    parser.add_argument(
+        "--video-supports-streaming",
+        "--supports-streaming",
+        dest="video_supports_streaming",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Pass supports_streaming to Telegram send_video (default: true for videos)",
+    )
+    parser.add_argument(
+        "--video-auto-probe",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Auto-probe local video width/height/duration with bounded ffprobe",
+    )
     parser.add_argument("--state-file")
     parser.add_argument("--json", action="store_true", help="Print full result JSON")
     return parser
@@ -1044,6 +1403,12 @@ def send_bot_message_main(
                 file_type=args.file_type,
                 filename=args.filename,
                 state_path=args.state_file,
+                video_width=args.video_width,
+                video_height=args.video_height,
+                video_duration=args.video_duration,
+                video_thumbnail_path=args.video_thumbnail_path,
+                video_supports_streaming=args.video_supports_streaming,
+                video_auto_probe=args.video_auto_probe,
             )
         )
     except ValueError as exc:
@@ -1051,6 +1416,8 @@ def send_bot_message_main(
 
     if args.json:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        if result.get("status") != "success":
+            return 1
     elif result.get("status") == "success":
         thread = f" thread_id={result.get('thread_id')}" if result.get("thread_id") is not None else ""
         print(

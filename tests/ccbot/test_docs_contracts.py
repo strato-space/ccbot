@@ -119,6 +119,9 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "event=telegram_polling_health_timeout_stalled" in readme
     assert "token/proxy credentials are redacted" in readme
     assert "pending_update_count" in readme
+    assert "bounded `ffprobe` call" in readme
+    assert "Telegram-returned video/thumbnail geometry" in readme
+    assert "status/message-id/url-only evidence" in readme
     assert "Verbose/debug paths may expose more raw execution surface" in readme
 
 
@@ -298,6 +301,9 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "paired replay-embedded image bytes" in delivery
     assert "local path" in delivery and "not authorization to read files" in delivery
     assert "Inbound media artifact path" in delivery
+    assert "For outbound `--file-type video`" in delivery
+    assert "Message.video" in delivery
+    assert "status/message-id/url-only result is weak" in delivery
     assert "Telegram Bot API download guardrails pass" in delivery
     assert "Audio artifact: /path" in delivery
     assert "Video artifact: /path" in delivery
@@ -312,6 +318,7 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "surface key == full control-surface identity" in boundaries
     assert "Inbound Telegram audio/video handling is a third boundary" in boundaries
     assert "Bot API download guardrails pass" in boundaries
+    assert "Outbound\nvideo sends are allowed to probe local file geometry" in boundaries
     assert "Replay evidence is written by" in boundaries
 
 
@@ -548,6 +555,8 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
     assert "**Pre-final terminal surface barrier**" in doc
     assert "Codex-style command/tool previews" in doc
     assert "Polling liveness guard" in doc
+    assert "outbound video sends auto-probe" in doc
+    assert "Telegram video/thumbnail geometry" in doc
     assert "service-alive-but-polling-dead" in doc
     assert "OMX interactive question artifacts" in doc
     assert "whole pre-final visible surface is" in doc

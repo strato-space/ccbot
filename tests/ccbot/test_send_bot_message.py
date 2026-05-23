@@ -1,5 +1,7 @@
 import asyncio
 import base64
+import contextlib
+import io
 import json
 from types import SimpleNamespace
 
@@ -315,6 +317,361 @@ def test_send_bot_message_gif_file_type_uses_animation_alias(monkeypatch, tmp_pa
     assert captured["caption"] == "animation result"
 
 
+def test_send_bot_message_video_auto_probes_and_returns_media_evidence(
+    monkeypatch,
+    tmp_path,
+):
+    state_path = tmp_path / "state.json"
+    video_path = tmp_path / "namazu.mp4"
+    video_path.write_bytes(b"mp4")
+    _write_state(
+        state_path,
+        {"surface_bindings": {"12345": {"c:-100200300": "@7"}}},
+    )
+    captured: dict = {}
+
+    def _probe(path):
+        assert path == video_path
+        return {"width": 720, "height": 1280, "duration": 55}
+
+    class FakeBot:
+        def __init__(self, token, request=None):
+            captured["token"] = token
+
+        async def send_video(self, video, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                message_id=8463,
+                message_thread_id=555,
+                chat=SimpleNamespace(id=kwargs["chat_id"], username=None),
+                video=SimpleNamespace(
+                    width=kwargs["width"],
+                    height=kwargs["height"],
+                    duration=kwargs["duration"],
+                    mime_type="video/mp4",
+                    file_size=18706819,
+                    thumbnail=SimpleNamespace(width=180, height=320, file_size=54321),
+                ),
+            )
+
+    monkeypatch.setattr(sender, "_probe_video_metadata", _probe)
+    monkeypatch.setattr(sender, "Bot", FakeBot)
+
+    result = asyncio.run(
+        sender.send_bot_message(
+            message="Namazu final preview",
+            token="token-video",
+            file_path=str(video_path),
+            file_type="video",
+            state_path=state_path,
+        )
+    )
+
+    assert result["status"] == "success"
+    assert captured["width"] == 720
+    assert captured["height"] == 1280
+    assert captured["duration"] == 55
+    assert captured["supports_streaming"] is True
+    assert result["media"]["request"] == {
+        "type": "video",
+        "width": 720,
+        "height": 1280,
+        "duration": 55,
+        "supports_streaming": True,
+        "source": "ffprobe",
+    }
+    assert result["media"]["telegram"]["video"]["width"] == 720
+    assert result["media"]["telegram"]["video"]["height"] == 1280
+    assert result["media"]["telegram"]["video"]["duration"] == 55
+    assert result["media"]["telegram"]["video"]["mime_type"] == "video/mp4"
+    assert result["media"]["telegram"]["thumbnail"] == {
+        "width": 180,
+        "height": 320,
+        "file_size": 54321,
+    }
+    assert result["media"]["evidence_status"] == "complete"
+
+
+def test_send_bot_message_video_explicit_metadata_and_thumbnail_override_probe(
+    monkeypatch,
+    tmp_path,
+):
+    state_path = tmp_path / "state.json"
+    video_path = tmp_path / "clip.mp4"
+    thumbnail_path = tmp_path / "thumb.jpg"
+    video_path.write_bytes(b"mp4")
+    thumbnail_path.write_bytes(b"jpg")
+    _write_state(
+        state_path,
+        {"surface_bindings": {"12345": {"c:-100200300": "@7"}}},
+    )
+    captured: dict = {}
+
+    monkeypatch.setattr(
+        sender,
+        "_probe_video_metadata",
+        lambda _path: {"width": 1, "height": 1, "duration": 1},
+    )
+
+    class FakeBot:
+        def __init__(self, token, request=None):
+            pass
+
+        async def send_video(self, video, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                message_id=101,
+                chat=SimpleNamespace(id=kwargs["chat_id"], username=None),
+                video=SimpleNamespace(
+                    width=720,
+                    height=1280,
+                    duration=56,
+                    mime_type="video/mp4",
+                    thumbnail=None,
+                ),
+            )
+
+    monkeypatch.setattr(sender, "Bot", FakeBot)
+
+    result = asyncio.run(
+        sender.send_bot_message(
+            message="explicit metadata",
+            token="token-video",
+            file_path=str(video_path),
+            file_type="video",
+            state_path=state_path,
+            video_width="720",
+            video_height="1280",
+            video_duration="55.6",
+            video_thumbnail_path=str(thumbnail_path),
+            video_supports_streaming=False,
+        )
+    )
+
+    assert result["status"] == "success"
+    assert captured["width"] == 720
+    assert captured["height"] == 1280
+    assert captured["duration"] == 56
+    assert captured["supports_streaming"] is False
+    assert captured["thumbnail"].filename == "thumb.jpg"
+    assert result["media"]["request"]["source"] == "explicit+ffprobe+thumbnail"
+    assert result["media"]["request"]["thumbnail"] == {
+        "provided": True,
+        "filename": "thumb.jpg",
+    }
+
+
+def test_video_probe_failure_is_bounded_and_best_effort(monkeypatch, tmp_path):
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"mp4")
+
+    def _timeout(*_args, **_kwargs):
+        raise sender.subprocess.TimeoutExpired(cmd="ffprobe", timeout=0.01)
+
+    monkeypatch.setattr(sender.subprocess, "run", _timeout)
+
+    assert sender._probe_video_metadata(video_path) == {}
+
+
+def test_send_bot_message_video_bad_metadata_fails_without_sending(
+    monkeypatch,
+    tmp_path,
+):
+    state_path = tmp_path / "state.json"
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"mp4")
+    _write_state(
+        state_path,
+        {"surface_bindings": {"12345": {"c:-100200300": "@7"}}},
+    )
+    captured: dict = {}
+
+    class FakeBot:
+        def __init__(self, token, request=None):
+            pass
+
+        async def send_video(self, video, **kwargs):  # pragma: no cover
+            captured["sent"] = True
+            raise AssertionError("send_video should not be called")
+
+    monkeypatch.setattr(sender, "Bot", FakeBot)
+
+    result = asyncio.run(
+        sender.send_bot_message(
+            message="bad metadata",
+            token="token-video",
+            file_path=str(video_path),
+            file_type="video",
+            state_path=state_path,
+            video_width="-1",
+        )
+    )
+
+    assert result == {"status": "error", "message": "video_width must be a positive integer"}
+    assert "sent" not in captured
+
+
+def test_send_bot_message_main_json_error_returns_nonzero(monkeypatch, tmp_path):
+    state_path = tmp_path / "state.json"
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"mp4")
+    _write_state(
+        state_path,
+        {"surface_bindings": {"12345": {"c:-100200300": "@7"}}},
+    )
+
+    class FakeBot:
+        def __init__(self, token, request=None):
+            pass
+
+        async def send_video(self, video, **kwargs):  # pragma: no cover
+            raise AssertionError("send_video should not be called")
+
+    monkeypatch.setattr(sender, "Bot", FakeBot)
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        code = sender.send_bot_message_main(
+            [
+                "--token",
+                "token-video",
+                "--message",
+                "",
+                "--state-file",
+                str(state_path),
+                "--file-path",
+                str(video_path),
+                "--file-type",
+                "video",
+                "--video-width",
+                "0",
+                "--json",
+            ],
+            prog="ccbot send",
+        )
+
+    assert code == 1
+    assert json.loads(stdout.getvalue()) == {
+        "status": "error",
+        "message": "video_width must be a positive integer",
+    }
+    assert stderr.getvalue() == ""
+
+
+def test_send_bot_message_video_weak_telegram_response_is_request_only(
+    monkeypatch,
+    tmp_path,
+):
+    state_path = tmp_path / "state.json"
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"mp4")
+    _write_state(
+        state_path,
+        {"surface_bindings": {"12345": {"c:-100200300": "@7"}}},
+    )
+    captured: dict = {}
+
+    monkeypatch.setattr(
+        sender,
+        "_probe_video_metadata",
+        lambda _path: {"width": 720, "height": 1280, "duration": 55},
+    )
+
+    class FakeBot:
+        def __init__(self, token, request=None):
+            pass
+
+        async def send_video(self, video, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                message_id=101,
+                chat=SimpleNamespace(id=kwargs["chat_id"], username=None),
+            )
+
+    monkeypatch.setattr(sender, "Bot", FakeBot)
+
+    result = asyncio.run(
+        sender.send_bot_message(
+            message="weak telegram response",
+            token="token-video",
+            file_path=str(video_path),
+            file_type="video",
+            state_path=state_path,
+        )
+    )
+
+    assert result["status"] == "success"
+    assert captured["width"] == 720
+    assert result["media"]["request"]["width"] == 720
+    assert result["media"]["telegram"] == {}
+    assert result["media"]["evidence_status"] == "request_only"
+
+
+def test_send_bot_message_edit_video_attachment_includes_media_metadata(
+    monkeypatch,
+    tmp_path,
+):
+    state_path = tmp_path / "state.json"
+    video_path = tmp_path / "clip.mp4"
+    thumbnail_path = tmp_path / "thumb.jpg"
+    video_path.write_bytes(b"mp4")
+    thumbnail_path.write_bytes(b"jpg")
+    _write_state(
+        state_path,
+        {
+            "surface_bindings": {"12345": {"t:42": "@7"}},
+            "group_chat_ids": {"12345:42": -100200300},
+        },
+    )
+    captured: dict = {}
+
+    class FakeBot:
+        def __init__(self, token, request=None):
+            pass
+
+        async def edit_message_media(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                message_id=888,
+                message_thread_id=42,
+                chat=SimpleNamespace(id=kwargs["chat_id"], username=None),
+                video=SimpleNamespace(
+                    width=720,
+                    height=1280,
+                    duration=55,
+                    mime_type="video/mp4",
+                    thumbnail=None,
+                ),
+            )
+
+    monkeypatch.setattr(sender, "Bot", FakeBot)
+
+    result = asyncio.run(
+        sender.send_bot_message(
+            message="edited video",
+            token="token-edit",
+            edit_message_id="888",
+            file_path=str(video_path),
+            file_type="video",
+            state_path=state_path,
+            video_width=720,
+            video_height=1280,
+            video_duration=55,
+            video_thumbnail_path=str(thumbnail_path),
+        )
+    )
+
+    assert result["status"] == "success"
+    assert captured["message_id"] == 888
+    assert captured["media"].width == 720
+    assert captured["media"].height == 1280
+    assert captured["media"]._duration.total_seconds() == 55
+    assert captured["media"].supports_streaming is True
+    assert captured["media"].thumbnail.filename == "thumb.jpg"
+    assert result["media"]["evidence_status"] == "complete"
+
+
 def test_send_bot_message_explicit_token_and_chat_id_does_not_need_config(
     monkeypatch,
     tmp_path,
@@ -508,6 +865,18 @@ def test_send_alias_help_includes_edit_message_id():
     help_text = sender._build_parser(prog="ccbot send").format_help()
 
     assert "--edit-message-id" in help_text
+
+
+def test_send_alias_help_includes_video_metadata_flags():
+    help_text = sender._build_parser(prog="ccbot send").format_help()
+
+    assert "--video-width" in help_text
+    assert "--video-height" in help_text
+    assert "--video-duration" in help_text
+    assert "--thumbnail-path" in help_text
+    assert "--supports-streaming" in help_text
+
+
 def test_send_bot_message_uses_proxy_env(monkeypatch, tmp_path):
     state_path = tmp_path / "state.json"
     _write_state(

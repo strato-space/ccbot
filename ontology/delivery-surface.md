@@ -72,7 +72,15 @@ control surface at a time.
     `ccbot send_bot_message` CLI
   - scoped to a resolved Telegram control surface via stored Telegram group
     routing coordinates, or to explicit `chat_id` / `thread_id` overrides
-  - may include document/file payloads such as result archives
+  - may include document/file payloads such as result archives, images,
+    animations, audio, or video
+  - outbound video delivery carries requested geometry metadata and
+    Telegram-returned video/thumbnail geometry as evidence; a bare
+    status/message-id/url success is not sufficient proof for
+    geometry-sensitive final preview delivery
+  - For outbound `--file-type video`, JSON/audit evidence includes the
+    Telegram `Message.video` object geometry when Telegram returns it, and a
+    status/message-id/url-only result is weak final-preview evidence
   - is not runtime input, not replay evidence, not a user turn opener, and not
     an assistant-final artifact
   - must not create or mutate a tmux binding; it is a direct outbound Telegram

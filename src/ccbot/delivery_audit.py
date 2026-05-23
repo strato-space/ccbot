@@ -57,6 +57,7 @@ def log_telegram_delivery(
     part_index: int | None = None,
     part_count: int | None = None,
     render_mode: str | None = None,
+    media: dict[str, Any] | None = None,
 ) -> None:
     """Append a single Telegram delivery audit row.
 
@@ -93,6 +94,8 @@ def log_telegram_delivery(
         row.update({key: value for key, value in optional.items() if value is not None})
         if error:
             row["error"] = _preview(error, max_chars=180)
+        if media:
+            row["media"] = media
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
     except Exception as exc:  # pragma: no cover - best-effort observability only
