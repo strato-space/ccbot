@@ -179,6 +179,7 @@ class ThreadLocator:
     file_path: str
     runtime_kind: str = "claude"
     cwd: str = ""
+    activity_timestamp: float = 0.0
 
     @property
     def session_id(self) -> str:

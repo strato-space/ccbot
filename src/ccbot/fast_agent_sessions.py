@@ -124,9 +124,8 @@ class FastAgentSessionCandidate:
 
     @property
     def ordering_timestamp(self) -> float:
-        if self.updated_at:
-            return _parse_timestamp(self.updated_at)
-        return self.mtime
+        """Replay/session file activity timestamp used for picker ordering/display."""
+        return self.mtime or _parse_timestamp(self.updated_at)
 
     @property
     def summary(self) -> str:
@@ -141,6 +140,7 @@ class FastAgentSessionCandidate:
             file_path=str(self.replay_file),
             runtime_kind="fast-agent",
             cwd=self.cwd,
+            activity_timestamp=self.ordering_timestamp,
         )
 
 
@@ -273,10 +273,8 @@ class FastAgentSessionCatalog:
 
         candidates.sort(
             key=lambda candidate: (
-                0 if candidate.updated_at else 1,
-                -_parse_timestamp(candidate.updated_at)
-                if candidate.updated_at
-                else -candidate.mtime,
+                -candidate.ordering_timestamp,
+                -_parse_timestamp(candidate.updated_at),
                 candidate.summary.casefold(),
                 candidate.session_id,
             )

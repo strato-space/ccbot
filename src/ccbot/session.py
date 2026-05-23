@@ -2446,7 +2446,18 @@ class SessionManager:
         because Codex candidates exist for the same path.
         """
         sessions: list[ThreadLocator] = []
-        seen_thread_ids: set[str] = set()
+        seen_thread_keys: set[tuple[str, str]] = set()
+
+        def _seen_key(locator: ThreadLocator) -> tuple[str, str]:
+            return (locator.runtime_kind or "claude", locator.thread_id)
+
+        def _locator_activity(locator: ThreadLocator) -> float:
+            if locator.activity_timestamp:
+                return locator.activity_timestamp
+            try:
+                return Path(locator.file_path).stat().st_mtime
+            except OSError:
+                return 0.0
 
         if self.codex_thread_catalog is not None:
             self.codex_thread_catalog.refresh()
@@ -2456,7 +2467,7 @@ class SessionManager:
             for candidate in candidates:
                 locator = candidate.to_locator()
                 sessions.append(locator)
-                seen_thread_ids.add(locator.thread_id)
+                seen_thread_keys.add(_seen_key(locator))
 
         if self.fast_agent_session_catalog is not None:
             self.fast_agent_session_catalog.refresh()
@@ -2466,15 +2477,18 @@ class SessionManager:
             )
             for candidate in fast_agent_candidates:
                 locator = candidate.to_locator()
-                if locator.thread_id in seen_thread_ids:
+                if _seen_key(locator) in seen_thread_keys:
                     continue
                 sessions.append(locator)
-                seen_thread_ids.add(locator.thread_id)
+                seen_thread_keys.add(_seen_key(locator))
 
         encoded_cwd = self._encode_cwd(cwd)
         project_dir = config.claude_projects_path / encoded_cwd
         if not project_dir.is_dir():
-            return sessions
+            return sorted(
+                sessions,
+                key=lambda locator: (-_locator_activity(locator), locator.summary.casefold(), locator.thread_id),
+            )[:10]
 
         # Collect JSONL files sorted by mtime (newest first)
         jsonl_files = sorted(
@@ -2483,20 +2497,32 @@ class SessionManager:
             reverse=True,
         )
 
-        # Skip sessions-index and cap at 10
+        legacy_added = 0
         for f in jsonl_files:
             if f.stem == "sessions-index":
                 continue
-            if len(sessions) >= 10:
+            if legacy_added >= 10:
                 break
             session_id = f.stem
-            if session_id in seen_thread_ids:
+            probe = ThreadLocator(
+                thread_id=session_id,
+                summary="",
+                message_count=0,
+                file_path=str(f),
+                runtime_kind="claude",
+                cwd=cwd,
+            )
+            if _seen_key(probe) in seen_thread_keys:
                 continue
             session = await self._get_thread_locator_direct(session_id, cwd)
             if session and session.message_count > 0:
                 sessions.append(session)
-                seen_thread_ids.add(session.thread_id)
-        return sessions
+                seen_thread_keys.add(_seen_key(session))
+                legacy_added += 1
+        return sorted(
+            sessions,
+            key=lambda locator: (-_locator_activity(locator), locator.summary.casefold(), locator.thread_id),
+        )[:10]
 
     async def list_sessions_for_directory(self, cwd: str) -> list[ClaudeSession]:
         return await self.list_threads_for_directory(cwd)

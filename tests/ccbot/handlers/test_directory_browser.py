@@ -106,3 +106,23 @@ def test_default_browse_root_ignores_restore_cwd(
 
     assert default_browse_root() != str(restore_cwd.resolve())
     assert default_browse_root() != str(service_cwd.resolve())
+
+
+def test_build_thread_picker_uses_activity_timestamp_for_display(monkeypatch):
+    now = 1_000_000.0
+    monkeypatch.setattr("ccbot.handlers.directory_browser.time.time", lambda: now)
+    text, _keyboard = build_thread_picker(
+        [
+            SimpleNamespace(
+                thread_id="thread-1",
+                summary="Activity based thread",
+                message_count=12,
+                file_path="/missing/thread-1.jsonl",
+                activity_timestamp=now - 120,
+            )
+        ],
+        bind_flow_version=3,
+        bind_flow_nonce="nonce123",
+    )
+
+    assert "Activity based thread — 12 messages (2m ago)" in text

@@ -298,12 +298,15 @@ def build_directory_browser(
     return text, InlineKeyboardMarkup(buttons), subdirs
 
 
-def _relative_time(file_path: str) -> str:
-    """Format file mtime as a human-readable relative time string."""
-    try:
-        mtime = os.path.getmtime(file_path)
-    except OSError:
-        return ""
+def _relative_time(file_path: str, activity_timestamp: float = 0.0) -> str:
+    """Format activity time as a human-readable relative time string."""
+    if activity_timestamp:
+        mtime = activity_timestamp
+    else:
+        try:
+            mtime = os.path.getmtime(file_path)
+        except OSError:
+            return ""
     delta = int(time.time() - mtime)
     if delta < 60:
         return "just now"
@@ -342,7 +345,7 @@ def build_thread_picker(
         summary = (
             thread.summary[:40] + "…" if len(thread.summary) > 40 else thread.summary
         )
-        rel = _relative_time(thread.file_path)
+        rel = _relative_time(thread.file_path, getattr(thread, "activity_timestamp", 0.0))
         time_str = f" ({rel})" if rel else ""
         lines.append(f"{i + 1}. {summary} — {thread.message_count} messages{time_str}")
 

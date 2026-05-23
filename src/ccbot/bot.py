@@ -1875,6 +1875,20 @@ async def _surface_omx_question_state(
     return True
 
 
+
+
+def _is_forum_topic_not_modified_error(exc: Exception) -> bool:
+    if not isinstance(exc, BadRequest):
+        return False
+    text = str(exc).strip().casefold().replace(" ", "_")
+    return text in {
+        "topic_not_modified",
+        "forum_topic_not_modified",
+        "message_is_not_modified",
+        "message_not_modified",
+    }
+
+
 async def _sync_topic_title(
     bot: Bot,
     user_id: int,
@@ -1890,6 +1904,12 @@ async def _sync_topic_title(
             name=topic_title,
         )
         return True
+    except BadRequest as e:
+        if _is_forum_topic_not_modified_error(e):
+            logger.debug("Forum topic title already synced: %s", e)
+            return True
+        logger.debug("Failed to sync forum topic title: %s", e)
+        return False
     except Exception as e:
         logger.debug("Failed to sync forum topic title: %s", e)
         return False
@@ -5612,6 +5632,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             pending_tid,
             pending_surface=pending_surface,
             resume_session_id=thread.thread_id,
+            runtime_kind=getattr(thread, "runtime_kind", None),
         )
 
     elif data == CB_THREAD_NEW:

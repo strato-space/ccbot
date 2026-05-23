@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import time
 from pathlib import Path
@@ -12,6 +13,7 @@ import pytest
 from ccbot.codex_threads import CodexThreadCatalog
 from ccbot.fast_agent_sessions import FastAgentSessionCatalog
 from ccbot.session import SessionManager
+from ccbot.runtime_types import ThreadLocator
 
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "codex"
@@ -562,7 +564,10 @@ async def test_session_manager_preserves_legacy_claude_threads_in_mixed_director
 
     sessions = await session_manager.list_threads_for_directory("/home")
 
-    assert sessions[0].thread_id == "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9"
+    assert any(
+        session.thread_id == "019d4e4b-7fac-77f3-b559-cb8e9b4c39a9"
+        for session in sessions
+    )
     assert any(session.thread_id == "legacy-claude-thread" for session in sessions)
     legacy = next(
         session for session in sessions if session.thread_id == "legacy-claude-thread"
@@ -750,3 +755,76 @@ async def test_codex_registration_recovers_after_delayed_index_write(
 
     assert resolved is not None
     assert resolved.thread_id == "019d4e63-f279-79b1-8dfd-be785dc4a419"
+
+
+def test_codex_picker_order_uses_rollout_activity_over_stale_index_timestamp(
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / ".codex"
+    fresh_id = "019d5000-0000-7000-8000-000000000101"
+    stale_id = "019d5000-0000-7000-8000-000000000102"
+    _write_codex_thread(
+        codex_home,
+        thread_id=fresh_id,
+        cwd="/workspace/app",
+        thread_name="Fresh replay activity",
+        updated_at="2026-04-01T10:00:00Z",
+    )
+    _write_codex_thread(
+        codex_home,
+        thread_id=stale_id,
+        cwd="/workspace/app",
+        thread_name="Stale replay activity",
+        updated_at="2026-04-03T10:00:00Z",
+    )
+    fresh = next(codex_home.glob(f"sessions/**/rollout-{fresh_id}.jsonl"))
+    stale = next(codex_home.glob(f"sessions/**/rollout-{stale_id}.jsonl"))
+    os.utime(fresh, (2_000_000_000, 2_000_000_000))
+    os.utime(stale, (1_000_000_000, 1_000_000_000))
+
+    catalog = CodexThreadCatalog(codex_home=codex_home)
+    candidates = catalog.list_candidates_for_cwd("/workspace/app")
+
+    assert [candidate.thread_id for candidate in candidates] == [fresh_id, stale_id]
+    assert candidates[0].to_locator().activity_timestamp == fresh.stat().st_mtime
+
+
+@pytest.mark.asyncio
+async def test_session_manager_caps_legacy_claude_reads_before_global_sort(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fixture_catalog: CodexThreadCatalog,
+) -> None:
+    project_dir = tmp_path / SessionManager._encode_cwd("/home")
+    project_dir.mkdir(parents=True)
+    for idx in range(12):
+        path = project_dir / f"legacy-{idx}.jsonl"
+        path.write_text("{}\n", encoding="utf-8")
+        os.utime(path, (1_000_000_000 + idx, 1_000_000_000 + idx))
+    monkeypatch.setattr("ccbot.session.config.claude_projects_path", tmp_path)
+    monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+    monkeypatch.setattr(SessionManager, "_save_state", lambda self: None)
+    manager = SessionManager(
+        codex_thread_catalog=fixture_catalog,
+        fast_agent_session_catalog=FastAgentSessionCatalog(
+            environment_root=fixture_catalog.codex_home / "empty-fast-agent"
+        ),
+    )
+    calls: list[str] = []
+
+    async def fake_locator(session_id: str, cwd: str):
+        calls.append(session_id)
+        return ThreadLocator(
+            thread_id=session_id,
+            summary=session_id,
+            message_count=1,
+            file_path=str(project_dir / f"{session_id}.jsonl"),
+            runtime_kind="claude",
+            cwd=cwd,
+        )
+
+    monkeypatch.setattr(manager, "_get_thread_locator_direct", fake_locator)
+
+    await manager.list_threads_for_directory("/home")
+
+    assert len(calls) == 10

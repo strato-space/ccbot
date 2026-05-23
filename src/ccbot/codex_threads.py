@@ -229,9 +229,12 @@ class CodexThreadCandidate:
 
     @property
     def ordering_timestamp(self) -> float:
-        if self.updated_at:
-            return _parse_timestamp(self.updated_at)
-        return self.mtime
+        """Replay activity timestamp used for picker ordering/display.
+
+        `updated_at` is persisted identity metadata from Codex's session index;
+        it must not outrank rollout/replay file activity in resume pickers.
+        """
+        return self.mtime or _parse_timestamp(self.updated_at)
 
     @property
     def summary(self) -> str:
@@ -246,6 +249,7 @@ class CodexThreadCandidate:
             file_path=str(self.rollout_file),
             runtime_kind="codex",
             cwd=self.cwd,
+            activity_timestamp=self.ordering_timestamp,
         )
 
 
@@ -561,10 +565,8 @@ class CodexThreadCatalog:
             candidates.append(lookup.to_candidate(entry))
         candidates.sort(
             key=lambda candidate: (
-                0 if candidate.updated_at else 1,
-                -_parse_timestamp(candidate.updated_at)
-                if candidate.updated_at
-                else -candidate.mtime,
+                -candidate.ordering_timestamp,
+                -_parse_timestamp(candidate.updated_at),
                 candidate.summary.casefold(),
                 candidate.thread_id,
             )

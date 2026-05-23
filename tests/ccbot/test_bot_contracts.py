@@ -5189,6 +5189,48 @@ class TestThreadPickerFlow:
 
         mock_create.assert_awaited_once()
         assert mock_create.await_args.kwargs["resume_session_id"] == "thread-1"
+        assert mock_create.await_args.kwargs["runtime_kind"] is None
+
+
+    @pytest.mark.asyncio
+    async def test_thread_picker_resume_preserves_selected_runtime_kind(self):
+        update = self._make_callback_update(
+            append_bind_flow_token(
+                f"{bot_mod.CB_THREAD_SELECT}1",
+                version=2,
+                nonce="nonce123",
+            )
+        )
+        context = _make_context()
+        context.user_data = {}
+        surface = bot_mod.control_surface_classifier(update)
+        bot_mod._set_pending_surface(context.user_data, surface)
+        bot_mod._set_surface_flow_values(
+            context.user_data,
+            surface,
+            **{
+                bot_mod.THREADS_KEY: [
+                    SimpleNamespace(thread_id="shared", runtime_kind="codex"),
+                    SimpleNamespace(thread_id="shared", runtime_kind="fast-agent"),
+                ],
+                bot_mod.THREAD_PICKER_SELECTED_PATH_KEY: "/tmp/project",
+            },
+        )
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch(
+                "ccbot.bot._create_and_bind_window", new_callable=AsyncMock
+            ) as mock_create,
+        ):
+            mock_sm.validate_topic_bind_flow_callback.return_value = True
+            await bot_mod.callback_handler(update, context)
+
+        mock_create.assert_awaited_once()
+        assert mock_create.await_args.kwargs["resume_session_id"] == "shared"
+        assert mock_create.await_args.kwargs["runtime_kind"] == "fast-agent"
 
     @pytest.mark.asyncio
     async def test_thread_picker_fresh_thread_omits_resume_id(self):
@@ -7057,3 +7099,86 @@ async def test_handle_new_message_waits_for_assistant_final_queue_before_next_tu
 
     mock_content.assert_awaited_once()
     assert joined is True
+
+
+class TestTopicTitleSyncNoop:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "message",
+        ["Topic_not_modified", "Forum_topic_not_modified", "message is not modified"],
+    )
+    async def test_sync_topic_title_treats_known_noop_as_success(self, message):
+        bot = AsyncMock()
+        bot.edit_forum_topic = AsyncMock(side_effect=BadRequest(message))
+
+        with patch("ccbot.bot.session_manager") as mock_sm:
+            mock_sm.resolve_chat_id.return_value = 100
+            assert await bot_mod._sync_topic_title(bot, 1, 42, "media jokes") is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "topic_not_modified_but_permission_denied",
+            "chat not modified because forum disabled",
+            "Topic_not_modified extra details unexpected",
+        ],
+    )
+    async def test_sync_topic_title_rejects_misleading_noop_substrings(self, message):
+        bot = AsyncMock()
+        bot.edit_forum_topic = AsyncMock(side_effect=BadRequest(message))
+
+        with patch("ccbot.bot.session_manager") as mock_sm:
+            mock_sm.resolve_chat_id.return_value = 100
+            assert await bot_mod._sync_topic_title(bot, 1, 42, "media jokes") is False
+
+    @pytest.mark.asyncio
+    async def test_create_and_bind_window_suppresses_warning_for_topic_noop(self):
+        query = MagicMock(spec=CallbackQuery)
+        query.answer = AsyncMock()
+        context = _make_context()
+        user = MagicMock(spec=User)
+        user.id = 1
+        surface = bot_mod.ControlSurface(
+            kind="group_topic",
+            chat_id=100,
+            thread_id=42,
+            legacy_scope_id=42,
+            surface_key="t:42",
+            label="topic",
+            is_shared_group=True,
+            supports_bind_flow=True,
+        )
+
+        with (
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock) as mock_edit,
+            patch.object(bot_mod.config, "claude_command", "codex"),
+        ):
+            mock_sm.get_surface_title.return_value = "media jokes"
+            mock_sm.bind_window.return_value = True
+            mock_sm.set_surface_title = MagicMock()
+            mock_sm.resolve_chat_id.return_value = 100
+            context.bot.edit_forum_topic = AsyncMock(side_effect=BadRequest("Topic_not_modified"))
+            mock_tmux.create_window = AsyncMock(
+                return_value=(
+                    True,
+                    "Created window 'media jokes' at /home/tools/mediagen-comfy",
+                    "media jokes",
+                    "@16",
+                )
+            )
+
+            await bot_mod._create_and_bind_window(
+                query,
+                context,
+                user,
+                "/home/tools/mediagen-comfy",
+                pending_thread_id=42,
+                pending_surface=surface,
+            )
+
+        rendered = mock_edit.await_args.args[1]
+        assert "Telegram topic title could not be synced" not in rendered
+        assert "Started fresh thread" in rendered

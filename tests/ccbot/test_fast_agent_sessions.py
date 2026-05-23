@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,25 @@ import pytest
 from ccbot.codex_threads import CodexThreadCatalog
 from ccbot.fast_agent_sessions import FastAgentSessionCatalog
 from ccbot.session import SessionManager
+
+
+def _write_test_codex_thread(
+    codex_home: Path,
+    *,
+    thread_id: str,
+    cwd: str,
+    thread_name: str,
+    updated_at: str,
+) -> None:
+    sessions_root = codex_home / "sessions" / "2026" / "04" / "02"
+    sessions_root.mkdir(parents=True, exist_ok=True)
+    with (codex_home / "session_index.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"id": thread_id, "thread_name": thread_name, "updated_at": updated_at}) + "\n")
+    rollout = sessions_root / f"rollout-{thread_id}.jsonl"
+    rollout.write_text(
+        json.dumps({"timestamp": updated_at, "type": "session_meta", "payload": {"id": thread_id, "cwd": cwd, "originator": "codex-tui", "source": "cli"}}) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _build_fast_agent_environment(tmp_path: Path) -> Path:
@@ -122,3 +142,45 @@ async def test_session_manager_lists_and_resolves_fast_agent_sessions(
     assert resolved is not None
     assert resolved.thread_id == "fa-session-20260403-01"
     assert resolved.file_path.endswith("acp_log.jsonl")
+
+
+@pytest.mark.asyncio
+async def test_session_manager_sorts_mixed_runtime_threads_by_activity_and_runtime_scoped_ids(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / ".codex"
+    shared_id = "shared-thread-id"
+    _write_test_codex_thread(
+        codex_home,
+        thread_id=shared_id,
+        cwd=str(tmp_path),
+        thread_name="Codex older",
+        updated_at="2026-04-01T10:00:00Z",
+    )
+    codex_rollout = next(codex_home.glob(f"sessions/**/rollout-{shared_id}.jsonl"))
+    os.utime(codex_rollout, (1_000_000_000, 1_000_000_000))
+
+    environment_root = _build_fast_agent_environment(tmp_path)
+    session_json = environment_root / "sessions" / "fa-session-20260403-01" / "session.json"
+    payload = json.loads(session_json.read_text(encoding="utf-8"))
+    payload["name"] = shared_id
+    payload["metadata"]["session_id"] = shared_id
+    payload["metadata"]["title"] = "Fast newer"
+    session_json.write_text(json.dumps(payload), encoding="utf-8")
+    for path in (environment_root / "sessions" / "fa-session-20260403-01").glob("*"):
+        os.utime(path, (2_000_000_000, 2_000_000_000))
+
+    monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+    monkeypatch.setattr(SessionManager, "_save_state", lambda self: None)
+    manager = SessionManager(
+        codex_thread_catalog=CodexThreadCatalog(codex_home=codex_home),
+        fast_agent_session_catalog=FastAgentSessionCatalog(environment_root=environment_root),
+    )
+
+    sessions = await manager.list_threads_for_directory(str(tmp_path))
+
+    assert [(session.runtime_kind, session.thread_id) for session in sessions[:2]] == [
+        ("fast-agent", shared_id),
+        ("codex", shared_id),
+    ]
