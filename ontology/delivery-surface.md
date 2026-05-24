@@ -29,6 +29,24 @@ control surface at a time.
     - command execution progress
     - file-change churn
 
+- **Terminal control panel artifact**
+  - mutable operator-status surface derived from the visible tmux control pane
+    when Codex exposes terminal-only controls that do not enter replay as
+    assistant content
+  - current examples:
+    - Codex `/goal` panel with status, objective, time used, tokens used, and
+      local commands
+    - Codex `Conversation interrupted` notice after the tmux operator presses
+      Esc
+  - not a user turn opener, not assistant-final, and not a warning unless a
+    specific subtype opts into warning-family delivery
+  - may appear after a prior assistant-final because it belongs to operator
+    control state rather than the closed assistant turn; it still remains scoped
+    to the active Telegram `chat_id`/`message_thread_id`/tmux window binding
+  - must use sanitized, human-facing panel fields and must not expose raw
+    transport metadata, pane ids, or hidden prompt scaffolds beyond the
+    ordinary resolved target context already allowed for receipts/status
+
 - **Terminal media result artifact**
   - `assistant_final` result whose primary user-facing payload is media rather
     than standalone text

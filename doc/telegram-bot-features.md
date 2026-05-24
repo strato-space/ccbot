@@ -159,6 +159,7 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | **Message rate limiting** | ✅ | 1.1s minimum interval per user to avoid flood control |
 | **Per-user message queues** | ✅ | FIFO ordering, content/status task separation, message merging |
 | **Status message deduplication** | ✅ | Skip edit if status text unchanged |
+| **Codex terminal-control panel mirroring** | ✅ | `/goal` panels and `Conversation interrupted` notices visible only in tmux are mirrored to Telegram as scoped mutable operator-status artifacts rather than user echo or assistant-final content |
 
 ### Potential Improvements (Prioritized)
 

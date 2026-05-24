@@ -1040,3 +1040,92 @@ async def test_transition_missing_window_binding_rebinds_external_when_replay_su
     kwargs = mock_content.await_args.kwargs
     assert kwargs["window_id"] == "external:codex:thread-1"
     assert "read-only mode" in kwargs["text"] or "persisted replay evidence" in kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_status_polling_projects_codex_goal_panel_as_terminal_control(mock_bot: AsyncMock):
+    window_id = "@5"
+    mock_window = MagicMock()
+    mock_window.window_id = window_id
+    mock_window.pane_current_command = "node"
+    pane_text = (
+        "Goal\n"
+        "Status: complete\n"
+        "Objective: Complete the durable ultragoal plan.\n"
+        "Time used: 58m\n"
+        "Tokens used: 638K\n"
+        "\n"
+        "Commands: /goal edit, /goal clear\n"
+        "› \n"
+    )
+
+    with (
+        patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+        patch(
+            "ccbot.handlers.status_polling.enqueue_pending_input_update",
+            new_callable=AsyncMock,
+        ) as mock_pending,
+        patch(
+            "ccbot.handlers.status_polling.enqueue_status_update",
+            new_callable=AsyncMock,
+        ) as mock_status,
+        patch(
+            "ccbot.handlers.status_polling.current_turn_generation",
+            return_value=12,
+        ),
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
+        mock_tmux.capture_pane = AsyncMock(return_value=pane_text)
+
+        await update_status_message(mock_bot, user_id=1, window_id=window_id, thread_id=42)
+
+    mock_pending.assert_awaited_once()
+    mock_status.assert_awaited_once()
+    args = mock_status.await_args.args
+    kwargs = mock_status.await_args.kwargs
+    assert args[:4] == (mock_bot, 1, window_id, args[3])
+    assert args[3].startswith("🎯 Codex goal")
+    assert "Tokens used: 638K" in args[3]
+    assert kwargs["content_type"] == "terminal_control_panel"
+    assert kwargs["semantic_kind"] == "terminal_control"
+    assert kwargs["turn_generation"] == 12
+
+
+@pytest.mark.asyncio
+async def test_status_polling_projects_conversation_interrupted_as_terminal_control(
+    mock_bot: AsyncMock,
+):
+    window_id = "@5"
+    mock_window = MagicMock()
+    mock_window.window_id = window_id
+    mock_window.pane_current_command = "node"
+    pane_text = (
+        "previous output\n"
+        "■ Conversation interrupted - tell the model what to do differently. "
+        "Something went wrong? Hit /feedback to report the issue.\n"
+        "› Find and fix a bug in @filename\n"
+        "  gpt-5.5 high · main · Context 29% left\n"
+    )
+
+    with (
+        patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+        patch(
+            "ccbot.handlers.status_polling.enqueue_pending_input_update",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "ccbot.handlers.status_polling.enqueue_status_update",
+            new_callable=AsyncMock,
+        ) as mock_status,
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
+        mock_tmux.capture_pane = AsyncMock(return_value=pane_text)
+
+        await update_status_message(mock_bot, user_id=1, window_id=window_id, thread_id=42)
+
+    mock_status.assert_awaited_once()
+    args = mock_status.await_args.args
+    kwargs = mock_status.await_args.kwargs
+    assert args[3].startswith("⚠️ Codex conversation interrupted")
+    assert kwargs["content_type"] == "terminal_control_panel"
+    assert kwargs["semantic_kind"] == "terminal_control"

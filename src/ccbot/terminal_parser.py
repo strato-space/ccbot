@@ -57,6 +57,14 @@ class PendingInputPreview:
 
 
 @dataclass(frozen=True)
+class TerminalControlObservation:
+    """User-visible Codex terminal-control/status surface from tmux."""
+
+    kind: str
+    text: str
+
+
+@dataclass(frozen=True)
 class UIPattern:
     """A text-marker pair that delimits an interactive UI region.
 
@@ -213,6 +221,99 @@ _PENDING_STATUS_LINE_RE = re.compile(r"^\s*[·✻✽✶✳✢]\s+")
 _CODEX_CONVERSATION_INTERRUPTED_RE = re.compile(
     r"^\s*■\s*Conversation interrupted\b", re.IGNORECASE
 )
+
+_CODEX_GOAL_PANEL_LABEL_RE = re.compile(
+    r"^\s*(Status|Objective|Time used|Tokens used|Commands):\s*(.*)$",
+    re.IGNORECASE,
+)
+_CODEX_PROMPT_RE = re.compile(r"^\s*(?:›|❯)(?:\s|$)")
+_CODEX_FOOTER_RE = re.compile(r"^\s*gpt-[^·]*(?:·|$)", re.IGNORECASE)
+
+
+def _clip_terminal_control_value(text: str, *, max_chars: int = 700) -> str:
+    compact = " ".join((text or "").split())
+    if len(compact) <= max_chars:
+        return compact
+    return compact[: max_chars - 1].rstrip() + "…"
+
+
+def _render_codex_goal_panel(fields: dict[str, str]) -> str | None:
+    status = _clip_terminal_control_value(fields.get("status", ""), max_chars=80)
+    objective = _clip_terminal_control_value(fields.get("objective", ""))
+    time_used = _clip_terminal_control_value(fields.get("time used", ""), max_chars=80)
+    tokens_used = _clip_terminal_control_value(fields.get("tokens used", ""), max_chars=80)
+    commands = _clip_terminal_control_value(fields.get("commands", ""), max_chars=160)
+    if not (status or objective or time_used or tokens_used or commands):
+        return None
+    rendered = ["🎯 Codex goal"]
+    if status:
+        rendered.append(f"Status: {status}")
+    if objective:
+        rendered.append(f"Objective: {objective}")
+    if time_used:
+        rendered.append(f"Time used: {time_used}")
+    if tokens_used:
+        rendered.append(f"Tokens used: {tokens_used}")
+    if commands:
+        rendered.append(f"Commands: {commands}")
+    return "\n".join(rendered)
+
+
+def extract_codex_goal_panel(pane_text: str) -> str | None:
+    """Extract and render Codex `/goal` terminal panel from visible pane text."""
+    if not pane_text:
+        return None
+    lines = pane_text.splitlines()
+    goal_indices = [idx for idx, line in enumerate(lines) if line.strip() == "Goal"]
+    for start_idx in reversed(goal_indices):
+        fields: dict[str, list[str]] = {}
+        current_key = ""
+        for raw_line in lines[start_idx + 1 : start_idx + 18]:
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            if _CODEX_PROMPT_RE.match(stripped) or _CODEX_FOOTER_RE.match(stripped):
+                break
+            if len(stripped) >= 8 and set(stripped) <= {"─", "-"}:
+                continue
+            match = _CODEX_GOAL_PANEL_LABEL_RE.match(stripped)
+            if match:
+                current_key = match.group(1).casefold()
+                fields.setdefault(current_key, []).append(match.group(2).strip())
+                if current_key == "commands":
+                    break
+                continue
+            if current_key and current_key != "commands":
+                fields.setdefault(current_key, []).append(stripped)
+        normalized = {key: " ".join(parts).strip() for key, parts in fields.items()}
+        rendered = _render_codex_goal_panel(normalized)
+        if rendered:
+            return rendered
+    return None
+
+
+def extract_conversation_interrupted_notice(pane_text: str) -> str | None:
+    """Extract Codex Esc/interruption notice as an operator-visible status."""
+    if not pane_text:
+        return None
+    for line in reversed(pane_text.splitlines()):
+        if _CODEX_CONVERSATION_INTERRUPTED_RE.match(line.strip()):
+            return (
+                "⚠️ Codex conversation interrupted\n"
+                "Tell the model what to do differently. Runtime is input-ready."
+            )
+    return None
+
+
+def extract_terminal_control_observation(pane_text: str) -> TerminalControlObservation | None:
+    """Return a user-visible terminal-control surface that should be mirrored."""
+    goal_panel = extract_codex_goal_panel(pane_text)
+    if goal_panel:
+        return TerminalControlObservation(kind="codex_goal_panel", text=goal_panel)
+    interrupted = extract_conversation_interrupted_notice(pane_text)
+    if interrupted:
+        return TerminalControlObservation(kind="codex_conversation_interrupted", text=interrupted)
+    return None
 
 
 def _pending_header_kind(line: str) -> str:

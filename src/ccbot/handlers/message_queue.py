@@ -39,6 +39,8 @@ from ..runtime_types import (
     ASSISTANT_FINAL_SEMANTIC_KIND,
     GENERATED_IMAGE_PREVIEW_CONTENT_TYPE,
     IMAGE_PREVIEW_SEMANTIC_KIND,
+    TERMINAL_CONTROL_PANEL_CONTENT_TYPE,
+    TERMINAL_CONTROL_SEMANTIC_KIND,
     USER_ECHO_SEMANTIC_KIND,
     WARNING_SEMANTIC_KIND,
     is_pre_final_visible_semantic_kind,
@@ -1082,6 +1084,21 @@ def _normalize_bare_command_status(text: str) -> str:
     if footer:
         rendered = f"{rendered}\n{footer}"
     return rendered
+
+
+def _status_audit_content_type(task: MessageTask) -> str:
+    return task.content_type if task.content_type != "text" else "status"
+
+
+def _status_audit_semantic_kind(task: MessageTask) -> str:
+    return task.semantic_kind or "technical_status"
+
+
+def _is_terminal_control_status_task(task: MessageTask) -> bool:
+    return (
+        task.semantic_kind == TERMINAL_CONTROL_SEMANTIC_KIND
+        or task.content_type == TERMINAL_CONTROL_PANEL_CONTENT_TYPE
+    )
 
 
 def _normalize_technical_status_text(text: str) -> str:
@@ -2240,8 +2257,8 @@ async def _process_status_update_task(
             chat_id=_task_chat_id(user_id, task),
             task=task,
             text=task.text or "",
-            content_type="status",
-            semantic_kind="technical_status",
+            content_type=_status_audit_content_type(task),
+            semantic_kind=_status_audit_semantic_kind(task),
             reason="stale_binding",
         )
         return
@@ -2268,12 +2285,12 @@ async def _process_status_update_task(
             chat_id=_task_chat_id(user_id, task),
             task=task,
             text=task.text or "",
-            content_type="status",
-            semantic_kind="technical_status",
+            content_type=_status_audit_content_type(task),
+            semantic_kind=_status_audit_semantic_kind(task),
             reason="stale_turn_generation",
         )
         return
-    if state_key in _technical_status_closed:
+    if state_key in _technical_status_closed and not _is_terminal_control_status_task(task):
         logger.debug(
             "Dropping technical status after terminal artifact: user=%d window=%s thread=%s",
             user_id,
@@ -2294,8 +2311,8 @@ async def _process_status_update_task(
             chat_id=_task_chat_id(user_id, task),
             task=task,
             text=task.text or "",
-            content_type="status",
-            semantic_kind="technical_status",
+            content_type=_status_audit_content_type(task),
+            semantic_kind=_status_audit_semantic_kind(task),
             reason="technical_status_closed",
         )
         return
@@ -2326,8 +2343,8 @@ async def _process_status_update_task(
             chat_id=chat_id,
             task=task,
             text=status_text,
-            content_type="status",
-            semantic_kind="technical_status",
+            content_type=_status_audit_content_type(task),
+            semantic_kind=_status_audit_semantic_kind(task),
             reason=(
                 "poll_without_existing_status"
                 if current_info is None
@@ -2344,8 +2361,8 @@ async def _process_status_update_task(
             chat_id=chat_id,
             task=task,
             text=task.text or "",
-            content_type="status",
-            semantic_kind="technical_status",
+            content_type=_status_audit_content_type(task),
+            semantic_kind=_status_audit_semantic_kind(task),
             reason="empty_after_status_normalization",
         )
         return
@@ -2372,6 +2389,8 @@ async def _process_status_update_task(
                 chat_id=chat_id,
                 state_chat_id=task.chat_id,
                 surface_key=task.surface_key,
+                content_type=_status_audit_content_type(task),
+                semantic_kind=_status_audit_semantic_kind(task),
             )
         elif status_text == last_text:
             # Same content, skip edit
@@ -2402,8 +2421,8 @@ async def _process_status_update_task(
                     task=task,
                     text=status_text,
                     message_id=msg_id,
-                    content_type="status",
-                    semantic_kind="technical_status",
+                    content_type=_status_audit_content_type(task),
+                    semantic_kind=_status_audit_semantic_kind(task),
                 )
                 _status_msg_info[skey] = (msg_id, wid, status_text)
                 _persist_status_msg_info(skey, (msg_id, wid, status_text))
@@ -2420,8 +2439,6 @@ async def _process_status_update_task(
                         task=task,
                         text=status_text,
                         message_id=msg_id,
-                        content_type="status",
-                        semantic_kind="technical_status",
                         reason="message_not_modified",
                     )
                     return
@@ -2438,6 +2455,8 @@ async def _process_status_update_task(
                         chat_id=chat_id,
                         state_chat_id=task.chat_id,
                         surface_key=task.surface_key,
+                        content_type=_status_audit_content_type(task),
+                        semantic_kind=_status_audit_semantic_kind(task),
                     )
                     return
                 try:
@@ -2462,8 +2481,8 @@ async def _process_status_update_task(
                             task=task,
                             text=status_text,
                             message_id=msg_id,
-                            content_type="status",
-                            semantic_kind="technical_status",
+                            content_type=_status_audit_content_type(task),
+                            semantic_kind=_status_audit_semantic_kind(task),
                             reason="message_not_modified",
                         )
                         return
@@ -2479,6 +2498,8 @@ async def _process_status_update_task(
                         chat_id=chat_id,
                         state_chat_id=task.chat_id,
                         surface_key=task.surface_key,
+                        content_type=_status_audit_content_type(task),
+                        semantic_kind=_status_audit_semantic_kind(task),
                     )
     else:
         # No existing status message, send new
@@ -2491,6 +2512,8 @@ async def _process_status_update_task(
             chat_id=chat_id,
             state_chat_id=task.chat_id,
             surface_key=task.surface_key,
+            content_type=_status_audit_content_type(task),
+            semantic_kind=_status_audit_semantic_kind(task),
         )
 
 
@@ -2504,6 +2527,8 @@ async def _do_send_status_message(
     chat_id: int | None = None,
     state_chat_id: int | None | object = _STATE_CHAT_UNSET,
     surface_key: str | None = None,
+    content_type: str = "status",
+    semantic_kind: str = "technical_status",
 ) -> None:
     """Send a new status message and track it (internal, called from worker)."""
     if _is_poll_only_status_text(text):
@@ -2560,8 +2585,8 @@ async def _do_send_status_message(
         message_id=(sent.message_id if sent else None),
         window_id=window_id,
         task_type="status_update",
-        content_type="status",
-        semantic_kind="technical_status",
+        content_type=content_type,
+        semantic_kind=semantic_kind,
         text=text,
         success=sent is not None,
     )
@@ -3915,6 +3940,8 @@ async def enqueue_status_update(
     chat_id: int | None = None,
     surface_key: str | None = None,
     turn_generation: int = 0,
+    content_type: str = "status",
+    semantic_kind: str = "technical_status",
 ) -> None:
     """Enqueue status update. Skipped if text unchanged or during flood control."""
     # Don't enqueue during flood control — they'd just be dropped
@@ -3929,7 +3956,11 @@ async def enqueue_status_update(
         chat_id=chat_id,
         surface_key=surface_key,
     )
-    if status_text and state_key in _technical_status_closed:
+    terminal_control = (
+        semantic_kind == TERMINAL_CONTROL_SEMANTIC_KIND
+        or content_type == TERMINAL_CONTROL_PANEL_CONTENT_TYPE
+    )
+    if status_text and state_key in _technical_status_closed and not terminal_control:
         return
 
     # Deduplicate: skip if text matches what's already displayed
@@ -3945,6 +3976,8 @@ async def enqueue_status_update(
             task_type="status_update",
             text=status_text,
             window_id=window_id,
+            content_type=content_type,
+            semantic_kind=semantic_kind,
             thread_id=thread_id,
             chat_id=chat_id,
             surface_key=surface_key,

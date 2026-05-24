@@ -30,6 +30,8 @@ COMMAND_EXECUTION_SEMANTIC_KIND = "command_execution"
 FILE_CHANGE_SEMANTIC_KIND = "file_change"
 ASSISTANT_FINAL_SEMANTIC_KIND = "assistant_final"
 IMAGE_PREVIEW_SEMANTIC_KIND = "image_preview"
+TERMINAL_CONTROL_SEMANTIC_KIND = "terminal_control"
+TERMINAL_CONTROL_PANEL_CONTENT_TYPE = "terminal_control_panel"
 GENERATED_IMAGE_PREVIEW_CONTENT_TYPE = "generated_image_preview"
 VIEWED_IMAGE_PREVIEW_CONTENT_TYPE = "viewed_image_preview"
 
@@ -65,6 +67,8 @@ def infer_semantic_kind(
         return TOOL_PROGRESS_SEMANTIC_KIND
     if content_type == VIEWED_IMAGE_PREVIEW_CONTENT_TYPE:
         return IMAGE_PREVIEW_SEMANTIC_KIND
+    if content_type == TERMINAL_CONTROL_PANEL_CONTENT_TYPE:
+        return TERMINAL_CONTROL_SEMANTIC_KIND
     if content_type == "tool_result" or event_kind == "tool_output":
         return TOOL_RESULT_SEMANTIC_KIND
     if (
@@ -103,6 +107,7 @@ def is_pre_final_visible_semantic_kind(semantic_kind: str) -> bool:
         WARNING_SEMANTIC_KIND,
         ASSISTANT_FINAL_SEMANTIC_KIND,
         LIFECYCLE_SEMANTIC_KIND,
+        TERMINAL_CONTROL_SEMANTIC_KIND,
     }
 
 

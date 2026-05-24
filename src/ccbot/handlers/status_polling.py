@@ -36,11 +36,19 @@ from ..runtime_discontinuity import (
     extract_terminal_tail_block,
     is_codex_termination_summary_text,
 )
-from ..runtime_types import WARNING_SEMANTIC_KIND
-from ..runtime_types import runtime_capability_registry
+from ..runtime_types import (
+    TERMINAL_CONTROL_PANEL_CONTENT_TYPE,
+    TERMINAL_CONTROL_SEMANTIC_KIND,
+    WARNING_SEMANTIC_KIND,
+    runtime_capability_registry,
+)
 from ..session import session_manager
 from ..input_safety import update_window_input_safety_snapshot
-from ..terminal_parser import classify_input_surface, extract_pending_input_preview
+from ..terminal_parser import (
+    classify_input_surface,
+    extract_pending_input_preview,
+    extract_terminal_control_observation,
+)
 from ..tmux_manager import tmux_manager
 from .interactive_ui import (
     clear_interactive_msg,
@@ -575,6 +583,23 @@ async def update_status_message(
         chat_id=chat_id,
         surface_key=surface_key,
     )
+
+
+    terminal_control = extract_terminal_control_observation(pane_text)
+    if terminal_control and not skip_status:
+        await enqueue_status_update(
+            bot,
+            user_id,
+            window_id,
+            terminal_control.text,
+            thread_id=thread_id,
+            chat_id=chat_id,
+            surface_key=surface_key,
+            turn_generation=turn_generation,
+            content_type=TERMINAL_CONTROL_PANEL_CONTENT_TYPE,
+            semantic_kind=TERMINAL_CONTROL_SEMANTIC_KIND,
+        )
+        return
 
     usage_limit_notice = _extract_usage_limit_notice(pane_text)
     if usage_limit_notice:

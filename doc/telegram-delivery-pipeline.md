@@ -348,6 +348,15 @@ the human-readable execution narrative. The mutable status artifact is reserved
 for ephemeral technical execution surface that would otherwise churn too
 quickly.
 
+Codex terminal-control panels observed only in the live tmux pane are projected
+through a distinct `terminal_control_panel` status class. The class is mutable
+and scoped like technical status, but it is not closed merely because a prior
+assistant-final already landed: `/goal` panels and `Conversation interrupted`
+operator notices describe current operator control state, not assistant content
+from the closed turn. Polling sanitizes these panels to human-facing fields such
+as goal status/objective/time/tokens/commands and suppresses raw transport
+metadata.
+
 Queued follow-up messages are different again. They describe future input that
 has not yet opened its turn, so compact mode may surface them as a separate
 latest-only pending-input artifact modeled after the Codex bottom pane:

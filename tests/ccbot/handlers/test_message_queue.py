@@ -3809,3 +3809,53 @@ async def test_status_send_typing_uses_throttled_surface_helper() -> None:
         window_id="@7",
     )
     bot.send_chat_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_terminal_control_status_bypasses_closed_technical_status(
+    monkeypatch, tmp_path
+) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    mq._technical_status_closed.clear()
+    mq._mark_technical_status_closed(100, 42)
+
+    sent = AsyncMock()
+    sent.message_id = 777
+    bot = AsyncMock()
+    await mq.shutdown_workers()
+
+    with (
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.message_queue.send_with_fallback",
+            new_callable=AsyncMock,
+            return_value=sent,
+        ),
+        patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+        mock_sm.get_window_for_thread.return_value = "@7"
+        mock_sm.get_topic_binding_state.return_value = "bound"
+        mock_sm.resolve_chat_id.return_value = 100
+        await mq.enqueue_status_update(
+            bot,
+            100,
+            "@7",
+            "🎯 Codex goal\nStatus: complete",
+            thread_id=42,
+            content_type="terminal_control_panel",
+            semantic_kind="terminal_control",
+        )
+        queue = mq.get_or_create_queue(bot, 100)
+        await queue.join()
+
+    rows = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    assert rows[-1]["action"] == "send"
+    assert rows[-1]["content_type"] == "terminal_control_panel"
+    assert rows[-1]["semantic_kind"] == "terminal_control"
+    assert mq._status_msg_info[mq._topic_state_key(100, 42)][0] == 777
+    await mq.shutdown_workers()
+    mq._technical_status_closed.clear()

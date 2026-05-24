@@ -153,6 +153,10 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   warning notices remain visible in Telegram while assistant-final semantics
   and post-final artifact closure remain intact. Repeated identical warning
   text reuses one warning bubble and adds a repeat counter only when `N > 2`.
+- **Codex terminal-control panels are mirrored** — Terminal-only Codex control
+  surfaces such as `/goal` status panels and `Conversation interrupted` notices
+  are projected to the bound Telegram topic as mutable operator-status artifacts,
+  not as user echo or assistant-final content.
 - **Runtime discontinuity guardrails** — True runtime termination or live tmux
   surface loss is delivered as a warning artifact with replay-native evidence
   first and screenshot fallback only for real loss. Active Codex panes that

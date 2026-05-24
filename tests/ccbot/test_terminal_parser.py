@@ -7,9 +7,12 @@ import pytest
 
 from ccbot.terminal_parser import (
     classify_input_surface,
+    extract_codex_goal_panel,
+    extract_conversation_interrupted_notice,
     extract_pending_input_preview,
     extract_bash_output,
     extract_interactive_content,
+    extract_terminal_control_observation,
     is_interactive_ui,
     parse_status_line,
     strip_pane_chrome,
@@ -195,6 +198,60 @@ class TestIsInteractiveUI:
 
     def test_false_for_empty_string(self):
         assert is_interactive_ui("") is False
+
+
+
+
+class TestTerminalControlObservation:
+    def test_extracts_codex_goal_panel(self):
+        pane = (
+            "previous output\n"
+            "Goal\n"
+            "Status: complete\n"
+            "Objective: Complete the durable ultragoal plan in .omx/ultragoal/goals.json,\n"
+            "including later accepted/appended stories.\n"
+            "Time used: 58m\n"
+            "Tokens used: 638K\n"
+            "\n"
+            "Commands: /goal edit, /goal clear\n"
+            "› \n"
+        )
+
+        rendered = extract_codex_goal_panel(pane)
+
+        assert rendered is not None
+        assert rendered.startswith("🎯 Codex goal")
+        assert "Status: complete" in rendered
+        assert "including later accepted/appended stories" in rendered
+        assert "Commands: /goal edit, /goal clear" in rendered
+
+    def test_extracts_conversation_interrupted_notice(self):
+        pane = (
+            "previous output\n"
+            "■ Conversation interrupted - tell the model what to do differently. "
+            "Something went wrong? Hit /feedback to report the issue.\n"
+            "› Find and fix a bug in @filename\n"
+        )
+
+        rendered = extract_conversation_interrupted_notice(pane)
+
+        assert rendered is not None
+        assert rendered.startswith("⚠️ Codex conversation interrupted")
+        assert "input-ready" in rendered
+
+    def test_terminal_control_observation_prefers_goal_panel(self):
+        pane = (
+            "■ Conversation interrupted - tell the model what to do differently.\n"
+            "Goal\n"
+            "Status: active\n"
+            "Objective: Fix delivery\n"
+        )
+
+        observation = extract_terminal_control_observation(pane)
+
+        assert observation is not None
+        assert observation.kind == "codex_goal_panel"
+        assert "Fix delivery" in observation.text
 
 
 # ── classify_input_surface ──────────────────────────────────────────────
