@@ -187,6 +187,11 @@ from .input_safety import (
     update_window_input_safety_snapshot,
 )
 from .runtime_discontinuity import is_codex_termination_summary_text
+from .restore import (
+    RestoreIntent,
+    build_restore_launch_command,
+    build_resume_target_proof,
+)
 from .runtime_types import (
     ASSISTANT_FINAL_SEMANTIC_KIND,
     GENERATED_IMAGE_PREVIEW_CONTENT_TYPE,
@@ -208,6 +213,7 @@ from .session import (
     ROUTING_MODE_QUEUE,
     ROUTING_MODE_STEER,
     FastRuntimeInputProof,
+    _codex_has_live_input_plane,
     PendingSurfaceSlot,
     session_manager,
 )
@@ -1454,6 +1460,234 @@ def _get_window_runtime_kind(window_id: str) -> str | None:
     if isinstance(runtime_kind, str) and runtime_kind:
         return runtime_kind
     return None
+
+
+@dataclass(frozen=True)
+class _RestoredRuntimeTarget:
+    window_id: str
+    window: Any
+    display_name: str
+
+
+def _descriptor_restore_intent(
+    *,
+    old_window_id: str,
+    binding_owner_id: int,
+    surface: ControlSurface,
+    chat_id: int | None,
+) -> tuple[RestoreIntent | None, str]:
+    """Build a fail-closed restore intent from durable binding descriptors."""
+    if not surface.surface_key:
+        return None, "missing control-surface key"
+    descriptor = session_manager.get_process_descriptor(old_window_id)
+    if descriptor is None:
+        return None, "missing persisted runtime descriptor"
+
+    raw_cwd = getattr(descriptor, "cwd", "")
+    if not isinstance(raw_cwd, str):
+        return None, "missing persisted runtime cwd"
+    cwd = raw_cwd.strip()
+    if not cwd:
+        return None, "missing persisted runtime cwd"
+    raw_runtime_kind = getattr(descriptor, "runtime_kind", "")
+    runtime_kind = (
+        raw_runtime_kind.strip()
+        if isinstance(raw_runtime_kind, str) and raw_runtime_kind.strip()
+        else _default_launch_runtime_kind()
+    )
+    raw_runtime_id = getattr(descriptor, "thread_id", "")
+    runtime_id = raw_runtime_id.strip() if isinstance(raw_runtime_id, str) else ""
+    if runtime_kind == "codex" and not runtime_id:
+        return None, "missing persisted Codex conversation identity"
+    display = session_manager.get_display_name(old_window_id)
+    raw_window_name = getattr(descriptor, "window_name", "")
+    descriptor_window_name = (
+        raw_window_name.strip() if isinstance(raw_window_name, str) else ""
+    )
+    window_name = descriptor_window_name or (
+        display if display and display != old_window_id else ""
+    ) or Path(cwd).name
+    return (
+        RestoreIntent(
+            window_name=window_name,
+            cwd=cwd,
+            runtime_id=runtime_id,
+            user_id=binding_owner_id,
+            surface_key=surface.surface_key,
+            group_chat_id=chat_id,
+            launcher_command=config.ccbot_command,
+            runtime_kind=runtime_kind,
+            shared_group=surface.is_shared_group,
+        ),
+        "",
+    )
+
+
+def _codex_resume_target_is_proven(intent: RestoreIntent) -> bool:
+    """Return whether a Codex restore has replay/catalog proof for same identity."""
+    if intent.runtime_kind != "codex":
+        return True
+    return build_resume_target_proof(session_manager, intent) is not None
+
+
+async def _attempt_bound_runtime_restore_for_input(
+    *,
+    update: Update,
+    old_window_id: str,
+    binding_owner_id: int | None,
+    surface: ControlSurface,
+    chat_id: int | None,
+    reason: str,
+    reply_on_failure: bool = True,
+) -> _RestoredRuntimeTarget | None:
+    """Restore a stale bound tmux runtime before releasing current Telegram input.
+
+    The original Telegram payload remains in the caller's local pending intent:
+    this helper only repairs the surface -> tmux window -> runtime identity chain.
+    The caller continues through the normal send path exactly once on success.
+    """
+    owner_id = (
+        binding_owner_id if binding_owner_id is not None else update.effective_user.id
+    )
+    display = session_manager.get_display_name(old_window_id)
+    intent, intent_error = _descriptor_restore_intent(
+        old_window_id=old_window_id,
+        binding_owner_id=owner_id,
+        surface=surface,
+        chat_id=chat_id,
+    )
+    if intent is None:
+        logger.warning(
+            "Cannot restore stale binding %s for surface %s: %s",
+            old_window_id,
+            surface.surface_key,
+            intent_error,
+        )
+        if reply_on_failure:
+            await safe_reply(
+                update.message,
+                f"❌ Window '{display}' is not writable and cannot be restored safely: {intent_error}. "
+                "Use /bind or /resume to attach a live runtime.",
+            )
+        return None
+
+    if not _codex_resume_target_is_proven(intent):
+        logger.warning(
+            "Cannot restore stale binding %s for surface %s: missing Codex replay proof",
+            old_window_id,
+            surface.surface_key,
+        )
+        if reply_on_failure:
+            await safe_reply(
+                update.message,
+                f"❌ Window '{display}' is not writable and ccbot cannot prove the persisted Codex thread. "
+                "Use /resume <thread-name|id> or /bind to attach a live runtime.",
+            )
+        return None
+
+    logger.info(
+        "Restoring stale bound runtime before input release "
+        "(reason=%s, old_window=%s, surface=%s, runtime_kind=%s, runtime_id=%s)",
+        reason,
+        old_window_id,
+        surface.surface_key,
+        intent.runtime_kind,
+        intent.runtime_id,
+    )
+    success, message, final_name, new_window_id, _reused = (
+        await tmux_manager.create_or_reuse_window(
+            intent.cwd,
+            window_name=intent.window_name,
+            start_claude=True,
+            resume_session_id=intent.runtime_id or None,
+            runtime_kind=intent.runtime_kind,
+            launch_command=build_restore_launch_command(intent),
+            reuse_existing=True,
+        )
+    )
+    if not success or not new_window_id:
+        logger.warning(
+            "Failed to restore stale binding %s for surface %s: %s",
+            old_window_id,
+            surface.surface_key,
+            message,
+        )
+        if reply_on_failure:
+            await safe_reply(
+                update.message,
+                f"❌ Window '{display}' is not writable and restore failed: {message}",
+            )
+        return None
+
+    wait_for_entry = getattr(session_manager, "wait_for_session_map_entry", None)
+    if callable(wait_for_entry) and intent.runtime_kind in {"claude", "codex"}:
+        try:
+            await wait_for_entry(new_window_id, timeout=5.0, interval=0.25)
+        except TypeError:
+            await wait_for_entry(new_window_id)
+
+    window = await tmux_manager.find_window_by_id(new_window_id)
+    if window is None:
+        logger.warning(
+            "Restored binding %s disappeared before activation proof (surface=%s)",
+            new_window_id,
+            surface.surface_key,
+        )
+        if reply_on_failure:
+            await safe_reply(
+                update.message,
+                "❌ Runtime restore started, but the tmux window disappeared before activation proof.",
+            )
+        return None
+
+    restored_name = final_name or intent.window_name
+    if chat_id is not None:
+        session_manager.set_group_chat_id(
+            owner_id,
+            surface.message_thread_id,
+            chat_id,
+        )
+    session_manager.register_live_process(
+        new_window_id,
+        intent.cwd,
+        window_name=restored_name,
+        runtime_kind=intent.runtime_kind,
+        thread_id=intent.runtime_id,
+    )
+    session_manager.bind_surface(
+        owner_id,
+        new_window_id,
+        surface_key=surface.surface_key,
+        window_name=restored_name,
+    )
+    if intent.runtime_id:
+        session_manager.record_restore_owner_proof(
+            runtime_id=intent.runtime_id,
+            runtime_kind=intent.runtime_kind,
+            cwd=intent.cwd,
+            user_id=owner_id,
+            surface_key=surface.surface_key,
+            window_id=new_window_id,
+            chat_id=chat_id,
+            thread_id=surface.message_thread_id,
+            proof_source="telegram_input_restore",
+        )
+        session_manager.clear_duplicate_thread_claims_for_window(
+            new_window_id,
+            reason="startup_restore",
+        )
+    logger.info(
+        "Restored stale bound runtime for input release "
+        "(old_window=%s, new_window=%s, surface=%s)",
+        old_window_id,
+        new_window_id,
+        surface.surface_key,
+    )
+    return _RestoredRuntimeTarget(
+        window_id=new_window_id,
+        window=window,
+        display_name=restored_name,
+    )
 
 
 _ATTACHMENT_INTENT_RE = re.compile(
@@ -3905,28 +4139,18 @@ async def _resolve_attachment_input_target(
     if not w:
         if silent_unbound:
             return None
-        display = session_manager.get_display_name(wid)
-        if not using_shared_group_binding:
-            binding_surface_key = _binding_surface_key_for_owner(
-                user.id,
-                control_surface,
-            )
-            if binding_surface_key and _session_has_method("unbind_surface"):
-                session_manager.unbind_surface(user.id, surface_key=binding_surface_key)
-            else:
-                session_manager.unbind_thread(user.id, thread_id)
-            await safe_reply(
-                update.message,
-                f"❌ Window '{display}' no longer exists. Binding removed.\n"
-                "Send a message to start a new session.",
-            )
-        else:
-            await safe_reply(
-                update.message,
-                f"❌ Shared window '{display}' no longer exists. Use /unbind, "
-                "then start a new session.",
-            )
-        return None
+        restored = await _attempt_bound_runtime_restore_for_input(
+            update=update,
+            old_window_id=wid,
+            binding_owner_id=binding_owner_id,
+            surface=control_surface,
+            chat_id=chat.id,
+            reason="missing_tmux_window_attachment",
+        )
+        if restored is None:
+            return None
+        wid = restored.window_id
+        w = restored.window
 
     if await _surface_omx_question_state(
         context.bot,
@@ -4978,32 +5202,26 @@ async def _handle_text_payload(
     # Bound topic — forward to bound window
     w = await tmux_manager.find_window_by_id(wid)
     if not w:
-        display = session_manager.get_display_name(wid)
         logger.info(
-            "Stale binding: window %s gone, unbinding (user=%d, thread=%d, shared=%s)",
-            display,
+            "Stale binding: window %s gone; attempting restore "
+            "(user=%d, thread=%d, shared=%s)",
+            wid,
             user.id,
             surface.legacy_scope_id,
             using_shared_group_binding,
         )
-        if not using_shared_group_binding:
-            session_manager.unbind_surface(
-                user.id,
-                surface_key=surface.surface_key,
-            )
-        if using_shared_group_binding:
-            await safe_reply(
-                update.message,
-                f"❌ Shared window '{display}' no longer exists. Use /unbind, "
-                "then start a new session.",
-            )
-        else:
-            await safe_reply(
-                update.message,
-                f"❌ Window '{display}' no longer exists. Binding removed.\n"
-                "Send a message to start a new session.",
-            )
-        return
+        restored = await _attempt_bound_runtime_restore_for_input(
+            update=update,
+            old_window_id=wid,
+            binding_owner_id=binding_owner_id,
+            surface=surface,
+            chat_id=chat.id if chat and chat.id is not None else None,
+            reason="missing_tmux_window_text",
+        )
+        if restored is None:
+            return
+        wid = restored.window_id
+        w = restored.window
 
     await enqueue_status_update(
         context.bot,
@@ -5025,6 +5243,24 @@ async def _handle_text_payload(
     # This catches UIs (permission prompts, etc.) that status polling might have missed.
     pane_text = await tmux_manager.capture_pane(w.window_id)
     input_surface = classify_input_surface(pane_text) if pane_text else None
+    if _get_window_runtime_kind(wid) == "codex" and not _codex_has_live_input_plane(
+        pane_command=str(getattr(w, "pane_current_command", "") or ""),
+        pane_text=pane_text,
+    ):
+        restored = await _attempt_bound_runtime_restore_for_input(
+            update=update,
+            old_window_id=wid,
+            binding_owner_id=binding_owner_id,
+            surface=surface,
+            chat_id=chat.id if chat and chat.id is not None else None,
+            reason="dead_runtime_input_plane_text",
+        )
+        if restored is None:
+            return
+        wid = restored.window_id
+        w = restored.window
+        pane_text = await tmux_manager.capture_pane(w.window_id)
+        input_surface = classify_input_surface(pane_text) if pane_text else None
     if input_surface is not None:
         update_window_input_safety_snapshot(
             window_id=w.window_id,

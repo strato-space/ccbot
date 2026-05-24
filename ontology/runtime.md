@@ -279,6 +279,11 @@ Raw operator control is different:
 - a Codex-bound tmux window that has fallen back to a shell prompt is not a live
   input injection plane, even if replay evidence for the previous identity is
   still readable
+- on the next inbound Telegram input, a stale `binding_scope=tmux` chain may be
+  repaired only when durable binding metadata plus replay/catalog proof identify
+  the same cwd, runtime kind, conversation identity, and control surface; the
+  current user payload is released once through the normal runtime-input driver
+  after the repaired binding is activated
 - a Codex "Conversation interrupted" surface is still a live input prompt for
   the next user instruction, not a read-only decision prompt
 - if no live input injection plane exists, Telegram text/keys must fail closed

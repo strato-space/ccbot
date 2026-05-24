@@ -543,7 +543,10 @@ Late delivery must fail closed.
 
 - if a queued task no longer matches the current control-surface binding, it is
   dropped
-- if the bound tmux window is gone, queued delivery for that binding is dropped
+- if the bound tmux window is gone or its Codex input plane has fallen back to a
+  shell, inbound Telegram input may first repair the same `binding_scope=tmux`
+  chain from durable cwd/runtime/conversation proof; if repair is ambiguous or
+  unproven, queued delivery for that binding is dropped/fails closed
 - explicit `/unbind`, topic close, or stale-window cleanup clears the tracked
   status artifact before normal cleanup continues
 - deleted or uneditable Telegram status messages fall back to sending a new

@@ -709,6 +709,10 @@ Routing note:
 - A Codex-bound tmux window that has fallen back to a shell prompt is read as a
   dead input plane; Telegram input fails closed instead of being pasted into
   `bash`.
+- If a bound tmux window is missing or has become a dead shell fallback, the
+  next Telegram input can self-heal the same surface only from durable
+  cwd/runtime/conversation replay proof, then releases that payload once through
+  the normal runtime-input path.
 - Codex `Conversation interrupted` surfaces stay writable: they are normal
   next-instruction prompts, not read-only approval prompts.
 - Pending-input previews preserve queued message text literally (except explicit

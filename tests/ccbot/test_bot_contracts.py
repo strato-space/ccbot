@@ -414,6 +414,167 @@ class TestRoutingModeCommands:
         mock_reply.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_text_handler_restores_missing_bound_window_before_queue_send(self):
+        update = _make_topic_update(text="hello")
+        context = _make_context()
+        restored_window = MagicMock(window_id="@31", pane_current_command="node")
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.build_resume_target_proof", return_value=object()),
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
+            patch(
+                "ccbot.bot._surface_omx_question_state",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "ccbot.bot.find_answerable_omx_question_for_window",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.is_external_binding_window_id.return_value = False
+            mock_sm.get_display_name.return_value = "mediagen-comfy"
+            descriptor = SimpleNamespace(
+                cwd="/home/tools/mediagen-comfy",
+                runtime_kind="codex",
+                thread_id="thread-1",
+                window_name="mediagen-comfy",
+            )
+            mock_sm.get_process_descriptor.return_value = descriptor
+            mock_sm.window_states = {"@7": descriptor}
+            mock_sm.get_surface_routing_mode.return_value = "queue"
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
+            mock_sm.wait_for_session_map_entry = AsyncMock(return_value=True)
+            mock_sm.send_to_window_queued = AsyncMock(return_value=(True, "queued"))
+            mock_tmux.find_window_by_id = AsyncMock(
+                side_effect=[None, restored_window]
+            )
+            mock_tmux.create_or_reuse_window = AsyncMock(
+                return_value=(
+                    True,
+                    "restored",
+                    "mediagen-comfy",
+                    "@31",
+                    False,
+                )
+            )
+            mock_tmux.capture_pane = AsyncMock(return_value="OpenAI Codex\n› ready")
+
+            await bot_mod.text_handler(update, context)
+
+        mock_sm.unbind_surface.assert_not_called()
+        mock_tmux.create_or_reuse_window.assert_awaited_once()
+        mock_sm.register_live_process.assert_called_once_with(
+            "@31",
+            "/home/tools/mediagen-comfy",
+            window_name="mediagen-comfy",
+            runtime_kind="codex",
+            thread_id="thread-1",
+        )
+        mock_sm.bind_surface.assert_called_once_with(
+            1,
+            "@31",
+            surface_key="t:100:42",
+            window_name="mediagen-comfy",
+        )
+        mock_sm.send_to_window_queued.assert_awaited_once_with("@31", "hello")
+        mock_reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_text_handler_restores_dead_codex_pane_before_queue_send(self):
+        update = _make_topic_update(text="hello")
+        context = _make_context()
+        dead_window = MagicMock(window_id="@7", pane_current_command="bash")
+        restored_window = MagicMock(window_id="@7", pane_current_command="node")
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.build_resume_target_proof", return_value=object()),
+            patch("ccbot.bot.enqueue_status_update", new_callable=AsyncMock),
+            patch(
+                "ccbot.bot._surface_omx_question_state",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "ccbot.bot.find_answerable_omx_question_for_window",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.is_external_binding_window_id.return_value = False
+            mock_sm.get_display_name.return_value = "mediagen-comfy"
+            descriptor = SimpleNamespace(
+                cwd="/home/tools/mediagen-comfy",
+                runtime_kind="codex",
+                thread_id="thread-1",
+                window_name="mediagen-comfy",
+            )
+            mock_sm.get_process_descriptor.return_value = descriptor
+            mock_sm.window_states = {"@7": descriptor}
+            mock_sm.get_surface_routing_mode.return_value = "queue"
+            mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
+            mock_sm.wait_for_session_map_entry = AsyncMock(return_value=True)
+            mock_sm.send_to_window_queued = AsyncMock(return_value=(True, "queued"))
+            mock_tmux.find_window_by_id = AsyncMock(
+                side_effect=[dead_window, restored_window]
+            )
+            mock_tmux.create_or_reuse_window = AsyncMock(
+                return_value=(True, "reused", "mediagen-comfy", "@7", True)
+            )
+            mock_tmux.capture_pane = AsyncMock(
+                side_effect=["$ ", "OpenAI Codex\n› ready"]
+            )
+
+            await bot_mod.text_handler(update, context)
+
+        mock_tmux.create_or_reuse_window.assert_awaited_once()
+        mock_sm.send_to_window_queued.assert_awaited_once_with("@7", "hello")
+        mock_reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_text_handler_missing_window_fails_closed_without_runtime_identity(
+        self,
+    ):
+        update = _make_topic_update(text="hello")
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.is_external_binding_window_id.return_value = False
+            mock_sm.get_display_name.return_value = "mediagen-comfy"
+            mock_sm.get_process_descriptor.return_value = SimpleNamespace(
+                cwd="/home/tools/mediagen-comfy",
+                runtime_kind="codex",
+                thread_id="",
+                window_name="mediagen-comfy",
+            )
+            mock_tmux.find_window_by_id = AsyncMock(return_value=None)
+
+            await bot_mod.text_handler(update, context)
+
+        mock_tmux.create_or_reuse_window.assert_not_called()
+        mock_sm.unbind_surface.assert_not_called()
+        mock_sm.send_to_window.assert_not_called()
+        mock_reply.assert_awaited_once()
+        assert "cannot be restored safely" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
     async def test_pending_queue_prompt_autosends_with_queue_mode_after_activation(self):
         context = _make_context()
         user = SimpleNamespace(id=1)
@@ -2782,6 +2943,61 @@ class TestMediaForwarding:
         mock_sm.set_group_chat_id.assert_not_called()
         mock_sm.send_to_window.assert_not_called()
         mock_tmux.find_window_by_id.assert_not_called()
+        mock_reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_attachment_target_restores_missing_bound_window(self):
+        update = _make_topic_update()
+        context = _make_context()
+        restored_window = MagicMock(window_id="@31")
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.build_resume_target_proof", return_value=object()),
+            patch(
+                "ccbot.bot._surface_omx_question_state",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_display_name.return_value = "mediagen-comfy"
+            descriptor = SimpleNamespace(
+                cwd="/home/tools/mediagen-comfy",
+                runtime_kind="codex",
+                thread_id="thread-1",
+                window_name="mediagen-comfy",
+            )
+            mock_sm.get_process_descriptor.return_value = descriptor
+            mock_sm.window_states = {"@7": descriptor}
+            mock_sm.get_topic_bind_flow_credentials.return_value = (3, "nonce")
+            mock_sm.wait_for_session_map_entry = AsyncMock(return_value=True)
+            mock_tmux.find_window_by_id = AsyncMock(
+                side_effect=[None, restored_window]
+            )
+            mock_tmux.create_or_reuse_window = AsyncMock(
+                return_value=(True, "restored", "mediagen-comfy", "@31", False)
+            )
+
+            target = await bot_mod._resolve_attachment_input_target(
+                update,
+                context,
+                require_binding_generation=True,
+            )
+
+        assert target is not None
+        assert target.window_id == "@31"
+        assert target.binding_generation == (3, "nonce")
+        mock_sm.unbind_surface.assert_not_called()
+        mock_sm.bind_surface.assert_called_once_with(
+            1,
+            "@31",
+            surface_key="t:100:42",
+            window_name="mediagen-comfy",
+        )
         mock_reply.assert_not_awaited()
 
     @pytest.mark.asyncio
