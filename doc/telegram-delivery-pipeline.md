@@ -124,6 +124,23 @@ evidence. A status/message-id/url-only result is weak
 evidence for final review previews because Telegram clients can render an
 otherwise valid vertical MP4 with the wrong preview geometry.
 
+
+## Operator Replay/Backfill for Missed Terminal Media
+
+`ccbot replay-backfill` is an operator-only repair path for Codex
+`image_generation_end` records that were already consumed by the monitor before
+media-preview normalization existed or before a deployment bug was fixed. It is
+not a second monitor and it does not rewind `monitor_state.json`. Operators must
+select an explicit replay file plus call id and/or byte range, run a dry-run,
+and then pass `--deliver` to send the selected generated-image media.
+
+The command reuses the Codex rollout normalizer, delivers only replay-embedded
+image bytes, skips already delivered candidates by default, and records a
+`replay_backfill` audit row containing replay path, byte offsets, Codex thread
+id, call id, and media hash. This keeps the repair bounded to the missed
+terminal media result and prevents unrelated historical replay from flooding a
+Telegram topic.
+
 ## Ordering Rules
 
 The delivery pipeline keeps:
@@ -666,5 +683,7 @@ post-final pre-final artifacts dropped because the same turn's lane is already
 closed. Rows
 include action, control surface, task/content/semantic class, message id when
 available, success flag, reason/error, turn generation and tool-use correlation
-where available, text length/hash, and a compact preview. It deliberately omits
-full raw payloads and secrets.
+where available, text length/hash, and a compact preview. Operator replay
+repairs use `replay_backfill` rows with replay path, byte offsets, call id, and
+media hash so duplicate prevention does not depend on mutable monitor offsets.
+It deliberately omits full raw payloads and secrets.

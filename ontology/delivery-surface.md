@@ -41,6 +41,9 @@ control surface at a time.
     artifact path text remains the terminal fallback so the result is not lost
   - must be derived from replay evidence and must not become arbitrary local
     file disclosure
+  - may be repaired by an operator-selected `replay_backfill` command only when
+    scoped to explicit replay offsets/call ids and audited with duplicate
+    prevention metadata; this repair path must not rewind global monitor state
 
 - **Runtime image preview artifact**
   - pre-final visible artifact whose primary payload is image media from runtime

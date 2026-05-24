@@ -31,11 +31,13 @@ def _build_parser(prog: str = "ccbot") -> argparse.ArgumentParser:
             "runtime-input",
             "inject",
             "binding-preflight",
+            "replay-backfill",
         ),
         help=(
             "Optional subcommand. `send` delivers text/files to Telegram; "
             "`runtime-input`/`inject` send text to a live runtime input plane; "
-            "`binding-preflight` validates a runtime binding read-only."
+            "`binding-preflight` validates a runtime binding read-only; "
+            "`replay-backfill` safely replays selected terminal media."
         ),
     )
     return parser
@@ -67,6 +69,12 @@ def main(argv: list[str] | None = None) -> None:
 
         raise SystemExit(
             binding_preflight_main(args[1:], prog="ccbot binding-preflight")
+        )
+    if args and args[0] == "replay-backfill":
+        from .replay_backfill_cli import replay_backfill_main
+
+        raise SystemExit(
+            replay_backfill_main(args[1:], prog="ccbot replay-backfill")
         )
     if args:
         _build_parser().error(f"unknown command: {args[0]}")

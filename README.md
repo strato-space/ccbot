@@ -349,6 +349,29 @@ CLI resolves the persisted Telegram control-surface routing coordinates from
 `$CCBOT_DIR/state.json`. Ambiguous state fails closed and requires an explicit
 target.
 
+
+**Operator replay/backfill for missed generated-image media:**
+
+If an older Codex rollout event was already consumed before generated-image
+preview delivery was enabled, do not rewind the global monitor offset. Use an
+explicit operator-selected replay slice or call id instead:
+
+```bash
+# Dry-run first; prints selected generated-image candidates only
+ccbot replay-backfill --replay-path ~/.codex/sessions/.../rollout.jsonl \
+  --thread-id 019e... --call-id ig_... --json
+
+# Deliver only the selected terminal media to the resolved Telegram surface
+ccbot replay-backfill --replay-path ~/.codex/sessions/.../rollout.jsonl \
+  --thread-id 019e... --call-id ig_... --deliver --json
+```
+
+`ccbot replay-backfill` never mutates monitor offsets. It re-normalizes only
+selected `image_generation_end` records, skips candidates already recorded in
+`telegram_delivery_audit.jsonl` unless `--force` is used, and writes a
+`replay_backfill` audit row with replay path, byte offsets, call id, and media
+hash for duplicate prevention.
+
 **Local CLI runtime input injection:**
 
 Services that need to submit text to the live tmux-hosted runtime must use the
