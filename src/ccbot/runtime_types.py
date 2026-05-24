@@ -122,6 +122,14 @@ class TopicBinding:
     chat_id: int | None = None
 
 
+THREAD_ID_SOURCE_SESSION_MAP = "session_map"
+THREAD_ID_SOURCE_LAUNCHER = "launcher"
+THREAD_ID_SOURCE_LIVE_FD = "live_fd"
+THREAD_ID_SOURCE_CWD_CATALOG = "cwd_catalog"
+THREAD_ID_SOURCE_RESTORE_INTENT = "restore_intent"
+THREAD_ID_SOURCE_CATALOG_RESOLUTION = "catalog_resolution"
+
+
 @dataclass
 class LiveProcessDescriptor:
     """State describing the live process hosted by a tmux window."""

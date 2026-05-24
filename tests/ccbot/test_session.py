@@ -763,6 +763,35 @@ class TestWindowState:
         mgr.clear_window_session("@1")
         assert mgr.get_window_state("@1").session_id == ""
 
+
+    def test_clear_duplicate_thread_claims_clears_thread_source(
+        self, mgr: SessionManager
+    ) -> None:
+        thread_id = "019e58ce-6f9e-7ea2-8c4d-5273ed295670"
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id=thread_id,
+            cwd="/tmp/project",
+            runtime_kind="codex",
+            thread_id_source="live_fd",
+        )
+        mgr.window_states["@2"] = LiveProcessDescriptor(
+            thread_id=thread_id,
+            cwd="/tmp/project",
+            runtime_kind="codex",
+            thread_id_source="restore_intent",
+        )
+        mgr.bind_thread(100, 1, "@1")
+        mgr.bind_thread(100, 2, "@2")
+
+        cleared = mgr.clear_duplicate_thread_claims_for_window(
+            "@1",
+            reason="test",
+        )
+
+        assert cleared == ["@2"]
+        assert mgr.window_states["@2"].thread_id == ""
+        assert mgr.window_states["@2"].thread_id_source == ""
+
     def test_reconcile_live_tmux_window_adopts_codex_after_cwd_drift(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -845,6 +874,7 @@ class TestWindowState:
             window_name="comfy-agent",
             registered_at=100.0,
             requires_live_proof=True,
+            thread_id_source="restore_intent",
         )
 
         changed = manager.reconcile_live_tmux_window(
@@ -857,6 +887,7 @@ class TestWindowState:
         assert changed is True
         state = manager.window_states["@8"]
         assert state.thread_id == ""
+        assert state.thread_id_source == ""
         assert state.cwd == "/tmp/new-project"
         assert state.requires_live_proof is True
 
