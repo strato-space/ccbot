@@ -57,6 +57,31 @@ to a cwd basename just because a directory was selected. When the final tmux
 display name differs because of collision suffixing or reuse, successful
 Telegram title sync updates the cached title metadata to that final name.
 
+### User-scoped map audit
+
+As of the 2026-05-24 ccbot-d4v audit, the already-flattened effective
+surface-behavior maps are `surface_routing_modes`, `surface_titles`, and
+`group_chat_ids`. The remaining `user_id -> surface_key` maps are retained
+intentionally until a canonical `ControlSurfaceIdentity` boundary is introduced:
+
+- `surface_bindings` / `external_surface_bindings` record the actor that created
+  or owns the persisted binding while shared group lookup may reuse the binding
+  for other allowed participants on the same exact chat/topic surface.
+- `surface_binding_states`, `surface_bind_flow_versions`, and
+  `surface_bind_flow_nonces` are bind-flow credentials/state; flattening them
+  would mix concurrent actors and stale callback protection.
+- `surface_pending_slots` belongs to the actor-owned future-input lane and must
+  not become a shared current-turn artifact.
+- `surface_policies` currently looks like surface behavior, but its writes are
+  still coupled to actor-owned bind/reset flows and legacy topic compatibility
+  mirrors. It should not be flattened by string-key edits alone; do that only
+  after the identity helper makes the permission/audit owner and effective
+  chat/thread surface explicit.
+
+Therefore no additional map is safe to flatten in-place without first landing
+the `ControlSurfaceIdentity` boundary work. Future flattening must preserve
+actor/audit ownership separately from effective shared chat/thread behavior.
+
 Compatibility topic mirrors still exist for topic-shaped callers:
 
 - `topic_policies[user_id][thread_id]`
