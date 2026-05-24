@@ -44,6 +44,7 @@ from .input_driver import runtime_input_driver
 from .runtime_types import (
     InputAction,
     LiveProcessDescriptor,
+    RestoreOwnerProof,
     RuntimeCapability,
     THREAD_ID_SOURCE_CATALOG_RESOLUTION,
     THREAD_ID_SOURCE_CWD_CATALOG,
@@ -130,6 +131,7 @@ SURFACE_BIND_FLOW_NONCES_KEY = "surface_bind_flow_nonces"
 SURFACE_PENDING_SLOTS_KEY = "surface_pending_slots"
 SURFACE_ROUTING_MODES_KEY = "surface_routing_modes"
 SURFACE_TITLES_KEY = "surface_titles"
+RESTORE_OWNER_PROOFS_KEY = "restore_owner_proofs"
 PENDING_SLOT_STATUS_PENDING = "pending"
 PENDING_SLOT_STATUS_CONSUMED = "consumed"
 SURFACE_PENDING_STATUS_PENDING = PENDING_SLOT_STATUS_PENDING
@@ -501,6 +503,7 @@ class SessionManager:
     surface_pending_slots: user_id -> {surface_key -> PendingSurfaceSlot}
     surface_routing_modes: surface_key -> steer|queue
     surface_titles: title_surface_key -> Telegram-visible title
+    restore_owner_proofs: runtime_id -> validated current-service restore-owner proof
     thread_bindings/external_topic_bindings/topic_*: compatibility-only topic mirrors
     window_display_names: window_id -> window_name (for display)
     group_chat_ids: surface_key -> Telegram group chat_id (for supergroup routing)
@@ -521,6 +524,10 @@ class SessionManager:
     )
     surface_routing_modes: dict[str, str] = field(default_factory=dict)
     surface_titles: dict[str, str] = field(default_factory=dict)
+    restore_owner_proofs: dict[str, RestoreOwnerProof] = field(default_factory=dict)
+    restore_service_epoch: str = field(
+        default_factory=lambda: f"{time.time():.6f}", repr=False
+    )
     thread_bindings: dict[int, dict[int, str]] = field(default_factory=dict)
     external_topic_bindings: dict[int, dict[int, dict[str, Any]]] = field(
         default_factory=dict
@@ -631,6 +638,10 @@ class SessionManager:
                 surface_key: title
                 for surface_key, title in self.surface_titles.items()
                 if str(title or "").strip()
+            },
+            RESTORE_OWNER_PROOFS_KEY: {
+                runtime_id: proof.to_dict()
+                for runtime_id, proof in self.restore_owner_proofs.items()
             },
             "thread_bindings": {
                 str(uid): {str(tid): wid for tid, wid in bindings.items()}
@@ -1043,6 +1054,22 @@ class SessionManager:
                 normalized[cls.make_surface_key(thread_id=thread_id, chat_id=chat_id)] = chat_id
         return normalized
 
+    @staticmethod
+    def _normalize_restore_owner_proofs(raw: Any) -> dict[str, RestoreOwnerProof]:
+        normalized: dict[str, RestoreOwnerProof] = {}
+        if not isinstance(raw, dict):
+            return normalized
+        for key, value in raw.items():
+            if not isinstance(value, dict):
+                continue
+            proof = RestoreOwnerProof.from_dict(value)
+            if proof is None:
+                continue
+            runtime_id = str(key or proof.runtime_id).strip()
+            if runtime_id and runtime_id == proof.runtime_id:
+                normalized[runtime_id] = proof
+        return normalized
+
     @classmethod
     def _normalize_surface_pending_slots(
         cls,
@@ -1391,6 +1418,9 @@ class SessionManager:
                 )
                 self.surface_titles = self._normalize_surface_titles(
                     state.get(SURFACE_TITLES_KEY, {})
+                )
+                self.restore_owner_proofs = self._normalize_restore_owner_proofs(
+                    state.get(RESTORE_OWNER_PROOFS_KEY, {})
                 )
                 self.window_display_names = state.get("window_display_names", {})
                 self.group_chat_ids = self._normalize_group_chat_ids(
@@ -2091,6 +2121,104 @@ class SessionManager:
         state.thread_id = ""
         state.thread_id_source = ""
 
+    def record_restore_owner_proof(
+        self,
+        *,
+        runtime_id: str,
+        runtime_kind: str,
+        cwd: str,
+        user_id: int,
+        surface_key: str,
+        window_id: str,
+        chat_id: int | None = None,
+        thread_id: int | None = None,
+        proof_source: str = "startup_restore",
+    ) -> RestoreOwnerProof | None:
+        """Persist current-service proof that restore owns a runtime surface.
+
+        This proof is stronger than raw CCBOT_RESTORE_* intent: it is recorded
+        only after startup restore validates runtime identity and binds the exact
+        Telegram surface to the exact tmux window for this process epoch.
+        """
+        normalized_surface_key = self._normalize_surface_key(surface_key)
+        if normalized_surface_key is None or not self._is_window_id(window_id):
+            return None
+        parsed = self._parse_surface_key(normalized_surface_key)
+        parsed_chat_id = parsed[1] if parsed is not None else None
+        parsed_thread_id = parsed[2] if parsed is not None else None
+        proof = RestoreOwnerProof(
+            runtime_id=str(runtime_id or "").strip(),
+            runtime_kind=str(runtime_kind or config.default_runtime_kind).strip(),
+            cwd=normalize_cwd(cwd),
+            user_id=int(user_id),
+            surface_key=normalized_surface_key,
+            window_id=window_id,
+            service_epoch=self.restore_service_epoch,
+            chat_id=chat_id if chat_id is not None else parsed_chat_id,
+            thread_id=thread_id if thread_id is not None else parsed_thread_id,
+            proof_source=proof_source,
+            observed_at=time.time(),
+        )
+        if not (proof.runtime_id and proof.runtime_kind and proof.cwd):
+            return None
+        self.restore_owner_proofs[proof.runtime_id] = proof
+        self._save_state()
+        return proof
+
+    def _restore_owner_proof_is_valid(
+        self,
+        proof: RestoreOwnerProof,
+        *,
+        runtime_kind: str | None = None,
+    ) -> bool:
+        if proof.service_epoch != self.restore_service_epoch:
+            return False
+        if runtime_kind and proof.runtime_kind and proof.runtime_kind != runtime_kind:
+            return False
+        normalized_surface_key = self._normalize_surface_key(proof.surface_key)
+        if normalized_surface_key != proof.surface_key:
+            return False
+        parsed = self._parse_surface_key(proof.surface_key)
+        if parsed is None:
+            return False
+        kind, parsed_chat_id, parsed_thread_id = parsed
+        if proof.chat_id is not None and parsed_chat_id is not None:
+            if proof.chat_id != parsed_chat_id:
+                return False
+        if proof.thread_id is not None and parsed_thread_id is not None:
+            if proof.thread_id != parsed_thread_id:
+                return False
+        if kind == "topic" and proof.thread_id is not None and proof.chat_id is not None:
+            stored_chat_id = self.resolve_chat_id(proof.user_id, proof.thread_id)
+            if stored_chat_id is not None and stored_chat_id != proof.chat_id:
+                return False
+        bound_window_id = self.surface_bindings.get(proof.user_id, {}).get(proof.surface_key)
+        if bound_window_id != proof.window_id or not self._is_window_id(proof.window_id):
+            return False
+        state = self.window_states.get(proof.window_id)
+        if state is None:
+            return False
+        if state.thread_id != proof.runtime_id:
+            return False
+        if state.runtime_kind and state.runtime_kind != proof.runtime_kind:
+            return False
+        if proof.cwd and normalize_cwd(state.cwd) != proof.cwd:
+            return False
+        return True
+
+    def _validated_restore_owner_proof_for_thread(
+        self,
+        thread_id: str,
+        *,
+        runtime_kind: str | None = None,
+    ) -> RestoreOwnerProof | None:
+        proof = self.restore_owner_proofs.get(str(thread_id or "").strip())
+        if proof is None:
+            return None
+        if not self._restore_owner_proof_is_valid(proof, runtime_kind=runtime_kind):
+            return None
+        return proof
+
     def register_live_process(
         self,
         window_id: str,
@@ -2130,6 +2258,18 @@ class SessionManager:
         owner = self.get_process_descriptor(owner_window_id)
         if owner is None or not owner.thread_id:
             return []
+        if reason == "startup_restore":
+            proof = self._validated_restore_owner_proof_for_thread(
+                owner.thread_id,
+                runtime_kind=owner.runtime_kind,
+            )
+            if proof is None or proof.window_id != owner_window_id:
+                logger.warning(
+                    "Skipping duplicate runtime thread claim cleanup for %s: "
+                    "missing validated restore-owner proof",
+                    owner_window_id,
+                )
+                return []
         bound_window_ids = self._bound_tmux_window_ids()
         cleared: list[str] = []
         for peer_window_id, peer in self.window_states.items():
@@ -2808,7 +2948,25 @@ class SessionManager:
         *,
         runtime_kind: str | None = None,
     ) -> str | None:
-        """Return the configured startup-restore window for a runtime thread."""
+        """Return the validated startup-restore owner for a runtime thread."""
+        proof = self._validated_restore_owner_proof_for_thread(
+            thread_id,
+            runtime_kind=runtime_kind,
+        )
+        return proof.window_id if proof is not None else None
+
+    def _restore_intent_owner_window_from_env(
+        self,
+        thread_id: str,
+        *,
+        runtime_kind: str | None = None,
+    ) -> str | None:
+        """Return the raw configured startup-restore owner from env intent.
+
+        This helper is limited to resolving the startup target before a validated
+        proof exists. Duplicate reclamation and replay fan-out must use
+        _restore_intent_owner_window_for_thread(), which validates the proof.
+        """
         if not thread_id:
             return None
         if str(os.environ.get("CCBOT_RESTORE_RUNTIME_ID") or "").strip() != thread_id:
@@ -2842,7 +3000,7 @@ class SessionManager:
         thread_id = str(os.environ.get("CCBOT_RESTORE_RUNTIME_ID") or "").strip()
         if not thread_id:
             return None
-        owner = self._restore_intent_owner_window_for_thread(thread_id)
+        owner = self._restore_intent_owner_window_from_env(thread_id)
         if owner != window_id:
             return None
         state = self.get_process_descriptor(window_id)

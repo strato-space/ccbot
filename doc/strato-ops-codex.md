@@ -93,7 +93,9 @@ Prefer explicit non-interactive Codex policy in that command when your host poli
   identity, replay evidence, Telegram control-surface identity, and Telegram
   routing coordinates are distinct.  `CCBOT_RESTORE_*` declares intent only;
   current live Codex fd proof wins over stale restore runtime ids for the same
-  tmux window.
+  tmux window. Duplicate runtime-claim cleanup is allowed only after a
+  current service-epoch restore-owner proof validates runtime id, cwd, exact
+  surface, chat/topic coordinates, and tmux window.
 - For Codex restore, set `CODEX_HOME` in the controller service env so replay
   ACK/catalog lookup uses the intended root, and set `OMX_AUTO_UPDATE=0` so an
   OMX update prompt cannot block non-interactive startup.

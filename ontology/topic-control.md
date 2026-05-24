@@ -115,6 +115,9 @@ If this note conflicts with any explanatory note in `doc/`, this note wins.
     stale sessions may share the same cwd
   - for an already live tmux window, current process fd proof outranks stale
     `CCBOT_RESTORE_*` intent when selecting replay delivery identity
+  - duplicate runtime-thread reclamation requires validated restore-owner proof
+    for the current service epoch; raw restore env alone cannot delete peer
+    window claims
 
 - **Pending slot**
   - surface-scoped deferred user intent captured before writable activation is

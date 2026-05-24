@@ -687,6 +687,23 @@ def bind_restored_surface(
         surface_key=intent.surface_key,
         window_name=intent.window_name,
     )
+    record_restore_owner_proof = getattr(
+        session_manager,
+        "record_restore_owner_proof",
+        None,
+    )
+    if callable(record_restore_owner_proof):
+        record_restore_owner_proof(
+            runtime_id=intent.runtime_id,
+            runtime_kind=intent.runtime_kind,
+            cwd=intent.cwd,
+            user_id=intent.user_id,
+            surface_key=intent.surface_key,
+            window_id=window_id,
+            chat_id=intent.group_chat_id,
+            thread_id=_surface_thread_id(intent.surface_key),
+            proof_source="startup_restore",
+        )
     clear_duplicates = getattr(
         session_manager,
         "clear_duplicate_thread_claims_for_window",

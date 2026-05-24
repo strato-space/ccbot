@@ -712,7 +712,7 @@ async def test_restore_intent_does_not_override_live_fd_proven_thread(
 
 
 @pytest.mark.asyncio
-async def test_codex_duplicate_thread_prefers_restore_intent_owner_after_restart(
+async def test_codex_duplicate_thread_prefers_validated_restore_owner_after_restart(
     session_manager: SessionManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -735,10 +735,20 @@ async def test_codex_duplicate_thread_prefers_restore_intent_owner_after_restart
     session_manager.bind_thread(100, 8227, "@2", window_name="mediagen-comfy")
 
     resolved = await session_manager.resolve_thread_for_window("@1")
-    users = await session_manager.find_users_for_session(thread_id)
-
     assert resolved is not None
     assert resolved.thread_id == thread_id
+    session_manager.record_restore_owner_proof(
+        runtime_id=thread_id,
+        runtime_kind="codex",
+        cwd="/home",
+        user_id=100,
+        surface_key="t:555",
+        window_id="@1",
+        thread_id=555,
+    )
+
+    users = await session_manager.find_users_for_session(thread_id)
+
     assert users == [(100, "@1", 555)]
     assert session_manager.get_window_state("@2").thread_id == ""
 

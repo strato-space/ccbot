@@ -547,8 +547,11 @@ session/window/panes before acting, distinguishes `LiveRuntimeProof` from
 runtime surfaces, and fails closed rather than killing tmux or restarting
 services when live identity is ambiguous.  `CCBOT_RESTORE_*` remains restore
 intent, not proof; when current live Codex fd proof disagrees with stale
-restore intent for the same window, the live fd-proven identity wins.  Local
-automation and live smoke validation must use `ccbot binding-preflight`, `ccbot runtime-input`,
+restore intent for the same window, the live fd-proven identity wins.  Duplicate
+runtime-thread reclamation requires a current-process restore-owner proof that
+validates runtime id, cwd, tmux window, `(user_id, surface_key)`, chat/topic
+coordinates, and service epoch; stale env or stale proof data must not clear
+other windows' runtime claims.  Local automation and live smoke validation must use `ccbot binding-preflight`, `ccbot runtime-input`,
 and same-runtime replay-evidence ACK; `ccbot runtime-status` is the equivalent
 read-only status alias for supervisors; do not use `ccbot send` or copied `tmux paste-buffer`
 commands as a runtime input path.

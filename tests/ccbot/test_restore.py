@@ -65,6 +65,132 @@ def _intent(**overrides) -> RestoreIntent:
 
 
 
+def test_bind_restored_surface_records_proof_and_reclaims_duplicate(
+    mgr: SessionManager,
+) -> None:
+    intent = _intent()
+    mgr.register_live_process(
+        "@2",
+        intent.cwd,
+        runtime_kind="codex",
+        thread_id=intent.runtime_id,
+    )
+    mgr.bind_surface(
+        intent.user_id,
+        "@2",
+        surface_key="t:-1004242:43",
+        window_name="stale-comfy-agent",
+    )
+
+    bind_restored_surface(mgr, intent, window_id="@1")
+
+    proof = mgr.restore_owner_proofs[intent.runtime_id]
+    assert proof.window_id == "@1"
+    assert proof.cwd == "/home/tools/mediagen-comfy"
+    assert proof.chat_id == -1004242
+    assert proof.thread_id == 42
+    assert mgr.get_window_state("@2").thread_id == ""
+
+
+def test_startup_restore_duplicate_cleanup_requires_current_epoch_proof(
+    mgr: SessionManager,
+) -> None:
+    thread_id = "thread-1"
+    mgr.register_live_process(
+        "@1",
+        "/home/tools/mediagen-comfy",
+        runtime_kind="codex",
+        thread_id=thread_id,
+    )
+    mgr.bind_surface(100, "@1", surface_key="t:-1004242:42")
+    mgr.register_live_process(
+        "@2",
+        "/home/tools/mediagen-comfy",
+        runtime_kind="codex",
+        thread_id=thread_id,
+    )
+    mgr.bind_surface(100, "@2", surface_key="t:-1004242:43")
+
+    cleared = mgr.clear_duplicate_thread_claims_for_window(
+        "@1",
+        reason="startup_restore",
+    )
+
+    assert cleared == []
+    assert mgr.get_window_state("@2").thread_id == thread_id
+
+
+def test_restore_owner_proof_persists_with_service_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    state_file = tmp_path / "state.json"
+    monkeypatch.setattr("ccbot.session.config.state_file", state_file)
+    manager = SessionManager()
+    manager.register_live_process(
+        "@1",
+        "/home/tools/mediagen-comfy",
+        runtime_kind="codex",
+        thread_id="thread-1",
+    )
+    manager.bind_surface(100, "@1", surface_key="t:-1004242:42")
+    proof = manager.record_restore_owner_proof(
+        runtime_id="thread-1",
+        runtime_kind="codex",
+        cwd="/home/tools/mediagen-comfy",
+        user_id=100,
+        surface_key="t:-1004242:42",
+        window_id="@1",
+        chat_id=-1004242,
+        thread_id=42,
+    )
+
+    restored = SessionManager()
+
+    assert proof is not None
+    assert restored.restore_owner_proofs["thread-1"].service_epoch == proof.service_epoch
+    assert restored._restore_intent_owner_window_for_thread("thread-1") is None
+
+
+def test_startup_restore_duplicate_cleanup_rejects_mismatched_proof(
+    mgr: SessionManager,
+) -> None:
+    thread_id = "thread-1"
+    mgr.register_live_process(
+        "@1",
+        "/home/tools/mediagen-comfy",
+        runtime_kind="codex",
+        thread_id=thread_id,
+    )
+    mgr.bind_surface(100, "@1", surface_key="t:-1004242:42")
+    mgr.record_restore_owner_proof(
+        runtime_id=thread_id,
+        runtime_kind="codex",
+        cwd="/home/tools/mediagen-comfy",
+        user_id=100,
+        surface_key="t:-1004242:42",
+        window_id="@1",
+        chat_id=-1004242,
+        thread_id=42,
+    )
+    mgr.get_window_state("@1").cwd = "/home/tools/ccbot"
+    mgr.register_live_process(
+        "@2",
+        "/home/tools/mediagen-comfy",
+        runtime_kind="codex",
+        thread_id=thread_id,
+    )
+    mgr.bind_surface(100, "@2", surface_key="t:-1004242:43")
+
+    cleared = mgr.clear_duplicate_thread_claims_for_window(
+        "@1",
+        reason="startup_restore",
+    )
+
+    assert cleared == []
+    assert mgr.get_window_state("@2").thread_id == thread_id
+
+
 def test_startup_restore_retryable_only_for_transient_reboot_surfaces() -> None:
     assert is_startup_restore_retryable(
         StartupRestoreResult(

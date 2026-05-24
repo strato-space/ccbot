@@ -181,6 +181,85 @@ class LiveProcessDescriptor:
         )
 
 
+@dataclass(frozen=True)
+class RestoreOwnerProof:
+    """Process-epoch proof that startup restore owns a runtime binding.
+
+    Raw CCBOT_RESTORE_* environment variables are intent only.  This proof is
+    written only after restore validation has matched runtime identity, cwd and
+    Telegram surface coordinates for the current controller process epoch.
+    """
+
+    runtime_id: str
+    runtime_kind: str
+    cwd: str
+    user_id: int
+    surface_key: str
+    window_id: str
+    service_epoch: str
+    chat_id: int | None = None
+    thread_id: int | None = None
+    proof_source: str = "startup_restore"
+    observed_at: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "runtime_id": self.runtime_id,
+            "runtime_kind": self.runtime_kind,
+            "cwd": self.cwd,
+            "user_id": self.user_id,
+            "surface_key": self.surface_key,
+            "window_id": self.window_id,
+            "service_epoch": self.service_epoch,
+            "proof_source": self.proof_source,
+            "observed_at": self.observed_at,
+        }
+        if self.chat_id is not None:
+            data["chat_id"] = self.chat_id
+        if self.thread_id is not None:
+            data["thread_id"] = self.thread_id
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RestoreOwnerProof | None":
+        try:
+            runtime_id = str(data.get("runtime_id") or "").strip()
+            runtime_kind = str(data.get("runtime_kind") or "").strip()
+            cwd = str(data.get("cwd") or "").strip()
+            surface_key = str(data.get("surface_key") or "").strip()
+            window_id = str(data.get("window_id") or "").strip()
+            service_epoch = str(data.get("service_epoch") or "").strip()
+            user_id = int(data.get("user_id"))
+        except (TypeError, ValueError):
+            return None
+        if not (runtime_id and runtime_kind and surface_key and window_id and service_epoch):
+            return None
+        chat_id_raw = data.get("chat_id")
+        thread_id_raw = data.get("thread_id")
+        try:
+            chat_id = int(chat_id_raw) if chat_id_raw is not None else None
+            thread_id = int(thread_id_raw) if thread_id_raw is not None else None
+        except (TypeError, ValueError):
+            return None
+        try:
+            observed_at = float(data.get("observed_at") or 0.0)
+        except (TypeError, ValueError):
+            observed_at = 0.0
+        return cls(
+            runtime_id=runtime_id,
+            runtime_kind=runtime_kind,
+            cwd=cwd,
+            user_id=user_id,
+            surface_key=surface_key,
+            window_id=window_id,
+            service_epoch=service_epoch,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            proof_source=str(data.get("proof_source") or "startup_restore"),
+            observed_at=observed_at,
+        )
+
+
 @dataclass
 class ThreadLocator:
     """Resolved persisted conversation identity plus its replay evidence path."""
