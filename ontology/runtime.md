@@ -296,5 +296,9 @@ Raw operator control is different:
   (`ccbot.service` / tmux `comfy:comfy-agent`) and ImmArenaBot
   (`imm_arena_bot.service` / tmux `imm_arena_bot:imm`) controller services;
   non-target tmux sessions/windows/panes are not part of the recovery target
+- if explicit `CCBOT_RESTORE_*` intent is absent, controller startup may derive
+  a restore candidate only from exact whitelisted control surfaces
+  (`CCBOT_AUTONOMOUS_RESTORE_SURFACES` or `CCBOT_OWNED_SURFACES`) plus durable
+  binding/process descriptors and replay/cwd/runtime proof
 - `tmux-preserve.conf` with `KillMode=process` narrows controller restart blast
   radius but does not replace before/after tmux PID and session-list checks

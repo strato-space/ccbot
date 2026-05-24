@@ -23,6 +23,7 @@ from .runtime_types import runtime_capability_registry
 logger = logging.getLogger(__name__)
 
 _RESTORE_PREFIX = "CCBOT_RESTORE_"
+_AUTONOMOUS_RESTORE_SURFACES_ENV = "CCBOT_AUTONOMOUS_RESTORE_SURFACES"
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _SHELL_COMMAND_NAMES = {"bash", "dash", "fish", "sh", "zsh"}
@@ -244,6 +245,26 @@ def _has_restore_env(environ: Mapping[str, str]) -> bool:
     return any(key.startswith(_RESTORE_PREFIX) for key in environ)
 
 
+def _csv_env_set(environ: Mapping[str, str], name: str) -> set[str]:
+    value = str(environ.get(name) or "").strip()
+    if not value:
+        return set()
+    return {item.strip() for item in value.split(",") if item.strip()}
+
+
+def _autonomous_restore_surface_whitelist(
+    environ: Mapping[str, str],
+) -> set[str]:
+    """Return exact control surfaces this controller may repair without intent env."""
+    explicit = _csv_env_set(environ, _AUTONOMOUS_RESTORE_SURFACES_ENV)
+    if explicit:
+        return explicit
+    owned = _csv_env_set(environ, "CCBOT_OWNED_SURFACES")
+    if owned:
+        return owned
+    return set(getattr(config, "owned_surface_keys", set()) or set())
+
+
 def _required(environ: Mapping[str, str], key: str, label: str) -> str:
     value = str(environ.get(key) or "").strip()
     if not value:
@@ -332,6 +353,127 @@ def parse_restore_intent(
         runtime_kind=runtime_kind,
         shared_group=shared_group,
     )
+
+
+def _intent_launcher_command(environ: Mapping[str, str]) -> str:
+    return str(
+        environ.get("CCBOT_COMMAND")
+        or environ.get("CLAUDE_COMMAND")
+        or config.ccbot_command
+        or ""
+    ).strip()
+
+
+def _state_window_id_is_tmux(session_manager: Any, window_id: str) -> bool:
+    checker = getattr(session_manager, "_is_window_id", None)
+    if callable(checker):
+        return bool(checker(window_id))
+    return window_id.startswith("@")
+
+
+def _derive_restore_intent_from_state(
+    session_manager: Any,
+    environ: Mapping[str, str],
+) -> tuple[RestoreIntent | None, str, str]:
+    """Derive one whitelisted restore target from durable state.
+
+    This is intentionally narrower than explicit ``CCBOT_RESTORE_*`` intent:
+    it can only select an exact whitelisted Telegram control surface whose
+    persisted binding, process descriptor, cwd, runtime kind, and conversation
+    identity already exist in the controller's durable state.
+    """
+    whitelist = _autonomous_restore_surface_whitelist(environ)
+    if not whitelist:
+        return (
+            None,
+            "no autonomous restore whitelist configured",
+            RestoreClassification.NO_RESTORE_INTENT,
+        )
+
+    candidates: list[RestoreIntent] = []
+    rejected: list[str] = []
+    launcher_command = _intent_launcher_command(environ)
+    for raw_user_id, bindings in getattr(session_manager, "surface_bindings", {}).items():
+        if not isinstance(bindings, dict):
+            continue
+        try:
+            user_id = int(raw_user_id)
+        except (TypeError, ValueError):
+            continue
+        for raw_surface_key, window_id in bindings.items():
+            surface_key = str(raw_surface_key or "").strip()
+            if surface_key not in whitelist:
+                continue
+            window_id = str(window_id or "").strip()
+            if not _state_window_id_is_tmux(session_manager, window_id):
+                rejected.append(f"{surface_key}: non-tmux binding")
+                continue
+            state = getattr(session_manager, "window_states", {}).get(window_id)
+            if state is None:
+                rejected.append(f"{surface_key}: missing window descriptor")
+                continue
+            cwd = str(getattr(state, "cwd", "") or "").strip()
+            if not cwd:
+                rejected.append(f"{surface_key}: missing cwd")
+                continue
+            runtime_kind = (
+                str(getattr(state, "runtime_kind", "") or "").strip()
+                or infer_runtime_kind_from_command(launcher_command)
+            )
+            runtime_id = str(getattr(state, "thread_id", "") or "").strip()
+            if runtime_kind == "codex" and not runtime_id:
+                rejected.append(f"{surface_key}: missing Codex runtime id")
+                continue
+            chat_id, thread_id = _surface_coordinates(surface_key)
+            if surface_key.startswith("t:") and chat_id is None:
+                rejected.append(f"{surface_key}: topic surface is not chat-qualified")
+                continue
+            if surface_key.startswith("c:") and chat_id is None:
+                rejected.append(f"{surface_key}: chat surface is not chat-qualified")
+                continue
+            display_name = ""
+            get_display_name = getattr(session_manager, "get_display_name", None)
+            if callable(get_display_name):
+                display_name = str(get_display_name(window_id) or "").strip()
+            window_name = (
+                str(getattr(state, "window_name", "") or "").strip()
+                or (display_name if display_name and display_name != window_id else "")
+                or Path(cwd).name
+            )
+            candidates.append(
+                RestoreIntent(
+                    window_name=window_name,
+                    cwd=cwd,
+                    runtime_id=runtime_id,
+                    user_id=user_id,
+                    surface_key=surface_key,
+                    group_chat_id=chat_id,
+                    launcher_command=launcher_command,
+                    runtime_kind=runtime_kind,
+                    shared_group=chat_id is not None and thread_id is not None,
+                )
+            )
+
+    if not candidates:
+        if rejected:
+            return (
+                None,
+                "; ".join(rejected),
+                RestoreClassification.UNSAFE_AMBIGUOUS,
+            )
+        return (
+            None,
+            "no matching whitelisted binding",
+            RestoreClassification.NO_RESTORE_INTENT,
+        )
+    if len(candidates) > 1:
+        surfaces = ", ".join(sorted(candidate.surface_key for candidate in candidates))
+        return (
+            None,
+            f"ambiguous autonomous restore candidates: {surfaces}",
+            RestoreClassification.UNSAFE_AMBIGUOUS,
+        )
+    return candidates[0], "state-derived autonomous restore target", ""
 
 
 def _surface_thread_id(surface_key: str) -> int | None:
@@ -796,28 +938,51 @@ async def inspect_configured_startup_target(
     environ: Mapping[str, str] | None = None,
 ) -> StartupRestoreInventory:
     """Inspect configured startup restore target without mutating state."""
+    source: Mapping[str, str] = os.environ if environ is None else environ
     try:
-        intent = parse_restore_intent(environ)
+        intent = parse_restore_intent(source)
     except RestoreIntentError as exc:
         return StartupRestoreInventory(
             classification=RestoreClassification.INVALID_RESTORE_INTENT,
             message=str(exc),
-            env=_env_restore_facts(environ),
+            env=_env_restore_facts(source),
         )
     if intent is None:
-        return StartupRestoreInventory(
-            classification=RestoreClassification.NO_RESTORE_INTENT,
-            message="no restore intent configured",
-            env=_env_restore_facts(environ),
+        if "CCBOT_RESTORE_ENABLED" in source and not _truthy(
+            source.get("CCBOT_RESTORE_ENABLED")
+        ):
+            return StartupRestoreInventory(
+                classification=RestoreClassification.NO_RESTORE_INTENT,
+                message="restore disabled by CCBOT_RESTORE_ENABLED",
+                env=_env_restore_facts(source),
+            )
+        intent, message, classification = _derive_restore_intent_from_state(
+            session_manager,
+            source,
+        )
+        if intent is None:
+            return StartupRestoreInventory(
+                classification=classification,
+                message=message,
+                env=_env_restore_facts(source),
+            )
+        logger.info(
+            "Derived startup restore intent from whitelisted durable state: "
+            "surface=%s window=%s runtime_kind=%s",
+            intent.surface_key,
+            getattr(session_manager, "surface_bindings", {})
+            .get(intent.user_id, {})
+            .get(intent.surface_key, ""),
+            intent.runtime_kind,
         )
 
-    env_check = validate_restore_env_contract(intent, environ)
+    env_check = validate_restore_env_contract(intent, source)
     if not env_check.ok:
         return StartupRestoreInventory(
             classification=RestoreClassification.ENV_CONTRACT_FAILED,
             intent=intent,
             message=env_check.reason,
-            env=_env_restore_facts(environ),
+            env=_env_restore_facts(source),
             binding_fingerprint=_binding_fingerprint(session_manager, intent),
         )
 
@@ -827,7 +992,7 @@ async def inspect_configured_startup_target(
             classification=RestoreClassification.UNSAFE_AMBIGUOUS,
             intent=intent,
             message=route_check.reason,
-            env=_env_restore_facts(environ),
+            env=_env_restore_facts(source),
             binding_fingerprint=_binding_fingerprint(session_manager, intent),
         )
 
@@ -836,7 +1001,7 @@ async def inspect_configured_startup_target(
         resume_proof = build_resume_target_proof(
             session_manager,
             intent,
-            environ=environ,
+            environ=source,
         )
         classification = RestoreClassification.FULL_LOSS_MISSING_TMUX_WINDOW
         message = (
@@ -850,7 +1015,7 @@ async def inspect_configured_startup_target(
             classification=classification,
             intent=intent,
             message=message,
-            env=_env_restore_facts(environ),
+            env=_env_restore_facts(source),
             resume_proof=resume_proof,
             binding_fingerprint=_binding_fingerprint(session_manager, intent),
         )
@@ -863,7 +1028,7 @@ async def inspect_configured_startup_target(
         existing,
         intent,
         pane_id=active_pane_id,
-        environ=environ,
+        environ=source,
     )
     classification, message = _classify_existing_window(
         window=existing,
@@ -876,7 +1041,7 @@ async def inspect_configured_startup_target(
         resume_proof = build_resume_target_proof(
             session_manager,
             intent,
-            environ=environ,
+            environ=source,
         )
         if intent.runtime_kind == "codex" and resume_proof is None:
             classification = RestoreClassification.UNSAFE_AMBIGUOUS
@@ -891,7 +1056,7 @@ async def inspect_configured_startup_target(
         pane_command=str(getattr(existing, "pane_current_command", "") or ""),
         pane_id=active_pane_id,
         panes=panes,
-        env=_env_restore_facts(environ),
+        env=_env_restore_facts(source),
         live_proof=live_proof,
         resume_proof=resume_proof,
         binding_fingerprint=_binding_fingerprint(session_manager, intent),

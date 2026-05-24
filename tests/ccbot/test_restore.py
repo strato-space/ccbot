@@ -275,6 +275,17 @@ def test_parse_restore_intent_is_absent_when_no_restore_env() -> None:
     assert parse_restore_intent({"CCBOT_RESTORE_ENABLED": "0"}) is None
 
 
+def _state_restore_env(**overrides: str) -> dict[str, str]:
+    env = {
+        "CCBOT_OWNED_SURFACES": "t:-1004242:42",
+        "CCBOT_COMMAND": "omx --madmax",
+        "CODEX_HOME": "/tmp/codex-home",
+        "OMX_AUTO_UPDATE": "0",
+    }
+    env.update(overrides)
+    return env
+
+
 def test_restore_env_contract_requires_codex_home_and_disabled_omx_update() -> None:
     intent = _intent()
 
@@ -794,4 +805,186 @@ async def test_startup_restore_reuses_registered_node_runtime_without_injecting(
     assert result.status == "already_restored"
     assert result.classification == RestoreClassification.EXISTING_VALID_RUNTIME
     assert mgr.surface_bindings[100]["t:42"] == "@1"
+    tmux.create_or_reuse_window.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_env_absent_state_derived_restore_adopts_whitelisted_live_runtime(
+    mgr: SessionManager,
+) -> None:
+    mgr.set_group_chat_id(100, 42, -1004242)
+    mgr.register_live_process(
+        "@31",
+        "/home/tools/mediagen-comfy",
+        window_name="comfy-agent",
+        runtime_kind="codex",
+        thread_id="thread-1",
+    )
+    mgr.bind_surface(
+        100,
+        "@31",
+        surface_key="t:-1004242:42",
+        window_name="comfy-agent",
+    )
+    tmux = SimpleNamespace()
+    tmux.find_window_by_name = AsyncMock(
+        return_value=SimpleNamespace(
+            window_id="@31",
+            window_name="comfy-agent",
+            cwd="/home/tools/mediagen-comfy",
+            pane_current_command="node",
+            pane_id="%31",
+        )
+    )
+    tmux.create_or_reuse_window = AsyncMock()
+
+    result = await restore_configured_startup_target(
+        mgr,
+        tmux,
+        environ=_state_restore_env(),
+    )
+
+    assert result.status == "already_restored"
+    assert result.classification == RestoreClassification.EXISTING_VALID_RUNTIME
+    assert result.inventory is not None
+    assert result.inventory.intent is not None
+    assert result.inventory.intent.surface_key == "t:-1004242:42"
+    assert result.inventory.intent.runtime_id == "thread-1"
+    assert mgr.surface_bindings[100]["t:-1004242:42"] == "@31"
+    tmux.create_or_reuse_window.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_env_absent_state_derived_restore_recreates_missing_whitelisted_window(
+    mgr: SessionManager,
+) -> None:
+    class _Candidate:
+        normalized_cwd = "/home/tools/mediagen-comfy"
+        rollout_file = "/tmp/codex-home/sessions/rollout-thread-1.jsonl"
+
+        def to_locator(self):
+            return SimpleNamespace(
+                file_path="/tmp/codex-home/sessions/rollout-thread-1.jsonl",
+                cwd="/home/tools/mediagen-comfy",
+            )
+
+    mgr.codex_thread_catalog = SimpleNamespace(get_candidate_fast=lambda _tid: _Candidate())
+    mgr.set_group_chat_id(100, 42, -1004242)
+    mgr.register_live_process(
+        "@31",
+        "/home/tools/mediagen-comfy",
+        window_name="comfy-agent",
+        runtime_kind="codex",
+        thread_id="thread-1",
+    )
+    mgr.bind_surface(
+        100,
+        "@31",
+        surface_key="t:-1004242:42",
+        window_name="comfy-agent",
+    )
+    created_window = SimpleNamespace(
+        window_id="@32",
+        window_name="comfy-agent",
+        cwd="/home/tools/mediagen-comfy",
+        pane_current_command="node",
+        pane_id="%32",
+        pane_pid="3232",
+    )
+    tmux = SimpleNamespace()
+    tmux.find_window_by_name = AsyncMock(side_effect=[None, created_window])
+    tmux.create_or_reuse_window = AsyncMock(
+        return_value=(True, "created", "comfy-agent", "@32", False)
+    )
+
+    async def wait_for_entry(window_id, **_kwargs):
+        assert window_id == "@32"
+        mgr.window_states["@32"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/home/tools/mediagen-comfy",
+            runtime_kind="codex",
+            window_name="comfy-agent",
+        )
+        return True
+
+    mgr.wait_for_session_map_entry = wait_for_entry  # type: ignore[method-assign]
+
+    result = await restore_configured_startup_target(
+        mgr,
+        tmux,
+        environ=_state_restore_env(),
+    )
+
+    assert result.status == "restored"
+    assert result.classification == RestoreClassification.FULL_LOSS_MISSING_TMUX_WINDOW
+    assert mgr.surface_bindings[100]["t:-1004242:42"] == "@32"
+    assert (
+        tmux.create_or_reuse_window.await_args.kwargs["launch_command"]
+        == "CODEX_HOME=/tmp/codex-home OMX_AUTO_UPDATE=0 omx --madmax"
+    )
+
+
+@pytest.mark.asyncio
+async def test_env_absent_restore_skips_without_autonomous_whitelist(
+    mgr: SessionManager,
+) -> None:
+    mgr.register_live_process(
+        "@31",
+        "/home/tools/mediagen-comfy",
+        window_name="comfy-agent",
+        runtime_kind="codex",
+        thread_id="thread-1",
+    )
+    mgr.bind_surface(100, "@31", surface_key="t:-1004242:42")
+    tmux = SimpleNamespace()
+    tmux.find_window_by_name = AsyncMock()
+
+    result = await restore_configured_startup_target(
+        mgr,
+        tmux,
+        environ={"CODEX_HOME": "/tmp/codex-home", "OMX_AUTO_UPDATE": "0"},
+    )
+
+    assert result.status == "skipped"
+    assert result.classification == RestoreClassification.NO_RESTORE_INTENT
+    tmux.find_window_by_name.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_env_absent_restore_rejects_stale_replay_cwd(
+    mgr: SessionManager,
+) -> None:
+    class _Candidate:
+        normalized_cwd = "/tmp/other"
+        rollout_file = "/tmp/codex-home/sessions/rollout-thread-1.jsonl"
+
+        def to_locator(self):
+            return SimpleNamespace(
+                file_path="/tmp/codex-home/sessions/rollout-thread-1.jsonl",
+                cwd="/tmp/other",
+            )
+
+    mgr.codex_thread_catalog = SimpleNamespace(get_candidate_fast=lambda _tid: _Candidate())
+    mgr.set_group_chat_id(100, 42, -1004242)
+    mgr.register_live_process(
+        "@31",
+        "/home/tools/mediagen-comfy",
+        window_name="comfy-agent",
+        runtime_kind="codex",
+        thread_id="thread-1",
+    )
+    mgr.bind_surface(100, "@31", surface_key="t:-1004242:42")
+    tmux = SimpleNamespace()
+    tmux.find_window_by_name = AsyncMock(return_value=None)
+    tmux.create_or_reuse_window = AsyncMock()
+
+    result = await restore_configured_startup_target(
+        mgr,
+        tmux,
+        environ=_state_restore_env(),
+    )
+
+    assert result.status == "failed"
+    assert result.classification == RestoreClassification.UNSAFE_AMBIGUOUS
+    assert "resume target proof" in result.message
     tmux.create_or_reuse_window.assert_not_called()

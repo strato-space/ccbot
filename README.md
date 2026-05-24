@@ -250,6 +250,7 @@ ALLOWED_USERS=your_telegram_user_id
 | `CCBOT_COMMAND`         | `claude`   | Runtime launcher command for new windows; set to `codex`, `omx --madmax`, or a host-specific wrapper |
 | `CLAUDE_COMMAND`        | `claude`   | Legacy fallback used only when `CCBOT_COMMAND` is unset |
 | `CCBOT_OWNED_SURFACES` | _(none)_ | Optional comma-separated allow list of chat-qualified surfaces (`t:<chat_id>:<thread_id>`, `c:<chat_id>`). When set, shared group updates outside these surfaces are hard-ignored before typing/reply/download/runtime side effects |
+| `CCBOT_AUTONOMOUS_RESTORE_SURFACES` | _(uses `CCBOT_OWNED_SURFACES`)_ | Optional narrower comma-separated allow list for env-absent startup restore; exact chat-qualified surfaces only |
 | `CCBOT_IGNORED_SURFACES` | _(none)_ | Optional comma-separated deny list of surfaces to hard-ignore; supports canonical keys plus legacy `t:<thread_id>` aliases for migrations |
 | `MONITOR_POLL_INTERVAL` | `2.0`      | Polling interval in seconds                      |
 | `CCBOT_SHOW_HIDDEN_DIRS` | `false` | Show hidden (dot) directories in directory browser |
@@ -546,12 +547,15 @@ session/window/panes before acting, distinguishes `LiveRuntimeProof` from
 `ResumeTargetProof`, ignores OMX HUD/question/update/helper panes as bindable
 runtime surfaces, and fails closed rather than killing tmux or restarting
 services when live identity is ambiguous.  `CCBOT_RESTORE_*` remains restore
-intent, not proof; when current live Codex fd proof disagrees with stale
-restore intent for the same window, the live fd-proven identity wins.  Duplicate
-runtime-thread reclamation requires a current-process restore-owner proof that
-validates runtime id, cwd, tmux window, `(user_id, surface_key)`, chat/topic
-coordinates, and service epoch; stale env or stale proof data must not clear
-other windows' runtime claims.  Local automation and live smoke validation must use `ccbot binding-preflight`, `ccbot runtime-input`,
+intent, not proof; when no explicit restore intent is present, controller
+startup may derive one target only from exact `CCBOT_AUTONOMOUS_RESTORE_SURFACES`
+or `CCBOT_OWNED_SURFACES` plus durable `surface_bindings`, `window_states`,
+chat-qualified routing coordinates, and replay/cwd/runtime proof.  When current
+live Codex fd proof disagrees with stale restore intent for the same window, the
+live fd-proven identity wins.  Duplicate runtime-thread reclamation requires a
+current-process restore-owner proof that validates runtime id, cwd, tmux window,
+`(user_id, surface_key)`, chat/topic coordinates, and service epoch; stale env
+or stale proof data must not clear other windows' runtime claims.  Local automation and live smoke validation must use `ccbot binding-preflight`, `ccbot runtime-input`,
 and same-runtime replay-evidence ACK; `ccbot runtime-status` is the equivalent
 read-only status alias for supervisors; do not use `ccbot send` or copied `tmux paste-buffer`
 commands as a runtime input path.
