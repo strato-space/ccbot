@@ -27,6 +27,7 @@ from typing import Any
 import aiofiles
 
 from .config import config
+from .control_surface import ControlSurfaceIdentity
 from .codex_rollout import CodexRolloutNormalizer
 from .codex_threads import (
     CodexThreadCandidate,
@@ -129,8 +130,6 @@ SURFACE_BIND_FLOW_NONCES_KEY = "surface_bind_flow_nonces"
 SURFACE_PENDING_SLOTS_KEY = "surface_pending_slots"
 SURFACE_ROUTING_MODES_KEY = "surface_routing_modes"
 SURFACE_TITLES_KEY = "surface_titles"
-TOPIC_SURFACE_PREFIX = "t:"
-CHAT_SURFACE_PREFIX = "c:"
 PENDING_SLOT_STATUS_PENDING = "pending"
 PENDING_SLOT_STATUS_CONSUMED = "consumed"
 SURFACE_PENDING_STATUS_PENDING = PENDING_SLOT_STATUS_PENDING
@@ -704,13 +703,10 @@ class SessionManager:
         chat_id: int | None = None,
     ) -> str:
         """Build the canonical persisted key for a control surface."""
-        if thread_id is not None:
-            if chat_id is not None:
-                return f"{TOPIC_SURFACE_PREFIX}{int(chat_id)}:{int(thread_id)}"
-            return f"{TOPIC_SURFACE_PREFIX}{int(thread_id)}"
-        if chat_id is not None:
-            return f"{CHAT_SURFACE_PREFIX}{int(chat_id)}"
-        raise ValueError("surface key requires thread_id or chat_id")
+        return ControlSurfaceIdentity.from_coordinates(
+            thread_id=thread_id,
+            chat_id=chat_id,
+        ).surface_key
 
     @classmethod
     def make_surface_title_key(
@@ -726,37 +722,19 @@ class SessionManager:
         different groups are different user-facing surfaces and must not share
         display metadata.
         """
-        if thread_id is not None:
-            if chat_id is not None:
-                return f"{TOPIC_SURFACE_PREFIX}{int(chat_id)}:{int(thread_id)}"
-            return cls.make_surface_key(thread_id=thread_id)
-        if chat_id is not None:
-            return cls.make_surface_key(chat_id=chat_id)
-        raise ValueError("surface title key requires thread_id or chat_id")
+        return ControlSurfaceIdentity.from_coordinates(
+            thread_id=thread_id,
+            chat_id=chat_id,
+        ).title_surface_key
 
     @staticmethod
     def _parse_surface_key(
         surface_key: str,
     ) -> tuple[str, int | None, int | None] | None:
         """Parse a persisted surface key into (kind, chat_id, thread_id)."""
-        if surface_key.startswith(TOPIC_SURFACE_PREFIX):
-            payload = surface_key[len(TOPIC_SURFACE_PREFIX) :]
-            parts = payload.split(":")
-            try:
-                if len(parts) == 1:
-                    return "topic", None, int(parts[0])
-                if len(parts) == 2:
-                    return "topic", int(parts[0]), int(parts[1])
-            except (TypeError, ValueError):
-                return None
-            return None
-        elif surface_key.startswith(CHAT_SURFACE_PREFIX):
-            payload = surface_key[len(CHAT_SURFACE_PREFIX) :]
-            try:
-                return "chat", int(payload), None
-            except (TypeError, ValueError):
-                return None
-        else:
+        try:
+            return ControlSurfaceIdentity.from_surface_key(surface_key).as_parse_tuple()
+        except ValueError:
             return None
 
     @staticmethod
@@ -764,25 +742,10 @@ class SessionManager:
         surface_key: str,
     ) -> tuple[str, int | None, int | None] | None:
         """Parse a persisted title key into (kind, chat_id, thread_id)."""
-        raw_key = str(surface_key or "").strip()
-        if raw_key.startswith(TOPIC_SURFACE_PREFIX):
-            payload = raw_key[len(TOPIC_SURFACE_PREFIX) :]
-            parts = payload.split(":")
-            try:
-                if len(parts) == 1:
-                    return "topic", None, int(parts[0])
-                if len(parts) == 2:
-                    return "topic", int(parts[0]), int(parts[1])
-            except (TypeError, ValueError):
-                return None
+        try:
+            return ControlSurfaceIdentity.from_surface_key(surface_key).as_parse_tuple()
+        except ValueError:
             return None
-        if raw_key.startswith(CHAT_SURFACE_PREFIX):
-            payload = raw_key[len(CHAT_SURFACE_PREFIX) :]
-            try:
-                return "chat", int(payload), None
-            except (TypeError, ValueError):
-                return None
-        return None
 
     @classmethod
     def _topic_thread_id_from_surface_key(cls, surface_key: str) -> int | None:
@@ -840,18 +803,14 @@ class SessionManager:
         chat_id: int | None = None,
     ) -> str:
         """Resolve either a direct surface key or thread/chat coordinates."""
-        if thread_id is not None or chat_id is not None:
-            return self.make_surface_key(thread_id=thread_id, chat_id=chat_id)
-        if surface_key is not None:
-            parsed = self._parse_surface_key(surface_key)
-            if parsed is None:
-                raise ValueError(f"invalid surface key: {surface_key!r}")
-            kind, parsed_chat_id, parsed_thread_id = parsed
-            return self.make_surface_key(
-                thread_id=parsed_thread_id if kind == "topic" else None,
-                chat_id=parsed_chat_id,
-            )
-        return self.make_surface_key(thread_id=thread_id, chat_id=chat_id)
+        try:
+            return ControlSurfaceIdentity.from_coordinates(
+                surface_key=surface_key,
+                thread_id=thread_id,
+                chat_id=chat_id,
+            ).surface_key
+        except ValueError as exc:
+            raise ValueError(f"invalid surface key: {surface_key!r}") from exc
 
     def _resolve_surface_title_key(
         self,
@@ -865,25 +824,16 @@ class SessionManager:
         Passing explicit chat/thread coordinates takes precedence over a legacy
         bare topic key so callers can keep topic titles group-scoped.
         """
-        if thread_id is not None or chat_id is not None:
-            return self.make_surface_title_key(
+        try:
+            return ControlSurfaceIdentity.from_coordinates(
+                surface_key=surface_key,
                 thread_id=thread_id,
                 chat_id=chat_id,
-            )
-        if surface_key is not None:
-            parsed = self._parse_surface_title_key(surface_key)
-            if parsed is None:
-                raise ValueError(f"invalid surface title key: {surface_key!r}")
-            kind, parsed_chat_id, parsed_thread_id = parsed
-            if kind == "topic":
-                return self.make_surface_title_key(
-                    chat_id=parsed_chat_id,
-                    thread_id=parsed_thread_id,
-                )
-            return self.make_surface_title_key(chat_id=parsed_chat_id)
-        raise ValueError(
-            "surface title key requires surface_key, thread_id, or chat_id"
-        )
+            ).title_surface_key
+        except ValueError as exc:
+            raise ValueError(
+                "surface title key requires surface_key, thread_id, or chat_id"
+            ) from exc
 
     @classmethod
     def _normalize_surface_map(cls, raw: Any) -> dict[int, dict[str, Any]]:
@@ -918,23 +868,21 @@ class SessionManager:
     @classmethod
     def _normalize_surface_key(cls, surface_key: Any) -> str | None:
         raw_key = str(surface_key or "").strip()
-        parsed = cls._parse_surface_key(raw_key)
-        if parsed is None:
+        try:
+            identity = ControlSurfaceIdentity.from_surface_key(raw_key)
+        except ValueError:
             return None
-        kind, chat_id, thread_id = parsed
-        if kind == "topic":
-            return cls.make_surface_key(thread_id=thread_id, chat_id=chat_id)
-        return cls.make_surface_key(chat_id=chat_id)
+        return identity.surface_key
 
     @classmethod
     def _normalize_surface_title_key(cls, surface_key: Any) -> str | None:
-        parsed = cls._parse_surface_title_key(str(surface_key or "").strip())
-        if parsed is None:
+        try:
+            identity = ControlSurfaceIdentity.from_surface_key(
+                str(surface_key or "").strip()
+            )
+        except ValueError:
             return None
-        kind, chat_id, thread_id = parsed
-        if kind == "topic":
-            return cls.make_surface_title_key(chat_id=chat_id, thread_id=thread_id)
-        return cls.make_surface_title_key(chat_id=chat_id)
+        return identity.title_surface_key
 
     @classmethod
     def _normalize_surface_title_map(cls, raw: Any) -> dict[int, dict[str, Any]]:

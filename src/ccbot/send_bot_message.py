@@ -33,6 +33,7 @@ from telegram import (
 from telegram.constants import ParseMode
 from telegram.request import HTTPXRequest
 
+from .control_surface import ControlSurfaceIdentity
 from .telegram_sender import split_message
 
 
@@ -233,23 +234,13 @@ def _is_chat_not_found(error: Exception) -> bool:
 
 
 def _parse_surface_key(surface_key: str) -> tuple[str, int | None, int | None]:
-    raw = (surface_key or "").strip()
-    if raw.startswith("t:"):
-        parts = raw[2:].split(":")
-        if len(parts) == 1:
-            return "topic", None, int(parts[0])
-        if len(parts) == 2:
-            return "topic", int(parts[0]), int(parts[1])
+    try:
+        return ControlSurfaceIdentity.from_surface_key(surface_key).as_parse_tuple()
+    except ValueError as exc:
         raise DeliveryTargetError(
             f"invalid surface_key {surface_key!r}; expected "
             "t:<thread_id>, t:<chat_id>:<thread_id>, or c:<chat_id>"
-        )
-    if raw.startswith("c:"):
-        return "chat", int(raw[2:]), None
-    raise DeliveryTargetError(
-        f"invalid surface_key {surface_key!r}; expected "
-        "t:<thread_id>, t:<chat_id>:<thread_id>, or c:<chat_id>"
-    )
+        ) from exc
 
 
 def _group_chat_ids(state: dict[str, Any]) -> dict[str, int]:

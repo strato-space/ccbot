@@ -285,7 +285,9 @@ The ontology files remain the master source for these nouns:
 - `surface_policy` and `binding_state` remain separate persisted axes.
 - `topic_policy` remains the legacy topic-shaped compatibility view.
 - Full persisted control-surface identity is `(user_id, surface_key)`; a
-  `surface_key` alone is a local product key.
+  `surface_key` alone is a local product key. Code paths derive topic/chat keys
+  through `ControlSurfaceIdentity` so binding lookup, title lookup, and outbound
+  replay routing stay aligned.
 - In shared group topics, allowed users are peers for the same chat/topic
   binding. Identical numeric `thread_id` values in different groups are different control surfaces and must not share a binding.
 - A no-topics group chat may expose one shared main-chat mode described by the

@@ -37,6 +37,9 @@ If this note conflicts with any explanatory note in `doc/`, this note wins.
 - **Control-surface identity**
   - the full persisted identity for a control surface in the current storage
     model
+  - represented in code by the `ControlSurfaceIdentity` helper, which derives
+    topic/chat `surface_key`, chat-qualified `title_surface_key`, and legacy
+    topic mirror forms from one typed value
   - current concrete shape: `(user_id, surface_key)`
   - this is the identity used when reasoning about uniqueness across persisted
     bot state

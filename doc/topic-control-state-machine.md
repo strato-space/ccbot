@@ -65,8 +65,11 @@ Telegram title sync updates the cached title metadata to that final name.
 
 As of the 2026-05-24 ccbot-d4v audit, the already-flattened effective
 surface-behavior maps are `surface_routing_modes`, `surface_titles`, and
-`group_chat_ids`. The remaining `user_id -> surface_key` maps are retained
-intentionally until a canonical `ControlSurfaceIdentity` boundary is introduced:
+`group_chat_ids`. A canonical `ControlSurfaceIdentity` helper now centralizes
+surface-key parsing and title-key derivation for topic, chat, and legacy
+compatibility forms. The remaining `user_id -> surface_key` maps are retained
+intentionally because the helper makes owner/audit identity explicit without
+flattening permission-bearing state:
 
 - `surface_bindings` / `external_surface_bindings` record the actor that created
   or owns the persisted binding while shared group lookup may reuse the binding
@@ -82,9 +85,10 @@ intentionally until a canonical `ControlSurfaceIdentity` boundary is introduced:
   after the identity helper makes the permission/audit owner and effective
   chat/thread surface explicit.
 
-Therefore no additional map is safe to flatten in-place without first landing
-the `ControlSurfaceIdentity` boundary work. Future flattening must preserve
-actor/audit ownership separately from effective shared chat/thread behavior.
+Therefore no additional map is safe to flatten in-place by string-key edits
+alone. Future flattening must continue using `ControlSurfaceIdentity` and must
+preserve actor/audit ownership separately from effective shared chat/thread
+behavior.
 
 Compatibility topic mirrors still exist for topic-shaped callers:
 

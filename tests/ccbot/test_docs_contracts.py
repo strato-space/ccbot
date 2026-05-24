@@ -260,6 +260,8 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "equal `thread_id` values in different groups are not the same control surface" in topic_control
     assert "Telegram group routing coordinates" in topic_control
     assert "group_chat_ids[t:<chat_id>:<thread_id>] -> Telegram group chat_id" in topic_control
+    assert "ControlSurfaceIdentity" in topic_control
+    assert "topic/chat `surface_key`, chat-qualified `title_surface_key`" in topic_control
     assert "Surface title" in topic_control
     assert "surface_titles[title_surface_key] -> title" in topic_control
     assert "t:<chat_id>:<thread_id>" in topic_control
@@ -547,6 +549,7 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
     assert "ontology files remain the master source" in doc
     assert "surface_policy" in doc
     assert "(user_id, surface_key)" in doc
+    assert "ControlSurfaceIdentity" in doc
     assert "no-topics group chat" in doc or "no-topics group" in doc
     assert "bot-addressed `@mention` messages in an unbound topic must stay silent" in doc
     assert "unbound photo, document, sticker, audio, and video messages must also" in doc
