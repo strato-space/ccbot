@@ -283,6 +283,10 @@ Raw operator control is different:
   the next user instruction, not a read-only decision prompt
 - if no live input injection plane exists, Telegram text/keys must fail closed
   as read-only rather than pretending to send into tmux
+- ccbot-created `binding_scope=tmux` windows keep the tmux container
+  operator-visible when their child shell/runtime process exits; a retained
+  dead/shell pane is recovery topology, not proof of a writable runtime input
+  plane
 - on `str`, autonomous recovery may restart only ComfyCodexBot
   (`ccbot.service` / tmux `comfy:comfy-agent`) and ImmArenaBot
   (`imm_arena_bot.service` / tmux `imm_arena_bot:imm`) controller services;

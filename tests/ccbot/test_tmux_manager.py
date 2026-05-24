@@ -133,6 +133,7 @@ async def test_create_window_explicitly_cd_into_requested_directory(
     assert window_name == "workspace"
     assert window_id == "@9"
     assert ("allow-rename", "off") in window.options
+    assert ("remain-on-exit", "on") in window.options
     assert pane.commands == [
         (
             f"cd {workspace} && {TmuxManager._runtime_env_scrub_prefix()} codex resume thread-123",

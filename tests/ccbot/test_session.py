@@ -2794,6 +2794,34 @@ class TestRuntimeInputDriverIntegration:
         mock_driver.send_raw_slash_command.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_send_to_window_fails_closed_when_codex_pane_is_dead(
+        self, mgr: SessionManager
+    ):
+        mgr.window_states["@1"] = LiveProcessDescriptor(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+        )
+
+        with (
+            patch("ccbot.session.tmux_manager") as mock_tmux,
+            patch("ccbot.session.runtime_input_driver") as mock_driver,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(window_id="@1", pane_current_command="")
+            )
+            mock_tmux.capture_pane = AsyncMock(return_value="Pane is dead")
+            mock_driver.send_text = AsyncMock(return_value=(True, "Sent text to @1"))
+            mock_driver.send_raw_slash_command = AsyncMock()
+
+            success, message = await mgr.send_to_window("@1", "hello")
+
+        assert success is False
+        assert "Codex live process is not active" in message
+        mock_driver.send_text.assert_not_awaited()
+        mock_driver.send_raw_slash_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_send_to_window_fails_closed_when_shell_uses_generic_prompt_glyph(
         self, mgr: SessionManager
     ):

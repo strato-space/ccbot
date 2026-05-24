@@ -740,8 +740,13 @@ class TmuxManager:
 
                 wid = window.window_id or ""
 
-                # Prevent Claude Code from overriding window name
+                # Prevent runtime TUIs from overriding the operator-facing
+                # window name, and keep the tmux container visible if the
+                # shell/runtime process exits.  The retained dead/shell pane is
+                # only an operator recovery surface; runtime input still has to
+                # revalidate a live input plane before accepting Telegram text.
                 window.set_window_option("allow-rename", "off")
+                window.set_window_option("remain-on-exit", "on")
 
                 # Start the configured runtime command if requested.
                 # Explicitly `cd` into the selected directory because shell init
