@@ -44,6 +44,9 @@ control surface at a time.
   - may be repaired by an operator-selected `replay_backfill` command only when
     scoped to explicit replay offsets/call ids and audited with duplicate
     prevention metadata; this repair path must not rewind global monitor state
+  - missed assistant-final text may use the same operator-only CLI with
+    `--text-final`, but only with explicit byte-range/turn-id/text-hash
+    selection and distinct `replay_backfill_text` audit metadata
 
 - **Runtime image preview artifact**
   - pre-final visible artifact whose primary payload is image media from runtime

@@ -356,11 +356,13 @@ CLI resolves the persisted Telegram control-surface routing coordinates from
 target.
 
 
-**Operator replay/backfill for missed generated-image media:**
+**Operator replay/backfill for missed terminal artifacts:**
 
 If an older Codex rollout event was already consumed before generated-image
-preview delivery was enabled, do not rewind the global monitor offset. Use an
-explicit operator-selected replay slice or call id instead:
+preview delivery was enabled, or a text assistant final was missed after a
+tracking bug, do not rewind the global monitor offset. Use an explicit
+operator-selected replay slice, call id, turn id, text hash, or byte range
+instead:
 
 ```bash
 # Dry-run first; prints selected generated-image candidates only
@@ -370,13 +372,22 @@ ccbot replay-backfill --replay-path ~/.codex/sessions/.../rollout.jsonl \
 # Deliver only the selected terminal media to the resolved Telegram surface
 ccbot replay-backfill --replay-path ~/.codex/sessions/.../rollout.jsonl \
   --thread-id 019e... --call-id ig_... --deliver --json
+
+# Dry-run a missed assistant-final text repair by explicit turn or byte range
+ccbot replay-backfill --text-final \
+  --replay-path ~/.codex/sessions/.../rollout.jsonl \
+  --thread-id 019e... --turn-id turn_... --chat-id -100... \
+  --message-thread-id 555 --json
 ```
 
-`ccbot replay-backfill` never mutates monitor offsets. It re-normalizes only
-selected `image_generation_end` records, skips candidates already recorded in
-`telegram_delivery_audit.jsonl` unless `--force` is used, and writes a
+`ccbot replay-backfill` never mutates monitor offsets. By default it
+re-normalizes only selected `image_generation_end` records and writes a
 `replay_backfill` audit row with replay path, byte offsets, call id, and media
-hash for duplicate prevention.
+hash. With `--text-final`, it requires `--byte-range`, `--turn-id`, or
+`--text-sha256`, refuses ambiguous multi-final selections, skips candidates
+already recorded unless `--force` is used, and writes a distinct
+`replay_backfill_text` audit row with replay path, byte offsets, turn id, and
+text hash for duplicate prevention.
 
 **Local CLI runtime input injection:**
 

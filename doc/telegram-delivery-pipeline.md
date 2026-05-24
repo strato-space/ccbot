@@ -125,21 +125,28 @@ evidence for final review previews because Telegram clients can render an
 otherwise valid vertical MP4 with the wrong preview geometry.
 
 
-## Operator Replay/Backfill for Missed Terminal Media
+## Operator Replay/Backfill for Missed Terminal Artifacts
 
-`ccbot replay-backfill` is an operator-only repair path for Codex
-`image_generation_end` records that were already consumed by the monitor before
-media-preview normalization existed or before a deployment bug was fixed. It is
-not a second monitor and it does not rewind `monitor_state.json`. Operators must
-select an explicit replay file plus call id and/or byte range, run a dry-run,
-and then pass `--deliver` to send the selected generated-image media.
+`ccbot replay-backfill` is an operator-only repair path for Codex terminal
+artifacts that were already consumed by the monitor before a deployment bug was
+fixed. It is not a second monitor and it does not rewind `monitor_state.json`.
+Generated-image media repair remains the default: operators select an explicit
+replay file plus call id and/or byte range, run a dry-run, and then pass
+`--deliver` to send only the selected generated-image media.
 
-The command reuses the Codex rollout normalizer, delivers only replay-embedded
-image bytes, skips already delivered candidates by default, and records a
-`replay_backfill` audit row containing replay path, byte offsets, Codex thread
-id, call id, and media hash. This keeps the repair bounded to the missed
-terminal media result and prevents unrelated historical replay from flooding a
-Telegram topic.
+Missed assistant-final text repair is opt-in with `--text-final`. It must be
+scoped by `--byte-range`, `--turn-id`, or `--text-sha256`; broad selections that
+match multiple finals fail closed. Delivery requires an explicit Telegram target
+or persisted target selector and records `replay_backfill_text`, not ordinary
+live-delivery, audit rows.
+
+The command reuses the Codex rollout normalizer, skips already delivered
+candidates by default, and records bounded duplicate-prevention evidence:
+`replay_backfill` rows contain replay path, byte offsets, Codex thread id, call
+id, and media hash; `replay_backfill_text` rows contain replay path, byte
+offsets, Codex thread id, turn id, and text hash. This keeps repairs bounded to
+the missed terminal artifact and prevents unrelated historical replay from
+flooding a Telegram topic.
 
 ## Ordering Rules
 
@@ -690,5 +697,7 @@ include action, control surface, task/content/semantic class, message id when
 available, success flag, reason/error, turn generation and tool-use correlation
 where available, text length/hash, and a compact preview. Operator replay
 repairs use `replay_backfill` rows with replay path, byte offsets, call id, and
-media hash so duplicate prevention does not depend on mutable monitor offsets.
-It deliberately omits full raw payloads and secrets.
+media hash for media, or `replay_backfill_text` rows with replay path, byte
+offsets, turn id, and text hash for assistant-final text. Duplicate prevention
+does not depend on mutable monitor offsets. It deliberately omits full raw
+payloads and secrets.
