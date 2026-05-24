@@ -8,11 +8,14 @@ automation trust a target for follow-up side effects.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+from .terminal_parser import classify_input_surface
 
 
 class BindingPreflightCliError(ValueError):
@@ -24,6 +27,7 @@ _BLOCKING_TARGET_REASONS = {
     "inactive_binding",
     "missing_runtime_metadata",
 }
+_VISIBLE_PROMPT_BLOCKED_CLASSIFICATION = "visible_prompt_blocked"
 
 
 @dataclass(frozen=True)
@@ -62,6 +66,8 @@ class RuntimeBindingExpected:
 def _runtime_status_for_classification(ok: bool, classification: str) -> str:
     if ok:
         return "input_ready"
+    if classification == _VISIBLE_PROMPT_BLOCKED_CLASSIFICATION:
+        return _VISIBLE_PROMPT_BLOCKED_CLASSIFICATION
     no_live_input_plane = {
         "helper_binding",
         "inactive_binding",
@@ -86,6 +92,7 @@ class RuntimeBindingPreflightResult:
     resolved: RuntimeBindingFacts | None = None
     expected: RuntimeBindingExpected | None = None
     remediation: str = ""
+    input_surface: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -101,6 +108,8 @@ class RuntimeBindingPreflightResult:
             data["resolved"] = self.resolved.to_dict()
         if self.expected is not None:
             data["expected"] = self.expected.to_dict()
+        if self.input_surface:
+            data["input_surface"] = self.input_surface
         return data
 
 
@@ -540,6 +549,55 @@ def validate_runtime_binding_facts(
     )
 
 
+async def _capture_input_surface_kind(window_id: str) -> str:
+    from .tmux_manager import tmux_manager
+
+    window = await tmux_manager.find_window_by_id(window_id)
+    if window is None:
+        return ""
+    pane_text = await tmux_manager.capture_pane(window.window_id)
+    return classify_input_surface(pane_text or "").kind
+
+
+def _should_check_input_surface(manager: Any, facts: RuntimeBindingFacts) -> bool:
+    """Return True when read-only preflight can safely mirror runtime-input guard."""
+    if facts.runtime_kind != "codex" or not facts.window_id:
+        return False
+    descriptor = manager.get_process_descriptor(facts.window_id)
+    return bool(
+        getattr(descriptor, "thread_id", "")
+        or getattr(descriptor, "requires_live_proof", False)
+    )
+
+
+def _visible_prompt_blocker(
+    manager: Any,
+    facts: RuntimeBindingFacts,
+    expected: RuntimeBindingExpected,
+) -> RuntimeBindingPreflightResult | None:
+    """Mirror runtime-input's fail-closed visible-prompt guard read-only."""
+    if not _should_check_input_surface(manager, facts):
+        return None
+    try:
+        surface_kind = asyncio.run(_capture_input_surface_kind(facts.window_id))
+    except Exception:
+        return None
+    if surface_kind != "blocked_prompt":
+        return None
+    return RuntimeBindingPreflightResult(
+        ok=False,
+        classification=_VISIBLE_PROMPT_BLOCKED_CLASSIFICATION,
+        resolved=facts,
+        expected=expected,
+        remediation=(
+            "Runtime preflight blocked: the target Codex pane has a visible "
+            "prompt/error surface. Submit, clear, or resolve the prompt before "
+            "using `ccbot runtime-input`."
+        ),
+        input_surface=surface_kind,
+    )
+
+
 def run_binding_preflight(
     manager: Any,
     args: argparse.Namespace,
@@ -568,7 +626,13 @@ def run_binding_preflight(
             expected=expected,
             remediation=resolved.remediation,
         )
-    return validate_runtime_binding_facts(resolved.resolved, expected)
+    validation = validate_runtime_binding_facts(resolved.resolved, expected)
+    if not validation.ok:
+        return validation
+    visible_prompt = _visible_prompt_blocker(manager, resolved.resolved, expected)
+    if visible_prompt is not None:
+        return visible_prompt
+    return validation
 
 
 def _validate_parse_only_args(args: argparse.Namespace) -> None:

@@ -145,7 +145,10 @@ This note defines the core runtime nouns for `ccbot`.
     `ccbot runtime-input`
   - local automation that needs a read-only gate before injection uses
     `ccbot runtime-status` / `ccbot binding-preflight`; its compact status is
-    advisory until `ccbot runtime-input` proves same-runtime replay ACK
+    advisory until `ccbot runtime-input` proves same-runtime replay ACK, but it
+    must fail closed as `visible_prompt_blocked` when a live Codex pane already
+    exposes the same visible-prompt/error surface that runtime-input would
+    refuse to overwrite
   - outbound Telegram result delivery (`ccbot send`) is not an input injection
     plane and must not mutate or bypass runtime control-surface bindings
 

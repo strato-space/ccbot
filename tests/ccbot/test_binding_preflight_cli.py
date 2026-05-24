@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from ccbot import binding_preflight_cli as cli
 from ccbot.runtime_types import LiveProcessDescriptor
@@ -114,6 +115,44 @@ def test_binding_preflight_canonical_comfy_target_passes(monkeypatch):
     assert result.resolved
     assert result.resolved.window_id == "@1"
     assert result.resolved.cwd == "/home/tools/mediagen-comfy"
+
+
+def test_binding_preflight_rejects_visible_prompt_like_runtime_input_guard(
+    monkeypatch,
+):
+    manager = _manager_without_io(monkeypatch)
+    _bind(manager)
+    manager.window_states["@1"].thread_id = "019e-test"
+    monkeypatch.setattr(
+        cli,
+        "_capture_input_surface_kind",
+        AsyncMock(return_value="blocked_prompt"),
+    )
+
+    result = _run(
+        manager,
+        [
+            "--user-id",
+            "3045664",
+            "--surface-key",
+            "t:555",
+            "--expected-user-id",
+            "3045664",
+            "--expected-surface-key",
+            "t:555",
+            "--expected-runtime-kind",
+            "codex",
+            "--expected-cwd",
+            "/home/tools/mediagen-comfy",
+            "--json",
+        ],
+    )
+
+    assert result.ok is False
+    assert result.classification == "visible_prompt_blocked"
+    assert result.to_dict()["status"] == "visible_prompt_blocked"
+    assert result.to_dict()["input_surface"] == "blocked_prompt"
+    assert "runtime-input" in result.remediation
 
 
 def test_binding_preflight_resolves_legacy_topic_with_chat_coordinates(monkeypatch):
@@ -449,6 +488,10 @@ def test_binding_preflight_main_json_failure_is_nonzero(monkeypatch, capsys):
 
 def test_binding_preflight_status_mapping_for_mismatch_and_ambiguous():
     assert cli._runtime_status_for_classification(True, "ok") == "input_ready"
+    assert (
+        cli._runtime_status_for_classification(False, "visible_prompt_blocked")
+        == "visible_prompt_blocked"
+    )
     assert (
         cli._runtime_status_for_classification(False, "missing_runtime_metadata")
         == "no_live_input_plane"

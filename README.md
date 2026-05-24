@@ -435,8 +435,11 @@ CCBOT_DIR=/data/iqdoctor/.ccbot \
 `ccbot runtime-status` is the same read-only status/preflight surface under a
 runtime-oriented name. Its JSON includes both the detailed `classification` and
 a compact `status` such as `input_ready`, `no_live_input_plane`,
-`binding_mismatch`, or `ambiguous` so external supervisors can gate
-`ccbot runtime-input` without scraping human text.
+`visible_prompt_blocked`, `binding_mismatch`, or `ambiguous` so external
+supervisors can gate `ccbot runtime-input` without scraping human text. For
+Codex panes with live runtime proof, the preflight mirrors the runtime-input
+visible-prompt guard read-only: a visible prompt/error composer reports
+`visible_prompt_blocked`, not `input_ready`.
 
 For ComfyCodexBot, `/home/tools/mediagen-comfy` is the primary Codex workspace
 for the Telegram control surface. `/home/tools/server/comfy` is historical

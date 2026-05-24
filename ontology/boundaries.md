@@ -51,7 +51,9 @@ automation boundary is `ccbot runtime-input`, which resolves the same
 control-surface/window state and calls the same runtime input driver as
 Telegram text. `ccbot runtime-status` / `ccbot binding-preflight` is the
 read-only gate for that boundary: it may report `input_ready` or fail closed,
-but it never injects text or sends Telegram messages. `ccbot send` is the
+including `visible_prompt_blocked` when the live Codex pane has a prompt/error
+surface that runtime-input would refuse to overwrite, but it never injects text
+or sends Telegram messages. `ccbot send` is the
 opposite direction: outbound Telegram
 delivery for service results, not a runtime/TUI injection command. Outbound
 video sends are allowed to probe local file geometry and attach Telegram
