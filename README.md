@@ -416,6 +416,12 @@ CCBOT_DIR=/data/iqdoctor/.ccbot \
   --expected-cwd /home/tools/mediagen-comfy
 ```
 
+`ccbot runtime-status` is the same read-only status/preflight surface under a
+runtime-oriented name. Its JSON includes both the detailed `classification` and
+a compact `status` such as `input_ready`, `no_live_input_plane`,
+`binding_mismatch`, or `ambiguous` so external supervisors can gate
+`ccbot runtime-input` without scraping human text.
+
 For ComfyCodexBot, `/home/tools/mediagen-comfy` is the primary Codex workspace
 for the Telegram control surface. `/home/tools/server/comfy` is historical
 runtime/runbook context only and must not be used as the primary ComfyCodexBot
@@ -530,7 +536,8 @@ services when live identity is ambiguous.  `CCBOT_RESTORE_*` remains restore
 intent, not proof; when current live Codex fd proof disagrees with stale
 restore intent for the same window, the live fd-proven identity wins.  Local
 automation and live smoke validation must use `ccbot binding-preflight`, `ccbot runtime-input`,
-and same-runtime replay-evidence ACK; do not use `ccbot send` or copied `tmux paste-buffer`
+and same-runtime replay-evidence ACK; `ccbot runtime-status` is the equivalent
+read-only status alias for supervisors; do not use `ccbot send` or copied `tmux paste-buffer`
 commands as a runtime input path.
 The service startup path does not inject a smoke message automatically; its
 bind-time gate stops at `LiveRuntimeProof`, while the operator live-ops gate

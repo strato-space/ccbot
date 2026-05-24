@@ -2,8 +2,8 @@
 
 Handles two execution modes:
   1. `ccbot hook` — delegates to hook.hook_main() for Claude Code hook processing.
-  2. `ccbot send` / `ccbot runtime-input` / `ccbot binding-preflight` —
-     delegates to focused CLIs.
+  2. `ccbot send` / `ccbot runtime-input` / `ccbot binding-preflight` /
+     `ccbot runtime-status` — delegates to focused CLIs.
   3. Default — configures logging, initializes tmux session, and starts the
      Telegram bot polling loop via bot.create_bot().
 """
@@ -31,12 +31,13 @@ def _build_parser(prog: str = "ccbot") -> argparse.ArgumentParser:
             "runtime-input",
             "inject",
             "binding-preflight",
+            "runtime-status",
             "replay-backfill",
         ),
         help=(
             "Optional subcommand. `send` delivers text/files to Telegram; "
             "`runtime-input`/`inject` send text to a live runtime input plane; "
-            "`binding-preflight` validates a runtime binding read-only; "
+            "`binding-preflight`/`runtime-status` validate runtime binding state read-only; "
             "`replay-backfill` safely replays selected terminal media."
         ),
     )
@@ -64,11 +65,12 @@ def main(argv: list[str] | None = None) -> None:
 
         command_name = args[0]
         raise SystemExit(runtime_input_main(args[1:], prog=f"ccbot {command_name}"))
-    if args and args[0] == "binding-preflight":
+    if args and args[0] in {"binding-preflight", "runtime-status"}:
         from .binding_preflight_cli import binding_preflight_main
 
+        command_name = args[0]
         raise SystemExit(
-            binding_preflight_main(args[1:], prog="ccbot binding-preflight")
+            binding_preflight_main(args[1:], prog=f"ccbot {command_name}")
         )
     if args and args[0] == "replay-backfill":
         from .replay_backfill_cli import replay_backfill_main

@@ -99,8 +99,11 @@ later delayed replay user echo.
 
 Local service automation that needs to submit Codex input must enter through
 `ccbot runtime-input`, not through `ccbot send` and not through copied tmux
-paste/send-key snippets. This keeps the local automation path on the same
-live-input-plane checks and Codex conversational ACK contract as Telegram-originated text.
+paste/send-key snippets. If automation first needs a read-only status check, it
+uses `ccbot runtime-status` / `ccbot binding-preflight`; that status is not a
+submit and does not replace the replay-ACK proof from `ccbot runtime-input`.
+This keeps the local automation path on the same live-input-plane checks and
+Codex conversational ACK contract as Telegram-originated text.
 
 ## Fail-Closed Rules
 

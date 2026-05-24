@@ -47,8 +47,9 @@ def test_binding_preflight_help_documents_read_only_semantics():
     help_text = cli._build_parser().format_help()
 
     assert "usage: ccbot binding-preflight " in help_text
-    assert "Read-only ccbot binding/workspace preflight" in help_text
+    assert "Read-only ccbot runtime status/binding preflight" in help_text
     assert "never calls send_to_window" in help_text
+    assert "runtime-status gate" in help_text
     assert "--expected-cwd" in help_text
 
 
@@ -109,6 +110,7 @@ def test_binding_preflight_canonical_comfy_target_passes(monkeypatch):
 
     assert result.ok is True
     assert result.classification == "ok"
+    assert result.to_dict()["status"] == "input_ready"
     assert result.resolved
     assert result.resolved.window_id == "@1"
     assert result.resolved.cwd == "/home/tools/mediagen-comfy"
@@ -441,4 +443,21 @@ def test_binding_preflight_main_json_failure_is_nonzero(monkeypatch, capsys):
     assert exit_code == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
+    assert payload["status"] == "no_live_input_plane"
     assert payload["classification"] == "no_binding"
+
+
+def test_binding_preflight_status_mapping_for_mismatch_and_ambiguous():
+    assert cli._runtime_status_for_classification(True, "ok") == "input_ready"
+    assert (
+        cli._runtime_status_for_classification(False, "missing_runtime_metadata")
+        == "no_live_input_plane"
+    )
+    assert (
+        cli._runtime_status_for_classification(False, "cwd_mismatch")
+        == "binding_mismatch"
+    )
+    assert (
+        cli._runtime_status_for_classification(False, "ambiguous_binding")
+        == "ambiguous"
+    )

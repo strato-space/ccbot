@@ -59,6 +59,24 @@ class RuntimeBindingExpected:
         return asdict(self)
 
 
+def _runtime_status_for_classification(ok: bool, classification: str) -> str:
+    if ok:
+        return "input_ready"
+    no_live_input_plane = {
+        "helper_binding",
+        "inactive_binding",
+        "missing_runtime_metadata",
+        "no_binding",
+    }
+    if classification in no_live_input_plane:
+        return "no_live_input_plane"
+    if classification == "ambiguous_binding":
+        return "ambiguous"
+    if classification.endswith("_mismatch"):
+        return "binding_mismatch"
+    return "blocked"
+
+
 @dataclass(frozen=True)
 class RuntimeBindingPreflightResult:
     """Read-only binding preflight result."""
@@ -72,6 +90,10 @@ class RuntimeBindingPreflightResult:
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "ok": self.ok,
+            "status": _runtime_status_for_classification(
+                self.ok,
+                self.classification,
+            ),
             "classification": self.classification,
             "remediation": self.remediation,
         }
@@ -106,13 +128,13 @@ def _build_parser(prog: str = "ccbot binding-preflight") -> argparse.ArgumentPar
     parser = argparse.ArgumentParser(
         prog=prog,
         description=(
-            "Read-only ccbot binding/workspace preflight. Validates a persisted "
+            "Read-only ccbot runtime status/binding preflight. Validates a persisted "
             "runtime binding target before any Telegram delivery or runtime input."
         ),
         epilog=(
             "This command never calls send_to_window and never sends Telegram "
-            "messages. Use it as a safe gate before `ccbot runtime-input` or "
-            "workspace-sensitive artifact delivery."
+            "messages. Use it as a safe runtime-status gate before `ccbot runtime-input` "
+            "or workspace-sensitive artifact delivery."
         ),
     )
     parser.add_argument(

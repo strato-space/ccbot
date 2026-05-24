@@ -49,7 +49,10 @@ submit", and "runtime turn opened" as the same event.
 Local automation must not duplicate this with ad-hoc tmux commands. The
 automation boundary is `ccbot runtime-input`, which resolves the same
 control-surface/window state and calls the same runtime input driver as
-Telegram text. `ccbot send` is the opposite direction: outbound Telegram
+Telegram text. `ccbot runtime-status` / `ccbot binding-preflight` is the
+read-only gate for that boundary: it may report `input_ready` or fail closed,
+but it never injects text or sends Telegram messages. `ccbot send` is the
+opposite direction: outbound Telegram
 delivery for service results, not a runtime/TUI injection command. Outbound
 video sends are allowed to probe local file geometry and attach Telegram
 `send_video` metadata/thumbnail evidence, but that remains delivery evidence
