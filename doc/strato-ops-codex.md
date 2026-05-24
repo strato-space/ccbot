@@ -123,6 +123,11 @@ Prefer explicit non-interactive Codex policy in that command when your host poli
   `tmux-preserve.conf` with `KillMode=process`.  Treat that as a blast
   radius mitigation, not as proof: before and after an approved controller
   restart, record the tmux server PID and `tmux list-sessions` output.
+- Both controller services must also install
+  `deploy/systemd/user/telegram-token-env-scrub.conf`, whose Service stanza is
+  `UnsetEnvironment=TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN`.  This keeps stale
+  user-manager Telegram token variables from overriding the per-instance
+  `CCBOT_DIR/.env` token when python-dotenv runs with `override=False`.
 - Do not blindly restart `imm_arena_bot.service` or kill tmux to self-heal:
   on `str`, a shared tmux server has been observed under that service cgroup.
   Ambiguous live layers fail closed for manual inspection.  Non-target tmux

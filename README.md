@@ -558,8 +558,13 @@ On `str`, autonomous controller restart scope is limited to the two known bot
 controller/tmux surfaces below.  Both controller services now carry the
 tmux-preserving systemd drop-in `tmux-preserve.conf` with
 `KillMode=process`; that drop-in reduces restart blast radius, but it is not
-itself proof that tmux survived.  Before and after any approved controller
-restart, operators/automation must record the tmux server PID and `tmux
+itself proof that tmux survived.  Both services must also carry the generic
+Telegram token scrub drop-in
+`deploy/systemd/user/telegram-token-env-scrub.conf` with
+`UnsetEnvironment=TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN` so a stale user-manager
+environment cannot override the token loaded from the instance `CCBOT_DIR/.env`.
+Before and after any approved controller restart, operators/automation must
+record the tmux server PID and `tmux
 list-sessions` output.  Non-target tmux sessions/windows/panes must not be
 restarted or killed by this recovery path.
 

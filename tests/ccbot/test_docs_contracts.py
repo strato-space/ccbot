@@ -150,6 +150,9 @@ def test_strato_ops_runbook_captures_cutover_and_rollback_contract() -> None:
     assert "tmux\n    `imm_arena_bot:imm`" in runbook
     assert "Both controller services now have" in runbook
     assert "`tmux-preserve.conf` with `KillMode=process`" in runbook
+    assert "deploy/systemd/user/telegram-token-env-scrub.conf" in runbook
+    assert "UnsetEnvironment=TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN" in runbook
+    assert "CCBOT_DIR/.env` token" in runbook
     assert "tmux server PID and `tmux list-sessions` output" in runbook
     assert "Non-target tmux\n  sessions/windows/panes must not be restarted or killed" in runbook
     assert "HUD is allowed\n  only as a small bottom pane" in runbook
@@ -654,3 +657,13 @@ def test_multi_runtime_regression_matrix_doc_freezes_verification_surface() -> N
     assert "tests/ccbot/test_claude_parity_contract.py" in doc
     assert "doc/execution-review-policy.md" in doc
     assert "/home/tools/ccbot-upstream" in doc
+
+
+def test_systemd_token_env_scrub_dropin_documents_required_unsets() -> None:
+    dropin = _read("deploy/systemd/user/telegram-token-env-scrub.conf")
+
+    assert "[Service]" in dropin
+    assert "UnsetEnvironment=TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN" in dropin
+    assert "ccbot.service" in dropin
+    assert "imm_arena_bot.service" in dropin
+    assert "CCBOT_DIR/.env" in dropin
