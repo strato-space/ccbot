@@ -1045,10 +1045,10 @@ async def send_bot_message(
             )
 
         if edit_id is not None:
-            edit_kwargs = dict(common_kwargs)
-            edit_kwargs.pop("disable_notification", None)
-            edit_kwargs.pop("reply_to_message_id", None)
-            edit_kwargs.pop("message_thread_id", None)
+            edit_kwargs = {
+                "chat_id": common_kwargs["chat_id"],
+                "parse_mode": common_kwargs["parse_mode"],
+            }
             msg = await bot.edit_message_text(
                 message_id=edit_id,
                 text=message or "",
@@ -1229,11 +1229,8 @@ async def _edit_attachment(
     edit_message_id: int,
     video_metadata: VideoSendMetadata | None = None,
 ) -> dict[str, Any]:
-    edit_kwargs = dict(common_kwargs)
-    edit_kwargs.pop("disable_notification", None)
-    edit_kwargs.pop("reply_to_message_id", None)
-    edit_kwargs.pop("message_thread_id", None)
-    parse_mode = edit_kwargs.pop("parse_mode", None)
+    edit_kwargs = {"chat_id": common_kwargs["chat_id"]}
+    parse_mode = common_kwargs.get("parse_mode")
     media = _input_media_for_attachment(
         attachment=attachment,
         attachment_filename=attachment_filename,
