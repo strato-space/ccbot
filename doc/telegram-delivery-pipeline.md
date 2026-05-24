@@ -265,15 +265,18 @@ free-text Telegram reply in the same bound thread is consumed as the `Other`
 answer and follows the same bridge-before-terminal-state rule. A timeout/error terminal record is
 not final while its same-window renderer pane is still alive and visibly
 matches the record; in that case the Telegram question artifact remains or is
-reopened as answerable, including `Other` recovery when allowed. A renderer
-startup failure is also recoverable when no helper pane exists yet but the
-session-scoped OMX mode state names a same-window tmux return pane; Telegram
-then owns the visible question artifact and best-effort bridges the answer to
-that return pane instead of presenting the renderer error as final technical
-status. When safe, the bot may also materialize a replacement same-window OMX
-question helper pane so the local tmux operator view and Telegram artifact stay
-aligned. This artifact is not a technical status artifact, not a user turn opener,
-and not a terminal
+reopened as answerable, including `Other` recovery when allowed. A renderer pane
+that exits before a Telegram answer bridge finishes is also treated as
+temporarily recoverable when the durable record still names a same-window return
+pane; during that bounded recovery window the existing Telegram artifact stays
+retryable instead of being edited to a terminal renderer error. A renderer startup
+failure is also recoverable when no helper pane exists yet but the session-scoped
+OMX mode state names a same-window tmux return pane; Telegram then owns the
+visible question artifact and best-effort bridges the answer to that return pane
+instead of presenting the renderer error as final technical status. When safe,
+the bot may also materialize a replacement same-window OMX question helper pane
+so the local tmux operator view and Telegram artifact stay aligned. This artifact
+is not a technical status artifact, not a user turn opener, and not a terminal
 assistant answer.
 
 This preserves the upstream Claude shape:

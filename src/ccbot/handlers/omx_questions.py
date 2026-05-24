@@ -60,6 +60,7 @@ _question_render_state: dict[_QuestionKey, tuple[str, tuple[int, ...]]] = {}
 _question_prompt_deferrals: dict[tuple[int, str, str], float] = {}
 _question_prompt_defer_audited: set[tuple[int, str, str, str]] = set()
 _QUESTION_PROMPT_GATE_TIMEOUT_SECONDS = 45.0
+_RENDERER_EXIT_RECOVERY_SECONDS = 10 * 60
 QUESTION_PROMPT_TASK_TYPE = "question_prompt"
 QUESTION_PROMPT_CONTENT_TYPE = "question"
 QUESTION_PROMPT_SEMANTIC_KIND = "interactive_question"
@@ -154,6 +155,28 @@ def _drop_question_tracking(key: _QuestionKey) -> None:
 def _is_message_not_modified_error(exc: Exception) -> bool:
     """Return whether Telegram reported an idempotent edit no-op."""
     return "message is not modified" in str(exc).casefold()
+
+
+def _is_expired_callback_query_error(exc: Exception) -> bool:
+    """Return whether Telegram rejected a late callback-query ACK."""
+    message = str(exc).casefold()
+    return (
+        "query is too old" in message
+        or "response timeout expired" in message
+        or "query id is invalid" in message
+    )
+
+
+async def _answer_callback_query(query: Any, *args: Any, **kwargs: Any) -> bool:
+    """Answer a Telegram callback query while tolerating expired ACK windows."""
+    try:
+        await query.answer(*args, **kwargs)
+    except Exception as exc:
+        if _is_expired_callback_query_error(exc):
+            logger.info("Telegram callback query ACK expired; state transition kept")
+            return False
+        raise
+    return True
 
 
 def _is_question_replacement_edit_error(exc: Exception) -> bool:
@@ -326,6 +349,13 @@ def _recent_enough(record: OmxQuestionRecord) -> bool:
     return (datetime.now(UTC) - dt).total_seconds() <= _MAX_QUESTION_AGE_SECONDS
 
 
+def _record_age_seconds(record: OmxQuestionRecord) -> float | None:
+    dt = _parse_dt(record.updated_at)
+    if dt is None:
+        return None
+    return (datetime.now(UTC) - dt).total_seconds()
+
+
 def _load_question_record(path: Path) -> OmxQuestionRecord | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -339,7 +369,9 @@ def _load_question_record(path: Path) -> OmxQuestionRecord | None:
     status = _safe_str(payload.get("status")).strip()
     if not question_id or not question or not status:
         return None
-    raw_options = payload.get("options") if isinstance(payload.get("options"), list) else []
+    raw_options = (
+        payload.get("options") if isinstance(payload.get("options"), list) else []
+    )
     options: list[OmxQuestionOption] = []
     for index, raw in enumerate(raw_options):
         if isinstance(raw, str):
@@ -358,7 +390,9 @@ def _load_question_record(path: Path) -> OmxQuestionRecord | None:
             )
         else:
             logger.debug("Skipping invalid OMX question option %s in %s", index, path)
-    renderer = payload.get("renderer") if isinstance(payload.get("renderer"), dict) else {}
+    renderer = (
+        payload.get("renderer") if isinstance(payload.get("renderer"), dict) else {}
+    )
     renderer = _renderer_with_state_return_bridge(path, renderer)
     return OmxQuestionRecord(
         path=path,
@@ -469,7 +503,9 @@ async def _list_pane_processes(window_id: str) -> list[tuple[str, int]]:
         )
         stdout, _ = await proc.communicate()
     except Exception:
-        logger.debug("Failed to list tmux pane processes for %s", window_id, exc_info=True)
+        logger.debug(
+            "Failed to list tmux pane processes for %s", window_id, exc_info=True
+        )
         return []
     if proc.returncode != 0:
         return []
@@ -554,7 +590,9 @@ def _question_paths_from_omx_env(env: dict[str, str]) -> list[Path]:
     session_id = _safe_str(env.get("OMX_SESSION_ID")).strip()
     if not root or not session_id:
         return []
-    questions_dir = Path(root) / ".omx" / "state" / "sessions" / session_id / "questions"
+    questions_dir = (
+        Path(root) / ".omx" / "state" / "sessions" / session_id / "questions"
+    )
     if not questions_dir.is_dir():
         return []
     return sorted(
@@ -652,7 +690,10 @@ async def _tmux_pane_exists(target: str) -> bool:
     except Exception:
         logger.debug("Failed to check tmux pane %s", target, exc_info=True)
         return False
-    return proc.returncode == 0 and stdout.decode("utf-8", errors="replace").strip() == target
+    return (
+        proc.returncode == 0
+        and stdout.decode("utf-8", errors="replace").strip() == target
+    )
 
 
 async def _launch_renderer_pane(
@@ -764,6 +805,30 @@ def _is_timeout_error_record(record: OmxQuestionRecord) -> bool:
     return code == "question_runtime_failed" and "timed out waiting" in message
 
 
+def _is_renderer_exited_error_record(record: OmxQuestionRecord) -> bool:
+    """Return True when the local question UI pane exited before an answer."""
+    if record.status != "error":
+        return False
+    error = _question_error_payload(record)
+    code = _safe_str(error.get("code")).strip()
+    message = _safe_str(error.get("message")).strip().casefold()
+    return (
+        code == "question_runtime_failed"
+        and "question renderer" in message
+        and "exited before answering" in message
+    )
+
+
+def _is_recent_renderer_exited_error(record: OmxQuestionRecord) -> bool:
+    """Return whether a renderer-exited record should stay Telegram-retryable."""
+    if not _is_renderer_exited_error_record(record):
+        return False
+    if not _safe_str(record.renderer.get("return_target")).strip():
+        return False
+    age = _record_age_seconds(record)
+    return age is None or 0 <= age <= _RENDERER_EXIT_RECOVERY_SECONDS
+
+
 def _is_unrendered_question_runtime_error(record: OmxQuestionRecord) -> bool:
     """Return True for renderer-start failures that Telegram can own."""
     if record.status != "error":
@@ -784,7 +849,9 @@ def _record_visible_in_renderer(record: OmxQuestionRecord, pane_text: str) -> bo
     haystack = " ".join((pane_text or "").split()).casefold()
     if not haystack:
         return False
-    question_lines = [line.strip() for line in record.question.splitlines() if line.strip()]
+    question_lines = [
+        line.strip() for line in record.question.splitlines() if line.strip()
+    ]
     if question_lines:
         question_anchor = max(question_lines, key=len)
         if " ".join(question_anchor.split()).casefold() not in haystack:
@@ -801,6 +868,8 @@ def _record_visible_in_renderer(record: OmxQuestionRecord, pane_text: str) -> bo
 
 async def _is_recoverable_live_renderer_error(record: OmxQuestionRecord) -> bool:
     """Return whether a timeout/error record is still answerable in tmux."""
+    if _is_recent_renderer_exited_error(record):
+        return True
     if _is_unrendered_question_runtime_error(record):
         return bool(_safe_str(record.renderer.get("return_target")).strip())
     if not _is_timeout_error_record(record):
@@ -1170,7 +1239,9 @@ async def _tmux_kill_pane(target: str, *, return_target: str = "") -> bool:
     return proc.returncode == 0
 
 
-async def _close_renderer_pane(record: OmxQuestionRecord, *, return_target: str = "") -> None:
+async def _close_renderer_pane(
+    record: OmxQuestionRecord, *, return_target: str = ""
+) -> None:
     renderer_target = _safe_str(record.renderer.get("target")).strip()
     if (
         _safe_str(record.renderer.get("renderer")).strip() == "tmux-pane"
@@ -1217,7 +1288,9 @@ async def _bridge_answer_to_runtime(
                 window_id,
                 message,
             )
-            return OmxQuestionBridgeResult(False, str(message or "runtime input failed"))
+            return OmxQuestionBridgeResult(
+                False, str(message or "runtime input failed")
+            )
         return OmxQuestionBridgeResult(True, str(message or "ok"))
 
     injected = await _tmux_send_line(return_target, injection)
@@ -1301,7 +1374,14 @@ def _build_question_text(
     lines = ["❓ OMX Question"]
     if record.status == "error":
         renderer_target = _safe_str(record.renderer.get("target")).strip()
-        if not renderer_target and _is_unrendered_question_runtime_error(record):
+        if _is_recent_renderer_exited_error(record):
+            lines.extend(
+                [
+                    "",
+                    "⚠️ The local OMX question renderer closed before the Telegram answer was fully bridged. Answer here to retry when the runtime is idle/input-ready.",
+                ]
+            )
+        elif not renderer_target and _is_unrendered_question_runtime_error(record):
             lines.extend(
                 [
                     "",
@@ -1477,7 +1557,9 @@ def _answered_label_text(record: OmxQuestionRecord) -> str:
     except Exception:
         payload = {}
     answer = payload.get("answer") if isinstance(payload.get("answer"), dict) else {}
-    selected_labels = answer.get("selected_labels") if isinstance(answer, dict) else None
+    selected_labels = (
+        answer.get("selected_labels") if isinstance(answer, dict) else None
+    )
     if isinstance(selected_labels, list) and selected_labels:
         return ", ".join(str(label) for label in selected_labels)
     value = answer.get("value") if isinstance(answer, dict) else ""
@@ -1736,13 +1818,10 @@ async def handle_omx_question_ui(
         if edit_result == "failed":
             return False
         _question_msgs.pop(key, None)
-    if (
-        not send_if_missing
-        and _should_override_question_deferral_for_timeout(
-            key,
-            record,
-            defer_reason=defer_reason,
-        )
+    if not send_if_missing and _should_override_question_deferral_for_timeout(
+        key,
+        record,
+        defer_reason=defer_reason,
     ):
         send_if_missing = True
         defer_reason = "pre_final_gate_timeout"
@@ -1901,18 +1980,22 @@ async def handle_omx_question_callback(
         thread_id=thread_id,
         chat_id=chat_id,
     ):
-        await query.answer("Question is not bound to this surface", show_alert=True)
+        await _answer_callback_query(
+            query, "Question is not bound to this surface", show_alert=True
+        )
         return True
     window = await tmux_manager.find_window_by_id(window_id)
     if not window:
-        await query.answer("Window not found", show_alert=True)
+        await _answer_callback_query(query, "Window not found", show_alert=True)
         return True
     record = await find_answerable_omx_question_for_window(
         window,
         question_suffix=question_suffix,
     )
     if record is None:
-        await query.answer("Question is no longer active", show_alert=True)
+        await _answer_callback_query(
+            query, "Question is no longer active", show_alert=True
+        )
         await clear_omx_question_msg(
             user.id,
             context.bot,
@@ -1950,7 +2033,9 @@ async def handle_omx_question_callback(
             else False
         )
         if refreshed == "failed":
-            await query.answer("Could not update question prompt; please retry", show_alert=True)
+            await _answer_callback_query(
+                query, "Could not update question prompt; please retry", show_alert=True
+            )
             return True
         if refreshed != "ok":
             await handle_omx_question_ui(
@@ -1961,12 +2046,12 @@ async def handle_omx_question_callback(
                 record=record,
                 chat_id=chat_id,
             )
-        await query.answer("Refreshed")
+        await _answer_callback_query(query, "Refreshed")
         return True
 
     if action == CB_OMX_QUESTION_TOGGLE:
         if index is None or index < 0 or index >= len(record.options):
-            await query.answer("Invalid option", show_alert=True)
+            await _answer_callback_query(query, "Invalid option", show_alert=True)
             return True
         selected = set(_question_selections.get(key, set()))
         if index in selected:
@@ -2003,7 +2088,9 @@ async def handle_omx_question_callback(
             else False
         )
         if edited == "failed":
-            await query.answer("Could not update question prompt; please retry", show_alert=True)
+            await _answer_callback_query(
+                query, "Could not update question prompt; please retry", show_alert=True
+            )
             return True
         if edited != "ok":
             await handle_omx_question_ui(
@@ -2014,17 +2101,19 @@ async def handle_omx_question_callback(
                 record=record,
                 chat_id=chat_id,
             )
-        await query.answer("Updated")
+        await _answer_callback_query(query, "Updated")
         return True
 
     if action == CB_OMX_QUESTION_SUBMIT:
         selected = sorted(_question_selections.get(key, set()))
         if not selected:
-            await query.answer("Select at least one option", show_alert=True)
+            await _answer_callback_query(
+                query, "Select at least one option", show_alert=True
+            )
             return True
     else:
         if index is None or index < 0 or index >= len(record.options):
-            await query.answer("Invalid option", show_alert=True)
+            await _answer_callback_query(query, "Invalid option", show_alert=True)
             return True
         selected = [index]
 
@@ -2051,14 +2140,16 @@ async def handle_omx_question_callback(
                 error=str(exc),
                 reason="runtime_bridge_failed",
             )
-        await query.answer(warning, show_alert=True)
+        await _answer_callback_query(query, warning, show_alert=True)
         return True
     selected_labels = answer.get("selected_labels")
     if isinstance(selected_labels, list):
         label_text = ", ".join(str(label) for label in selected_labels)
     else:
         label_text = str(answer.get("value", ""))
-    text = f"✅ OMX Question answered\n\n{record.question}\n\nAnswer: {label_text}".strip()
+    text = (
+        f"✅ OMX Question answered\n\n{record.question}\n\nAnswer: {label_text}".strip()
+    )
     msg_id = _message_id_from_update(update)
     try:
         await query.edit_message_text(
@@ -2094,7 +2185,7 @@ async def handle_omx_question_callback(
                 error=str(exc),
                 reason="answered",
             )
-    await query.answer("Answered")
+    await _answer_callback_query(query, "Answered")
     await clear_omx_question_msg(
         user.id,
         None,

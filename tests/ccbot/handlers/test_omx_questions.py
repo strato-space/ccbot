@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -28,6 +28,7 @@ def _write_question(
     allow_other: bool = False,
     error: dict[str, object] | None = None,
     include_renderer: bool = True,
+    updated_at: str | None = None,
 ) -> Path:
     if scope == "root":
         path = root / ".omx/state/questions" / f"{question_id}.json"
@@ -40,7 +41,8 @@ def _write_question(
         "kind": "omx.question/v1",
         "question_id": question_id,
         "created_at": "2026-04-30T01:00:00.000Z",
-        "updated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "updated_at": updated_at
+        or datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "status": status,
         "header": "Deep interview",
         "question": question,
@@ -294,7 +296,9 @@ async def test_handle_omx_question_ui_audits_prompt_send(
     from ccbot import delivery_audit
 
     audit_path = tmp_path / "audit.jsonl"
-    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    monkeypatch.setattr(
+        delivery_audit.config, "telegram_delivery_audit_file", audit_path
+    )
     _write_question(tmp_path)
     window = TmuxWindow(
         window_id="@7",
@@ -319,8 +323,7 @@ async def test_handle_omx_question_ui_audits_prompt_send(
     assert await omx_questions.handle_omx_question_ui(bot, 1, "@7", 42) is True
 
     rows = [
-        json.loads(line)
-        for line in audit_path.read_text(encoding="utf-8").splitlines()
+        json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
     ]
     assert rows[-1]["action"] == "send"
     assert rows[-1]["task_type"] == "question_prompt"
@@ -338,7 +341,9 @@ async def test_handle_omx_question_ui_defers_first_prompt_until_gate_timeout(
     from ccbot import delivery_audit
 
     audit_path = tmp_path / "audit.jsonl"
-    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    monkeypatch.setattr(
+        delivery_audit.config, "telegram_delivery_audit_file", audit_path
+    )
     _write_question(tmp_path)
     window = TmuxWindow(
         window_id="@7",
@@ -393,8 +398,7 @@ async def test_handle_omx_question_ui_defers_first_prompt_until_gate_timeout(
     bot.send_message.assert_awaited_once()
 
     rows = [
-        json.loads(line)
-        for line in audit_path.read_text(encoding="utf-8").splitlines()
+        json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
     ]
     assert rows[0]["action"] == "suppress"
     assert rows[0]["reason"] == "pre_final_lane_open"
@@ -533,16 +537,18 @@ async def test_handle_omx_question_ui_reopens_timeout_error_with_live_renderer(
     monkeypatch.setattr(
         omx_questions,
         "_cmdline_for_pid",
-        lambda pid: [
-            "node",
-            "omx.js",
-            "question",
-            "--ui",
-            "--state-path",
-            str(question_path),
-        ]
-        if pid == 2
-        else ["node", "omx.js", "hud", "--watch"],
+        lambda pid: (
+            [
+                "node",
+                "omx.js",
+                "question",
+                "--ui",
+                "--state-path",
+                str(question_path),
+            ]
+            if pid == 2
+            else ["node", "omx.js", "hud", "--watch"]
+        ),
     )
     monkeypatch.setattr(
         omx_questions,
@@ -700,7 +706,9 @@ async def test_handle_omx_question_ui_materializes_renderer_start_failure(
         "_candidate_question_paths_from_window_processes",
         AsyncMock(return_value=[question_path]),
     )
-    monkeypatch.setattr(omx_questions, "_tmux_pane_exists", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        omx_questions, "_tmux_pane_exists", AsyncMock(return_value=True)
+    )
     launch = AsyncMock(return_value="%20")
     monkeypatch.setattr(omx_questions, "_launch_renderer_pane", launch)
 
@@ -776,6 +784,57 @@ async def test_omx_question_callback_answers_current_record(
     assert message_queue.current_turn_generation(1, 42) == 1
 
 
+@pytest.mark.asyncio
+async def test_omx_question_callback_ignores_expired_ack_after_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _write_question(tmp_path)
+    window = TmuxWindow(
+        window_id="@7",
+        window_name="work",
+        cwd=str(tmp_path),
+        pane_current_command="node",
+        pane_id="%0",
+    )
+    monkeypatch.setattr(
+        omx_questions.tmux_manager,
+        "find_window_by_id",
+        AsyncMock(return_value=window),
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_callback_window_authorized",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        omx_questions.session_manager,
+        "send_to_window",
+        AsyncMock(return_value=(True, "ok")),
+    )
+    monkeypatch.setattr(omx_questions, "_tmux_kill_pane", AsyncMock(return_value=True))
+    query = SimpleNamespace(
+        data=f"{CB_OMX_QUESTION_SELECT}:1:a1b2c3d4:@7",
+        message=SimpleNamespace(message_thread_id=42),
+        answer=AsyncMock(
+            side_effect=Exception(
+                "Query is too old and response timeout expired or query id is invalid"
+            )
+        ),
+        edit_message_text=AsyncMock(),
+    )
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_user=SimpleNamespace(id=1),
+    )
+    context = SimpleNamespace(bot=AsyncMock())
+
+    assert await omx_questions.handle_omx_question_callback(update, context) is True
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["status"] == "answered"
+    assert payload["answer"]["value"] == "revise"
+    query.edit_message_text.assert_awaited_once()
+    query.answer.assert_awaited_once_with("Answered")
 
 
 @pytest.mark.asyncio
@@ -830,6 +889,105 @@ async def test_omx_question_callback_keeps_record_retryable_when_runtime_bridge_
 
 
 @pytest.mark.asyncio
+async def test_handle_omx_question_ui_keeps_recent_renderer_exit_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    question_id = "question-2026-05-24T09-05-13-823Z-578427e4"
+    _write_question(
+        tmp_path,
+        question_id=question_id,
+        status="error",
+        target="%72",
+        return_target="%0",
+        question="Round 7 | Target: Ava/Action boundary | Ambiguity: 17%",
+        error={
+            "code": "question_runtime_failed",
+            "message": "Question renderer tmux-pane %72 exited before answering.",
+        },
+    )
+    window = TmuxWindow(
+        window_id="@7",
+        window_name="work",
+        cwd=str(tmp_path),
+        pane_current_command="node",
+        pane_id="%0",
+        pane_ids=("%0",),
+    )
+    bot = AsyncMock()
+    omx_questions._question_msgs[(1, "t:42")] = 77
+    omx_questions._question_windows[(1, "t:42")] = "@7"
+    omx_questions._question_render_state[(1, "t:42")] = (question_id, ())
+    monkeypatch.setattr(
+        omx_questions.tmux_manager,
+        "find_window_by_id",
+        AsyncMock(return_value=window),
+    )
+    monkeypatch.setattr(
+        omx_questions.session_manager,
+        "resolve_chat_id",
+        lambda user_id, thread_id=None: -100,
+    )
+
+    assert await omx_questions.handle_omx_question_ui(bot, 1, "@7", 42) is True
+
+    bot.edit_message_text.assert_not_awaited()
+    bot.send_message.assert_not_awaited()
+    assert omx_questions._question_msgs[(1, "t:42")] == 77
+    recoverable = await omx_questions.find_answerable_omx_question_for_window(window)
+    assert recoverable is not None
+    assert recoverable.status == "error"
+
+
+@pytest.mark.asyncio
+async def test_handle_omx_question_ui_eventually_renders_stale_renderer_exit_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    question_id = "question-2026-05-24T09-05-13-823Z-578427e4"
+    _write_question(
+        tmp_path,
+        question_id=question_id,
+        status="error",
+        target="%72",
+        return_target="%0",
+        question="Round 7 | Target: Ava/Action boundary | Ambiguity: 17%",
+        updated_at=(datetime.now(UTC) - timedelta(minutes=20))
+        .isoformat()
+        .replace("+00:00", "Z"),
+        error={
+            "code": "question_runtime_failed",
+            "message": "Question renderer tmux-pane %72 exited before answering.",
+        },
+    )
+    window = TmuxWindow(
+        window_id="@7",
+        window_name="work",
+        cwd=str(tmp_path),
+        pane_current_command="node",
+        pane_id="%0",
+        pane_ids=("%0",),
+    )
+    bot = AsyncMock()
+    omx_questions._question_msgs[(1, "t:42")] = 77
+    omx_questions._question_windows[(1, "t:42")] = "@7"
+    omx_questions._question_render_state[(1, "t:42")] = (question_id, ())
+    monkeypatch.setattr(
+        omx_questions.tmux_manager,
+        "find_window_by_id",
+        AsyncMock(return_value=window),
+    )
+    monkeypatch.setattr(
+        omx_questions.session_manager,
+        "resolve_chat_id",
+        lambda user_id, thread_id=None: -100,
+    )
+
+    assert await omx_questions.handle_omx_question_ui(bot, 1, "@7", 42) is True
+
+    bot.edit_message_text.assert_awaited_once()
+    assert "❌ OMX Question error" in bot.edit_message_text.await_args.kwargs["text"]
+
+
+@pytest.mark.asyncio
 async def test_answer_omx_question_does_not_mark_answered_when_raw_bridge_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -851,6 +1009,7 @@ async def test_answer_omx_question_does_not_mark_answered_when_raw_bridge_fails(
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["status"] == "prompting"
     assert "answer" not in payload
+
 
 @pytest.mark.asyncio
 async def test_omx_question_toggle_mirrors_selection_to_renderer(
@@ -883,13 +1042,7 @@ async def test_omx_question_toggle_mirrors_selection_to_renderer(
     monkeypatch.setattr(
         omx_questions,
         "_capture_renderer_pane",
-        AsyncMock(
-            return_value=(
-                "› [ ] 1. Proceed\n"
-                "  [ ] 2. Revise\n"
-                "  [ ] 3. Other\n"
-            )
-        ),
+        AsyncMock(return_value=("› [ ] 1. Proceed\n  [ ] 2. Revise\n  [ ] 3. Other\n")),
     )
     sent_keys: list[tuple[str, str]] = []
 
@@ -1075,12 +1228,9 @@ async def test_omx_question_multiselect_toggle_rerenders_exact_record_not_newest
     assert "Old prompt" in text
     assert "New prompt" not in text
     assert omx_questions._question_msgs[(1, "t:42")] == 77
-    assert (
-        omx_questions._question_selections[
-            (1, "t:42", "question-2026-04-30T01-00-00-000Z-old12345")
-        ]
-        == {0}
-    )
+    assert omx_questions._question_selections[
+        (1, "t:42", "question-2026-04-30T01-00-00-000Z-old12345")
+    ] == {0}
     query.answer.assert_awaited_once_with("Updated")
 
 
@@ -1124,9 +1274,7 @@ async def test_omx_question_multiselect_repeated_toggles_keep_callback_message(
     context = SimpleNamespace(bot=bot)
 
     assert await omx_questions.handle_omx_question_callback(update, context) is True
-    update.callback_query.data = (
-        f"{omx_questions.CB_OMX_QUESTION_TOGGLE}:1:a1b2c3d4:@7"
-    )
+    update.callback_query.data = f"{omx_questions.CB_OMX_QUESTION_TOGGLE}:1:a1b2c3d4:@7"
     assert await omx_questions.handle_omx_question_callback(update, context) is True
 
     bot.send_message.assert_not_awaited()
@@ -1134,12 +1282,9 @@ async def test_omx_question_multiselect_repeated_toggles_keep_callback_message(
     assert {
         call.kwargs["message_id"] for call in bot.edit_message_text.await_args_list
     } == {77}
-    assert (
-        omx_questions._question_selections[
-            (1, "t:42", "question-2026-04-30T01-00-00-000Z-a1b2c3d4")
-        ]
-        == {0, 1}
-    )
+    assert omx_questions._question_selections[
+        (1, "t:42", "question-2026-04-30T01-00-00-000Z-a1b2c3d4")
+    ] == {0, 1}
 
 
 @pytest.mark.asyncio
@@ -1280,9 +1425,9 @@ async def test_omx_question_idempotent_edit_keeps_tracking_without_duplicate(
 
     bot.send_message.assert_not_awaited()
     assert omx_questions._question_msgs[(1, "t:-100:42")] == 77
-    assert (
-        omx_questions._question_render_state[(1, "t:-100:42")]
-        == ("question-2026-04-30T01-00-00-000Z-a1b2c3d4", (0,))
+    assert omx_questions._question_render_state[(1, "t:-100:42")] == (
+        "question-2026-04-30T01-00-00-000Z-a1b2c3d4",
+        (0,),
     )
     query.answer.assert_awaited_once_with("Updated")
 
@@ -1334,12 +1479,9 @@ async def test_omx_question_toggle_replacement_send_is_tracked_after_real_edit_f
     bot.edit_message_text.assert_awaited_once()
     bot.send_message.assert_awaited_once()
     assert omx_questions._question_msgs[(1, "t:42")] == 88
-    assert (
-        omx_questions._question_selections[
-            (1, "t:42", "question-2026-04-30T01-00-00-000Z-a1b2c3d4")
-        ]
-        == {0}
-    )
+    assert omx_questions._question_selections[
+        (1, "t:42", "question-2026-04-30T01-00-00-000Z-a1b2c3d4")
+    ] == {0}
     query.answer.assert_awaited_once_with("Updated")
 
 
@@ -1561,8 +1703,6 @@ async def test_handle_omx_question_ui_edits_terminal_answer_artifact(
     assert await omx_questions.handle_omx_question_ui(bot, 1, "@7", 42) is True
 
     bot.edit_message_text.assert_awaited_once()
-    assert (
-        "✅ OMX Question answered" in bot.edit_message_text.await_args.kwargs["text"]
-    )
+    assert "✅ OMX Question answered" in bot.edit_message_text.await_args.kwargs["text"]
     assert "Answer: Proceed" in bot.edit_message_text.await_args.kwargs["text"]
     assert (1, "t:42") not in omx_questions._question_msgs

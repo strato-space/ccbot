@@ -180,6 +180,10 @@ control surface at a time.
   - a timeout/error record with a same-window renderer pane that is still alive
     and visibly matches the record remains recoverable and answerable; the
     timeout is not by itself final technical status
+  - a renderer-exited record remains temporarily recoverable when it still names
+    a same-window return pane and is inside the Telegram bridge recovery window;
+    this prevents a transient renderer failure from replacing a retryable
+    question artifact with a terminal error while Codex input is busy or slow
   - a renderer-start failure before a helper pane exists remains recoverable
     when session-scoped OMX mode state names a same-window tmux return pane;
     the return pane is a continuation bridge, not a bindable question surface
