@@ -171,6 +171,10 @@ control surface at a time.
   - prompt sends, edits, and first-send deferrals are delivery-audit events with
     interactive-question semantics; missing Telegram message ids are not proof
     of correct ordering
+  - predefined-button and `Other` answers are terminal only after the return
+    bridge succeeds; a busy or failed runtime bridge must leave the question
+    answerable/retryable rather than writing `answered` or showing a terminal
+    Telegram checkmark
   - if the record allows `Other`, a free-text Telegram reply on the same bound
     surface is consumed as the `Other` answer instead of ordinary runtime input
   - a timeout/error record with a same-window renderer pane that is still alive

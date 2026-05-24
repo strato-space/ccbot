@@ -92,6 +92,16 @@ class OmxQuestionRecord:
         return self.question_id[-8:] if len(self.question_id) >= 8 else self.question_id
 
 
+@dataclass(frozen=True)
+class OmxQuestionBridgeResult:
+    success: bool
+    message: str = ""
+
+
+class OmxQuestionBridgeError(RuntimeError):
+    """Raised when a Telegram question answer cannot reach the runtime pane."""
+
+
 def _thread_key(thread_id: int | None) -> int:
     return thread_id or 0
 
@@ -1182,19 +1192,20 @@ async def _bridge_answer_to_runtime(
     *,
     window_id: str = "",
     warning_context: str = "",
-) -> None:
+) -> OmxQuestionBridgeResult:
     transport = _safe_str(record.renderer.get("return_transport")).strip()
     return_target = _safe_str(record.renderer.get("return_target")).strip()
     if transport != "tmux-send-keys" or not return_target:
         await _close_renderer_pane(record, return_target=return_target)
-        return
+        return OmxQuestionBridgeResult(True, "no return transport")
 
     injection = _injection_text(answer)
     if window_id:
         # The local question pane can be the active pane while the Telegram callback
         # is handled. Close it before using the normal runtime input path so Codex
         # receives a real submit/ACK flow in the return pane instead of a raw
-        # tmux paste that can remain stuck in the composer.
+        # tmux paste that can remain stuck in the composer.  The durable question
+        # record remains retryable unless this bridge succeeds.
         await _close_renderer_pane(record, return_target=return_target)
         sent, message = await session_manager.send_to_window(window_id, injection)
         if not sent:
@@ -1206,7 +1217,8 @@ async def _bridge_answer_to_runtime(
                 window_id,
                 message,
             )
-        return
+            return OmxQuestionBridgeResult(False, str(message or "runtime input failed"))
+        return OmxQuestionBridgeResult(True, str(message or "ok"))
 
     injected = await _tmux_send_line(return_target, injection)
     if not injected:
@@ -1216,7 +1228,9 @@ async def _bridge_answer_to_runtime(
             record.question_id,
             return_target,
         )
+        return OmxQuestionBridgeResult(False, "tmux return pane injection failed")
     await _close_renderer_pane(record, return_target=return_target)
+    return OmxQuestionBridgeResult(True, "ok")
 
 
 async def answer_omx_question(
@@ -1233,6 +1247,10 @@ async def answer_omx_question(
         raise ValueError("Single-answerable OMX question needs exactly one option")
 
     answer = _answer_payload(record, selected_indices)
+    bridge = await _bridge_answer_to_runtime(record, answer, window_id=window_id)
+    if not bridge.success:
+        raise OmxQuestionBridgeError(bridge.message or "runtime input failed")
+
     payload = _read_json_object(record.path)
     payload["status"] = "answered"
     payload["updated_at"] = _now_iso()
@@ -1240,7 +1258,6 @@ async def answer_omx_question(
     payload.pop("error", None)
     _write_json_object(record.path, payload)
 
-    await _bridge_answer_to_runtime(record, answer, window_id=window_id)
     return answer
 
 
@@ -1258,6 +1275,15 @@ async def answer_omx_question_other(
         raise ValueError("OMX question does not allow Other answers")
 
     answer = _other_answer_payload(record, value)
+    bridge = await _bridge_answer_to_runtime(
+        record,
+        answer,
+        window_id=window_id,
+        warning_context="Other",
+    )
+    if not bridge.success:
+        raise OmxQuestionBridgeError(bridge.message or "runtime input failed")
+
     payload = _read_json_object(record.path)
     payload["status"] = "answered"
     payload["updated_at"] = _now_iso()
@@ -1265,12 +1291,6 @@ async def answer_omx_question_other(
     payload.pop("error", None)
     _write_json_object(record.path, payload)
 
-    await _bridge_answer_to_runtime(
-        record,
-        answer,
-        window_id=window_id,
-        warning_context="Other",
-    )
     return answer
 
 
@@ -2009,7 +2029,30 @@ async def handle_omx_question_callback(
         selected = [index]
 
     await open_new_turn_generation_with_cleanup(context.bot, user.id, thread_id)
-    answer = await answer_omx_question(record, selected, window_id=window_id)
+    try:
+        answer = await answer_omx_question(record, selected, window_id=window_id)
+    except OmxQuestionBridgeError as exc:
+        warning = (
+            "⚠️ Codex is busy; the question answer was not submitted. "
+            "Retry when the runtime is idle/input-ready."
+        )
+        msg_id = _message_id_from_update(update)
+        if msg_id is not None:
+            _audit_question_artifact(
+                action="bridge_failed",
+                user_id=user.id,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                message_id=msg_id,
+                window_id=window_id,
+                record=record,
+                text=warning,
+                success=False,
+                error=str(exc),
+                reason="runtime_bridge_failed",
+            )
+        await query.answer(warning, show_alert=True)
+        return True
     selected_labels = answer.get("selected_labels")
     if isinstance(selected_labels, list):
         label_text = ", ".join(str(label) for label in selected_labels)

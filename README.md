@@ -127,12 +127,13 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   first-send gate. Prompt sends, edits, and first-send deferrals are written to
   the delivery audit as interactive-question events. The temporary renderer
   pane belongs to the bound tmux window; it is not promoted to a bindable
-  control surface or delivery source. Choosing an option writes the
-  durable record as `answered`, closes the temporary question pane, and
-  best-effort bridges the normal `[omx question answered] ...` continuation
-  line through the bound runtime input path when a bound window is known (so
-  Codex submit/ACK handling applies) or to the recorded tmux return pane as a
-  fallback. If the record allows `Other`,
+  control surface or delivery source. Choosing an option must first bridge the
+  normal `[omx question answered] ...` continuation line through the bound
+  runtime input path when a bound window is known (so Codex submit/ACK handling
+  applies) or to the recorded tmux return pane as a fallback. The durable
+  record is written as `answered` only after that bridge succeeds; if Codex is
+  busy or the bridge fails, Telegram keeps the question retryable instead of
+  showing a terminal answered state. If the record allows `Other`,
   a free-text Telegram reply to the same bound thread is recorded as the
   `Other` answer and follows the same return-pane bridge. If the record times
   out with an error while the same-window renderer pane is still alive and

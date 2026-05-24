@@ -255,12 +255,14 @@ the OMX record provides a tmux return bridge, the bot closes the temporary
 question pane and best-effort sends the normal `[omx question answered] ...`
 continuation line through the bound runtime input path when a bound window is
 known, so Codex submit/ACK handling applies. Pane-level tmux send remains only
-a fallback when no bound window is available. While the record is active, ordinary
+a fallback when no bound window is available. A button or `Other` answer is
+recorded as terminal `answered` only after the return bridge succeeds; when
+Codex is busy or the bridge fails, the Telegram artifact stays retryable and no
+terminal checkmark is emitted. While the record is active, ordinary
 Telegram text/media input to the same bound window fails closed so it cannot
 bypass the blocking control question. If the OMX record allows `Other`, a
 free-text Telegram reply in the same bound thread is consumed as the `Other`
-answer, written to the durable record, bridged back to the recorded return pane,
-and the temporary question pane is closed. A timeout/error terminal record is
+answer and follows the same bridge-before-terminal-state rule. A timeout/error terminal record is
 not final while its same-window renderer pane is still alive and visibly
 matches the record; in that case the Telegram question artifact remains or is
 reopened as answerable, including `Other` recovery when allowed. A renderer

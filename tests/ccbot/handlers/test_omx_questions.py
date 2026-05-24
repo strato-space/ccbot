@@ -776,6 +776,82 @@ async def test_omx_question_callback_answers_current_record(
     assert message_queue.current_turn_generation(1, 42) == 1
 
 
+
+
+@pytest.mark.asyncio
+async def test_omx_question_callback_keeps_record_retryable_when_runtime_bridge_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _write_question(tmp_path)
+    window = TmuxWindow(
+        window_id="@7",
+        window_name="work",
+        cwd=str(tmp_path),
+        pane_current_command="node",
+        pane_id="%0",
+    )
+    monkeypatch.setattr(
+        omx_questions.tmux_manager,
+        "find_window_by_id",
+        AsyncMock(return_value=window),
+    )
+    monkeypatch.setattr(
+        omx_questions,
+        "_callback_window_authorized",
+        lambda *args, **kwargs: True,
+    )
+    send_to_window = AsyncMock(return_value=(False, "Codex is still working"))
+    kill_pane = AsyncMock(return_value=True)
+    monkeypatch.setattr(omx_questions.session_manager, "send_to_window", send_to_window)
+    monkeypatch.setattr(omx_questions, "_tmux_kill_pane", kill_pane)
+    query = SimpleNamespace(
+        data=f"{CB_OMX_QUESTION_SELECT}:1:a1b2c3d4:@7",
+        message=SimpleNamespace(message_id=77, message_thread_id=42, chat_id=-100),
+        answer=AsyncMock(),
+        edit_message_text=AsyncMock(),
+    )
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_user=SimpleNamespace(id=1),
+    )
+    context = SimpleNamespace(bot=AsyncMock())
+
+    assert await omx_questions.handle_omx_question_callback(update, context) is True
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["status"] == "prompting"
+    assert "answer" not in payload
+    send_to_window.assert_awaited_once_with("@7", "[omx question answered] revise")
+    kill_pane.assert_awaited_once_with("%207", return_target="%0")
+    query.edit_message_text.assert_not_awaited()
+    query.answer.assert_awaited_once()
+    assert query.answer.await_args.kwargs == {"show_alert": True}
+    assert "not submitted" in query.answer.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_answer_omx_question_does_not_mark_answered_when_raw_bridge_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _write_question(tmp_path)
+    window = TmuxWindow(
+        window_id="@7",
+        window_name="work",
+        cwd=str(tmp_path),
+        pane_current_command="node",
+        pane_id="%207",
+    )
+    record = omx_questions.find_active_omx_question(window)
+    assert record is not None
+    monkeypatch.setattr(omx_questions, "_tmux_send_line", AsyncMock(return_value=False))
+
+    with pytest.raises(omx_questions.OmxQuestionBridgeError):
+        await omx_questions.answer_omx_question(record, [0])
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["status"] == "prompting"
+    assert "answer" not in payload
+
 @pytest.mark.asyncio
 async def test_omx_question_toggle_mirrors_selection_to_renderer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
