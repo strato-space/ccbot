@@ -62,6 +62,10 @@ If this note conflicts with any explanatory note in `doc/`, this note wins.
   - for named topics with known Telegram coordinates,
     `title_surface_key` is chat-qualified (`t:<chat_id>:<thread_id>`) so equal
     numeric `thread_id` values in different groups cannot share title metadata
+  - legacy bare `t:<thread_id>` title metadata may be backfilled to
+    `t:<chat_id>:<thread_id>` only when `group_chat_ids` proves exactly one
+    Telegram group chat coordinate; ambiguous same-numbered topics are left
+    unpromoted
   - Telegram title events are actor-delivered, but title metadata is
     surface-scoped: allowed participants may reuse a stored title for the exact
     chat-qualified control surface, regardless of which allowed actor saw the
@@ -214,7 +218,8 @@ No-topics main-chat variant:
   stored Telegram group `chat_id` coordinates, not through the Telegram user id
 - a fresh bind may use a stored surface title as the tmux display name, but must
   not overwrite an existing Telegram topic title with a cwd basename when no
-  title proof is available
+  title proof is available; legacy title backfill is allowed only for a unique
+  proven chat/topic coordinate
 - when tmux collision suffixes or reuse produce a final authoritative display
   name and Telegram title sync succeeds, cached surface-title metadata must be
   updated to that final name

@@ -622,6 +622,66 @@ def test_shared_surface_title_lookup_crosses_actor_scope_only_for_exact_surface(
     assert manager.get_shared_surface_title(thread_id=42, chat_id=-1003) == ""
 
 
+def test_legacy_surface_title_promotes_when_group_chat_coordinate_is_unique(
+    tmp_path, monkeypatch
+):
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "surface_titles": {"100": {"t:42": "comfy-agent-ops"}},
+                "group_chat_ids": {"100:42": -100200300},
+                "window_states": {},
+                "user_window_offsets": {},
+                "thread_bindings": {},
+                "window_display_names": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(session_module.config, "state_file", state_file)
+
+    manager = SessionManager()
+
+    assert (
+        manager.get_surface_title(100, thread_id=42, chat_id=-100200300)
+        == "comfy-agent-ops"
+    )
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved["surface_titles"]["t:-100200300:42"] == "comfy-agent-ops"
+    assert saved["surface_titles"]["t:42"] == "comfy-agent-ops"
+
+
+def test_legacy_surface_title_does_not_promote_across_ambiguous_groups(
+    tmp_path, monkeypatch
+):
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "surface_titles": {"100": {"t:42": "comfy-agent-ops"}},
+                "group_chat_ids": {
+                    "100:42": -100200300,
+                    "200:42": -100200301,
+                },
+                "window_states": {},
+                "user_window_offsets": {},
+                "thread_bindings": {},
+                "window_display_names": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(session_module.config, "state_file", state_file)
+
+    manager = SessionManager()
+
+    assert manager.get_surface_title(100, thread_id=42, chat_id=-100200300) == ""
+    assert manager.get_surface_title(100, thread_id=42, chat_id=-100200301) == ""
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved["surface_titles"] == {"t:42": "comfy-agent-ops"}
+
+
 def test_surface_key_migration_from_legacy_topic_maps(tmp_path, monkeypatch):
     state_file = tmp_path / "state.json"
     state_file.write_text(

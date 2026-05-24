@@ -982,6 +982,85 @@ class SessionManager:
         return normalized
 
     @classmethod
+    def _legacy_topic_titles_by_thread(cls, raw: Any) -> dict[int, set[str]]:
+        """Return legacy bare-topic titles grouped by numeric topic id.
+
+        Older state may contain ``surface_titles[user_id][t:<thread_id>]`` or a
+        flat ``surface_titles[t:<thread_id>]`` entry. A bare topic id is not a
+        globally safe Telegram surface, so callers must only promote it when a
+        separate chat-coordinate proof is unique.
+        """
+        titles: dict[int, set[str]] = {}
+        if not isinstance(raw, dict):
+            return titles
+
+        def collect(surface_key: Any, title: Any) -> None:
+            normalized_key = cls._normalize_surface_title_key(surface_key)
+            if normalized_key is None:
+                return
+            parsed = cls._parse_surface_title_key(normalized_key)
+            if parsed is None:
+                return
+            kind, chat_id, thread_id = parsed
+            if kind != "topic" or chat_id is not None or thread_id is None:
+                return
+            clean = str(title or "").strip()
+            if clean:
+                titles.setdefault(thread_id, set()).add(clean)
+
+        for key, value in raw.items():
+            if isinstance(value, dict):
+                for surface_key, title in value.items():
+                    collect(surface_key, title)
+            else:
+                collect(key, value)
+        return titles
+
+    def _topic_chat_ids_for_thread(self, thread_id: int) -> set[int]:
+        """Return known Telegram chat ids for one topic id."""
+        chat_ids: set[int] = set()
+        for surface_key, chat_id in self.group_chat_ids.items():
+            parsed = self._parse_surface_key(str(surface_key))
+            if parsed is None:
+                continue
+            kind, parsed_chat_id, parsed_thread_id = parsed
+            if kind != "topic" or parsed_thread_id != thread_id:
+                continue
+            if parsed_chat_id is not None:
+                chat_ids.add(parsed_chat_id)
+                continue
+            if isinstance(chat_id, int):
+                chat_ids.add(chat_id)
+        return chat_ids
+
+    def _backfill_chat_qualified_surface_titles(self, raw: Any) -> bool:
+        """Promote safe legacy title entries to chat-qualified topic keys.
+
+        The migration is intentionally conservative: one legacy topic id may be
+        promoted only when exactly one title and exactly one Telegram group chat
+        coordinate are known. Ambiguous equal topic ids across groups remain
+        untouched until Telegram provides a fresh chat-qualified title event.
+        """
+        changed = False
+        for thread_id, legacy_titles in self._legacy_topic_titles_by_thread(raw).items():
+            if len(legacy_titles) != 1:
+                continue
+            chat_ids = self._topic_chat_ids_for_thread(thread_id)
+            if len(chat_ids) != 1:
+                continue
+            title = next(iter(legacy_titles))
+            chat_id = next(iter(chat_ids))
+            surface_key = self.make_surface_title_key(
+                chat_id=chat_id,
+                thread_id=thread_id,
+            )
+            if surface_key in self.surface_titles:
+                continue
+            self.surface_titles[surface_key] = title
+            changed = True
+        return changed
+
+    @classmethod
     def _normalize_group_chat_ids(cls, raw: Any) -> dict[str, int]:
         """Normalize group routing coordinates to flat surface keys.
 
@@ -1369,6 +1448,10 @@ class SessionManager:
                 self.group_chat_ids = self._normalize_group_chat_ids(
                     state.get("group_chat_ids", {})
                 )
+                if self._backfill_chat_qualified_surface_titles(
+                    state.get(SURFACE_TITLES_KEY, {})
+                ):
+                    migrate_legacy = True
 
                 # Detect old format: keys that don't look like window IDs
                 needs_migration = False

@@ -48,9 +48,13 @@ The `surface_titles` map stores optional human-facing title metadata captured
 from Telegram topic create/edit service updates. Named-topic title keys are
 chat-qualified as `t:<chat_id>:<thread_id>` when Telegram coordinates are known,
 so same-numbered topics in different groups cannot bleed display names into one
-another. Telegram service updates are delivered to an actor, but the title is
-surface-scoped: another allowed actor may reuse the stored title only for the
-same exact chat-qualified control surface. A stored title may seed a fresh tmux
+another. During state migration, legacy bare `t:<thread_id>` title entries are
+backfilled to a chat-qualified key only when `group_chat_ids` proves exactly one
+Telegram group chat coordinate for that topic id; ambiguous same-numbered topics
+remain unpromoted until a fresh Telegram title event arrives. Telegram service
+updates are delivered to an actor, but the title is surface-scoped: another
+allowed actor may reuse the stored title only for the same exact chat-qualified
+control surface. A stored title may seed a fresh tmux
 window name, but it is not the binding, not the cwd, and not runtime/replay
 identity. When no title is known, fresh bind must not rename the Telegram topic
 to a cwd basename just because a directory was selected. When the final tmux
