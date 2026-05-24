@@ -8,12 +8,43 @@ from pathlib import Path
 import time
 
 import pytest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+from ccbot.codex_threads import CodexThreadCatalog
 from ccbot.runtime_types import RolloutSource
+from ccbot.session import SessionManager
 from ccbot.monitor_state import TrackedSession
 from ccbot.session_monitor import SessionMonitor
+from ccbot.tmux_manager import TmuxWindow
 from ccbot.transcript_parser import TranscriptParser
+
+
+def _write_codex_rollout(
+    codex_home: Path,
+    *,
+    thread_id: str,
+    cwd: str,
+    updated_at: str,
+) -> Path:
+    sessions_root = codex_home / "sessions" / "2026" / "05" / "24"
+    sessions_root.mkdir(parents=True, exist_ok=True)
+    rollout = sessions_root / f"rollout-2026-05-24T09-22-54-{thread_id}.jsonl"
+    rollout.write_text(
+        json.dumps(
+            {
+                "timestamp": updated_at,
+                "type": "session_meta",
+                "payload": {
+                    "id": thread_id,
+                    "cwd": cwd,
+                    "originator": "codex_cli",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return rollout
 
 
 class TestReadNewLinesOffsetRecovery:
@@ -219,6 +250,66 @@ class TestCheckForUpdatesCodexRollout:
             "lifecycle",
         }
         assert second == []
+
+
+    @pytest.mark.asyncio
+    async def test_current_session_map_uses_fd_proven_thread_over_stale_restore(
+        self, monitor: SessionMonitor, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cwd = "/home/tools/mediagen-comfy"
+        old_thread_id = "019e4e71-1499-7d11-991b-2de6af8aa0ce"
+        live_thread_id = "019e58ce-6f9e-7ea2-8c4d-5273ed295670"
+        codex_home = tmp_path / ".codex"
+        _write_codex_rollout(
+            codex_home,
+            thread_id=old_thread_id,
+            cwd=cwd,
+            updated_at="2026-05-22T06:48:14Z",
+        )
+        live_rollout = _write_codex_rollout(
+            codex_home,
+            thread_id=live_thread_id,
+            cwd=cwd,
+            updated_at="2026-05-24T09:22:54Z",
+        )
+        catalog = CodexThreadCatalog(codex_home=codex_home)
+
+        monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+        monkeypatch.setattr(SessionManager, "_save_state", lambda self: None)
+        monkeypatch.setenv("CCBOT_RESTORE_RUNTIME_ID", old_thread_id)
+        monkeypatch.setenv("CCBOT_RESTORE_USER_ID", "100")
+        monkeypatch.setenv("CCBOT_RESTORE_SURFACE_KEY", "t:555")
+        manager = SessionManager(codex_thread_catalog=catalog)
+        manager.register_live_process("@1", cwd, runtime_kind="codex")
+        manager.bind_thread(100, 555, "@1", window_name="comfy-agent")
+        monkeypatch.setattr(
+            manager,
+            "_resolve_live_codex_rollout_from_pane_pid",
+            lambda *, pane_pid, cwd: catalog.get_candidate_fast(live_thread_id),
+        )
+        monkeypatch.setattr("ccbot.session.session_manager", manager)
+        monkeypatch.setattr(
+            "ccbot.session_monitor.tmux_manager.list_windows",
+            AsyncMock(
+                return_value=[
+                    TmuxWindow(
+                        window_id="@1",
+                        window_name="comfy-agent",
+                        cwd=cwd,
+                        pane_current_command="node",
+                        pane_pid="1234",
+                    )
+                ]
+            ),
+        )
+
+        current_map = await monitor._load_current_session_map()
+
+        assert current_map == {"@1": live_thread_id}
+        assert set(monitor._active_rollout_sources) == {live_thread_id}
+        source = monitor._active_rollout_sources[live_thread_id]
+        assert source.file_path == live_rollout
+        assert manager.get_window_state("@1").thread_id == live_thread_id
 
     @pytest.mark.asyncio
     async def test_check_for_updates_uses_runtime_resolved_active_rollout_sources(

@@ -251,6 +251,9 @@ Raw operator control is different:
   be promoted to restored binding targets
 - a live process may be associated with at most one primary runtime
   conversation identity at a time
+- live process fd proof is stronger than startup restore intent for the same
+  tmux window; stale restore runtime ids must not override a fd-proven current
+  Codex identity
 - a runtime conversation identity may have multiple historical replay artifacts
 - resume attaches a new or reused live process to an existing identity; it does
   not restore the previous live process

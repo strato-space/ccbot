@@ -132,6 +132,7 @@ class LiveProcessDescriptor:
     runtime_kind: str = "claude"
     registered_at: float = 0.0
     requires_live_proof: bool = False
+    thread_id_source: str = ""
 
     @property
     def session_id(self) -> str:
@@ -155,6 +156,8 @@ class LiveProcessDescriptor:
             data["registered_at"] = self.registered_at
         if self.requires_live_proof:
             data["requires_live_proof"] = self.requires_live_proof
+        if self.thread_id_source:
+            data["thread_id_source"] = self.thread_id_source
         return data
 
     @classmethod
@@ -166,6 +169,7 @@ class LiveProcessDescriptor:
             runtime_kind=data.get("runtime_kind", "claude"),
             registered_at=float(data.get("registered_at", 0.0) or 0.0),
             requires_live_proof=bool(data.get("requires_live_proof", False)),
+            thread_id_source=str(data.get("thread_id_source") or ""),
         )
 
 

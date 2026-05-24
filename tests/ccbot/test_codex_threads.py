@@ -657,6 +657,61 @@ async def test_codex_duplicate_thread_state_delivers_only_authoritative_window(
 
 
 @pytest.mark.asyncio
+async def test_restore_intent_does_not_override_live_fd_proven_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / ".codex"
+    old_thread_id = "019e4e71-1499-7d11-991b-2de6af8aa0ce"
+    live_thread_id = "019e58ce-6f9e-7ea2-8c4d-5273ed295670"
+    cwd = "/home/tools/mediagen-comfy"
+    _write_codex_thread(
+        codex_home,
+        thread_id=old_thread_id,
+        cwd=cwd,
+        thread_name="Stale restore thread",
+        updated_at="2026-05-22T06:48:14Z",
+    )
+    _write_codex_thread(
+        codex_home,
+        thread_id=live_thread_id,
+        cwd=cwd,
+        thread_name="Current live thread",
+        updated_at="2026-05-24T09:22:54Z",
+    )
+    catalog = CodexThreadCatalog(codex_home=codex_home)
+
+    monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+    monkeypatch.setattr(SessionManager, "_save_state", lambda self: None)
+    monkeypatch.setenv("CCBOT_RESTORE_RUNTIME_ID", old_thread_id)
+    monkeypatch.setenv("CCBOT_RESTORE_USER_ID", "100")
+    monkeypatch.setenv("CCBOT_RESTORE_SURFACE_KEY", "t:555")
+
+    manager = SessionManager(codex_thread_catalog=catalog)
+    manager.register_live_process("@1", cwd, runtime_kind="codex")
+    manager.bind_thread(100, 555, "@1", window_name="comfy-agent")
+    monkeypatch.setattr(
+        manager,
+        "_resolve_live_codex_rollout_from_pane_pid",
+        lambda *, pane_pid, cwd: catalog.get_candidate_fast(live_thread_id),
+    )
+
+    changed = manager.reconcile_live_tmux_window(
+        window_id="@1",
+        cwd=cwd,
+        window_name="comfy-agent",
+        pane_current_command="node",
+        pane_pid="1234",
+    )
+    resolved = await manager.resolve_thread_for_window("@1")
+
+    assert changed is True
+    assert resolved is not None
+    assert resolved.thread_id == live_thread_id
+    assert manager.get_window_state("@1").thread_id == live_thread_id
+
+
+@pytest.mark.asyncio
 async def test_codex_duplicate_thread_prefers_restore_intent_owner_after_restart(
     session_manager: SessionManager,
     monkeypatch: pytest.MonkeyPatch,

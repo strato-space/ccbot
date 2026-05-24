@@ -527,9 +527,10 @@ session/window/panes before acting, distinguishes `LiveRuntimeProof` from
 `ResumeTargetProof`, ignores OMX HUD/question/update/helper panes as bindable
 runtime surfaces, and fails closed rather than killing tmux or restarting
 services when live identity is ambiguous.  `CCBOT_RESTORE_*` remains restore
-intent, not proof.  Local automation and live smoke validation must use
-`ccbot binding-preflight`, `ccbot runtime-input`, and same-runtime
-replay-evidence ACK; do not use `ccbot send` or copied `tmux paste-buffer`
+intent, not proof; when current live Codex fd proof disagrees with stale
+restore intent for the same window, the live fd-proven identity wins.  Local
+automation and live smoke validation must use `ccbot binding-preflight`, `ccbot runtime-input`,
+and same-runtime replay-evidence ACK; do not use `ccbot send` or copied `tmux paste-buffer`
 commands as a runtime input path.
 The service startup path does not inject a smoke message automatically; its
 bind-time gate stops at `LiveRuntimeProof`, while the operator live-ops gate

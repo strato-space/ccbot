@@ -106,6 +106,8 @@ If this note conflicts with any explanatory note in `doc/`, this note wins.
     refer to the same live binding
   - cwd equality alone is not sufficient proof for Codex/OMX because helper or
     stale sessions may share the same cwd
+  - for an already live tmux window, current process fd proof outranks stale
+    `CCBOT_RESTORE_*` intent when selecting replay delivery identity
 
 - **Pending slot**
   - surface-scoped deferred user intent captured before writable activation is

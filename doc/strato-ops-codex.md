@@ -91,7 +91,9 @@ Prefer explicit non-interactive Codex policy in that command when your host poli
 - Startup restore must inventory before action: service process, controller
   env, tmux session/window/panes, work runtime process, runtime conversation
   identity, replay evidence, Telegram control-surface identity, and Telegram
-  routing coordinates are distinct.  `CCBOT_RESTORE_*` declares intent only.
+  routing coordinates are distinct.  `CCBOT_RESTORE_*` declares intent only;
+  current live Codex fd proof wins over stale restore runtime ids for the same
+  tmux window.
 - For Codex restore, set `CODEX_HOME` in the controller service env so replay
   ACK/catalog lookup uses the intended root, and set `OMX_AUTO_UPDATE=0` so an
   OMX update prompt cannot block non-interactive startup.

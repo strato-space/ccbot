@@ -547,6 +547,9 @@ class SessionManager:
     _codex_ack_locks: dict[str, asyncio.Lock] = field(
         default_factory=dict, init=False, repr=False
     )
+    _stale_restore_intent_warnings: set[tuple[str, str, str]] = field(
+        default_factory=set, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.codex_thread_catalog is None:
@@ -1994,6 +1997,7 @@ class SessionManager:
                 if new_sid:
                     state.thread_id = new_sid
                     state.requires_live_proof = False
+                    state.thread_id_source = "session_map"
                 state.cwd = new_cwd
                 state.runtime_kind = new_runtime_kind
                 changed = True
@@ -2063,6 +2067,7 @@ class SessionManager:
         state.registered_at = time.time()
         state.thread_id = thread_id
         state.requires_live_proof = state.runtime_kind == "codex" and not thread_id
+        state.thread_id_source = "launcher" if thread_id else ""
         self._save_state()
         return state
 
@@ -2161,6 +2166,7 @@ class SessionManager:
             if not state.runtime_kind:
                 state.runtime_kind = "codex"
             state.requires_live_proof = False
+            state.thread_id_source = "live_fd"
             state.registered_at = time.time()
             logger.info(
                 "Adopted live Codex thread for window %s from process fd proof: "
@@ -2221,6 +2227,7 @@ class SessionManager:
                 if candidates:
                     selected = candidates[0]
                     state.thread_id = selected.thread_id
+                    state.thread_id_source = "cwd_catalog"
                     logger.info(
                         "Adopted live Codex thread for window %s after cwd drift: "
                         "%s (%s) -> %s (%s)",
@@ -2232,6 +2239,7 @@ class SessionManager:
                     )
                 else:
                     state.thread_id = ""
+                    state.thread_id_source = ""
                     logger.info(
                         "Cleared thread for window %s after cwd drift without "
                         "matching Codex rollout: %s (%s) -> <none> (%s)",
@@ -2242,6 +2250,7 @@ class SessionManager:
                     )
         elif old_thread_id:
             state.thread_id = ""
+            state.thread_id_source = ""
             logger.info(
                 "Cleared thread for window %s after runtime cwd drift: "
                 "%s (%s) -> <none> (%s)",
@@ -2344,6 +2353,7 @@ class SessionManager:
         """Clear the persisted identity binding for a live window."""
         state = self.get_or_create_process_descriptor(window_id)
         state.thread_id = ""
+        state.thread_id_source = ""
         self._save_state()
         logger.info("Cleared persisted binding for window_id %s", window_id)
 
@@ -2653,6 +2663,7 @@ class SessionManager:
             changed = False
             if state.thread_id != restore_locator.thread_id:
                 state.thread_id = restore_locator.thread_id
+                state.thread_id_source = "restore_intent"
                 changed = True
             if restore_locator.cwd and state.cwd != restore_locator.cwd:
                 state.cwd = restore_locator.cwd
@@ -2674,6 +2685,7 @@ class SessionManager:
             if duplicate_owner is not None:
                 if state.thread_id == selected.thread_id:
                     state.thread_id = ""
+                    state.thread_id_source = ""
                     self._save_state()
                 logger.warning(
                     "Suppressing duplicate runtime thread resolution for window %s: "
@@ -2686,6 +2698,7 @@ class SessionManager:
             changed = False
             if state.thread_id != selected.thread_id:
                 state.thread_id = selected.thread_id
+                state.thread_id_source = "catalog_resolution"
                 changed = True
             if selected.cwd and state.cwd != selected.cwd:
                 state.cwd = selected.cwd
@@ -2794,6 +2807,23 @@ class SessionManager:
         if owner != window_id:
             return None
         state = self.get_process_descriptor(window_id)
+        if (
+            state is not None
+            and state.thread_id
+            and state.thread_id != thread_id
+            and state.thread_id_source == "live_fd"
+        ):
+            warning_key = (window_id, thread_id, state.thread_id)
+            if warning_key not in self._stale_restore_intent_warnings:
+                self._stale_restore_intent_warnings.add(warning_key)
+                logger.warning(
+                    "Ignoring stale restore intent for window %s: restore thread %s "
+                    "differs from live fd-proven thread %s",
+                    window_id,
+                    thread_id,
+                    state.thread_id,
+                )
+            return None
         runtime_kind = str(os.environ.get("CCBOT_RESTORE_RUNTIME_KIND") or "").strip()
         if not runtime_kind:
             runtime_kind = state.runtime_kind if state is not None else ""
