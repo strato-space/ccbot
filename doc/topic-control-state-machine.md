@@ -135,6 +135,11 @@ Compatibility topic mirrors still exist for topic-shaped callers:
 - Bot-addressed `@mention` in `none`
   - stays silent
   - does not open bind flow
+- Bot-instance foreign surface gate
+  - when `CCBOT_OWNED_SURFACES` or `CCBOT_IGNORED_SURFACES` classifies a
+    shared group surface as foreign to this bot instance, every update type is
+    hard-ignored before typing, replies, downloads, runtime-input audit, or tmux
+    input
 - Explicit `/bind`
   - first captures Telegram group routing metadata for this surface
   - may enter `bind_flow`

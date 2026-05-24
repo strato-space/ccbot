@@ -58,6 +58,12 @@ def _bounded_int_env(
     return parsed
 
 
+def _csv_env_set(name: str) -> set[str]:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return set()
+    return {item.strip() for item in value.split(",") if item.strip()}
+
 def _bool_env(name: str, default: bool = False) -> bool:
     value = os.getenv(name, "").strip().lower()
     if not value:
@@ -113,6 +119,13 @@ class Config:
         # Tmux session name and window naming
         self.tmux_session_name = os.getenv("TMUX_SESSION_NAME", "ccbot")
         self.tmux_main_window_name = "__main__"
+
+        # Optional per-bot Telegram surface ownership guard.  When
+        # CCBOT_OWNED_SURFACES is set, shared group updates outside those
+        # chat-qualified surface keys are hard-ignored before user-visible
+        # side effects (typing, replies, downloads, runtime input).
+        self.owned_surface_keys = _csv_env_set("CCBOT_OWNED_SURFACES")
+        self.ignored_surface_keys = _csv_env_set("CCBOT_IGNORED_SURFACES")
 
         # Runtime command to run in new windows.  Keep the legacy
         # claude_command attribute as a compatibility alias while call sites

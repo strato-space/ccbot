@@ -187,6 +187,10 @@ No-topics main-chat variant:
   may start
 - shared group topics do not treat bot-addressed `@mention` as a bind-flow
   opener
+- when `CCBOT_OWNED_SURFACES` or `CCBOT_IGNORED_SURFACES` classifies a shared
+  group surface as foreign to this bot instance, every update type is
+  hard-ignored before typing, replies, downloads, runtime-input audit, or tmux
+  input
 - command-only entry paths in shared group surfaces must persist Telegram group
   routing coordinates before they mutate binding state
 - for named topics this means `(user_id, thread_id) -> chat_id`; for no-topics

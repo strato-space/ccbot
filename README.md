@@ -245,6 +245,8 @@ ALLOWED_USERS=your_telegram_user_id
 | `TMUX_SESSION_NAME`     | `ccbot`    | Tmux session name                                |
 | `CCBOT_COMMAND`         | `claude`   | Runtime launcher command for new windows; set to `codex`, `omx --madmax`, or a host-specific wrapper |
 | `CLAUDE_COMMAND`        | `claude`   | Legacy fallback used only when `CCBOT_COMMAND` is unset |
+| `CCBOT_OWNED_SURFACES` | _(none)_ | Optional comma-separated allow list of chat-qualified surfaces (`t:<chat_id>:<thread_id>`, `c:<chat_id>`). When set, shared group updates outside these surfaces are hard-ignored before typing/reply/download/runtime side effects |
+| `CCBOT_IGNORED_SURFACES` | _(none)_ | Optional comma-separated deny list of surfaces to hard-ignore; supports canonical keys plus legacy `t:<thread_id>` aliases for migrations |
 | `MONITOR_POLL_INTERVAL` | `2.0`      | Polling interval in seconds                      |
 | `CCBOT_SHOW_HIDDEN_DIRS` | `false` | Show hidden (dot) directories in directory browser |
 | `OPENAI_API_KEY` | _(none)_ | OpenAI API key for voice message transcription when using `openai` or `auto` fallback |
@@ -452,7 +454,10 @@ and `/unbind` operate on that shared surface binding.
 
 For forum topics, "same surface" means the same Telegram group plus the same
 topic/thread id. A topic with the same numeric thread id in another group is a
-different control surface.
+different control surface. Bot instances that share a Telegram group should set
+`CCBOT_OWNED_SURFACES`; when that allow list is present, foreign group topics
+are ignored before ccbot emits typing indicators, replies, media downloads,
+runtime-input audit rows, or tmux input.
 
 For shared groups without topics, the current product surface may expose one
 explicit main-chat mode:

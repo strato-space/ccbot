@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from telegram import CallbackQuery, MessageEntity, User
 from telegram.error import BadRequest, RetryAfter
+from telegram.ext import ApplicationHandlerStop
 
 from ccbot import bot as bot_mod
 from ccbot import typing_indicator as typing_indicator_mod
@@ -86,6 +87,123 @@ def _make_context(*, bot_username: str = "ccbot", bot_id: int = 999) -> MagicMoc
     context.user_data = {}
     return context
 
+
+class TestOwnedSurfaceHardIgnore:
+    def _own_only_thread_42(self):
+        return (
+            patch.object(bot_mod.config, "owned_surface_keys", {"t:100:42"}),
+            patch.object(bot_mod.config, "ignored_surface_keys", set()),
+        )
+
+    @pytest.mark.asyncio
+    async def test_global_gate_stops_foreign_group_topic_before_handlers(self):
+        update = _make_topic_update(thread_id=5733, chat_id=100, text="#bug")
+        context = _make_context()
+
+        with self._own_only_thread_42()[0], self._own_only_thread_42()[1]:
+            with pytest.raises(ApplicationHandlerStop):
+                await bot_mod._hard_ignore_foreign_surface_handler(update, context)
+
+        update.message.chat.send_action.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "#bug @ComfyCodexBot do not answer here",
+            "$oh-my-codex:ultraqa ignore this foreign thread",
+            "plain foreign text",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_text_payload_foreign_group_topic_is_silent_before_side_effects(
+        self, text
+    ):
+        update = _make_topic_update(thread_id=5733, chat_id=100, text=text)
+        context = _make_context()
+
+        with (
+            self._own_only_thread_42()[0],
+            self._own_only_thread_42()[1],
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.log_telegram_delivery") as mock_audit,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            await bot_mod.text_handler(update, context)
+
+        mock_sm.set_group_chat_id.assert_not_called()
+        mock_sm.send_to_window.assert_not_called()
+        mock_audit.assert_not_called()
+        update.message.chat.send_action.assert_not_awaited()
+        mock_reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_slash_command_foreign_group_topic_is_silent_before_side_effects(self):
+        update = _make_topic_update(thread_id=5733, chat_id=100, text="/bind")
+        context = _make_context()
+
+        with (
+            self._own_only_thread_42()[0],
+            self._own_only_thread_42()[1],
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            await bot_mod.forward_command_handler(update, context)
+
+        mock_sm.set_group_chat_id.assert_not_called()
+        mock_sm.send_to_window.assert_not_called()
+        mock_tmux.find_window_by_id.assert_not_called()
+        update.message.chat.send_action.assert_not_awaited()
+        mock_reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_media_foreign_group_topic_is_silent_before_download(self):
+        update = _make_topic_update(thread_id=5733, chat_id=100)
+        context = _make_context()
+        photo = MagicMock(file_unique_id="foreign-photo")
+        photo.get_file = AsyncMock()
+        update.message.photo = [photo]
+
+        with (
+            self._own_only_thread_42()[0],
+            self._own_only_thread_42()[1],
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            await bot_mod.photo_handler(update, context)
+
+        photo.get_file.assert_not_called()
+        mock_sm.set_group_chat_id.assert_not_called()
+        mock_sm.send_to_window.assert_not_called()
+        mock_tmux.find_window_by_id.assert_not_called()
+        update.message.chat.send_action.assert_not_awaited()
+        mock_reply.assert_not_awaited()
+
+    def test_group_main_chat_allowlist_does_not_own_all_topics(self):
+        topic_update = _make_topic_update(thread_id=5733, chat_id=100, text="ping")
+        main_update = _make_main_chat_update(chat_id=100, text="ping")
+
+        with (
+            patch.object(bot_mod.config, "owned_surface_keys", {"c:100"}),
+            patch.object(bot_mod.config, "ignored_surface_keys", set()),
+        ):
+            assert bot_mod._should_hard_ignore_update(topic_update)
+            assert not bot_mod._should_hard_ignore_update(main_update)
+
+    @pytest.mark.asyncio
+    async def test_owned_group_topic_passes_hard_ignore_gate(self):
+        update = _make_topic_update(thread_id=42, chat_id=100, text="ping")
+        context = _make_context()
+
+        with self._own_only_thread_42()[0], self._own_only_thread_42()[1]:
+            await bot_mod._hard_ignore_foreign_surface_handler(update, context)
+
+        assert not bot_mod._should_hard_ignore_update(update)
+        update.message.chat.send_action.assert_not_awaited()
 
 def test_simple_text_fast_path_classifier_preserves_attachment_and_shell_paths():
     assert bot_mod._is_simple_text_fast_path_candidate("останови сервисы vilco")

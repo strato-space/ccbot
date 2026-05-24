@@ -69,6 +69,7 @@ from telegram.error import BadRequest
 from telegram.ext import (
     AIORateLimiter,
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
@@ -617,6 +618,67 @@ def _surface_identity_kwargs(surface: ControlSurface | None) -> dict[str, object
 def surface_key_adapter(surface: ControlSurface) -> int | None:
     """Return the legacy numeric scope id used by pre-surface session APIs."""
     return surface.legacy_scope_id
+
+
+def _configured_surface_keys(name: str) -> set[str]:
+    value = getattr(config, name, set())
+    if not value:
+        return set()
+    if isinstance(value, str):
+        return {item.strip() for item in value.split(",") if item.strip()}
+    return {str(item).strip() for item in value if str(item).strip()}
+
+
+def _surface_key_aliases(surface: ControlSurface) -> set[str]:
+    aliases: set[str] = set()
+    if surface.surface_key:
+        aliases.add(surface.surface_key)
+    if surface.thread_id is not None:
+        aliases.add(f"t:{surface.thread_id}")
+    if surface.kind == "group_main_chat" and surface.chat_id is not None:
+        aliases.add(f"c:{surface.chat_id}")
+    return aliases
+
+
+def _is_foreign_owned_surface(surface: ControlSurface) -> bool:
+    """Return True when this bot instance must ignore a Telegram surface.
+
+    ``CCBOT_IGNORED_SURFACES`` is a deny list. ``CCBOT_OWNED_SURFACES`` is an
+    optional shared-group allow list: when present, group topics/main chats that
+    do not match it are foreign to this bot instance. Private chats/topics stay
+    governed by the user allow-list unless explicitly ignored.
+    """
+    aliases = _surface_key_aliases(surface)
+    ignored = _configured_surface_keys("ignored_surface_keys")
+    if aliases & ignored:
+        return True
+
+    owned = _configured_surface_keys("owned_surface_keys")
+    if owned and surface.is_shared_group:
+        return not bool(aliases & owned)
+    return False
+
+
+def _should_hard_ignore_update(update: Update) -> bool:
+    return _is_foreign_owned_surface(control_surface_classifier(update))
+
+
+async def _hard_ignore_foreign_surface_handler(
+    update: Update,
+    _context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Stop dispatcher processing for foreign group surfaces before side effects."""
+    if not _should_hard_ignore_update(update):
+        return
+    surface = control_surface_classifier(update)
+    logger.info(
+        "Hard-ignored Telegram update outside owned surfaces "
+        "(surface=%s chat_id=%s thread_id=%s)",
+        surface.surface_key,
+        surface.chat_id,
+        surface.thread_id,
+    )
+    raise ApplicationHandlerStop
 
 
 def _artifact_thread_id_for_surface(surface: ControlSurface) -> int | None:
@@ -2793,6 +2855,8 @@ async def topic_closed_handler(
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
         return
+    if _should_hard_ignore_update(update):
+        return
 
     thread_id = _get_thread_id(update)
     if thread_id is None:
@@ -2852,6 +2916,8 @@ async def topic_edited_handler(
     """Handle topic rename — sync new name to tmux window and internal state."""
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
+        return
+    if _should_hard_ignore_update(update):
         return
 
     msg = update.message
@@ -2950,6 +3016,8 @@ async def topic_created_handler(
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
         return
+    if _should_hard_ignore_update(update):
+        return
 
     msg = update.message
     topic_created = getattr(msg, "forum_topic_created", None) if msg else None
@@ -2983,6 +3051,8 @@ async def forward_command_handler(
     if not user or not is_user_allowed(user.id):
         return
     if not update.message:
+        return
+    if _should_hard_ignore_update(update):
         return
 
     thread_id = _get_thread_id(update)
@@ -3068,6 +3138,8 @@ async def unsupported_content_handler(
         return
     user = update.effective_user
     if not user or not is_user_allowed(user.id):
+        return
+    if _should_hard_ignore_update(update):
         return
     logger.debug("Unsupported content from user %d", user.id)
     await safe_reply(
@@ -3782,6 +3854,8 @@ async def _resolve_attachment_input_target(
         return None
 
     if not update.message:
+        return None
+    if _should_hard_ignore_update(update):
         return None
 
     chat = update.message.chat
@@ -4723,6 +4797,8 @@ async def _handle_text_payload(
 
     if not update.message or not text:
         return
+    if _should_hard_ignore_update(update):
+        return
 
     surface = control_surface_classifier(update)
     thread_id = surface.message_thread_id
@@ -5272,6 +5348,8 @@ async def _set_current_surface_routing_mode(
         return
     if not update.message:
         return
+    if _should_hard_ignore_update(update):
+        return
     surface = control_surface_classifier(update)
     if not surface.supports_bind_flow:
         await safe_reply(update.message, _unsupported_surface_message(surface))
@@ -5300,6 +5378,8 @@ async def switch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await safe_reply(update.message, "You are not authorized to use this bot.")
         return
     if not update.message:
+        return
+    if _should_hard_ignore_update(update):
         return
     surface = control_surface_classifier(update)
     if not surface.supports_bind_flow:
@@ -7011,6 +7091,10 @@ def create_bot() -> Application:
     application.add_handler(
         TypeHandler(Update, _mark_telegram_update_handler, block=True),
         group=-100,
+    )
+    application.add_handler(
+        TypeHandler(Update, _hard_ignore_foreign_surface_handler, block=True),
+        group=-99,
     )
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
