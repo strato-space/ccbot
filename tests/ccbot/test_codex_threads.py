@@ -712,6 +712,53 @@ async def test_restore_intent_does_not_override_live_fd_proven_thread(
 
 
 @pytest.mark.asyncio
+async def test_live_fd_proof_overrides_stale_runtime_kind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / ".codex"
+    live_thread_id = "019e58ce-6f9e-7ea2-8c4d-5273ed295670"
+    cwd = "/home/tools/mediagen-comfy"
+    _write_codex_thread(
+        codex_home,
+        thread_id=live_thread_id,
+        cwd=cwd,
+        thread_name="Current live thread",
+        updated_at="2026-05-24T09:22:54Z",
+    )
+    catalog = CodexThreadCatalog(codex_home=codex_home)
+
+    monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+    monkeypatch.setattr(SessionManager, "_save_state", lambda self: None)
+    manager = SessionManager(codex_thread_catalog=catalog)
+    manager.register_live_process(
+        "@31",
+        cwd,
+        runtime_kind="claude",
+        thread_id=live_thread_id,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_resolve_live_codex_rollout_from_pane_pid",
+        lambda *, pane_pid, cwd: catalog.get_candidate_fast(live_thread_id),
+    )
+
+    changed = manager.reconcile_live_tmux_window(
+        window_id="@31",
+        cwd=cwd,
+        window_name="comfy-agent",
+        pane_current_command="node",
+        pane_pid="447334",
+    )
+
+    state = manager.get_window_state("@31")
+    assert changed is True
+    assert state.runtime_kind == "codex"
+    assert state.thread_id == live_thread_id
+    assert state.thread_id_source == "live_fd"
+
+
+@pytest.mark.asyncio
 async def test_codex_duplicate_thread_prefers_validated_restore_owner_after_restart(
     session_manager: SessionManager,
     monkeypatch: pytest.MonkeyPatch,

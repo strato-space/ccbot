@@ -583,6 +583,34 @@ def build_live_runtime_proof(
     )
 
 
+def _reconcile_live_identity_from_window(session_manager: Any, window: Any) -> None:
+    """Adopt live runtime identity from tmux/process evidence when available.
+
+    Startup restore can launch/resume Codex successfully before the legacy
+    session-map hook writes a new entry.  In that gap, the strongest proof is
+    the live Codex process holding the target rollout JSONL open under the
+    tmux pane pid.  Reuse the same fd-proof reconciliation path used by status
+    polling instead of treating a missing session_map entry as definitive.
+    """
+    reconcile = getattr(session_manager, "reconcile_live_tmux_window", None)
+    if not callable(reconcile):
+        return
+    try:
+        reconcile(
+            window_id=str(getattr(window, "window_id", "") or ""),
+            cwd=str(getattr(window, "cwd", "") or ""),
+            window_name=str(getattr(window, "window_name", "") or ""),
+            pane_current_command=str(getattr(window, "pane_current_command", "") or ""),
+            pane_pid=str(getattr(window, "pane_pid", "") or ""),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Startup restore live identity reconciliation failed for %s: %s",
+            str(getattr(window, "window_id", "") or "<unknown>"),
+            exc,
+        )
+
+
 def build_resume_target_proof(
     session_manager: Any,
     intent: RestoreIntent,
@@ -829,6 +857,7 @@ async def inspect_configured_startup_target(
 
     panes = await _list_restore_panes(tmux_manager, existing)
     active_pane_id = str(getattr(existing, "pane_id", "") or "")
+    _reconcile_live_identity_from_window(session_manager, existing)
     live_proof = build_live_runtime_proof(
         session_manager,
         existing,
@@ -1014,6 +1043,7 @@ async def restore_configured_startup_target(
             inventory.classification,
             inventory,
         )
+    _reconcile_live_identity_from_window(session_manager, created_window)
     live_proof = build_live_runtime_proof(
         session_manager,
         created_window,

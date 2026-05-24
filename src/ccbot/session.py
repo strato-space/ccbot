@@ -2339,22 +2339,24 @@ class SessionManager:
         )
         if live_codex_candidate is not None and (
             state.thread_id != live_codex_candidate.thread_id
+            or state.runtime_kind != "codex"
             or state.requires_live_proof
             or normalize_cwd(state.cwd) != live_codex_candidate.normalized_cwd
         ):
             old_thread_id = state.thread_id
             old_cwd = state.cwd
+            old_runtime_kind = state.runtime_kind
             state.thread_id = live_codex_candidate.thread_id
             state.cwd = live_codex_candidate.cwd
-            if not state.runtime_kind:
-                state.runtime_kind = "codex"
+            state.runtime_kind = "codex"
             state.requires_live_proof = False
             state.thread_id_source = THREAD_ID_SOURCE_LIVE_FD
             state.registered_at = time.time()
             logger.info(
                 "Adopted live Codex thread for window %s from process fd proof: "
-                "%s (%s) -> %s (%s)",
+                "%s/%s (%s) -> codex/%s (%s)",
                 window_id,
+                old_runtime_kind or "<none>",
                 old_thread_id or "<none>",
                 old_cwd or "<none>",
                 live_codex_candidate.thread_id,
@@ -3485,16 +3487,32 @@ class SessionManager:
         )
         bindings = self.surface_bindings.setdefault(user_id, {})
         bindings[resolved_surface_key] = window_id
+        legacy_surface_key = self._legacy_topic_surface_key(resolved_surface_key)
+        if legacy_surface_key and self._legacy_topic_surface_matches_chat(
+            user_id,
+            resolved_surface_key,
+        ):
+            legacy_window_id = bindings.get(legacy_surface_key)
+            if legacy_window_id is None or self.is_external_binding_window_id(
+                legacy_window_id
+            ):
+                bindings[legacy_surface_key] = window_id
         if self._is_window_id(window_id):
             self.get_or_create_process_descriptor(window_id)
         external = self.external_surface_bindings.get(user_id)
-        if external and resolved_surface_key in external:
-            del external[resolved_surface_key]
+        if external:
+            for stale_surface_key in (resolved_surface_key, legacy_surface_key):
+                if stale_surface_key and stale_surface_key in external:
+                    del external[stale_surface_key]
             self._prune_empty_surface_entry(self.external_surface_bindings, user_id)
         states = self.surface_binding_states.setdefault(user_id, {})
         states[resolved_surface_key] = BINDING_STATE_BOUND
+        if legacy_surface_key and bindings.get(legacy_surface_key) == window_id:
+            states[legacy_surface_key] = BINDING_STATE_BOUND
         policies = self.surface_policies.setdefault(user_id, {})
         policies.setdefault(resolved_surface_key, TOPIC_POLICY_IMPLICIT_BIND_ALLOWED)
+        if legacy_surface_key and bindings.get(legacy_surface_key) == window_id:
+            policies.setdefault(legacy_surface_key, TOPIC_POLICY_IMPLICIT_BIND_ALLOWED)
         self._rotate_surface_bind_flow_credentials(
             user_id, surface_key=resolved_surface_key
         )
