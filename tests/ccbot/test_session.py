@@ -19,7 +19,12 @@ from ccbot.session import (
     _codex_text_matches_expected_exact,
     _stable_text_hash,
 )
-from ccbot.runtime_types import LiveProcessDescriptor, ThreadLocator
+from ccbot.runtime_types import (
+    THREAD_ID_SOURCE_LIVE_FD,
+    THREAD_ID_SOURCE_RESTORE_INTENT,
+    LiveProcessDescriptor,
+    ThreadLocator,
+)
 from ccbot.state_schema import (
     BINDING_STATE_BIND_FLOW,
     BINDING_STATE_BOUND,
@@ -772,13 +777,13 @@ class TestWindowState:
             thread_id=thread_id,
             cwd="/tmp/project",
             runtime_kind="codex",
-            thread_id_source="live_fd",
+            thread_id_source=THREAD_ID_SOURCE_LIVE_FD,
         )
         mgr.window_states["@2"] = LiveProcessDescriptor(
             thread_id=thread_id,
             cwd="/tmp/project",
             runtime_kind="codex",
-            thread_id_source="restore_intent",
+            thread_id_source=THREAD_ID_SOURCE_RESTORE_INTENT,
         )
         mgr.bind_thread(100, 1, "@1")
         mgr.bind_thread(100, 2, "@2")
@@ -874,7 +879,7 @@ class TestWindowState:
             window_name="comfy-agent",
             registered_at=100.0,
             requires_live_proof=True,
-            thread_id_source="restore_intent",
+            thread_id_source=THREAD_ID_SOURCE_RESTORE_INTENT,
         )
 
         changed = manager.reconcile_live_tmux_window(
