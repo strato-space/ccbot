@@ -118,8 +118,9 @@ evidence rather than a cosmetic hint. Local `--file-path` uploads are
 best-effort probed with a bounded `ffprobe` call, explicit
 `--video-width` / `--video-height` / `--video-duration` / `--thumbnail-path`
 flags may override or supplement the probe, and the resulting `send_video`
-request metadata plus Telegram-returned `Message.video` / thumbnail geometry are
-included in JSON/audit evidence. A status/message-id/url-only result is weak
+request metadata (including request method and provided thumbnail path) plus
+Telegram-returned `Message.video` / thumbnail geometry are included in JSON/audit
+evidence. A status/message-id/url-only result is weak
 evidence for final review previews because Telegram clients can render an
 otherwise valid vertical MP4 with the wrong preview geometry.
 

@@ -112,9 +112,10 @@ class VideoSendMetadata:
             )
         return kwargs
 
-    def request_evidence(self) -> dict[str, Any]:
+    def request_evidence(self, *, method: str = "send_video") -> dict[str, Any]:
         evidence: dict[str, Any] = {
             "type": "video",
+            "method": method,
             "width": self.width,
             "height": self.height,
             "duration": self.duration,
@@ -126,6 +127,7 @@ class VideoSendMetadata:
             evidence["thumbnail"] = {
                 "provided": True,
                 "filename": self.thumbnail_path.name,
+                "path": str(self.thumbnail_path),
             }
         return {key: value for key, value in evidence.items() if value is not None}
 
@@ -1174,7 +1176,7 @@ async def _send_attachment(
     elif file_type == "video":
         if video_metadata is not None:
             send_kwargs.update(video_metadata.send_kwargs())
-            media_request = video_metadata.request_evidence()
+            media_request = video_metadata.request_evidence(method="send_video")
         msg = await bot.send_video(video=attachment, **send_kwargs)
     elif file_type == "audio":
         msg = await bot.send_audio(audio=attachment, **send_kwargs)
@@ -1250,7 +1252,7 @@ async def _edit_attachment(
         **_message_result(
             msg,
             target,
-            media_request=video_metadata.request_evidence()
+            media_request=video_metadata.request_evidence(method="edit_message_media")
             if file_type == "video" and video_metadata is not None
             else None,
         ),

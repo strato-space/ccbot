@@ -374,6 +374,7 @@ def test_send_bot_message_video_auto_probes_and_returns_media_evidence(
     assert captured["supports_streaming"] is True
     assert result["media"]["request"] == {
         "type": "video",
+        "method": "send_video",
         "width": 720,
         "height": 1280,
         "duration": 55,
@@ -458,6 +459,7 @@ def test_send_bot_message_video_explicit_metadata_and_thumbnail_override_probe(
     assert result["media"]["request"]["thumbnail"] == {
         "provided": True,
         "filename": "thumb.jpg",
+        "path": str(thumbnail_path),
     }
 
 
@@ -669,6 +671,8 @@ def test_send_bot_message_edit_video_attachment_includes_media_metadata(
     assert captured["media"]._duration.total_seconds() == 55
     assert captured["media"].supports_streaming is True
     assert captured["media"].thumbnail.filename == "thumb.jpg"
+    assert result["media"]["request"]["method"] == "edit_message_media"
+    assert result["media"]["request"]["thumbnail"]["path"] == str(thumbnail_path)
     assert result["media"]["evidence_status"] == "complete"
 
 

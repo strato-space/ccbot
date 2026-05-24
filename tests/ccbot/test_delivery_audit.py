@@ -68,10 +68,16 @@ def test_delivery_audit_records_video_media_metadata(monkeypatch, tmp_path) -> N
     media = {
         "request": {
             "type": "video",
+            "method": "send_video",
             "width": 720,
             "height": 1280,
             "duration": 55,
             "supports_streaming": True,
+            "thumbnail": {
+                "provided": True,
+                "filename": "thumb.jpg",
+                "path": "/tmp/ccbot/thumb.jpg",
+            },
         },
         "telegram": {
             "video": {

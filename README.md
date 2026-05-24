@@ -682,8 +682,9 @@ outbound `video`, `ccbot send` auto-probes local `--file-path` uploads with a
 bounded `ffprobe` call and passes Telegram `send_video` width, height, duration,
 and `supports_streaming` metadata when available. Geometry-sensitive final
 previews can also pass `--video-width`, `--video-height`, `--video-duration`,
-and `--thumbnail-path`; `--json` includes both requested video metadata and
-Telegram-returned video/thumbnail geometry so a generic
+and `--thumbnail-path`; `--json` includes the request method, requested video
+metadata, thumbnail path when provided, and Telegram-returned video/thumbnail
+geometry so a generic
 `status/message_id/url` success is not treated as final preview evidence. This
 is separate from inbound Telegram audio/video ingress, which forwards local
 media artifact paths into the runtime.
@@ -837,5 +838,6 @@ action, topic/control surface, semantic class, success flag, message id when
 available, and a short hash/preview of the rendered artifact. This is used to
 compare what Telegram actually showed with the Codex/tmux human surface without
 storing full raw tool payloads. For outbound video delivery, audit rows may also
-include sanitized requested video geometry and Telegram-returned video/thumbnail
-geometry so final-preview gates can reject status/message-id/url-only evidence.
+include sanitized requested video geometry, request method, provided thumbnail
+path, and Telegram-returned video/thumbnail geometry so final-preview gates can
+reject status/message-id/url-only evidence.
