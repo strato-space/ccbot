@@ -405,6 +405,11 @@ tool results rather than being forced into command execution.
   delivery artifacts. They share chat-level degraded-transport backpressure, so
   parallel topics cannot multiply typing/probe calls while durable content is
   waiting on Telegram.
+- Compact mutable artifact lanes are latest-state lanes while queued behind a
+  durable ordering barrier: status, commentary, plan, and pending-input updates
+  may replace older same-surface/window/turn/lane updates before Telegram sees
+  them. Durable content/final/warning/ingress artifacts remain ordered facts,
+  not replaceable state.
 - pending input preview remains outside this terminal ordering barrier; it
   describes future queued input rather than current-turn output
 - pending input preview closes on queue-owned lifecycle transitions such as

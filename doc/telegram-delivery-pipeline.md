@@ -590,6 +590,11 @@ Late delivery must fail closed.
   must stay queue-owned and retry after the advised cooldown instead of being
   consumed by `queue.task_done()`; mutable/ephemeral artifacts may be retried or
   explicitly suppressed only with retry audit evidence.
+- While a user queue is backed up, compact mutable lanes (`status`,
+  `commentary`, `plan`, and `pending-input`) are coalesced at enqueue time to
+  the latest same-surface/window/turn/lane task after the most recent durable
+  ordering barrier. Durable content, final answers, warnings, ingress receipts,
+  and terminal close tasks are never coalesced away.
 
 This prevents:
 

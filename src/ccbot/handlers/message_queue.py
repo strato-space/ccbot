@@ -730,6 +730,90 @@ def _can_merge_tasks(base: MessageTask, candidate: MessageTask) -> bool:
     return True
 
 
+_MUTABLE_COALESCING_BARRIER_TASK_TYPES = {
+    "content",
+    "ingress_receipt",
+    "commentary_close",
+    "pre_final_close",
+}
+
+
+def _mutable_coalesce_lane(task: MessageTask) -> str | None:
+    if task.task_type in {"status_update", "status_clear"}:
+        return f"status:{task.content_type}:{task.semantic_kind}"
+    if task.task_type in {"commentary_update", "commentary_clear"}:
+        return "commentary"
+    if task.task_type in {"plan_update", "plan_clear"}:
+        return "plan"
+    if task.task_type in {"pending_input_update", "pending_input_clear"}:
+        return "pending_input"
+    return None
+
+
+def _same_mutable_coalesce_lane(
+    user_id: int,
+    existing: MessageTask,
+    new: MessageTask,
+) -> bool:
+    lane = _mutable_coalesce_lane(new)
+    if lane is None or _mutable_coalesce_lane(existing) != lane:
+        return False
+    if _task_state_key(user_id, existing) != _task_state_key(user_id, new):
+        return False
+    if existing.window_id != new.window_id:
+        return False
+    return existing.turn_generation == new.turn_generation
+
+
+async def _enqueue_coalescing_mutable_task(
+    queue: asyncio.Queue[MessageTask],
+    lock: asyncio.Lock,
+    user_id: int,
+    task: MessageTask,
+) -> int:
+    """Enqueue a mutable task after replacing older same-lane queued updates."""
+    collapsed = 0
+    async with lock:
+        items = _inspect_queue(queue)
+        last_barrier_index = max(
+            (
+                index
+                for index, item in enumerate(items)
+                if item.task_type in _MUTABLE_COALESCING_BARRIER_TASK_TYPES
+            ),
+            default=-1,
+        )
+        remaining: list[MessageTask] = []
+        for index, item in enumerate(items):
+            if index > last_barrier_index and _same_mutable_coalesce_lane(
+                user_id,
+                item,
+                task,
+            ):
+                collapsed += 1
+                if item.task_type in {"pending_input_update", "pending_input_clear"}:
+                    _pending_input_enqueued.pop(_task_state_key(user_id, item), None)
+                queue.task_done()
+                continue
+            remaining.append(item)
+
+        for item in remaining:
+            queue.put_nowait(item)
+            queue.task_done()
+        queue.put_nowait(task)
+
+    if collapsed:
+        _audit_task_delivery(
+            action="coalesce",
+            user_id=user_id,
+            chat_id=_safe_task_chat_id(user_id, task),
+            task=task,
+            text=task.text or "\n\n".join(task.parts),
+            reason=f"mutable_queue_coalesced:{_mutable_coalesce_lane(task)}:count={collapsed}",
+        )
+    return collapsed
+
+
 async def _merge_content_tasks(
     queue: asyncio.Queue[MessageTask],
     first: MessageTask,
@@ -4227,7 +4311,12 @@ async def enqueue_status_update(
             surface_key=surface_key,
         )
 
-    queue.put_nowait(task)
+    await _enqueue_coalescing_mutable_task(
+        queue,
+        _queue_locks[user_id],
+        user_id,
+        task,
+    )
 
 
 async def enqueue_ingress_receipt(
@@ -4353,7 +4442,12 @@ async def enqueue_commentary_update(
             surface_key=surface_key,
         )
 
-    queue.put_nowait(task)
+    await _enqueue_coalescing_mutable_task(
+        queue,
+        _queue_locks[user_id],
+        user_id,
+        task,
+    )
 
 
 async def enqueue_plan_update(
@@ -4397,7 +4491,12 @@ async def enqueue_plan_update(
             surface_key=surface_key,
             turn_generation=turn_generation,
         )
-    queue.put_nowait(task)
+    await _enqueue_coalescing_mutable_task(
+        queue,
+        _queue_locks[user_id],
+        user_id,
+        task,
+    )
 
 
 async def enqueue_pending_input_update(
@@ -4456,7 +4555,12 @@ async def enqueue_pending_input_update(
             turn_generation=turn_generation,
         )
 
-    queue.put_nowait(task)
+    await _enqueue_coalescing_mutable_task(
+        queue,
+        _queue_locks[user_id],
+        user_id,
+        task,
+    )
 
 
 async def enqueue_commentary_close(

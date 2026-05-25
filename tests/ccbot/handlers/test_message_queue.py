@@ -32,6 +32,7 @@ from ccbot.handlers.message_queue import (
     clear_commentary_lane_state,
     clear_image_preview_message,
     current_turn_generation,
+    enqueue_commentary_update,
     enqueue_content_message,
     enqueue_pending_input_update,
     enqueue_ingress_receipt,
@@ -240,6 +241,118 @@ async def test_queue_worker_retries_status_after_retryafter_without_consuming_ta
     finally:
         await shutdown_workers()
         _flood_until.pop(1, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("enqueue_kind", "processor_name"),
+    [
+        ("status", "_process_status_update_task"),
+        ("commentary", "_process_commentary_update_task"),
+        ("plan", "_process_plan_update_task"),
+        ("pending", "_process_pending_input_update_task"),
+    ],
+)
+async def test_mutable_updates_coalesce_to_latest_while_queue_is_backed_up(
+    enqueue_kind: str,
+    processor_name: str,
+) -> None:
+    bot = AsyncMock()
+    blocker_started = asyncio.Event()
+    unblock = asyncio.Event()
+
+    async def _block_content(*_args, **_kwargs):
+        blocker_started.set()
+        await unblock.wait()
+
+    async def _enqueue_mutable(index: int) -> None:
+        text = f"{enqueue_kind} {index}"
+        if enqueue_kind == "status":
+            await enqueue_status_update(
+                bot,
+                user_id=1,
+                window_id="@7",
+                status_text=text,
+                chat_id=100,
+                thread_id=42,
+                turn_generation=1,
+            )
+        elif enqueue_kind == "commentary":
+            await enqueue_commentary_update(
+                bot,
+                user_id=1,
+                window_id="@7",
+                commentary_text=text,
+                parts=[text],
+                chat_id=100,
+                thread_id=42,
+                turn_generation=1,
+            )
+        elif enqueue_kind == "plan":
+            await enqueue_plan_update(
+                bot,
+                user_id=1,
+                window_id="@7",
+                plan_text=text,
+                chat_id=100,
+                thread_id=42,
+                turn_generation=1,
+            )
+        else:
+            await enqueue_pending_input_update(
+                bot,
+                user_id=1,
+                window_id="@7",
+                pending_input_text=text,
+                chat_id=100,
+                thread_id=42,
+                turn_generation=1,
+            )
+
+    try:
+        with (
+            patch(
+                "ccbot.handlers.message_queue._process_content_task",
+                new_callable=AsyncMock,
+                side_effect=_block_content,
+            ),
+            patch(
+                f"ccbot.handlers.message_queue.{processor_name}",
+                new_callable=AsyncMock,
+            ) as mock_processor,
+            patch("ccbot.handlers.message_queue._audit_task_delivery") as mock_audit,
+        ):
+            await enqueue_content_message(
+                bot,
+                user_id=1,
+                window_id="@7",
+                parts=["blocking durable content"],
+                chat_id=100,
+                thread_id=42,
+            )
+            await asyncio.wait_for(blocker_started.wait(), timeout=1)
+
+            for index in range(100):
+                await _enqueue_mutable(index)
+
+            queue = get_message_queue(1)
+            assert queue is not None
+            assert queue.qsize() == 1
+
+            unblock.set()
+            await asyncio.wait_for(queue.join(), timeout=1)
+
+        mock_processor.assert_awaited_once()
+        delivered_task = mock_processor.await_args.args[2]
+        assert delivered_task.text == f"{enqueue_kind} 99"
+        assert sum(
+            1
+            for call in mock_audit.call_args_list
+            if call.kwargs.get("action") == "coalesce"
+        ) == 99
+    finally:
+        unblock.set()
+        await shutdown_workers()
 
 
 def test_can_merge_tasks_rejects_different_topics_for_same_window():
