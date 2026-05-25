@@ -131,6 +131,7 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 |---------|--------|-------|
 | **HTML formatting** | ✅ | Messages render via `chatgpt-md-converter`; MarkdownV2 is no longer the active runtime formatter |
 | **send_chat_action("typing")** | ✅ | Shown while processing user messages and during long operations |
+| **sendMessageDraft transport preview** | ✅ / guarded | Optional `CCBOT_TELEGRAM_DRAFT_PREVIEW=probe|on` path for draft-eligible high-frequency transient partial frames. It is transport-only audit evidence, not a durable artifact or final-answer proof; group/topic use requires explicit surface allowlist and persisted live capability evidence |
 | **Telegram ingress receipt** | ✅ | Eligible simple Codex text sends a distinct current-update receipt before replay ACK; it is edited to confirmed, delivered-but-unconfirmed, or failed and is not a runtime user echo before proof |
 | **InlineKeyboardMarkup** | ✅ | Used extensively: thread picker, history pagination, directory browser, prompt snapshots, screenshot refresh |
 | **callback_query.answer()** | ✅ | Instant feedback on all callback button clicks |

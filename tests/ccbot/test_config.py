@@ -41,6 +41,21 @@ class TestConfigValid:
         cfg = Config()
         assert cfg.is_user_allowed(99999) is False
 
+    def test_telegram_draft_preview_defaults_to_off(self):
+        cfg = Config()
+        assert cfg.telegram_draft_preview_mode == "off"
+        assert cfg.telegram_draft_preview_allowed_surfaces == set()
+        assert cfg.telegram_draft_preview_min_interval_seconds == 1.5
+
+    def test_telegram_draft_preview_env(self, monkeypatch):
+        monkeypatch.setenv("CCBOT_TELEGRAM_DRAFT_PREVIEW", "probe")
+        monkeypatch.setenv("CCBOT_TELEGRAM_DRAFT_ALLOWED_SURFACES", "t:-100:42,c:123")
+        monkeypatch.setenv("CCBOT_TELEGRAM_DRAFT_MIN_INTERVAL_SECONDS", "0.25")
+        cfg = Config()
+        assert cfg.telegram_draft_preview_mode == "probe"
+        assert cfg.telegram_draft_preview_allowed_surfaces == {"t:-100:42", "c:123"}
+        assert cfg.telegram_draft_preview_min_interval_seconds == 0.25
+
 
 @pytest.mark.usefixtures("_base_env")
 class TestConfigMissingEnv:

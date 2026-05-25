@@ -30,6 +30,34 @@ SENSITIVE_ENV_VARS = {
 VOICE_STT_PROVIDERS = {"openai", "local_command", "auto", "disabled"}
 
 
+def _bounded_float_env(
+    name: str,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %.2f", name, value, default)
+        return default
+    if parsed < minimum:
+        logger.warning(
+            "%s=%s below minimum %s; using %s", name, parsed, minimum, minimum
+        )
+        return minimum
+    if parsed > maximum:
+        logger.warning(
+            "%s=%s above maximum %s; using %s", name, parsed, maximum, maximum
+        )
+        return maximum
+    return parsed
+
+
 def _bounded_int_env(
     name: str,
     default: int,
@@ -126,6 +154,39 @@ class Config:
         # side effects (typing, replies, downloads, runtime input).
         self.owned_surface_keys = _csv_env_set("CCBOT_OWNED_SURFACES")
         self.ignored_surface_keys = _csv_env_set("CCBOT_IGNORED_SURFACES")
+
+        draft_preview_mode = os.getenv("CCBOT_TELEGRAM_DRAFT_PREVIEW", "off").strip().lower()
+        if draft_preview_mode not in {"off", "probe", "on"}:
+            logger.warning(
+                "Unknown CCBOT_TELEGRAM_DRAFT_PREVIEW=%s, falling back to off",
+                draft_preview_mode,
+            )
+            draft_preview_mode = "off"
+        self.telegram_draft_preview_mode = draft_preview_mode
+        self.telegram_draft_preview_allowed_surfaces = _csv_env_set(
+            "CCBOT_TELEGRAM_DRAFT_ALLOWED_SURFACES"
+        )
+        self.telegram_draft_preview_clear_allowed_surfaces = _csv_env_set(
+            "CCBOT_TELEGRAM_DRAFT_CLEAR_ALLOWED_SURFACES"
+        )
+        self.telegram_draft_preview_min_interval_seconds = _bounded_float_env(
+            "CCBOT_TELEGRAM_DRAFT_MIN_INTERVAL_SECONDS",
+            1.5,
+            minimum=0.1,
+            maximum=30.0,
+        )
+        self.telegram_draft_preview_retry_cooldown_seconds = _bounded_int_env(
+            "CCBOT_TELEGRAM_DRAFT_RETRY_COOLDOWN_SECONDS",
+            30,
+            minimum=1,
+            maximum=3600,
+        )
+        self.telegram_draft_preview_timeout_cooldown_seconds = _bounded_int_env(
+            "CCBOT_TELEGRAM_DRAFT_TIMEOUT_COOLDOWN_SECONDS",
+            10,
+            minimum=1,
+            maximum=3600,
+        )
 
         # Runtime command to run in new windows.  Keep the legacy
         # claude_command attribute as a compatibility alias while call sites

@@ -48,6 +48,10 @@ from ..runtime_types import (
 from ..state_schema import BINDING_STATE_BOUND
 from ..terminal_parser import parse_status_line
 from ..delivery_audit import log_telegram_delivery
+from ..draft_streaming import (
+    maybe_send_draft_preview,
+    stop_draft_preview_state,
+)
 from ..config import config
 from ..utils import atomic_write_json
 from ..tmux_manager import tmux_manager
@@ -1099,6 +1103,29 @@ def _is_terminal_control_status_task(task: MessageTask) -> bool:
         task.semantic_kind == TERMINAL_CONTROL_SEMANTIC_KIND
         or task.content_type == TERMINAL_CONTROL_PANEL_CONTENT_TYPE
     )
+
+
+def _is_draft_preview_eligible_status_task(task: MessageTask, text: str) -> bool:
+    """Return True for high-frequency transient status lines eligible for drafts."""
+    if task.task_type != "status_update":
+        return False
+    if task.content_type not in {"text", "status"}:
+        return False
+    if task.semantic_kind not in {"", "technical_status"}:
+        return False
+    body = (text or "").strip()
+    if not body or "\n" in body or len(body) > 300:
+        return False
+    lowered = body.lower()
+    if body.startswith("⌘ Command") or lowered.startswith("tool "):
+        return False
+    if "↳ tool output" in lowered:
+        return False
+    return True
+
+
+def _draft_preview_suppresses_durable_status(result_status: str) -> bool:
+    return result_status in {"sent", "debounced"}
 
 
 def _normalize_technical_status_text(text: str) -> str:
@@ -2366,6 +2393,38 @@ async def _process_status_update_task(
             reason="empty_after_status_normalization",
         )
         return
+
+    draft_result = None
+    if _is_draft_preview_eligible_status_task(task, status_text):
+        draft_result = await maybe_send_draft_preview(
+            bot,
+            user_id=user_id,
+            chat_id=chat_id,
+            thread_id=tid if tid != 0 else None,
+            surface_key=task.surface_key,
+            window_id=wid,
+            text=status_text,
+            turn_generation=task.turn_generation,
+            lane="technical_status",
+            source_content_type=_status_audit_content_type(task),
+            source_semantic_kind=_status_audit_semantic_kind(task),
+        )
+        if (
+            config.telegram_draft_preview_mode == "on"
+            and current_info is not None
+            and _draft_preview_suppresses_durable_status(draft_result.status)
+        ):
+            _audit_task_delivery(
+                action="suppress",
+                user_id=user_id,
+                chat_id=chat_id,
+                task=task,
+                text=status_text,
+                content_type=_status_audit_content_type(task),
+                semantic_kind=_status_audit_semantic_kind(task),
+                reason="draft_preview_transport",
+            )
+            return
 
     if current_info:
         msg_id, stored_wid, last_text = current_info
@@ -4290,6 +4349,25 @@ def _mark_technical_status_closed(
             surface_key=surface_key,
         )
     )
+    resolved_chat_id = chat_id
+    if resolved_chat_id is None:
+        try:
+            resolved_chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+        except Exception:  # pragma: no cover - legacy close path best-effort only
+            resolved_chat_id = None
+    if resolved_chat_id is not None:
+        stop_draft_preview_state(
+            chat_id=resolved_chat_id,
+            thread_id=thread_id,
+            surface_key=surface_key,
+            turn_generation=current_turn_generation(
+                user_id,
+                thread_id,
+                chat_id=chat_id,
+                surface_key=surface_key,
+            ),
+            lane="technical_status",
+        )
 
 
 def _mark_commentary_closed(

@@ -277,6 +277,12 @@ ALLOWED_USERS=your_telegram_user_id
 | `CCBOT_MAX_AUDIO_BYTES` | `52428800` | Maximum inbound Telegram audio artifact size before refusing download/forward |
 | `CCBOT_MAX_VIDEO_BYTES` | `104857600` | Maximum inbound Telegram video artifact size before refusing download/forward |
 | `CCBOT_MAX_TELEGRAM_DOWNLOAD_BYTES` | `20971520` | Maximum Bot API `getFile`/download size for inbound media; effective audio/video preflight uses the lower of this cap and the media-specific cap |
+| `CCBOT_TELEGRAM_DRAFT_PREVIEW` | `off` | Optional `sendMessageDraft` transport preview mode: `off`, `probe`, or `on`. Drafts are transient latest-only previews; final answers and semantic milestones still use durable send/edit paths |
+| `CCBOT_TELEGRAM_DRAFT_ALLOWED_SURFACES` | _(none)_ | Comma-separated allow list (`t:<chat_id>:<thread_id>`, `c:<chat_id>`) for draft preview probes and group/topic rollout |
+| `CCBOT_TELEGRAM_DRAFT_MIN_INTERVAL_SECONDS` | `1.5` | Per surface/generation/lane minimum interval for draft preview Bot API calls; intermediate frames are coalesced/dropped, not converted into edit storms |
+| `CCBOT_TELEGRAM_DRAFT_RETRY_COOLDOWN_SECONDS` | `30` | Surface cooldown after Telegram `RetryAfter` on draft preview transport |
+| `CCBOT_TELEGRAM_DRAFT_TIMEOUT_COOLDOWN_SECONDS` | `10` | Short surface cooldown after draft preview timeout/network failures |
+| `CCBOT_TELEGRAM_DRAFT_CLEAR_ALLOWED_SURFACES` | _(none)_ | Optional surfaces where live smoke proved an empty/clear draft is safe; otherwise final closure only stops/drops the draft lane and relies on Telegram expiry |
 | `CCBOT_TELEGRAM_POOL_TIMEOUT` | `10.0` | HTTPX connection-pool wait timeout for ordinary Telegram Bot API requests |
 | `CCBOT_TELEGRAM_GET_UPDATES_POOL_SIZE` | `4` | Dedicated Telegram `getUpdates` connection pool size; keep above PTB's single-connection default for long-poll resilience |
 | `CCBOT_TELEGRAM_GET_UPDATES_POOL_TIMEOUT` | `10.0` | Connection-pool wait timeout for `getUpdates` requests |

@@ -23,6 +23,9 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "doc/telegram-delivery-pipeline.md" in readme
     assert "doc/multi-runtime-regression-matrix.md" in readme
     assert "doc/multi-runtime-rollout.md" in readme
+    assert "CCBOT_TELEGRAM_DRAFT_PREVIEW" in readme
+    assert "CCBOT_TELEGRAM_DRAFT_ALLOWED_SURFACES" in readme
+    assert "transient latest-only previews" in readme
     assert "/home/tools/codex-tools/codex-session-scout" in readme
     assert "runtime conversation identity" in readme
     assert "replay evidence" in readme
@@ -553,6 +556,8 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
     assert "steer" in doc
     assert "workspace `.fast-agent` root" in doc
     assert "**Compact delivery policy**" in doc
+    assert "sendMessageDraft transport preview" in doc
+    assert "transport-only audit evidence" in doc
     assert "Queued follow-up preview" in doc
     assert "user echo, orchestration milestones, and final assistant text as durable bubbles" in doc
     assert "visibility wins when silence would make runtime state ambiguous" in doc
