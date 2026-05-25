@@ -95,7 +95,6 @@ class DraftPreviewResult:
 @dataclass
 class _RuntimeState:
     last_sent_at: dict[tuple[str, int, str], float]
-    last_success_at: dict[str, float]
     cooldown_until: dict[str, float]
     closed: set[tuple[str, int, str]]
     pending_text: dict[tuple[str, int, str], str]
@@ -104,7 +103,6 @@ class _RuntimeState:
 
 _state = _RuntimeState(
     last_sent_at={},
-    last_success_at={},
     cooldown_until={},
     closed=set(),
     pending_text={},
@@ -115,19 +113,32 @@ _state = _RuntimeState(
 def clear_draft_preview_state() -> None:
     """Reset in-memory draft state for tests/restarts."""
     _state.last_sent_at.clear()
-    _state.last_success_at.clear()
     _state.cooldown_until.clear()
     _state.closed.clear()
     _state.pending_text.clear()
     _state.dropped_since_audit.clear()
 
 
-def _surface_key(*, chat_id: int, thread_id: int | None, surface_key: str | None) -> str:
-    if surface_key:
-        return surface_key
+def _canonical_surface_key(*, chat_id: int, thread_id: int | None) -> str:
     if thread_id is not None:
         return f"t:{chat_id}:{thread_id}"
     return f"c:{chat_id}"
+
+
+def _surface_key(*, chat_id: int, thread_id: int | None, surface_key: str | None) -> str:
+    return _canonical_surface_key(chat_id=chat_id, thread_id=thread_id)
+
+
+def _surface_key_mismatch(
+    *,
+    chat_id: int,
+    thread_id: int | None,
+    surface_key: str | None,
+) -> bool:
+    provided = (surface_key or "").strip()
+    if not provided:
+        return False
+    return provided != _canonical_surface_key(chat_id=chat_id, thread_id=thread_id)
 
 
 def draft_id_for(
@@ -199,10 +210,6 @@ def _mode() -> str:
 
 def _allowed_surfaces() -> set[str]:
     return set(getattr(config, "telegram_draft_preview_allowed_surfaces", set()) or set())
-
-
-def _clear_allowed_surfaces() -> set[str]:
-    return set(getattr(config, "telegram_draft_preview_clear_allowed_surfaces", set()) or set())
 
 
 def _min_interval_seconds() -> float:
@@ -362,7 +369,7 @@ async def maybe_send_draft_preview(
             thread_id=thread_id,
             surface=surface,
             window_id=window_id,
-            text=text,
+            text="[redacted unsafe draft payload]",
             turn_generation=turn_generation,
             lane=lane,
             draft_id=draft_id,
@@ -371,6 +378,26 @@ async def maybe_send_draft_preview(
             source_semantic_kind=source_semantic_kind,
         )
         return DraftPreviewResult("unsafe", surface, draft_id, "unsafe_to_show")
+
+    if _surface_key_mismatch(chat_id=chat_id, thread_id=thread_id, surface_key=surface_key):
+        _audit(
+            status="surface_not_allowed",
+            user_id=user_id,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            surface=surface,
+            window_id=window_id,
+            text=text,
+            turn_generation=turn_generation,
+            lane=lane,
+            draft_id=draft_id,
+            reason="surface_key_mismatch",
+            source_content_type=source_content_type,
+            source_semantic_kind=source_semantic_kind,
+        )
+        return DraftPreviewResult(
+            "surface_not_allowed", surface, draft_id, "surface_key_mismatch"
+        )
 
     key = (surface, turn_generation, lane)
     if key in _state.closed:
@@ -545,7 +572,6 @@ async def maybe_send_draft_preview(
         )
 
     _state.last_sent_at[key] = now
-    _state.last_success_at[surface] = now
     _state.pending_text.pop(key, None)
     _state.dropped_since_audit.pop((surface, "debounced"), None)
     _audit(
@@ -643,9 +669,20 @@ async def maybe_clear_verified_draft_preview(
     turn_generation: int,
     lane: str,
 ) -> DraftPreviewResult:
-    """Best-effort verified clear; disabled unless live-smoke marked safe."""
+    """Close the local draft lane without sending an unsafe empty draft.
+
+    Telegram empty-text draft semantics are quarantined until a production smoke
+    proves they clear rather than create placeholder artifacts.  Closure is
+    therefore local/audit-only and relies on Telegram's transient draft expiry.
+    """
+    del bot
     surface = _surface_key(chat_id=chat_id, thread_id=thread_id, surface_key=surface_key)
-    cap = _surface_capability(surface)
+    draft_id = draft_id_for(
+        chat_id=chat_id,
+        thread_id=thread_id,
+        turn_generation=turn_generation,
+        lane=lane,
+    )
     stop_draft_preview_state(
         chat_id=chat_id,
         thread_id=thread_id,
@@ -653,57 +690,8 @@ async def maybe_clear_verified_draft_preview(
         turn_generation=turn_generation,
         lane=lane,
     )
-    if not (cap.get("clear_safe") is True and surface in _clear_allowed_surfaces()):
-        _audit(
-            status="closed",
-            user_id=user_id,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            surface=surface,
-            window_id=window_id,
-            text="",
-            turn_generation=turn_generation,
-            lane=lane,
-            reason="clear_not_capability_proven",
-        )
-        return DraftPreviewResult("closed", surface, reason="clear_not_capability_proven")
-
-    draft_id = draft_id_for(
-        chat_id=chat_id,
-        thread_id=thread_id,
-        turn_generation=turn_generation,
-        lane=lane,
-    )
-    method = getattr(bot, "send_message_draft", None)
-    if not callable(method):
-        mark_draft_surface_unsupported(surface, reason="missing_method")
-        return DraftPreviewResult("unsupported", surface, draft_id, "missing_method")
-    kwargs: dict[str, Any] = {}
-    if thread_id is not None:
-        kwargs["message_thread_id"] = thread_id
-    try:
-        await method(chat_id=chat_id, draft_id=draft_id, text="", **kwargs)
-    except Exception as exc:  # noqa: BLE001 - verified clear is best-effort only
-        _audit(
-            status="failed",
-            user_id=user_id,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            surface=surface,
-            window_id=window_id,
-            text="",
-            turn_generation=turn_generation,
-            lane=lane,
-            draft_id=draft_id,
-            reason="verified_clear_failed",
-            success=False,
-            error=str(exc),
-            source_content_type="draft_preview_clear",
-            source_semantic_kind=DRAFT_PREVIEW_SEMANTIC_KIND,
-        )
-        return DraftPreviewResult("failed", surface, draft_id, "verified_clear_failed")
     _audit(
-        status="sent",
+        status="closed",
         user_id=user_id,
         chat_id=chat_id,
         thread_id=thread_id,
@@ -713,20 +701,8 @@ async def maybe_clear_verified_draft_preview(
         turn_generation=turn_generation,
         lane=lane,
         draft_id=draft_id,
-        reason="verified_clear_sent",
+        reason="clear_disabled_uses_expiry",
         source_content_type="draft_preview_clear",
         source_semantic_kind=DRAFT_PREVIEW_SEMANTIC_KIND,
     )
-    return DraftPreviewResult("sent", surface, draft_id, "verified_clear_sent", sent=True)
-
-
-def recent_draft_preview_succeeded(
-    *,
-    chat_id: int,
-    thread_id: int | None,
-    surface_key: str | None,
-    within_seconds: float = 3.0,
-) -> bool:
-    surface = _surface_key(chat_id=chat_id, thread_id=thread_id, surface_key=surface_key)
-    last = _state.last_success_at.get(surface)
-    return last is not None and time.monotonic() - last <= within_seconds
+    return DraftPreviewResult("closed", surface, draft_id, "clear_disabled_uses_expiry")

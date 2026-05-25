@@ -209,8 +209,8 @@ control surface at a time.
     normally dropped rather than converted into durable edit storms
   - the draft lane stops/drops on final answer, stale turn generation,
     queue-empty, binding-stale, lane cancellation, or degraded/unsupported
-    capability; clear attempts are allowed only when live smoke proves they do
-    not leave misleading placeholders, otherwise Telegram expiry is relied on
+    capability; empty-text clear attempts are currently quarantined because they
+    can leave misleading placeholders, so Telegram expiry is relied on
 
 - **Interactive question artifact**
   - mutable Telegram projection of a runtime-owned blocking question

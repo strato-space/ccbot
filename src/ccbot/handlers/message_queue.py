@@ -731,6 +731,7 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                 elif task.task_type == "status_update":
                     await _process_status_update_task(bot, user_id, task)
                 elif task.task_type == "status_clear":
+                    _stop_task_draft_preview_state(user_id, task)
                     if task.chat_id is None and task.surface_key is None:
                         await _do_clear_status_message(
                             bot,
@@ -1124,8 +1125,34 @@ def _is_draft_preview_eligible_status_task(task: MessageTask, text: str) -> bool
     return True
 
 
+def _stop_task_draft_preview_state(
+    user_id: int,
+    task: MessageTask,
+    *,
+    lane: str = "technical_status",
+) -> None:
+    """Close pending draft-preview state for a queue-owned lifecycle event."""
+    try:
+        chat_id = _task_chat_id(user_id, task)
+    except Exception:  # pragma: no cover - close-only best effort for legacy tasks
+        return
+    thread_id = task.thread_id if (task.thread_id or 0) != 0 else None
+    turn_generation = task.turn_generation or current_turn_generation(
+        user_id,
+        task.thread_id,
+        chat_id=task.chat_id,
+        surface_key=task.surface_key,
+    )
+    stop_draft_preview_state(
+        chat_id=chat_id,
+        thread_id=thread_id,
+        surface_key=task.surface_key,
+        turn_generation=turn_generation,
+        lane=lane,
+    )
+
 def _draft_preview_suppresses_durable_status(result_status: str) -> bool:
-    return result_status in {"sent", "debounced"}
+    return result_status == "sent"
 
 
 def _normalize_technical_status_text(text: str) -> str:
@@ -1600,6 +1627,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             chat_id=task.chat_id,
             surface_key=task.surface_key,
         )
+        _stop_task_draft_preview_state(user_id, task)
         _clear_warning_tracking_for_topic(
             user_id,
             tid,
@@ -2272,6 +2300,7 @@ async def _process_status_update_task(
             chat_id=task.chat_id,
             surface_key=task.surface_key,
         )
+        _stop_task_draft_preview_state(user_id, task)
         _clear_warning_tracking_for_topic(
             user_id,
             tid,
@@ -2306,6 +2335,7 @@ async def _process_status_update_task(
             surface_key=task.surface_key,
             expected_window_id=wid,
         )
+        _stop_task_draft_preview_state(user_id, task)
         _audit_task_delivery(
             action="suppress",
             user_id=user_id,
@@ -2349,6 +2379,7 @@ async def _process_status_update_task(
 
     if not status_text:
         # No status text means clear status
+        _stop_task_draft_preview_state(user_id, task)
         await _do_clear_status_message(
             bot,
             user_id,

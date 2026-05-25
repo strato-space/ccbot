@@ -294,7 +294,7 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "not a turn artifact" in delivery
     assert "not replay proof" in delivery
     assert "support is not inferred" in delivery
-    assert "clear attempts are allowed only when live smoke proves" in delivery
+    assert "empty-text clear attempts are currently quarantined" in delivery
     assert "omx.question/v1" in delivery
     assert "`--state-path`" in delivery
     assert "same-window OMX question" in delivery

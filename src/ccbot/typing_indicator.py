@@ -10,7 +10,6 @@ from telegram.constants import ChatAction
 from telegram.error import RetryAfter
 
 from .delivery_audit import log_telegram_delivery
-from .draft_streaming import recent_draft_preview_succeeded
 
 logger = logging.getLogger(__name__)
 
@@ -49,25 +48,6 @@ async def send_runtime_update_typing_once(
         chat_id=chat_id,
         thread_id=thread_id,
     )
-    if recent_draft_preview_succeeded(
-        chat_id=chat_id,
-        thread_id=thread_id,
-        surface_key=surface_key,
-        within_seconds=RUNTIME_UPDATE_TYPING_THROTTLE_SECONDS,
-    ):
-        log_telegram_delivery(
-            action="runtime_update_typing_suppress",
-            user_id=user_id,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            window_id=window_id,
-            task_type="telegram_transport",
-            content_type="chat_action",
-            semantic_kind="typing_suppressed",
-            text="typing",
-            reason="recent_draft_preview",
-        )
-        return False
     last_sent = _runtime_update_typing_last_sent.get(key)
     if (
         last_sent is not None

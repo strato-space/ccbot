@@ -250,7 +250,7 @@ async def test_draft_preview_stops_on_final_answer_success_without_assuming_empt
 
 
 @pytest.mark.asyncio
-async def test_verified_clear_attempt_is_best_effort_and_not_delivery_proof(monkeypatch):
+async def test_verified_clear_attempt_is_quarantined_until_live_smoke(monkeypatch):
     monkeypatch.setattr(config, "telegram_draft_preview_mode", "on", raising=False)
     monkeypatch.setattr(
         config,
@@ -272,10 +272,12 @@ async def test_verified_clear_attempt_is_best_effort_and_not_delivery_proof(monk
         lane="technical_status",
     )
 
-    assert result.status == "sent"
-    assert bot.send_message_draft.await_args.kwargs["text"] == ""
+    assert result.status == "closed"
+    assert result.reason == "clear_disabled_uses_expiry"
+    bot.send_message_draft.assert_not_awaited()
     rows = _rows(config.telegram_delivery_audit_file)
     assert rows[-1]["semantic_kind"] == "telegram_draft_preview"
+    assert rows[-1]["reason"] == "clear_disabled_uses_expiry"
     assert rows[-1]["media"]["source_content_type"] == "draft_preview_clear"
 
 
@@ -419,3 +421,157 @@ async def test_status_draft_on_mode_can_suppress_durable_edit(monkeypatch):
 
     mq.maybe_send_draft_preview.assert_awaited_once()
     bot.edit_message_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_draft_preview_redacts_unsafe_text_in_audit(monkeypatch):
+    monkeypatch.setattr(config, "telegram_draft_preview_mode", "on", raising=False)
+    bot = SimpleNamespace(send_message_draft=AsyncMock(return_value=True))
+    secret_text = "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz123456"
+
+    result = await maybe_send_draft_preview(
+        bot,
+        user_id=1,
+        chat_id=123,
+        thread_id=None,
+        surface_key=None,
+        window_id="@1",
+        text=secret_text,
+        turn_generation=1,
+        lane="technical_status",
+    )
+
+    assert result.status == "unsafe"
+    bot.send_message_draft.assert_not_awaited()
+    rows = _rows(config.telegram_delivery_audit_file)
+    assert rows[-1]["reason"] == "unsafe_to_show"
+    assert "OPENAI_API_KEY" not in rows[-1]["preview"]
+    assert "sk-" not in rows[-1]["preview"]
+    assert rows[-1]["preview"] == "[redacted unsafe draft payload]"
+
+
+@pytest.mark.asyncio
+async def test_surface_key_mismatch_blocks_before_send(monkeypatch):
+    monkeypatch.setattr(config, "telegram_draft_preview_mode", "probe", raising=False)
+    monkeypatch.setattr(
+        config,
+        "telegram_draft_preview_allowed_surfaces",
+        {"t:-100:42"},
+        raising=False,
+    )
+    bot = SimpleNamespace(send_message_draft=AsyncMock(return_value=True))
+
+    result = await maybe_send_draft_preview(
+        bot,
+        user_id=1,
+        chat_id=-100,
+        thread_id=99,
+        surface_key="t:-100:42",
+        window_id="@1",
+        text="Working",
+        turn_generation=1,
+        lane="technical_status",
+    )
+
+    assert result.status == "surface_not_allowed"
+    assert result.reason == "surface_key_mismatch"
+    assert result.surface_key == "t:-100:99"
+    bot.send_message_draft.assert_not_awaited()
+    rows = _rows(config.telegram_delivery_audit_file)
+    assert rows[-1]["media"]["surface_key"] == "t:-100:99"
+    assert rows[-1]["reason"] == "surface_key_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_status_draft_debounced_keeps_durable_edit(monkeypatch):
+    monkeypatch.setattr(config, "telegram_draft_preview_mode", "on", raising=False)
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@1",
+        text="Working on response",
+        turn_generation=1,
+        chat_id=123,
+    )
+    bot = SimpleNamespace(edit_message_text=AsyncMock(), send_message_draft=AsyncMock())
+
+    mq._status_msg_info[(1, "chat:123")] = (55, "@1", "Old status")
+    monkeypatch.setattr(mq, "_is_task_binding_active", AsyncMock(return_value=True))
+    monkeypatch.setattr(mq, "current_turn_generation", lambda *a, **k: 1)
+    monkeypatch.setattr(
+        mq,
+        "maybe_send_draft_preview",
+        AsyncMock(return_value=SimpleNamespace(status="debounced")),
+    )
+
+    await mq._process_status_update_task(bot, 1, task)
+
+    mq.maybe_send_draft_preview.assert_awaited_once()
+    bot.edit_message_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stale_turn_status_stops_pending_draft_state(monkeypatch):
+    monkeypatch.setattr(config, "telegram_draft_preview_mode", "on", raising=False)
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@1",
+        text="Working on response",
+        turn_generation=1,
+        chat_id=123,
+    )
+    bot = SimpleNamespace(delete_message=AsyncMock())
+    draft_streaming._state.pending_text[("c:123", 1, "technical_status")] = "pending"
+
+    mq._status_msg_info[(1, "chat:123")] = (55, "@1", "Old status")
+    monkeypatch.setattr(mq, "_is_task_binding_active", AsyncMock(return_value=True))
+    monkeypatch.setattr(mq, "current_turn_generation", lambda *a, **k: 2)
+
+    await mq._process_status_update_task(bot, 1, task)
+
+    assert ("c:123", 1, "technical_status") in draft_streaming._state.closed
+    assert ("c:123", 1, "technical_status") not in draft_streaming._state.pending_text
+
+
+def test_status_clear_stops_pending_draft_state(monkeypatch):
+    task = MessageTask(
+        task_type="status_clear",
+        window_id="@1",
+        turn_generation=1,
+        chat_id=123,
+    )
+    draft_streaming._state.pending_text[("c:123", 1, "technical_status")] = "pending"
+    monkeypatch.setattr(mq, "current_turn_generation", lambda *a, **k: 1)
+
+    mq._stop_task_draft_preview_state(1, task)
+
+    assert ("c:123", 1, "technical_status") in draft_streaming._state.closed
+    assert ("c:123", 1, "technical_status") not in draft_streaming._state.pending_text
+
+
+@pytest.mark.asyncio
+async def test_corrupt_capabilities_json_fails_closed(monkeypatch):
+    monkeypatch.setattr(config, "telegram_draft_preview_mode", "on", raising=False)
+    monkeypatch.setattr(
+        config,
+        "telegram_draft_preview_allowed_surfaces",
+        {"t:-100:42"},
+        raising=False,
+    )
+    (config.config_dir / "draft_preview_capabilities.json").write_text("{not-json", encoding="utf-8")
+    bot = SimpleNamespace(send_message_draft=AsyncMock(return_value=True))
+
+    result = await maybe_send_draft_preview(
+        bot,
+        user_id=1,
+        chat_id=-100,
+        thread_id=42,
+        surface_key="t:-100:42",
+        window_id="@1",
+        text="Working",
+        turn_generation=1,
+        lane="technical_status",
+    )
+
+    assert result.status == "surface_not_allowed"
+    assert result.reason == "surface_not_capability_proven"
+    bot.send_message_draft.assert_not_awaited()
