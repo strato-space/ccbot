@@ -669,6 +669,128 @@ def _should_hard_ignore_update(update: Update) -> bool:
     return _is_foreign_owned_surface(control_surface_classifier(update))
 
 
+def _message_command_token(update: Update) -> str:
+    if not update.message:
+        return ""
+    text = (update.message.text or update.message.caption or "").strip()
+    if not text.startswith("/"):
+        return ""
+    return text.split(maxsplit=1)[0]
+
+
+def _is_exact_bind_command_for_this_bot(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    token = _message_command_token(update)
+    if not token:
+        return False
+    text = (update.message.text or update.message.caption or "").strip()
+    if text != token:
+        return False
+    command = token[1:]
+    if "@" in command:
+        command_name, bot_name = command.split("@", 1)
+        username = str(getattr(context.bot, "username", "") or "")
+        if not username or bot_name.casefold() != username.casefold():
+            return False
+    else:
+        command_name = command
+    return command_name.casefold() == "bind"
+
+
+def _window_has_active_descriptor_readonly(window_id: str) -> bool:
+    window_states = getattr(session_manager, "window_states", None)
+    if not isinstance(window_states, dict):
+        return False
+    state = window_states.get(window_id)
+    if state is None:
+        return False
+    if _is_non_bindable_codex_helper_window(window_id):
+        return False
+    return bool(
+        getattr(state, "cwd", "")
+        or getattr(state, "thread_id", "")
+        or getattr(state, "window_name", "")
+        or getattr(state, "registered_at", 0.0)
+    )
+
+
+def _surface_has_active_binding_readonly(
+    user_id: int,
+    surface: ControlSurface,
+) -> bool:
+    """Return whether a surface has a direct/shared binding without mutation."""
+    if _get_session_window_for_surface(user_id, surface):
+        return True
+    shared = _get_shared_group_binding_record_for_surface(user_id, surface)
+    if shared is None:
+        return False
+    _owner_id, window_id, _binding_surface_key = shared
+    return _window_has_active_descriptor_readonly(window_id)
+
+
+def _is_bind_flow_callback_data(data: str) -> bool:
+    return (
+        data.startswith(CB_DIR_SELECT)
+        or data == CB_DIR_UP
+        or data.startswith(CB_DIR_PAGE)
+        or data == CB_DIR_CONFIRM
+        or data == CB_DIR_CANCEL
+        or data.startswith(CB_THREAD_SELECT)
+        or data == CB_THREAD_NEW
+        or data == CB_THREAD_CANCEL
+        or data.startswith(CB_WIN_BIND)
+        or data == CB_WIN_NEW
+        or data == CB_WIN_CANCEL
+    )
+
+
+def _should_hard_ignore_unbound_group_topic_update(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """Silence unbound shared group named topics except the exact bind entry."""
+    if not update.message:
+        return False
+    surface = control_surface_classifier(update)
+    if surface.kind != "group_topic" or not surface.is_shared_group:
+        return False
+    user = update.effective_user
+    if user and _surface_has_active_binding_readonly(user.id, surface):
+        return False
+    return not _is_exact_bind_command_for_this_bot(update, context)
+
+
+def _should_hard_ignore_unbound_group_topic_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    data: str,
+    bind_flow_version: int,
+    bind_flow_nonce: str,
+) -> bool:
+    query = update.callback_query
+    if query is None:
+        return False
+    surface = control_surface_classifier(update)
+    if surface.kind != "group_topic" or not surface.is_shared_group:
+        return False
+    user = update.effective_user
+    if user and _surface_has_active_binding_readonly(user.id, surface):
+        return False
+    if not user or not _is_bind_flow_callback_data(data):
+        return True
+    pending_surface = _resolve_bind_flow_callback_surface(update, context)
+    if pending_surface is None or not _same_surface(pending_surface, surface):
+        return True
+    return not _validate_surface_bind_flow_callback(
+        user.id,
+        pending_surface,
+        bind_flow_version,
+        bind_flow_nonce,
+    )
+
+
 async def _hard_ignore_foreign_surface_handler(
     update: Update,
     _context: ContextTypes.DEFAULT_TYPE,
@@ -679,6 +801,24 @@ async def _hard_ignore_foreign_surface_handler(
     surface = control_surface_classifier(update)
     logger.info(
         "Hard-ignored Telegram update outside owned surfaces "
+        "(surface=%s chat_id=%s thread_id=%s)",
+        surface.surface_key,
+        surface.chat_id,
+        surface.thread_id,
+    )
+    raise ApplicationHandlerStop
+
+
+async def _hard_ignore_unbound_group_topic_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Stop unbound shared group topic updates before any handler side effects."""
+    if not _should_hard_ignore_unbound_group_topic_update(update, context):
+        return
+    surface = control_surface_classifier(update)
+    logger.info(
+        "Hard-ignored unbound Telegram group-topic update "
         "(surface=%s chat_id=%s thread_id=%s)",
         surface.surface_key,
         surface.chat_id,
@@ -1100,6 +1240,8 @@ def _get_shared_group_binding_record_for_surface(
         for binding_surface_key in candidate_keys:
             window_id = bindings.get(binding_surface_key)
             if not isinstance(window_id, str) or not window_id:
+                continue
+            if not _window_has_active_descriptor_readonly(window_id):
                 continue
             try:
                 binding_owner_id = int(owner_id)
@@ -2766,6 +2908,8 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     surface = control_surface_classifier(update)
+    if _should_hard_ignore_unbound_group_topic_update(update, context):
+        return
     _remember_group_chat_id_for_surface(user.id, update)
     if not surface.supports_bind_flow:
         await safe_reply(update.message, _unsupported_surface_message(surface))
@@ -2949,6 +3093,8 @@ async def esc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     surface = control_surface_classifier(update)
+    if _should_hard_ignore_unbound_group_topic_update(update, context):
+        return
     _remember_group_chat_id_for_surface(user.id, update)
     if not surface.supports_bind_flow:
         await safe_reply(update.message, _unsupported_surface_message(surface))
@@ -3288,6 +3434,8 @@ async def forward_command_handler(
         return
     if _should_hard_ignore_update(update):
         return
+    if _should_hard_ignore_unbound_group_topic_update(update, context):
+        return
 
     thread_id = _get_thread_id(update)
     surface = control_surface_classifier(update)
@@ -3374,6 +3522,8 @@ async def unsupported_content_handler(
     if not user or not is_user_allowed(user.id):
         return
     if _should_hard_ignore_update(update):
+        return
+    if _should_hard_ignore_unbound_group_topic_update(update, _context):
         return
     logger.debug("Unsupported content from user %d", user.id)
     await safe_reply(
@@ -5025,6 +5175,8 @@ async def _handle_text_payload(
         return
 
     surface = control_surface_classifier(update)
+    if _should_hard_ignore_unbound_group_topic_update(update, context):
+        return
     thread_id = surface.message_thread_id
     surface_identity_kwargs = _surface_identity_kwargs(surface)
 
@@ -5586,6 +5738,8 @@ async def _set_current_surface_routing_mode(
         return
     if _should_hard_ignore_update(update):
         return
+    if _should_hard_ignore_unbound_group_topic_update(update, context):
+        return
     surface = control_surface_classifier(update)
     if not surface.supports_bind_flow:
         await safe_reply(update.message, _unsupported_surface_message(surface))
@@ -5616,6 +5770,8 @@ async def switch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not update.message:
         return
     if _should_hard_ignore_update(update):
+        return
+    if _should_hard_ignore_unbound_group_topic_update(update, context):
         return
     surface = control_surface_classifier(update)
     if not surface.supports_bind_flow:
@@ -5656,6 +5812,8 @@ async def switch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def steer_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if _should_hard_ignore_unbound_group_topic_update(update, context):
+        return
     prompt = _routing_command_prompt(update, context)
     if not prompt:
         await _set_current_surface_routing_mode(update, context, ROUTING_MODE_STEER)
@@ -5669,6 +5827,8 @@ async def steer_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if _should_hard_ignore_unbound_group_topic_update(update, context):
+        return
     prompt = _routing_command_prompt(update, context)
     if not prompt:
         await _set_current_surface_routing_mode(update, context, ROUTING_MODE_QUEUE)
@@ -5841,6 +6001,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     raw_data = query.data
     data, bind_flow_version, bind_flow_nonce = split_bind_flow_token(raw_data)
+
+    if _should_hard_ignore_unbound_group_topic_callback(
+        update,
+        context,
+        data,
+        bind_flow_version,
+        bind_flow_nonce,
+    ):
+        return
 
     # Capture group chat_id for supergroup forum topic routing.
     # Required: Telegram Bot API needs group chat_id (not user_id) to send
@@ -7331,6 +7500,10 @@ def create_bot() -> Application:
     application.add_handler(
         TypeHandler(Update, _hard_ignore_foreign_surface_handler, block=True),
         group=-99,
+    )
+    application.add_handler(
+        TypeHandler(Update, _hard_ignore_unbound_group_topic_handler, block=True),
+        group=-98,
     )
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))

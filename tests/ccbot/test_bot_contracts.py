@@ -218,6 +218,247 @@ class TestOwnedSurfaceHardIgnore:
         assert not bot_mod._should_hard_ignore_update(update)
         update.message.chat.send_action.assert_not_awaited()
 
+
+class TestUnboundGroupTopicHardIgnore:
+    def _unbound_session(self):
+        mock_sm = MagicMock()
+        mock_sm.get_window_for_thread.return_value = None
+        mock_sm.surface_bindings = {}
+        mock_sm.resolve_chat_id.return_value = 100
+        return mock_sm
+
+    def _callback_update(self, data: str) -> MagicMock:
+        update = _make_topic_update()
+        update.message = None
+        update.callback_query = MagicMock()
+        update.callback_query.data = data
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.message = MagicMock(
+            message_thread_id=42,
+            chat=update.effective_chat,
+        )
+        return update
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "hello",
+            "/steer hi",
+            "/queue hi",
+            "/switch queue",
+            "/resume persisted-thread",
+            "/help",
+            "/clear",
+            "/compact",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_unbound_group_topic_non_bind_updates_stop_before_handlers(
+        self, text
+    ):
+        update = _make_topic_update(text=text)
+        context = _make_context()
+
+        with patch("ccbot.bot.session_manager", self._unbound_session()):
+            with pytest.raises(ApplicationHandlerStop):
+                await bot_mod._hard_ignore_unbound_group_topic_handler(update, context)
+
+        update.message.chat.send_action.assert_not_awaited()
+
+    @pytest.mark.parametrize("text", ["/bind", "/bind@ccbot"])
+    @pytest.mark.asyncio
+    async def test_exact_bind_entry_passes_unbound_group_topic_guard(self, text):
+        update = _make_topic_update(text=text)
+        context = _make_context(bot_username="ccbot")
+
+        with patch("ccbot.bot.session_manager", self._unbound_session()):
+            await bot_mod._hard_ignore_unbound_group_topic_handler(update, context)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "/bind@OtherBot",
+            "/bindish",
+            "/bind_extra",
+            "/bind abc",
+            "/bind@ccbot abc",
+            "/bind\nabc",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_near_bind_commands_are_stopped_in_unbound_group_topic(
+        self, text
+    ):
+        update = _make_topic_update(text=text)
+        context = _make_context(bot_username="ccbot")
+
+        with patch("ccbot.bot.session_manager", self._unbound_session()):
+            with pytest.raises(ApplicationHandlerStop):
+                await bot_mod._hard_ignore_unbound_group_topic_handler(update, context)
+
+    @pytest.mark.asyncio
+    async def test_bound_group_topic_non_bind_command_passes_guard(self):
+        update = _make_topic_update(text="/steer hi")
+        context = _make_context()
+        mock_sm = self._unbound_session()
+        mock_sm.get_window_for_thread.return_value = "@7"
+
+        with patch("ccbot.bot.session_manager", mock_sm):
+            await bot_mod._hard_ignore_unbound_group_topic_handler(update, context)
+
+    @pytest.mark.asyncio
+    async def test_stale_shared_binding_record_is_still_unbound_for_guard(self):
+        update = _make_topic_update(user_id=2, text="/queue hi")
+        context = _make_context()
+        mock_sm = self._unbound_session()
+        mock_sm.surface_bindings = {1: {"t:100:42": "@dead"}}
+        mock_sm.window_states = {}
+
+        with patch("ccbot.bot.session_manager", mock_sm):
+            with pytest.raises(ApplicationHandlerStop):
+                await bot_mod._hard_ignore_unbound_group_topic_handler(update, context)
+
+    @pytest.mark.parametrize(
+        "update",
+        [
+            _make_main_chat_update(text="/steer hi"),
+            _make_topic_update(chat_type="private", text="/steer hi"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_guard_does_not_apply_to_main_chat_or_private_topic(self, update):
+        context = _make_context()
+
+        with patch("ccbot.bot.session_manager", self._unbound_session()):
+            await bot_mod._hard_ignore_unbound_group_topic_handler(update, context)
+
+    @pytest.mark.asyncio
+    async def test_direct_steer_queue_switch_resume_forward_are_silent_unbound(self):
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager", self._unbound_session()) as mock_sm,
+            patch(
+                "ccbot.bot._handle_text_payload", new_callable=AsyncMock
+            ) as mock_handle,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            await bot_mod.steer_command(_make_topic_update(text="/steer hi"), context)
+            await bot_mod.queue_command(_make_topic_update(text="/queue hi"), context)
+            await bot_mod.switch_command(_make_topic_update(text="/switch"), context)
+            await bot_mod.resume_command(_make_topic_update(text="/resume abc"), context)
+            await bot_mod.forward_command_handler(
+                _make_topic_update(text="/clear"), context
+            )
+
+        mock_handle.assert_not_awaited()
+        mock_sm.set_group_chat_id.assert_not_called()
+        mock_sm.set_surface_routing_mode.assert_not_called()
+        mock_sm.toggle_surface_routing_mode.assert_not_called()
+        mock_sm.send_to_window.assert_not_called()
+        mock_reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stale_shared_binding_text_stays_silent_before_side_effects(self):
+        update = _make_topic_update(user_id=2, text="hello")
+        context = _make_context()
+        mock_sm = self._unbound_session()
+        mock_sm.surface_bindings = {1: {"t:100:42": "@dead"}}
+        mock_sm.window_states = {}
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager", mock_sm),
+            patch("ccbot.bot.log_telegram_delivery") as mock_audit,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            await bot_mod.text_handler(update, context)
+
+        mock_sm.set_group_chat_id.assert_not_called()
+        mock_audit.assert_not_called()
+        update.message.chat.send_action.assert_not_awaited()
+        mock_reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unbound_non_bind_callback_is_silent_before_side_effects(self):
+        update = self._callback_update(f"{bot_mod.CB_ASK_UP}@7")
+        context = _make_context()
+        mock_sm = self._unbound_session()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager", mock_sm),
+            patch(
+                "ccbot.bot.handle_omx_question_callback",
+                new_callable=AsyncMock,
+            ) as mock_omx,
+        ):
+            await bot_mod.callback_handler(update, context)
+
+        mock_sm.set_group_chat_id.assert_not_called()
+        mock_omx.assert_not_awaited()
+        update.callback_query.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_valid_bind_flow_callback_is_allowed_in_unbound_group_topic(self):
+        update = self._callback_update(
+            append_bind_flow_token(
+                bot_mod.CB_WIN_CANCEL,
+                version=1,
+                nonce="nonce123",
+            )
+        )
+        context = _make_context()
+        context.user_data = {
+            bot_mod.PENDING_SURFACE_STATE_KEY: {
+                "kind": "group_topic",
+                "chat_id": 100,
+                "thread_id": 42,
+                "legacy_scope_id": 42,
+                "surface_key": "t:100:42",
+                "label": "topic",
+                "is_shared_group": True,
+                "supports_bind_flow": True,
+            }
+        }
+        mock_sm = self._unbound_session()
+        mock_sm.validate_topic_bind_flow_callback.return_value = True
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager", mock_sm),
+            patch("ccbot.bot.safe_edit", new_callable=AsyncMock),
+            patch("ccbot.bot.handle_omx_question_callback", new_callable=AsyncMock, return_value=False),
+        ):
+            await bot_mod.callback_handler(update, context)
+
+        mock_sm.set_group_chat_id.assert_called_once_with(1, 42, 100)
+        update.callback_query.answer.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unbound_group_topic_text_preserves_stale_user_data(self):
+        update = _make_topic_update(text="hello")
+        context = _make_context()
+        context.user_data[bot_mod.STATE_KEY] = bot_mod.STATE_SELECTING_WINDOW
+        context.user_data["_pending_thread_text"] = "draft"
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot.session_manager", self._unbound_session()) as mock_sm,
+            patch("ccbot.bot.log_telegram_delivery") as mock_audit,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            await bot_mod.text_handler(update, context)
+
+        assert context.user_data[bot_mod.STATE_KEY] == bot_mod.STATE_SELECTING_WINDOW
+        assert context.user_data["_pending_thread_text"] == "draft"
+        mock_sm.set_group_chat_id.assert_not_called()
+        mock_audit.assert_not_called()
+        update.message.chat.send_action.assert_not_awaited()
+        mock_reply.assert_not_awaited()
+
+
 def test_simple_text_fast_path_classifier_preserves_attachment_and_shell_paths():
     assert bot_mod._is_simple_text_fast_path_candidate("останови сервисы vilco")
     assert not bot_mod._is_simple_text_fast_path_candidate("line one\nline two")
@@ -343,7 +584,7 @@ class TestRoutingModeCommands:
         assert "queue" in mock_reply.await_args.args[1]
 
     @pytest.mark.asyncio
-    async def test_forced_queue_command_unbound_shared_group_replies_unbound(self):
+    async def test_forced_queue_command_unbound_shared_group_is_silent(self):
         update = _make_topic_update(chat_type="supergroup", text="/queue hello")
         context = _make_context()
         context.args = ["hello"]
@@ -359,8 +600,9 @@ class TestRoutingModeCommands:
 
             await bot_mod.queue_command(update, context)
 
-        mock_reply.assert_awaited_once()
-        assert "/bind" in mock_reply.await_args.args[1]
+        mock_sm.set_group_chat_id.assert_not_called()
+        mock_sm.send_to_window.assert_not_called()
+        mock_reply.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_steer_command_with_prompt_uses_one_shot_steer_mode(self):
@@ -368,9 +610,13 @@ class TestRoutingModeCommands:
         context = _make_context()
         context.args = ["hi"]
 
-        with patch(
-            "ccbot.bot._handle_text_payload", new_callable=AsyncMock
-        ) as mock_handle:
+        with (
+            patch(
+                "ccbot.bot._should_hard_ignore_unbound_group_topic_update",
+                return_value=False,
+            ),
+            patch("ccbot.bot._handle_text_payload", new_callable=AsyncMock) as mock_handle,
+        ):
             await bot_mod.steer_command(update, context)
 
         mock_handle.assert_awaited_once_with(
@@ -386,9 +632,13 @@ class TestRoutingModeCommands:
         context = _make_context()
         context.args = ["hi", "there"]
 
-        with patch(
-            "ccbot.bot._handle_text_payload", new_callable=AsyncMock
-        ) as mock_handle:
+        with (
+            patch(
+                "ccbot.bot._should_hard_ignore_unbound_group_topic_update",
+                return_value=False,
+            ),
+            patch("ccbot.bot._handle_text_payload", new_callable=AsyncMock) as mock_handle,
+        ):
             await bot_mod.queue_command(update, context)
 
         mock_handle.assert_awaited_once_with(
@@ -1515,7 +1765,7 @@ class TestCommandSurface:
         assert "/bind" in mock_reply.await_args.args[1]
 
     @pytest.mark.asyncio
-    async def test_text_handler_does_not_restart_bind_flow_while_picker_is_active(self):
+    async def test_text_handler_unbound_group_bind_flow_stays_silent(self):
         update = _make_topic_update()
         update.message.text = "hello"
         context = _make_context()
@@ -1536,9 +1786,7 @@ class TestCommandSurface:
             await bot_mod.text_handler(update, context)
 
         mock_tmux.list_windows.assert_not_called()
-        mock_reply.assert_awaited_once_with(
-            update.message, bot_mod.BIND_FLOW_ACTIVE_MESSAGE
-        )
+        mock_reply.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_text_handler_external_binding_returns_read_only_warning(self):
@@ -1650,6 +1898,7 @@ class TestCommandSurface:
         ):
             mock_sm.get_window_for_thread.return_value = None
             mock_sm.surface_bindings = {1: {"t:42": "@7"}}
+            mock_sm.window_states = {"@7": SimpleNamespace(cwd="/tmp/project")}
             mock_sm.resolve_chat_id.return_value = 100
             mock_tmux.find_window_by_id = AsyncMock(
                 return_value=MagicMock(window_id="@7")
@@ -1727,6 +1976,7 @@ class TestCommandSurface:
         ):
             mock_sm.get_window_for_thread.return_value = None
             mock_sm.surface_bindings = {1: {"t:42": "@7"}}
+            mock_sm.window_states = {"@7": SimpleNamespace(cwd="/tmp/project")}
             mock_sm.resolve_chat_id.return_value = 100
             mock_sm.get_display_name.return_value = "project"
 
@@ -1767,6 +2017,10 @@ class TestCommandSurface:
             patch.object(bot_mod.config, "claude_command", "codex"),
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot.clear_topic_state", new_callable=AsyncMock),
+            patch(
+                "ccbot.bot._should_hard_ignore_unbound_group_topic_update",
+                return_value=False,
+            ),
             patch(
                 "ccbot.bot._register_bound_window", new_callable=AsyncMock
             ) as mock_register,
@@ -1997,6 +2251,7 @@ class TestCommandSurface:
         ):
             mock_sm.get_window_for_thread.return_value = None
             mock_sm.surface_bindings = {1: {"t:42": "@7"}}
+            mock_sm.window_states = {"@7": SimpleNamespace(cwd="/tmp/project")}
             mock_sm.resolve_chat_id.return_value = 100
             mock_sm.get_display_name.return_value = "project"
 
@@ -2045,6 +2300,10 @@ class TestCommandSurface:
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot._get_thread_id", return_value=42),
             patch("ccbot.bot.clear_topic_state", new_callable=AsyncMock),
+            patch(
+                "ccbot.bot._should_hard_ignore_unbound_group_topic_update",
+                return_value=False,
+            ),
             patch(
                 "ccbot.bot._register_bound_window", new_callable=AsyncMock
             ) as mock_register,
@@ -2123,6 +2382,10 @@ class TestCommandSurface:
             patch.object(bot_mod.config, "claude_command", "fast-agent"),
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot._get_thread_id", return_value=42),
+            patch(
+                "ccbot.bot._should_hard_ignore_unbound_group_topic_update",
+                return_value=False,
+            ),
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
@@ -2143,6 +2406,10 @@ class TestCommandSurface:
             patch.object(bot_mod.config, "claude_command", "claude"),
             patch("ccbot.bot.is_user_allowed", return_value=True),
             patch("ccbot.bot._get_thread_id", return_value=42),
+            patch(
+                "ccbot.bot._should_hard_ignore_unbound_group_topic_update",
+                return_value=False,
+            ),
             patch("ccbot.bot.session_manager") as mock_sm,
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
@@ -2750,6 +3017,7 @@ class TestTopicCleanup:
             patch("ccbot.bot.clear_topic_state", new_callable=AsyncMock) as mock_clear,
         ):
             mock_sm.surface_bindings = {1: {"t:100:42": "@7"}}
+            mock_sm.window_states = {"@7": SimpleNamespace(cwd="/tmp/project")}
             mock_sm.get_window_for_surface.return_value = "@7"
             mock_sm.get_display_name.return_value = "project"
             window = MagicMock()
@@ -3352,6 +3620,7 @@ class TestMediaForwarding:
         ):
             mock_sm.get_window_for_thread.side_effect = [None, "@7"]
             mock_sm.surface_bindings = {1: {"t:42": "@7"}}
+            mock_sm.window_states = {"@7": SimpleNamespace(cwd="/tmp/project")}
             mock_sm.resolve_chat_id.return_value = 100
             mock_sm.get_topic_bind_flow_credentials.return_value = (1, "nonce")
             mock_tmux.find_window_by_id = AsyncMock(
@@ -4699,6 +4968,10 @@ class TestMediaForwarding:
 
         with (
             patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch(
+                "ccbot.bot._should_hard_ignore_unbound_group_topic_update",
+                return_value=False,
+            ),
             patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
         ):
             await bot_mod.unsupported_content_handler(update, context)

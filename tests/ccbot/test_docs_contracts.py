@@ -39,7 +39,7 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "manual_bind_required" in readme
     assert "control surface" in readme
     assert "no-topics group main chat" in readme
-    assert "ordinary text and `@bot` mentions stay silent until a command is used" in readme
+    assert "media, and non-`/bind` commands stay silent until exact `/bind`" in readme
     assert "Command entry paths also capture the Telegram group `chat_id`" in readme
     assert "standalone `chat_id` as a\nTelegram routing coordinate" in readme
     assert "CODEX_HOME=/data/iqdoctor/.codex" in readme
@@ -68,7 +68,7 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "Non-target tmux sessions/windows/panes must not be\nrestarted or killed" in readme
     assert "HUD\nshould remain a small bottom pane" in readme
     assert "must never be chosen\nas the restored Telegram binding target" in readme
-    assert "Command handlers persist group routing metadata" in readme
+    assert "Command handlers that are valid for their current surface persist group routing metadata" in readme
     assert "shared group topics" in readme
     assert "queue" in readme
     assert "steer" in readme
@@ -256,7 +256,7 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "Control-surface identity" in runtime
     assert "(user_id, surface_key)" in runtime
     assert "Telegram group routing coordinates" in runtime
-    assert "command-only entry paths such as `/bind` and `/resume`" in runtime
+    assert "`/bind@<this-bot>` with no extra payload is the only allowed command-only entry path" in runtime
     assert "Control-surface policy" in runtime
     assert "surface-scoped maps are canonical" in runtime
     assert "Topic And Surface Control Ontology" in topic_control
@@ -272,7 +272,7 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "t:<chat_id>:<thread_id>" in topic_control
     assert "title metadata is\n    surface-scoped" in topic_control
     assert "cached surface-title metadata must be\n  updated to that final name" in topic_control
-    assert "command-only entry must not depend on prior text, mention, or callback input" in topic_control
+    assert "allowed command-only entry must not depend on prior text, mention, or" in topic_control
     assert "photo/document/sticker/audio/video ingress is not an addressed entry" in topic_control
     assert "HUD/helper pane" in topic_control
     assert "not itself a\n    control surface, delivery source, runtime conversation identity" in topic_control
@@ -574,11 +574,11 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
     assert "(user_id, surface_key)" in doc
     assert "ControlSurfaceIdentity" in doc
     assert "no-topics group chat" in doc or "no-topics group" in doc
-    assert "bot-addressed `@mention` messages in an unbound topic must stay silent" in doc
+    assert "ordinary messages, bot-addressed `@mention` messages, media, and non-`/bind` commands" in doc
     assert "unbound photo, document, sticker, audio, and video messages must also" in doc
     assert "do not download media" in doc
     assert "Identical numeric `thread_id` values in different groups are different control surfaces" in doc
-    assert "explicit `/bind` and explicit `/resume` remain valid explicit entry paths" in doc
+    assert "only exact `/bind` or `/bind@ThisBot` is a valid explicit entry path" in doc
     assert "group routing metadata" in doc
     assert "the group `chat_id`" in doc
     assert "**Pre-final terminal surface barrier**" in doc

@@ -40,9 +40,11 @@ This note defines the core runtime nouns for `ccbot`.
   - physical Telegram `chat_id` coordinates needed for outbound delivery and
     topic title sync in group control surfaces
   - these are stored separately from the product control-surface identity
-  - command-only entry paths such as `/bind` and `/resume` must capture these
-    coordinates themselves instead of relying on a previous mention or text
-    update
+  - allowed command-only entry paths capture these coordinates themselves
+    instead of relying on a previous mention or text update
+  - in an unbound shared group named-topic surface, `/bind` or
+    `/bind@<this-bot>` with no extra payload is the only allowed command-only entry path; `/bind <args>` and `/resume`
+    is not a bootstrap command there
 
 - **Topic transport identifier**
   - Telegram transport token such as `message_thread_id`

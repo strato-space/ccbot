@@ -616,8 +616,8 @@ as the restored Telegram binding target.
 1. Create a new topic in the Telegram group, or use the main chat in a group where topics are disabled
 2. Enter via a valid opener for that surface
    - private chats with topics enabled: a first plain text message may still open bind flow
-   - shared group topics: ordinary text and `@bot` mentions stay silent until a command is used; use `/bind` or `/resume`
-   - no-topics group main chat: ordinary text and `@bot` mentions stay silent until a command is used; use `/bind` or `/resume`
+   - shared group topics: ordinary text, `@bot` mentions, media, and non-`/bind` commands stay silent until exact `/bind` or `/bind@ThisBot` opens bind flow; Telegram input routes only after activation proof creates an active binding. Bind-flow picker callbacks are the only unbound callback continuation allowed after that exact `/bind` entry
+   - no-topics group main chat: ordinary text and `@bot` mentions stay silent until a command is used; use `/bind` or `/resume` where the runtime lane supports it
 3. A directory browser appears from a cwd-neutral root such as
    `CCBOT_BIND_DEFAULT_ROOT`, `CCBOT_WORKSPACE_ROOT`, or `/home/tools` — select
    the project directory. Controller restore state and the controller service
@@ -643,17 +643,17 @@ routing warm-up in shared group surfaces.
   silent: the bot does not download the media, reply with bind guidance, or
   mutate bind state.
 - In **no-topics group main chat mode**, ordinary text and bot-addressed `@mention` stay silent.
-- Explicit `/bind` and `/resume` remain the valid explicit re-entry paths in shared group surfaces.
-- Command handlers persist group routing metadata before binding, resuming,
+- In an **unbound group/supergroup named topic**, only exact `/bind` or `/bind@ThisBot` is a valid explicit entry path; `/bind <thread-name|id>`, `/resume`, `/steer`, `/queue`, `/switch`, help, raw text, mentions, media, and non-bind callbacks remain silent until a binding exists. Fresh bind-flow picker callbacks may continue the bind flow opened by exact `/bind`.
+- Command handlers that are valid for their current surface persist group routing metadata before binding, resuming,
   unbinding, renaming, history lookup, screenshot capture, interrupt, or usage
   actions that address the shared surface.
 - After an explicit `/unbind` or a picker cancel, the topic enters `manual_bind_required`.
 - In `manual_bind_required`, plain messages do not restart binding implicitly.
-- Use `/bind` to choose a live window or workspace again.
+- Use `/bind` to choose a live window or workspace again. A topic in `bind_flow` is still unbound for runtime delivery until activation proof exists.
 - In Codex lane, `/bind <thread-name|id>` can attach external persisted replay
-  without tmux. This path is read-only.
-- Use `/resume <thread-name|id>` only when the configured runtime lane supports deterministic explicit resume from an unbound topic.
-  - Codex: supported by exact persisted thread id or exact thread name.
+  without tmux only outside unbound shared group named-topic bootstrap. This path is read-only.
+- Use `/resume <thread-name|id>` only after an active binding exists, or in a non-shared/non-named-topic lane where the configured runtime adapter explicitly supports deterministic resume. It is not a bootstrap entry for an unbound shared group named topic.
+  - Codex: supported by exact persisted thread id or exact thread name only in lanes that allow explicit resume.
   - Claude Code: degraded from an unbound topic because transcript ids do not prove the workspace path.
   - fast-agent: degraded from an unbound topic because session ids are scoped by the workspace `.fast-agent` root.
 
@@ -697,8 +697,8 @@ effective cap fail before download with a clear “too large for Telegram bot
 download” warning rather than a generic artifact failure.
 
 If photo, document, sticker, audio, or video media arrives before the topic has an
-active writable runtime binding, it is ignored silently. Use `/bind` or
-`/resume` first; media ingress does not open or repair bind flow by itself.
+active writable runtime binding, it is ignored silently. Use `/bind` first in
+an unbound shared group named topic; media ingress does not open or repair bind flow by itself.
 
 If the topic is bound to an external persisted thread without live tmux, input
 injection fails closed with an explicit read-only warning and a reattach hint.

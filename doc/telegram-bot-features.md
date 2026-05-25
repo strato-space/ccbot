@@ -189,9 +189,9 @@ These commands are registered in the Telegram bot menu as the stable topic-contr
 
 | Command | Bot Menu Description | Function |
 |---------|---------------------|----------|
-| `/bind` | Start or resume the topic bind flow | Explicitly choose a live window/workspace, or use `/bind <thread-name|id>` in Codex lane to attach external read-only replay |
+| `/bind` | Start or resume the topic bind flow | Exact `/bind` opens bind flow in unbound shared group named topics; `/bind <thread-name|id>` external replay attach is not valid in that bootstrap lane |
 | `/unbind` | Detach this topic from its live window | Leaves the tmux window running but moves the topic to `manual_bind_required` |
-| `/resume <token>` | Bind this topic to a persisted runtime thread | Works only when the configured launch lane supports deterministic explicit resume from an unbound topic |
+| `/resume <token>` | Bind this topic to a persisted runtime thread | Not valid for unbound shared group named topics; works only after active binding or in non-shared/non-named-topic lanes that explicitly support resume |
 | `/rename <name>` | Rename the current tmux window and topic | Sync the live tmux label, forum topic title, and supported runtime title metadata |
 | `/esc` | Interrupt the active runtime task | Sends Escape to the current tmux pane |
 
@@ -300,19 +300,19 @@ The ontology files remain the master source for these nouns:
 Named-topic behavior:
 
 - In **private chats with topics enabled**, a fresh topic may still start with implicit bind from the first plain message.
-- In **group/supergroup topics**, ordinary messages and bot-addressed `@mention` messages in an unbound topic must stay silent; they do not open bind flow.
-- In **group/supergroup topics**, unbound photo, document, sticker, audio, and video messages must also
+- In **group/supergroup named topics**, ordinary messages, bot-addressed `@mention` messages, media, and non-`/bind` commands in an unbound topic must stay silent; they do not open bind flow.
+- In **group/supergroup named topics**, unbound photo, document, sticker, audio, and video messages must also
   stay silent; they do not download media, reply with bind guidance, call
   runtime input, or mutate bind-flow state.
-- In **group/supergroup topics**, explicit `/bind` and explicit `/resume` remain valid explicit entry paths.
+- In **unbound group/supergroup named topics**, only exact `/bind` or `/bind@ThisBot` is a valid explicit entry path. `/bind <thread-name|id>`, explicit `/resume`, and non-bind callbacks are not bootstrap entries there; they may be valid only after binding or in a non-shared/non-named-topic lane that explicitly supports them. Fresh bind-flow picker callbacks are allowed only as continuations of the exact `/bind` entry.
 - Explicit command entry paths store Telegram group routing metadata, including
   the group `chat_id`, so later topic title sync and delivery use the group
   transport coordinates rather than a user chat id.
 - After explicit `/unbind` or picker cancel, the topic moves to `manual_bind_required`.
 - In `manual_bind_required`, plain messages do not re-trigger bind implicitly.
 - In Codex lane, `/bind <thread-name|id>` may attach an external persisted
-  thread without tmux. This binding is replay-delivery first and marked
-  read-only.
+  thread without tmux only outside unbound shared group named-topic bootstrap.
+  This binding is replay-delivery first and marked read-only.
 - In external read-only bind mode, Telegram input must fail closed with a
   read-only warning and a hint to reattach writable live control via `/bind`
   or `/resume`.
@@ -346,9 +346,10 @@ Named-topic behavior:
 
 ### Runtime-specific `/resume` notes
 
-- Codex: explicit `/resume <thread-name|id>` is supported by exact persisted identity resolution and launches `codex resume <resolved-thread-id>` in tmux.
-- Claude Code: explicit `/resume` from an unbound topic is degraded because the persisted transcript id does not prove a reversible workspace path.
-- fast-agent: explicit `/resume` from an unbound topic is degraded because persisted sessions are scoped by the workspace `.fast-agent` root.
+- Codex: explicit `/resume <thread-name|id>` is supported by exact persisted identity resolution in lanes that allow explicit resume and launches `codex resume <resolved-thread-id>` in tmux.
+- In unbound shared group named topics, `/resume` is hard-ignored before runtime-specific handling.
+- Claude Code: explicit `/resume` from an unbound topic is degraded in lanes that allow the command because the persisted transcript id does not prove a reversible workspace path.
+- fast-agent: explicit `/resume` from an unbound topic is degraded in lanes that allow the command because persisted sessions are scoped by the workspace `.fast-agent` root.
 
 ---
 

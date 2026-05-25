@@ -131,9 +131,12 @@ If this note conflicts with any explanatory note in `doc/`, this note wins.
 
 - **Addressed entry**
   - explicit user action that may open or continue bind flow on a surface
-  - current examples:
-    - `/bind`
-    - `/resume <thread-name|id>` where the runtime lane allows it
+  - for an unbound shared group named-topic surface, the only addressed entry
+    is exact `/bind` or `/bind@<this-bot>` with no extra payload
+  - `/resume <thread-name|id>` is a runtime reattach command only after a
+    surface has an active binding, or in non-shared/non-named-topic lanes whose
+    runtime adapter explicitly supports it; it is not a bootstrap entry for an
+    unbound shared group named-topic surface
   - bot-addressed `@mention` is not an addressed entry for shared group
     surfaces
   - photo/document/sticker/audio/video ingress is not an addressed entry either; if the
@@ -198,16 +201,22 @@ No-topics main-chat variant:
 - named private topics may allow implicit bind when policy permits it
 - shared group topics do not treat ordinary non-addressed text as a bind-flow
   opener
-- shared group topics require an explicit command entry path before bind flow
-  may start
+- unbound shared group named-topic surfaces allow only exact `/bind` or
+  `/bind@<this-bot>` with no extra payload before bind flow may start
+- a transient `bind_flow` state is still unbound for runtime delivery: it is not
+  an active binding, input injection plane, or replay-delivery source
+- `/bind <args>`, non-bind commands, bot-addressed mentions, ordinary text,
+  media, and non-bind callbacks in unbound shared group named-topic surfaces
+  are hard-ignored before typing,
+  replies, downloads, runtime-input audit, state mutation, or tmux input
 - shared group topics do not treat bot-addressed `@mention` as a bind-flow
   opener
 - when `CCBOT_OWNED_SURFACES` or `CCBOT_IGNORED_SURFACES` classifies a shared
   group surface as foreign to this bot instance, every update type is
   hard-ignored before typing, replies, downloads, runtime-input audit, or tmux
   input
-- command-only entry paths in shared group surfaces must persist Telegram group
-  routing coordinates before they mutate binding state
+- command-only entry paths that are allowed for their surface species must
+  persist Telegram group routing coordinates before they mutate binding state
 - for named topics this means `(user_id, thread_id) -> chat_id`; for no-topics
   main-chat mode this means `(user_id, 0) -> chat_id`
 - no-topics main-chat mode is its own control-surface species; it must not be
@@ -221,8 +230,10 @@ No-topics main-chat variant:
   binding for the same chat/topic surface instead of creating per-user windows
 - shared named-topic binding lookup must reject bindings from a different
   Telegram group even when the numeric topic/thread id is equal
-- command-only entry must not depend on prior text, mention, or callback input
-  to populate `group_chat_ids`
+- allowed command-only entry must not depend on prior text, mention, or
+  callback input to populate `group_chat_ids`; the only unbound callback
+  exception is a fresh bind-flow picker callback continuing an exact `/bind`
+  entry with valid bind-flow credentials
 - outbound topic delivery and topic title synchronization must resolve through
   stored Telegram group `chat_id` coordinates, not through the Telegram user id
 - a fresh bind may use a stored surface title as the tmux display name, but must

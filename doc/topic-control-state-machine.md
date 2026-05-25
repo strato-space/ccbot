@@ -148,12 +148,19 @@ Compatibility topic mirrors still exist for topic-shaped callers:
     shared group surface as foreign to this bot instance, every update type is
     hard-ignored before typing, replies, downloads, runtime-input audit, or tmux
     input
-- Explicit `/bind`
+- Explicit `/bind` or `/bind@<this-bot>`
   - first captures Telegram group routing metadata for this surface
   - may enter `bind_flow`
-- Explicit `/resume <thread>`
-  - first captures Telegram group routing metadata for this surface
-  - remains an allowed explicit entry path where the runtime lane supports it
+- Any other update in an unbound shared group named topic, including
+  `/bind <args>`, `/resume <thread>`, `/steer`, `/queue`, `/switch`, bot-addressed mentions,
+  ordinary text, media, and non-bind callbacks
+  - stays silent
+  - does not emit typing, replies, downloads, audit rows, state mutations, or
+    tmux/runtime input
+  - may become valid only after the surface has an active binding or in a
+    non-shared/non-named-topic lane that explicitly supports it
+- Fresh bind-flow picker callbacks are allowed only as continuations of the exact
+  `/bind` or `/bind@<this-bot>` entry and must validate bind-flow credentials
 
 ### No-topics main-chat control surface
 
@@ -189,7 +196,8 @@ Compatibility topic mirrors still exist for topic-shaped callers:
 ## Invariants
 
 - `manual_bind_required` must never silently revert to implicit binding.
-- `bind_flow` is transient control state, not a live delivery source.
+- `bind_flow` is transient control state, not a live delivery source; for
+  runtime delivery it is still unbound.
 - `bound` is the only state that may carry a live binding record.
 - `surface_policy != binding_state` remains a hard distinction.
 - In shared group topics, ordinary non-addressed user text is not itself a
