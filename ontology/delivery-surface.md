@@ -410,6 +410,9 @@ tool results rather than being forced into command execution.
   may replace older same-surface/window/turn/lane updates before Telegram sees
   them. Durable content/final/warning/ingress artifacts remain ordered facts,
   not replaceable state.
+- Backlog metrics are payload-free observations, not delivery artifacts:
+  Telegram delivery backlog is queue/in-flight/flood state, while replay backlog
+  is unread/read-but-not-dispatched replay evidence state.
 - pending input preview remains outside this terminal ordering barrier; it
   describes future queued input rather than current-turn output
 - pending input preview closes on queue-owned lifecycle transitions such as

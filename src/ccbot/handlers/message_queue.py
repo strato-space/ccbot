@@ -208,6 +208,7 @@ class MessageTask:
     turn_generation: int = 0
     proof_id: str | None = None
     receipt_status: str = "pending"
+    enqueued_at: float = field(default_factory=time.monotonic)
     retry_after_attempts: int = 0
     delivered_part_count: int = 0
     last_message_id: int | None = None
@@ -220,6 +221,8 @@ _message_queues: dict[int, asyncio.Queue[MessageTask]] = {}
 _queue_workers: dict[int, asyncio.Task[None]] = {}
 _queue_locks: dict[int, asyncio.Lock] = {}  # Protect drain/refill operations
 _inflight_task_users: set[int] = set()
+_inflight_tasks: dict[int, MessageTask] = {}
+_mutable_coalesced_counts: dict[int, int] = {}
 
 # Map (tool_use_id, user_id, thread_id_or_0) -> telegram message_id
 # for editing tool_use messages with results
@@ -554,6 +557,52 @@ def is_user_delivery_backlog_active(user_id: int) -> bool:
     return _flood_until.get(user_id, 0) > time.monotonic()
 
 
+def get_telegram_delivery_backlog_metrics(user_id: int | None = None) -> list[dict]:
+    """Return payload-free per-user Telegram delivery backlog metrics."""
+    now = time.monotonic()
+    user_ids = (
+        {user_id}
+        if user_id is not None
+        else set(_message_queues) | set(_inflight_tasks) | set(_flood_until)
+    )
+    snapshots: list[dict] = []
+    for uid in sorted(user_ids):
+        queue = _message_queues.get(uid)
+        items = list(queue._queue) if queue is not None else []  # noqa: SLF001
+        mutable_count = sum(
+            1 for item in items if _mutable_coalesce_lane(item) is not None
+        )
+        durable_count = sum(
+            1
+            for item in items
+            if item.task_type in {"content", "ingress_receipt"}
+        )
+        oldest_enqueued_at = min((item.enqueued_at for item in items), default=None)
+        inflight = _inflight_tasks.get(uid)
+        flood_remaining = max(0.0, _flood_until.get(uid, 0.0) - now)
+        snapshots.append(
+            {
+                "user_id": uid,
+                "queue_depth": len(items),
+                "in_flight": inflight is not None,
+                "in_flight_task_type": inflight.task_type if inflight else None,
+                "in_flight_task_class": (
+                    _retry_after_task_class(inflight) if inflight else None
+                ),
+                "oldest_queued_age_seconds": (
+                    max(0.0, now - oldest_enqueued_at)
+                    if oldest_enqueued_at is not None
+                    else 0.0
+                ),
+                "mutable_count": mutable_count,
+                "durable_count": durable_count,
+                "flood_cooldown_remaining_seconds": flood_remaining,
+                "collapsed_mutable_count": _mutable_coalesced_counts.get(uid, 0),
+            }
+        )
+    return snapshots
+
+
 def _inspect_queue(queue: asyncio.Queue[MessageTask]) -> list[MessageTask]:
     """Non-destructively inspect all items in queue.
 
@@ -803,6 +852,9 @@ async def _enqueue_coalescing_mutable_task(
         queue.put_nowait(task)
 
     if collapsed:
+        _mutable_coalesced_counts[user_id] = (
+            _mutable_coalesced_counts.get(user_id, 0) + collapsed
+        )
         _audit_task_delivery(
             action="coalesce",
             user_id=user_id,
@@ -894,6 +946,7 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
         try:
             task = await queue.get()
             _inflight_task_users.add(user_id)
+            _inflight_tasks[user_id] = task
             try:
                 # Flood control: drop status, wait for content
                 flood_end = _flood_until.get(user_id, 0)
@@ -1059,6 +1112,7 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                 logger.error(f"Error processing message task for user {user_id}: {e}")
             finally:
                 _inflight_task_users.discard(user_id)
+                _inflight_tasks.pop(user_id, None)
                 queue.task_done()
         except asyncio.CancelledError:
             logger.info(f"Message queue worker cancelled for user {user_id}")
@@ -4971,6 +5025,8 @@ async def shutdown_workers() -> None:
     _message_queues.clear()
     _queue_locks.clear()
     _inflight_task_users.clear()
+    _inflight_tasks.clear()
+    _mutable_coalesced_counts.clear()
     _status_msg_info.clear()
     _commentary_msg_info.clear()
     _commentary_extra_msg_ids.clear()

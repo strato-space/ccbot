@@ -40,6 +40,7 @@ from ccbot.handlers.message_queue import (
     enqueue_status_update,
     flush_terminal_artifacts_before_new_turn,
     get_message_queue,
+    get_telegram_delivery_backlog_metrics,
     shutdown_workers,
     _mark_commentary_closed,
     open_new_turn_generation,
@@ -352,6 +353,53 @@ async def test_mutable_updates_coalesce_to_latest_while_queue_is_backed_up(
         ) == 99
     finally:
         unblock.set()
+        await shutdown_workers()
+
+
+@pytest.mark.asyncio
+async def test_telegram_backlog_metrics_distinguish_durable_and_mutable_queue() -> None:
+    bot = AsyncMock()
+    blocker_started = asyncio.Event()
+
+    async def _block_content(*_args, **_kwargs):
+        blocker_started.set()
+        await asyncio.Event().wait()
+
+    try:
+        with patch(
+            "ccbot.handlers.message_queue._process_content_task",
+            new_callable=AsyncMock,
+            side_effect=_block_content,
+        ):
+            await enqueue_content_message(
+                bot,
+                user_id=1,
+                window_id="@7",
+                parts=["blocking durable content"],
+                chat_id=100,
+                thread_id=42,
+            )
+            await asyncio.wait_for(blocker_started.wait(), timeout=1)
+            await enqueue_status_update(
+                bot,
+                user_id=1,
+                window_id="@7",
+                status_text="status waiting",
+                chat_id=100,
+                thread_id=42,
+                turn_generation=1,
+            )
+
+            [metrics] = get_telegram_delivery_backlog_metrics(1)
+
+        assert metrics["queue_depth"] == 1
+        assert metrics["in_flight"] is True
+        assert metrics["in_flight_task_type"] == "content"
+        assert metrics["in_flight_task_class"] == "durable"
+        assert metrics["mutable_count"] == 1
+        assert metrics["durable_count"] == 0
+        assert metrics["oldest_queued_age_seconds"] >= 0
+    finally:
         await shutdown_workers()
 
 

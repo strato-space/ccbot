@@ -74,6 +74,9 @@ class SessionMonitor:
         self._active_rollout_sources: dict[str, RolloutSource] = {}
         # Per-thread Codex rollout synthesis state carried across poll cycles.
         self._codex_rollout_states: dict[str, CodexRolloutState] = {}
+        self._last_parsed_event_counts: dict[str, int] = {}
+        self._last_delivery_queued_counts: dict[str, int] = {}
+        self._callback_inflight_count = 0
         # In-memory mtime cache for quick file change detection (not persisted)
         self._file_mtimes: dict[str, float] = {}  # thread_id -> last_seen_mtime
 
@@ -81,6 +84,50 @@ class SessionMonitor:
         self, callback: Callable[[NormalizedEvent], Awaitable[None]]
     ) -> None:
         self._message_callback = callback
+
+    def get_replay_backlog_metrics(self) -> list[dict]:
+        """Return payload-free replay backlog metrics for tracked sources."""
+        snapshots: list[dict] = []
+        for thread_id, tracked in sorted(self.state.tracked_sessions.items()):
+            path = Path(tracked.file_path)
+            try:
+                file_size = path.stat().st_size
+            except OSError:
+                file_size = 0
+            byte_delta = max(0, file_size - tracked.last_byte_offset)
+            line_delta = 0
+            if byte_delta > 0:
+                try:
+                    with path.open("rb") as handle:
+                        handle.seek(tracked.last_byte_offset)
+                        line_delta = sum(1 for _ in handle)
+                except OSError:
+                    line_delta = 0
+            codex_state = self._codex_rollout_states.get(thread_id)
+            pending_rollout_event_count = (
+                len(codex_state.pending_event_messages) if codex_state else 0
+            )
+            snapshots.append(
+                {
+                    "thread_id": thread_id,
+                    "runtime_kind": tracked.runtime_kind,
+                    "replay_path": str(path),
+                    "file_size": file_size,
+                    "last_read_offset": tracked.last_byte_offset,
+                    "last_accepted_offset": tracked.last_byte_offset,
+                    "byte_delta": byte_delta,
+                    "line_delta": line_delta,
+                    "parsed_but_not_dispatched_count": (
+                        self._last_parsed_event_counts.get(thread_id, 0)
+                    ),
+                    "callback_in_flight_count": self._callback_inflight_count,
+                    "pending_rollout_event_count": pending_rollout_event_count,
+                    "delivery_queued_event_count": (
+                        self._last_delivery_queued_counts.get(thread_id, 0)
+                    ),
+                }
+            )
+        return snapshots
 
     @staticmethod
     def _normalized_event_from_parsed_entry(
@@ -657,6 +704,14 @@ class SessionMonitor:
                     )
                     if event is not None:
                         new_messages.append(event)
+                self._last_parsed_event_counts[rollout_source.thread_id] = len(
+                    parsed_entries
+                )
+                self._last_delivery_queued_counts[rollout_source.thread_id] = sum(
+                    1
+                    for event in new_messages
+                    if event.thread_id == rollout_source.thread_id
+                )
 
                 self.state.update_tracked_source(tracked)
 
@@ -851,9 +906,15 @@ class SessionMonitor:
                     logger.info("[%s] thread=%s: %s", status, msg.thread_id, preview)
                     if self._message_callback:
                         try:
+                            self._callback_inflight_count += 1
                             await self._message_callback(msg)
                         except Exception as e:
                             logger.error(f"Message callback error: {e}")
+                        finally:
+                            self._callback_inflight_count = max(
+                                0,
+                                self._callback_inflight_count - 1,
+                            )
 
             except Exception as e:
                 logger.error(f"Monitor loop error: {e}")

@@ -618,6 +618,24 @@ suppressed and audited as `telegram_backpressure`, while durable content
 delivery remains queue-owned. Suppressed or non-dispatched internal events do
 not emit typing.
 
+## Backlog Metrics
+
+ccbot exposes payload-free backlog snapshots for operators and future health
+surfaces:
+
+- Telegram delivery backlog is queue-owned: per user it reports queue depth,
+  in-flight task type/class, oldest queued age, mutable vs durable queued counts,
+  flood cooldown remaining, and the cumulative mutable-coalesced count.
+- Replay backlog is monitor-owned: per tracked replay source it reports file
+  size, last read/accepted byte offset, byte/line delta, parsed-but-not-dispatched
+  count, callback-in-flight count, pending rollout event count, and
+  delivery-queued event count.
+
+These counters intentionally do not include raw prompt, assistant, command, or
+tool payload text. Telegram queue backlog and Codex replay backlog are distinct:
+replay bytes may be fully read while Telegram delivery remains queued, and
+Telegram may be empty while unread replay evidence remains on disk.
+
 ## Queue And Steer
 
 Message-layer sources are equal:

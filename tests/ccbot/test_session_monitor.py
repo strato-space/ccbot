@@ -58,6 +58,38 @@ class TestReadNewLinesOffsetRecovery:
             state_file=tmp_path / "monitor_state.json",
         )
 
+    def test_replay_backlog_metrics_report_unread_bytes_without_payload(
+        self,
+        monitor,
+        tmp_path,
+    ):
+        jsonl_file = tmp_path / "session.jsonl"
+        first = json.dumps({"type": "assistant", "message": "secret text"}) + "\n"
+        second = json.dumps({"type": "assistant", "message": "later secret"}) + "\n"
+        jsonl_file.write_text(first + second, encoding="utf-8")
+        monitor.state.update_tracked_source(
+            TrackedSession(
+                session_id="thread-1",
+                file_path=str(jsonl_file),
+                last_byte_offset=len(first.encode("utf-8")),
+                runtime_kind="codex",
+            )
+        )
+        monitor._last_parsed_event_counts["thread-1"] = 2
+        monitor._last_delivery_queued_counts["thread-1"] = 1
+        monitor._callback_inflight_count = 1
+
+        [metrics] = monitor.get_replay_backlog_metrics()
+
+        assert metrics["thread_id"] == "thread-1"
+        assert metrics["byte_delta"] == len(second.encode("utf-8"))
+        assert metrics["line_delta"] == 1
+        assert metrics["last_read_offset"] == len(first.encode("utf-8"))
+        assert metrics["parsed_but_not_dispatched_count"] == 2
+        assert metrics["delivery_queued_event_count"] == 1
+        assert metrics["callback_in_flight_count"] == 1
+        assert "secret" not in json.dumps(metrics)
+
     @pytest.mark.asyncio
     async def test_mid_line_offset_recovery(self, monitor, tmp_path, make_jsonl_entry):
         """Recover from corrupted offset pointing mid-line."""
