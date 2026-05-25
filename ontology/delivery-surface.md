@@ -397,6 +397,10 @@ tool results rather than being forced into command execution.
 - if an already-started multipart send becomes stale mid-flight, the remaining
   parts and trailing attachment payloads must abort rather than leaking below
   the new boundary
+- Telegram `RetryAfter`/429 is a transport backpressure event, not a successful
+  semantic delivery. Durable queued content and ingress receipts remain pending
+  until a retry attempt succeeds; mutable or ephemeral artifacts may be retried
+  or intentionally suppressed, but not silently consumed as delivered.
 - pending input preview remains outside this terminal ordering barrier; it
   describes future queued input rather than current-turn output
 - pending input preview closes on queue-owned lifecycle transitions such as

@@ -32,9 +32,11 @@ from ccbot.handlers.message_queue import (
     clear_commentary_lane_state,
     clear_image_preview_message,
     current_turn_generation,
+    enqueue_content_message,
     enqueue_pending_input_update,
     enqueue_ingress_receipt,
     enqueue_plan_update,
+    enqueue_status_update,
     flush_terminal_artifacts_before_new_turn,
     get_message_queue,
     shutdown_workers,
@@ -100,6 +102,144 @@ def test_ingress_receipt_render_can_include_runtime_target_hint() -> None:
     assert "comfy-agent-ops" in text
     assert "/home/tools/mediagen-comfy" in text
     assert text.endswith("ping")
+
+
+@pytest.mark.asyncio
+async def test_queue_worker_retries_content_after_retryafter_without_loss() -> None:
+    bot = AsyncMock()
+    sent = SimpleNamespace(message_id=7001)
+
+    try:
+        with (
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                side_effect=[RetryAfter(1), sent],
+            ) as mock_send,
+            patch(
+                "ccbot.handlers.message_queue._is_task_binding_active",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "ccbot.handlers.message_queue._check_and_send_status",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "ccbot.handlers.message_queue.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            patch("ccbot.handlers.message_queue._audit_task_delivery") as mock_audit,
+        ):
+            await enqueue_content_message(
+                bot,
+                user_id=1,
+                window_id="@7",
+                parts=["final answer"],
+                chat_id=100,
+                thread_id=42,
+            )
+            queue = get_message_queue(1)
+            assert queue is not None
+            await asyncio.wait_for(queue.join(), timeout=1)
+
+        assert mock_send.await_count == 2
+        assert any(
+            call.kwargs.get("action") == "retry_scheduled"
+            for call in mock_audit.call_args_list
+        )
+    finally:
+        await shutdown_workers()
+        _flood_until.pop(1, None)
+
+
+@pytest.mark.asyncio
+async def test_queue_worker_retry_does_not_duplicate_delivered_content_parts() -> None:
+    bot = AsyncMock()
+    first_sent = SimpleNamespace(message_id=7001)
+    second_sent = SimpleNamespace(message_id=7002)
+
+    try:
+        with (
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                side_effect=[first_sent, RetryAfter(1), second_sent],
+            ) as mock_send,
+            patch(
+                "ccbot.handlers.message_queue._is_task_binding_active",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "ccbot.handlers.message_queue._check_and_send_status",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "ccbot.handlers.message_queue.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await enqueue_content_message(
+                bot,
+                user_id=1,
+                window_id="@7",
+                parts=["part one", "part two"],
+                chat_id=100,
+                thread_id=42,
+            )
+            queue = get_message_queue(1)
+            assert queue is not None
+            await asyncio.wait_for(queue.join(), timeout=1)
+
+        assert [call.args[2] for call in mock_send.await_args_list] == [
+            "part one",
+            "part two",
+            "part two",
+        ]
+    finally:
+        await shutdown_workers()
+        _flood_until.pop(1, None)
+
+
+@pytest.mark.asyncio
+async def test_queue_worker_retries_status_after_retryafter_without_consuming_task() -> None:
+    bot = AsyncMock()
+
+    try:
+        with (
+            patch(
+                "ccbot.handlers.message_queue._process_status_update_task",
+                new_callable=AsyncMock,
+                side_effect=[RetryAfter(1), None],
+            ) as mock_status,
+            patch(
+                "ccbot.handlers.message_queue.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            patch("ccbot.handlers.message_queue._audit_task_delivery") as mock_audit,
+        ):
+            await enqueue_status_update(
+                bot,
+                user_id=1,
+                window_id="@7",
+                status_text="⌘ Command\n```sh\npytest\n```",
+                chat_id=100,
+                thread_id=42,
+            )
+            queue = get_message_queue(1)
+            assert queue is not None
+            await asyncio.wait_for(queue.join(), timeout=1)
+
+        assert mock_status.await_count == 2
+        assert any(
+            call.kwargs.get("action") == "retry_scheduled"
+            and "mutable" in (call.kwargs.get("reason") or "")
+            for call in mock_audit.call_args_list
+        )
+    finally:
+        await shutdown_workers()
+        _flood_until.pop(1, None)
 
 
 def test_can_merge_tasks_rejects_different_topics_for_same_window():

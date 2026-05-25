@@ -585,12 +585,19 @@ Late delivery must fail closed.
   status artifact before normal cleanup continues
 - deleted or uneditable Telegram status messages fall back to sending a new
   message or clearing the stale tracking entry
+- Telegram `RetryAfter` is a transport backpressure signal, not proof that the
+  current queue task was delivered. Durable content and ingress-receipt tasks
+  must stay queue-owned and retry after the advised cooldown instead of being
+  consumed by `queue.task_done()`; mutable/ephemeral artifacts may be retried or
+  explicitly suppressed only with retry audit evidence.
 
 This prevents:
 
 - late events posting into explicitly unbound topics
 - progress artifacts surviving after teardown
 - stale tool-result edits targeting an old topic binding
+- local ACK of a Telegram send/edit task that was actually rate-limited before
+  reaching Telegram
 
 ## Runtime Update Typing Indicator
 

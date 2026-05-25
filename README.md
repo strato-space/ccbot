@@ -904,7 +904,7 @@ src/ccbot/
     ├── directory_browser.py # Directory browser inline keyboard UI
     ├── history.py         # Message history pagination
     ├── interactive_ui.py  # Interactive UI handling (AskUser, ExitPlan, Permissions)
-    ├── message_queue.py   # Per-user message queue + worker (merge, rate limit)
+    ├── message_queue.py   # Per-user message queue + worker (merge, rate limit, RetryAfter retry)
     ├── message_sender.py  # safe_reply / safe_edit / safe_send helpers
     ├── response_builder.py # Response message building (format tool_use, thinking, etc.)
     └── status_polling.py  # Terminal status line polling

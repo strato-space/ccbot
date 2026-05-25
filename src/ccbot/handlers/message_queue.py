@@ -95,7 +95,7 @@ def _retry_after_seconds(exc: RetryAfter) -> int:
     retry_after = exc.retry_after
     seconds = (
         retry_after
-        if isinstance(retry_after, int)
+        if isinstance(retry_after, int | float)
         else int(retry_after.total_seconds())
     )
     return max(1, min(seconds, _IMAGE_PREVIEW_DELETE_RETRY_MAX_DELAY_SECONDS))
@@ -208,6 +208,11 @@ class MessageTask:
     turn_generation: int = 0
     proof_id: str | None = None
     receipt_status: str = "pending"
+    retry_after_attempts: int = 0
+    delivered_part_count: int = 0
+    last_message_id: int | None = None
+    images_sent: bool = False
+    documents_sent: bool = False
 
 
 # Per-user message queues and worker tasks
@@ -466,6 +471,7 @@ _flood_until: dict[int, float] = {}
 
 # Max seconds to wait for flood control before dropping tasks
 FLOOD_CONTROL_MAX_WAIT = 10
+MESSAGE_TASK_RETRY_AFTER_MAX_ATTEMPTS = 3
 _TECHNICAL_CHURN_TASK_TYPES = {
     "status_update",
     "status_clear",
@@ -550,6 +556,129 @@ def _inspect_queue(queue: asyncio.Queue[MessageTask]) -> list[MessageTask]:
         except asyncio.QueueEmpty:
             break
     return items
+
+
+def _message_retry_after_seconds(exc: RetryAfter) -> int:
+    """Normalize Telegram RetryAfter to a positive integer delay."""
+    retry_after = exc.retry_after
+    seconds = (
+        retry_after
+        if isinstance(retry_after, int | float)
+        else int(retry_after.total_seconds())
+    )
+    return max(1, seconds)
+
+
+def _retry_after_task_class(task: MessageTask) -> str:
+    """Classify queued tasks for RetryAfter handling/audit."""
+    if task.task_type in {"content", "ingress_receipt"}:
+        return "durable"
+    if task.task_type in {
+        "status_update",
+        "commentary_update",
+        "pending_input_update",
+        "plan_update",
+    }:
+        return "mutable"
+    return "ephemeral"
+
+
+def _safe_task_chat_id(user_id: int, task: MessageTask) -> int:
+    """Best-effort chat id for retry audit rows."""
+    try:
+        return _task_chat_id(user_id, task)
+    except Exception:
+        return task.chat_id or user_id
+
+
+async def _requeue_task_at_front(
+    queue: asyncio.Queue[MessageTask],
+    lock: asyncio.Lock,
+    task: MessageTask,
+) -> None:
+    """Put the current task back at the front without corrupting join counts.
+
+    `asyncio.Queue` has no public put-front operation.  Draining and refilling
+    is safe here because each user has one worker and callers hold the queue
+    lock.  Refilled already-queued items get an immediate compensating
+    `task_done()`, matching the existing merge/reorder accounting pattern.
+    The current task is intentionally not compensated here: the worker's
+    `finally: queue.task_done()` completes the attempt that just failed, while
+    the new put keeps the retry attempt tracked by `queue.join()`.
+    """
+    async with lock:
+        items = _inspect_queue(queue)
+        queue.put_nowait(task)
+        for item in items:
+            queue.put_nowait(item)
+            queue.task_done()
+
+
+async def _handle_retry_after_for_task(
+    *,
+    queue: asyncio.Queue[MessageTask],
+    lock: asyncio.Lock,
+    user_id: int,
+    task: MessageTask,
+    exc: RetryAfter,
+) -> None:
+    """Retry or explicitly suppress a task after Telegram flood control."""
+    retry_secs = _message_retry_after_seconds(exc)
+    task.retry_after_attempts += 1
+    task_class = _retry_after_task_class(task)
+
+    if (
+        task_class != "durable"
+        and task.retry_after_attempts > MESSAGE_TASK_RETRY_AFTER_MAX_ATTEMPTS
+    ):
+        if task.task_type in {"pending_input_update", "pending_input_clear"}:
+            _pending_input_enqueued.pop(_task_state_key(user_id, task), None)
+        _audit_task_delivery(
+            action="retry_suppressed",
+            user_id=user_id,
+            chat_id=_safe_task_chat_id(user_id, task),
+            task=task,
+            text=task.text or "\n\n".join(task.parts),
+            success=False,
+            error=str(exc),
+            reason=(
+                f"retry_after_suppressed:{task_class}:"
+                f"attempts={task.retry_after_attempts}:retry_after={retry_secs}"
+            ),
+        )
+        logger.warning(
+            "Suppressing %s task after repeated RetryAfter: user=%d type=%s attempts=%d",
+            task_class,
+            user_id,
+            task.task_type,
+            task.retry_after_attempts,
+        )
+        return
+
+    _flood_until[user_id] = time.monotonic() + retry_secs
+    _audit_task_delivery(
+        action="retry_scheduled",
+        user_id=user_id,
+        chat_id=_safe_task_chat_id(user_id, task),
+        task=task,
+        text=task.text or "\n\n".join(task.parts),
+        success=False,
+        error=str(exc),
+        reason=(
+            f"retry_after_scheduled:{task_class}:"
+            f"attempt={task.retry_after_attempts}:retry_after={retry_secs}"
+        ),
+    )
+    await _requeue_task_at_front(queue, lock, task)
+    logger.warning(
+        "RetryAfter for user %d: retrying %s task %s after %ds (attempt %d)",
+        user_id,
+        task_class,
+        task.task_type,
+        retry_secs,
+        task.retry_after_attempts,
+    )
+    await asyncio.sleep(min(retry_secs, FLOOD_CONTROL_MAX_WAIT))
 
 
 def _can_merge_tasks(base: MessageTask, candidate: MessageTask) -> bool:
@@ -654,6 +783,7 @@ async def _merge_content_tasks(
             chat_id=first.chat_id,
             surface_key=first.surface_key,
             turn_generation=first.turn_generation,
+            retry_after_attempts=first.retry_after_attempts,
         ),
         merge_count,
     )
@@ -674,12 +804,15 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                 if flood_end > 0:
                     remaining = flood_end - time.monotonic()
                     if remaining > 0:
-                        if task.task_type not in {
-                            "content",
-                            "commentary_update",
-                            "plan_update",
-                            "ingress_receipt",
-                        }:
+                        if (
+                            task.retry_after_attempts == 0
+                            and task.task_type not in {
+                                "content",
+                                "commentary_update",
+                                "plan_update",
+                                "ingress_receipt",
+                            }
+                        ):
                             # Status is ephemeral — safe to drop
                             if task.task_type in {
                                 "pending_input_update",
@@ -690,7 +823,7 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                                     None,
                                 )
                             continue
-                        # Content is actual Claude output — wait then send
+                        # Durable or retry-debt tasks wait for the flood gate.
                         logger.debug(
                             "Flood controlled: waiting %.0fs for content (user %d)",
                             remaining,
@@ -819,26 +952,13 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
                         expected_window_id=task.window_id,
                     )
             except RetryAfter as e:
-                retry_secs = (
-                    e.retry_after
-                    if isinstance(e.retry_after, int)
-                    else int(e.retry_after.total_seconds())
+                await _handle_retry_after_for_task(
+                    queue=queue,
+                    lock=lock,
+                    user_id=user_id,
+                    task=task,
+                    exc=e,
                 )
-                if retry_secs > FLOOD_CONTROL_MAX_WAIT:
-                    _flood_until[user_id] = time.monotonic() + retry_secs
-                    logger.warning(
-                        "Flood control for user %d: retry_after=%ds, "
-                        "pausing queue until ban expires",
-                        user_id,
-                        retry_secs,
-                    )
-                else:
-                    logger.warning(
-                        "Flood control for user %d: waiting %ds",
-                        user_id,
-                        retry_secs,
-                    )
-                    await asyncio.sleep(retry_secs)
             except Exception as e:
                 logger.error(f"Error processing message task for user {user_id}: {e}")
             finally:
@@ -1742,8 +1862,9 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
     )
 
     if is_generated_image_terminal_preview:
-        media_sent = await _send_task_images(bot, chat_id, task)
+        media_sent = task.images_sent or await _send_task_images(bot, chat_id, task)
         if media_sent:
+            task.images_sent = True
             _audit_task_delivery(
                 action="send",
                 user_id=user_id,
@@ -1874,11 +1995,10 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                     # Fall through to send as new message
 
     # 2. Send content messages, converting status message to first content part
-    first_part = True
-    last_msg_id: int | None = None
-    delivered_parts = 0
+    first_part = task.delivered_part_count == 0
+    last_msg_id: int | None = task.last_message_id
     expected_parts = len(task.parts)
-    for part in task.parts:
+    for part in task.parts[task.delivered_part_count :]:
         current_generation = current_turn_generation(
             user_id,
             task.thread_id,
@@ -1938,7 +2058,8 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             )
             if converted_msg_id is not None:
                 last_msg_id = converted_msg_id
-                delivered_parts += 1
+                task.last_message_id = converted_msg_id
+                task.delivered_part_count += 1
                 continue
 
         sent = await send_with_fallback(
@@ -1959,7 +2080,8 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
 
         if sent:
             last_msg_id = sent.message_id
-            delivered_parts += 1
+            task.last_message_id = sent.message_id
+            task.delivered_part_count += 1
 
     # 3. Record tool/command start message ID for later editing
     if (
@@ -2008,18 +2130,28 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             task.semantic_kind,
         )
         return
-    images_sent = await _send_task_images(bot, chat_id, task)
-    await _send_task_documents(bot, chat_id, task)
+    images_sent = task.images_sent or await _send_task_images(bot, chat_id, task)
+    task.images_sent = images_sent
+    if not task.documents_sent:
+        await _send_task_documents(bot, chat_id, task)
+        task.documents_sent = True
 
-    if delivered_parts > 0 and is_pre_final_visible_semantic_kind(task.semantic_kind):
+    if (
+        task.delivered_part_count > 0
+        and is_pre_final_visible_semantic_kind(task.semantic_kind)
+    ):
         _latest_pre_final_visible_kind[state_key] = task.semantic_kind
 
     final_delivery_complete = (
         (expected_parts == 0 and (not task.image_data or images_sent))
-        or delivered_parts == expected_parts
+        or task.delivered_part_count >= expected_parts
     )
 
-    if is_terminal_artifact and last_msg_id is not None and final_delivery_complete:
+    if (
+        is_terminal_artifact
+        and task.last_message_id is not None
+        and final_delivery_complete
+    ):
         # Terminal ordering closes only after a final artifact has actually
         # been delivered in full. Closing earlier can hide commentary/status
         # without surfacing the complete final answer if Telegram send fails

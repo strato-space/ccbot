@@ -17,6 +17,7 @@ from telegram.error import BadRequest, RetryAfter
 from telegram.ext import ApplicationHandlerStop
 
 from ccbot import bot as bot_mod
+from ccbot.handlers import message_queue as message_queue_mod
 from ccbot import typing_indicator as typing_indicator_mod
 from ccbot.input_safety import (
     clear_window_input_safety_snapshot,
@@ -34,6 +35,16 @@ from ccbot.state_schema import (
 )
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+
+@pytest.fixture(autouse=True)
+async def _isolate_message_queue_workers():
+    """Keep per-user queue workers from leaking across bot contract tests."""
+    try:
+        yield
+    finally:
+        await message_queue_mod.shutdown_workers()
+        message_queue_mod._flood_until.clear()
 
 
 def _make_topic_update(

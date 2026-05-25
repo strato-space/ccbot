@@ -157,8 +157,8 @@ Raw slash commands can still be typed manually and are forwarded best-effort, bu
 | **Runtime image preview artifact** | ✅ | Codex `image_generation_end` and `view_image` / `Viewed Image` replay output with paired embedded image bytes is delivered as a latest-only pre-final mutable Telegram photo bubble with sanitized caption; the first preview sends the bubble and later same-turn previews edit that media in place, and multi-image previews use the first image with a truncation audit. It is authorized replay-proven disclosure to the active bound control surface, never a local-path file read, and does not close the assistant turn |
 | **ReplyKeyboardRemove** | ✅ | Used when switching away from reply keyboard |
 | **Codex command forwarding** | ✅ | Raw `/command` input is forwarded to tmux; the documented menu only exposes the supported Codex subset |
-| **Message rate limiting** | ✅ | 1.1s minimum interval per user to avoid flood control |
-| **Per-user message queues** | ✅ | FIFO ordering, content/status task separation, message merging |
+| **Message rate limiting** | ✅ | 1.1s minimum interval per user to avoid flood control; Telegram `RetryAfter` keeps durable queue tasks pending for retry rather than acknowledging them as delivered |
+| **Per-user message queues** | ✅ | FIFO ordering, content/status task separation, message merging, and RetryAfter retry accounting for durable delivery tasks |
 | **Status message deduplication** | ✅ | Skip edit if status text unchanged |
 | **Codex terminal-control panel mirroring** | ✅ | `/goal` panels and `Conversation interrupted` notices visible only in tmux are mirrored to Telegram as scoped mutable operator-status artifacts rather than user echo or assistant-final content |
 
