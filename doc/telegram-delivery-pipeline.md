@@ -63,6 +63,17 @@ The default Telegram surface is `compact`, not `verbose`.
   prompts still render ordinary user echo.
 - `send_chat_action("typing")` is a transient Telegram transport signal, not an
   artifact in compact ordering and not runtime proof
+- optional `sendMessageDraft` previews are also transient Telegram transport
+  signals: they may show latest-only, debounced, draft-eligible high-frequency
+  partial frames, but they are not durable content, not technical status
+  artifacts, not pre-final visible artifacts, not `/history`, not replay proof,
+  and never final-answer proof; final content and semantic milestones still use
+  durable send/edit paths
+- `sendMessageDraft` group/topic use is capability-gated by explicit
+  operator-approved allowlist and live smoke; support is not inferred from a
+  client library exposing `message_thread_id`; draft text must pass compact
+  safe-to-show filters and draft lanes stop/drop on final answer, stale
+  generation, queue-empty, binding-stale, cancellation, or degraded capability
 - placeholder reasoning such as `[reasoning]` is suppressed
 - raw tool payloads, giant command stdout dumps, and full file bodies must be summarized before they reach Telegram
 - repeated identical warnings on one control surface deduplicate into one latest warning

@@ -184,6 +184,34 @@ control surface at a time.
   - `send_chat_action("typing")` is only a transient Telegram transport signal:
     it is not this receipt, not a turn artifact, and not runtime proof
 
+- **Telegram draft preview transport signal**
+  - optional `sendMessageDraft` / `send_message_draft` projection for
+    high-frequency transient partial frames while runtime output is still being
+    generated
+  - transient Telegram transport preview, not a turn artifact, not a
+    pre-final visible artifact, not a technical status artifact, not a
+    `/history` item, not replay proof, and not an assistant-final/status
+    replacement
+  - scoped by Telegram control surface, turn generation, lane, and a stable
+    non-zero draft id; draft success is audit evidence only for transport
+    preview, never proof of durable content/status delivery
+  - final assistant content, warnings, user echo, ingress receipts,
+    interactive questions, generated media results, durable commentary
+    milestones, and replay/backfill proof must remain on durable delivery paths
+  - group/topic use requires an operator-approved allowlist plus live-smoke
+    surface capability evidence; support is not inferred merely from client
+    library method signatures or a `message_thread_id` parameter
+  - draft text must pass the same safe-to-show compact visibility filters as
+    durable visible output; hidden internal payloads, raw control/tool/debug
+    text, reasoning-only placeholders, token-bearing text, local secret paths,
+    and unnormalized raw payloads must not be drafted
+  - draft updates are latest-only, debounced, and budgeted; skipped frames are
+    normally dropped rather than converted into durable edit storms
+  - the draft lane stops/drops on final answer, stale turn generation,
+    queue-empty, binding-stale, lane cancellation, or degraded/unsupported
+    capability; clear attempts are allowed only when live smoke proves they do
+    not leave misleading placeholders, otherwise Telegram expiry is relied on
+
 - **Interactive question artifact**
   - mutable Telegram projection of a runtime-owned blocking question
   - current source:

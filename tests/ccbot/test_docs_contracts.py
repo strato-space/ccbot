@@ -287,6 +287,11 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "OMX workflow status artifact" in delivery
     assert "`omx_workflow_panel`" in delivery
     assert "`omx_workflow_status`" in delivery
+    assert "Telegram draft preview transport signal" in delivery
+    assert "not a turn artifact" in delivery
+    assert "not replay proof" in delivery
+    assert "support is not inferred" in delivery
+    assert "clear attempts are allowed only when live smoke proves" in delivery
     assert "omx.question/v1" in delivery
     assert "`--state-path`" in delivery
     assert "same-window OMX question" in delivery
@@ -483,6 +488,10 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "artifact" in doc
     assert "including Claude-style `local_command`" in doc
     assert "placeholder reasoning such as `[reasoning]` is suppressed" in doc
+    assert "optional `sendMessageDraft` previews are also transient Telegram transport" in doc
+    assert "not durable content" in doc
+    assert "never final-answer proof" in doc
+    assert "support is not inferred from a\n  client library exposing `message_thread_id`" in doc
     assert "raw tool payloads, giant command stdout dumps, and full file bodies must be summarized before they reach Telegram" in doc
     assert "fenced `sh` blocks" in doc
     assert "fenced `json` blocks" in doc
