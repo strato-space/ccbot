@@ -166,9 +166,6 @@ class Config:
         self.telegram_draft_preview_allowed_surfaces = _csv_env_set(
             "CCBOT_TELEGRAM_DRAFT_ALLOWED_SURFACES"
         )
-        self.telegram_draft_preview_clear_allowed_surfaces = _csv_env_set(
-            "CCBOT_TELEGRAM_DRAFT_CLEAR_ALLOWED_SURFACES"
-        )
         self.telegram_draft_preview_min_interval_seconds = _bounded_float_env(
             "CCBOT_TELEGRAM_DRAFT_MIN_INTERVAL_SECONDS",
             1.5,

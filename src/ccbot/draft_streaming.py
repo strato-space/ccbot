@@ -125,10 +125,6 @@ def _canonical_surface_key(*, chat_id: int, thread_id: int | None) -> str:
     return f"c:{chat_id}"
 
 
-def _surface_key(*, chat_id: int, thread_id: int | None, surface_key: str | None) -> str:
-    return _canonical_surface_key(chat_id=chat_id, thread_id=thread_id)
-
-
 def _surface_key_mismatch(
     *,
     chat_id: int,
@@ -179,11 +175,10 @@ def _write_capabilities(data: dict[str, dict[str, Any]]) -> None:
         logger.debug("Failed to write draft preview capabilities: %s", exc)
 
 
-def mark_draft_surface_supported(surface_key: str, *, clear_safe: bool = False) -> None:
+def mark_draft_surface_supported(surface_key: str) -> None:
     data = _load_capabilities()
     data[surface_key] = {
         "status": "supported",
-        "clear_safe": bool(clear_safe),
         "updated_at": time.time(),
     }
     _write_capabilities(data)
@@ -351,7 +346,7 @@ async def maybe_send_draft_preview(
     source_semantic_kind: str | None = None,
 ) -> DraftPreviewResult:
     """Best-effort sendMessageDraft preview with hard fallback-to-drop semantics."""
-    surface = _surface_key(chat_id=chat_id, thread_id=thread_id, surface_key=surface_key)
+    surface = _canonical_surface_key(chat_id=chat_id, thread_id=thread_id)
     mode = _mode()
     draft_id = draft_id_for(
         chat_id=chat_id,
@@ -652,7 +647,7 @@ def stop_draft_preview_state(
     lane: str,
 ) -> None:
     """Close a draft lane locally without assuming Telegram empty-text clear is safe."""
-    surface = _surface_key(chat_id=chat_id, thread_id=thread_id, surface_key=surface_key)
+    surface = _canonical_surface_key(chat_id=chat_id, thread_id=thread_id)
     key = (surface, turn_generation, lane)
     _state.closed.add(key)
     _state.pending_text.pop(key, None)
@@ -676,7 +671,7 @@ async def maybe_clear_verified_draft_preview(
     therefore local/audit-only and relies on Telegram's transient draft expiry.
     """
     del bot
-    surface = _surface_key(chat_id=chat_id, thread_id=thread_id, surface_key=surface_key)
+    surface = _canonical_surface_key(chat_id=chat_id, thread_id=thread_id)
     draft_id = draft_id_for(
         chat_id=chat_id,
         thread_id=thread_id,

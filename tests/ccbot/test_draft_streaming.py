@@ -26,7 +26,6 @@ def draft_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "telegram_delivery_audit_file", tmp_path / "audit.jsonl")
     monkeypatch.setattr(config, "telegram_draft_preview_mode", "off", raising=False)
     monkeypatch.setattr(config, "telegram_draft_preview_allowed_surfaces", set(), raising=False)
-    monkeypatch.setattr(config, "telegram_draft_preview_clear_allowed_surfaces", set(), raising=False)
     monkeypatch.setattr(config, "telegram_draft_preview_min_interval_seconds", 0.5, raising=False)
     monkeypatch.setattr(config, "telegram_draft_preview_retry_cooldown_seconds", 30, raising=False)
     monkeypatch.setattr(config, "telegram_draft_preview_timeout_cooldown_seconds", 10, raising=False)
@@ -252,13 +251,6 @@ async def test_draft_preview_stops_on_final_answer_success_without_assuming_empt
 @pytest.mark.asyncio
 async def test_verified_clear_attempt_is_quarantined_until_live_smoke(monkeypatch):
     monkeypatch.setattr(config, "telegram_draft_preview_mode", "on", raising=False)
-    monkeypatch.setattr(
-        config,
-        "telegram_draft_preview_clear_allowed_surfaces",
-        {"c:123"},
-        raising=False,
-    )
-    mark_draft_surface_supported("c:123", clear_safe=True)
     bot = SimpleNamespace(send_message_draft=AsyncMock(return_value=True))
 
     result = await maybe_clear_verified_draft_preview(
