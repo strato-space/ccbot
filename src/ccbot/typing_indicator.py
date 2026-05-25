@@ -74,6 +74,8 @@ def _audit_typing_suppressed(
     thread_id: int | None,
     window_id: str | None,
     reason: str,
+    error: Exception | None = None,
+    retry_after: float | None = None,
 ) -> None:
     log_telegram_delivery(
         action="runtime_update_typing_suppressed",
@@ -86,6 +88,9 @@ def _audit_typing_suppressed(
         semantic_kind="typing_suppressed",
         text="typing",
         reason=reason,
+        error=error,
+        retry_after=retry_after,
+        backpressure_reason=reason,
     )
 
 
@@ -168,10 +173,12 @@ async def send_runtime_update_typing_once(
             thread_id=thread_id,
             window_id=window_id,
             reason=f"telegram_backpressure:retry_after:{retry_after}",
+            error=exc,
+            retry_after=retry_after,
         )
         logger.debug("Runtime update typing was rate-limited by Telegram", exc_info=True)
         return False
-    except (TimedOut, NetworkError):
+    except (TimedOut, NetworkError) as exc:
         record_runtime_update_backpressure(
             chat_id,
             seconds=RUNTIME_UPDATE_TYPING_DEGRADED_COOLDOWN_SECONDS,
@@ -183,6 +190,7 @@ async def send_runtime_update_typing_once(
             thread_id=thread_id,
             window_id=window_id,
             reason="telegram_backpressure:transport_timeout",
+            error=exc,
         )
         logger.debug("Failed to send runtime update typing indicator", exc_info=True)
         return False

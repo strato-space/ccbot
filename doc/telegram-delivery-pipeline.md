@@ -630,6 +630,12 @@ surfaces:
   size, last read/accepted byte offset, byte/line delta, parsed-but-not-dispatched
   count, callback-in-flight count, pending rollout event count, and
   delivery-queued event count.
+- Delivery audit rows for queue-backed sends/edits/suppression/retry decisions
+  include payload-free queue context: task class, queued age in milliseconds,
+  queue depth observed at enqueue and send/audit time, and structured transport
+  error context such as `transport_error_type`, `error_class`, `retry_after`,
+  and `backpressure_reason`. Error text is compact and credential/payload
+  redacted; raw Telegram payloads and bot tokens are never audit evidence.
 
 These counters intentionally do not include raw prompt, assistant, command, or
 tool payload text. Telegram queue backlog and Codex replay backlog are distinct:
@@ -770,5 +776,9 @@ where available, text length/hash, and a compact preview. Operator replay
 repairs use `replay_backfill` rows with replay path, byte offsets, call id, and
 media hash for media, or `replay_backfill_text` rows with replay path, byte
 offsets, turn id, and text hash for assistant-final text. Duplicate prevention
-does not depend on mutable monitor offsets. It deliberately omits full raw
-payloads and secrets.
+does not depend on mutable monitor offsets. Queue-backed rows may add task class,
+queue age/depth, collapsed-mutable count context, and structured transport
+fields (`transport_error_type`, `error_class`, `retry_after`,
+`backpressure_reason`) so RetryAfter/timeout/backpressure incidents are
+diagnosable without reading raw Bot API payloads. It deliberately omits full raw
+payloads and secrets, and redacts credential-shaped fragments from error text.

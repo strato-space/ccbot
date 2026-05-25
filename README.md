@@ -929,3 +929,8 @@ storing full raw tool payloads. For outbound video delivery, audit rows may also
 include sanitized requested video geometry, request method, provided thumbnail
 path, and Telegram-returned video/thumbnail geometry so final-preview gates can
 reject status/message-id/url-only evidence.
+Queue-backed delivery rows may also include payload-free backlog context
+(`task_class`, queue age, enqueue/send queue depth) and structured transport
+context (`transport_error_type`, `error_class`, `retry_after`,
+`backpressure_reason`). Error text is compact and redacted so Bot API tokens,
+credentials, and raw request payloads are not audit evidence.

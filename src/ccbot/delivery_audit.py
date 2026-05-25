@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,63 @@ def _sha(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8", "replace")).hexdigest()[:16]
 
 
+_SENSITIVE_ERROR_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"bot\d+:[A-Za-z0-9_-]+"), "bot[redacted]"),
+    (
+        re.compile(
+            r"(?i)\b(token|access_token|api_key|authorization|password|passwd|secret)="
+            r"([^\s&]+)"
+        ),
+        r"\1=[redacted]",
+    ),
+    (
+        re.compile(r"(?i)\b(raw_?payload|payload|request_body|body)=([^\s]+)"),
+        r"\1=[redacted]",
+    ),
+    (re.compile(r"://([^:\s/@]+):([^@\s/]+)@"), r"://\1:[redacted]@"),
+    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/\-]+=*"), "Bearer [redacted]"),
+)
+
+
+def _sanitize_error_text(error: object) -> str:
+    """Return a compact diagnostic string without credential/payload-shaped data."""
+    text = str(error)
+    for pattern, replacement in _SENSITIVE_ERROR_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _retry_after_value(error: object) -> float | None:
+    retry_after = getattr(error, "retry_after", None)
+    if retry_after is None:
+        return None
+    if isinstance(retry_after, int | float):
+        return float(retry_after)
+    total_seconds = getattr(retry_after, "total_seconds", None)
+    if callable(total_seconds):
+        return float(total_seconds())
+    return None
+
+
+def _transport_error_type(error: object, explicit: str | None = None) -> str | None:
+    if explicit:
+        return explicit
+    if error is None:
+        return None
+    name = error.__class__.__name__.lower()
+    if "retryafter" in name or _retry_after_value(error) is not None:
+        return "retry_after"
+    if "timedout" in name or "timeout" in name:
+        return "timeout"
+    if "network" in name:
+        return "network_error"
+    if "badrequest" in name:
+        return "bad_request"
+    if "telegram" in name:
+        return "telegram_error"
+    return "exception"
+
+
 def log_telegram_delivery(
     *,
     action: str,
@@ -50,7 +108,15 @@ def log_telegram_delivery(
     semantic_kind: str | None = None,
     text: str = "",
     success: bool = True,
-    error: str | None = None,
+    error: str | Exception | None = None,
+    transport_error_type: str | None = None,
+    error_class: str | None = None,
+    retry_after: float | None = None,
+    queue_age_ms: int | None = None,
+    depth_at_enqueue: int | None = None,
+    depth_at_send: int | None = None,
+    task_class: str | None = None,
+    backpressure_reason: str | None = None,
     reason: str | None = None,
     turn_generation: int | None = None,
     tool_use_id: str | None = None,
@@ -90,10 +156,25 @@ def log_telegram_delivery(
             "part_index": part_index,
             "part_count": part_count,
             "render_mode": render_mode,
+            "transport_error_type": _transport_error_type(
+                error,
+                transport_error_type,
+            ),
+            "error_class": error_class
+            if error_class is not None
+            else (error.__class__.__name__ if isinstance(error, Exception) else None),
+            "retry_after": retry_after
+            if retry_after is not None
+            else _retry_after_value(error),
+            "queue_age_ms": queue_age_ms,
+            "depth_at_enqueue": depth_at_enqueue,
+            "depth_at_send": depth_at_send,
+            "task_class": task_class,
+            "backpressure_reason": backpressure_reason,
         }
         row.update({key: value for key, value in optional.items() if value is not None})
         if error:
-            row["error"] = _preview(error, max_chars=180)
+            row["error"] = _preview(_sanitize_error_text(error), max_chars=180)
         if media:
             row["media"] = media
         with path.open("a", encoding="utf-8") as handle:

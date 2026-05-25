@@ -472,6 +472,11 @@ Additional artifact rules:
   - every Telegram send/edit/delete/suppress attempt should be recorded in a local JSONL audit
     with schema version, action, topic, artifact class, turn/tool correlation
     where available, text length/hash, compact preview, reason, and success/error
+  - queue-backed lifecycle rows may add payload-free task class, queue age,
+    enqueue/send queue depth, structured transport error type/class,
+    `retry_after`, and `backpressure_reason`; these fields explain delivery
+    lag/backpressure without treating raw Bot API payloads or credentials as
+    evidence
   - negative lifecycle rows (`suppress`, failed `delete`, failed send/edit) are
     first-class evidence, not debug noise; without them the audit cannot explain
     why a Codex/tmux-visible artifact did not appear in Telegram

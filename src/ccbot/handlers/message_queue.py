@@ -209,6 +209,7 @@ class MessageTask:
     proof_id: str | None = None
     receipt_status: str = "pending"
     enqueued_at: float = field(default_factory=time.monotonic)
+    depth_at_enqueue: int = 0
     retry_after_attempts: int = 0
     delivered_part_count: int = 0
     last_message_id: int | None = None
@@ -411,6 +412,11 @@ def _task_state_key(user_id: int, task: MessageTask) -> TopicStateKey:
         chat_id=task.chat_id,
         surface_key=task.surface_key,
     )
+
+
+def _queue_depth_for_user(user_id: int) -> int | None:
+    queue = _message_queues.get(user_id)
+    return queue.qsize() if queue is not None else None
 
 
 def _task_matches_surface(
@@ -700,7 +706,7 @@ async def _handle_retry_after_for_task(
             task=task,
             text=task.text or "\n\n".join(task.parts),
             success=False,
-            error=str(exc),
+            error=exc,
             reason=(
                 f"retry_after_suppressed:{task_class}:"
                 f"attempts={task.retry_after_attempts}:retry_after={retry_secs}"
@@ -723,7 +729,7 @@ async def _handle_retry_after_for_task(
         task=task,
         text=task.text or "\n\n".join(task.parts),
         success=False,
-        error=str(exc),
+        error=exc,
         reason=(
             f"retry_after_scheduled:{task_class}:"
             f"attempt={task.retry_after_attempts}:retry_after={retry_secs}"
@@ -849,6 +855,7 @@ async def _enqueue_coalescing_mutable_task(
         for item in remaining:
             queue.put_nowait(item)
             queue.task_done()
+        task.depth_at_enqueue = len(remaining)
         queue.put_nowait(task)
 
     if collapsed:
@@ -1203,7 +1210,7 @@ def _audit_task_delivery(
     text: str = "",
     message_id: int | None = None,
     success: bool = True,
-    error: str | None = None,
+    error: str | Exception | None = None,
     thread_id: int | None = None,
     window_id: str | None = None,
     task_type: str | None = None,
@@ -1247,6 +1254,72 @@ def _audit_task_delivery(
         part_index=part_index,
         part_count=part_count,
         render_mode=render_mode,
+        queue_age_ms=(
+            int(max(0.0, time.monotonic() - task.enqueued_at) * 1000)
+            if task
+            else None
+        ),
+        depth_at_enqueue=(task.depth_at_enqueue if task else None),
+        depth_at_send=(_queue_depth_for_user(user_id) if task else None),
+        task_class=(_retry_after_task_class(task) if task else None),
+        backpressure_reason=(
+            reason
+            if reason and ("backpressure" in reason or "retry_after" in reason)
+            else None
+        ),
+    )
+
+
+def _audit_delivery_for_optional_task(
+    *,
+    action: str,
+    user_id: int,
+    chat_id: int,
+    task: MessageTask | None,
+    thread_id: int | None = None,
+    message_id: int | None = None,
+    window_id: str | None = None,
+    task_type: str | None = None,
+    content_type: str | None = None,
+    semantic_kind: str | None = None,
+    text: str = "",
+    success: bool = True,
+    error: str | Exception | None = None,
+    reason: str | None = None,
+) -> None:
+    """Audit a queue-backed delivery with queue context when a task is available."""
+    if task is not None:
+        _audit_task_delivery(
+            action=action,
+            user_id=user_id,
+            chat_id=chat_id,
+            task=task,
+            text=text,
+            message_id=message_id,
+            success=success,
+            error=error,
+            thread_id=thread_id,
+            window_id=window_id,
+            task_type=task_type,
+            content_type=content_type,
+            semantic_kind=semantic_kind,
+            reason=reason,
+        )
+        return
+    log_telegram_delivery(
+        action=action,
+        user_id=user_id,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        message_id=message_id,
+        window_id=window_id,
+        task_type=task_type,
+        content_type=content_type,
+        semantic_kind=semantic_kind,
+        text=text,
+        success=success,
+        error=error,
+        reason=reason,
     )
 
 
@@ -1626,7 +1699,7 @@ async def _send_or_edit_image_preview(
                 text=text,
                 message_id=current_info.message_id,
                 success=False,
-                error=str(edit_error),
+                error=edit_error,
                 reason="image_preview_media_edit_failed",
             )
             try:
@@ -1668,7 +1741,7 @@ async def _send_or_edit_image_preview(
                     text=text,
                     message_id=current_info.message_id,
                     success=False,
-                    error=str(delete_error),
+                    error=delete_error,
                     reason="image_preview_delete_before_replace_failed",
                 )
                 _audit_task_delivery(
@@ -1722,7 +1795,7 @@ async def _send_or_edit_image_preview(
                 text=text,
                 message_id=current_info.message_id,
                 success=False,
-                error=str(delete_error),
+                error=delete_error,
                 reason="image_preview_stale_delete_failed",
             )
             _audit_task_delivery(
@@ -2764,6 +2837,7 @@ async def _process_status_update_task(
                 surface_key=task.surface_key,
                 content_type=_status_audit_content_type(task),
                 semantic_kind=_status_audit_semantic_kind(task),
+                audit_task=task,
             )
         elif status_text == last_text:
             # Same content, skip edit
@@ -2830,6 +2904,7 @@ async def _process_status_update_task(
                         surface_key=task.surface_key,
                         content_type=_status_audit_content_type(task),
                         semantic_kind=_status_audit_semantic_kind(task),
+                        audit_task=task,
                     )
                     return
                 try:
@@ -2873,6 +2948,7 @@ async def _process_status_update_task(
                         surface_key=task.surface_key,
                         content_type=_status_audit_content_type(task),
                         semantic_kind=_status_audit_semantic_kind(task),
+                        audit_task=task,
                     )
     else:
         # No existing status message, send new
@@ -2887,6 +2963,7 @@ async def _process_status_update_task(
             surface_key=task.surface_key,
             content_type=_status_audit_content_type(task),
             semantic_kind=_status_audit_semantic_kind(task),
+            audit_task=task,
         )
 
 
@@ -2902,6 +2979,7 @@ async def _do_send_status_message(
     surface_key: str | None = None,
     content_type: str = "status",
     semantic_kind: str = "technical_status",
+    audit_task: MessageTask | None = None,
 ) -> None:
     """Send a new status message and track it (internal, called from worker)."""
     if _is_poll_only_status_text(text):
@@ -2950,10 +3028,11 @@ async def _do_send_status_message(
         text,
         **_send_kwargs(thread_id),  # type: ignore[arg-type]
     )
-    log_telegram_delivery(
+    _audit_delivery_for_optional_task(
         action="send",
         user_id=user_id,
         chat_id=chat_id,
+        task=audit_task,
         thread_id=thread_id,
         message_id=(sent.message_id if sent else None),
         window_id=window_id,
@@ -3065,14 +3144,12 @@ async def _process_commentary_update_task(
                     parse_mode=PARSE_MODE,
                     link_preview_options=NO_LINK_PREVIEW,
                 )
-                log_telegram_delivery(
+                _audit_task_delivery(
                     action="edit",
                     user_id=user_id,
                     chat_id=chat_id,
-                    thread_id=task.thread_id,
+                    task=task,
                     message_id=msg_id,
-                    window_id=wid,
-                    task_type="commentary_update",
                     content_type="commentary",
                     semantic_kind="commentary",
                     text=commentary_text,
@@ -3106,6 +3183,7 @@ async def _process_commentary_update_task(
         chat_id=_task_chat_id(user_id, task),
         state_chat_id=task.chat_id,
         surface_key=task.surface_key,
+        audit_task=task,
     )
 
 
@@ -3120,6 +3198,7 @@ async def _do_send_commentary_message(
     chat_id: int | None = None,
     state_chat_id: int | None | object = _STATE_CHAT_UNSET,
     surface_key: str | None = None,
+    audit_task: MessageTask | None = None,
 ) -> None:
     """Send a new commentary bubble when in-place reuse is unavailable."""
     ckey = _topic_state_key(
@@ -3152,10 +3231,11 @@ async def _do_send_commentary_message(
             part,
             **_send_kwargs(thread_id),  # type: ignore[arg-type]
         )
-        log_telegram_delivery(
+        _audit_delivery_for_optional_task(
             action="send",
             user_id=user_id,
             chat_id=chat_id,
+            task=audit_task,
             thread_id=thread_id,
             message_id=(sent.message_id if sent else None),
             window_id=window_id,
@@ -3256,14 +3336,12 @@ async def _process_plan_update_task(
                     parse_mode=PARSE_MODE,
                     link_preview_options=NO_LINK_PREVIEW,
                 )
-                log_telegram_delivery(
+                _audit_task_delivery(
                     action="edit",
                     user_id=user_id,
                     chat_id=chat_id,
-                    thread_id=task.thread_id,
+                    task=task,
                     message_id=msg_id,
-                    window_id=wid,
-                    task_type="plan_update",
                     content_type="plan_update",
                     semantic_kind="plan_update",
                     text=plan_text,
@@ -3298,6 +3376,7 @@ async def _process_plan_update_task(
         chat_id=_task_chat_id(user_id, task),
         state_chat_id=task.chat_id,
         surface_key=task.surface_key,
+        audit_task=task,
     )
 
 
@@ -3311,6 +3390,7 @@ async def _do_send_plan_update_message(
     chat_id: int | None = None,
     state_chat_id: int | None | object = _STATE_CHAT_UNSET,
     surface_key: str | None = None,
+    audit_task: MessageTask | None = None,
 ) -> None:
     """Send a new dedicated plan artifact."""
     state_chat_for_key = (
@@ -3338,10 +3418,11 @@ async def _do_send_plan_update_message(
         text,
         **_send_kwargs(thread_id),  # type: ignore[arg-type]
     )
-    log_telegram_delivery(
+    _audit_delivery_for_optional_task(
         action="send",
         user_id=user_id,
         chat_id=chat_id,
+        task=audit_task,
         thread_id=thread_id,
         message_id=(sent.message_id if sent else None),
         window_id=window_id,
@@ -3412,14 +3493,12 @@ async def _process_pending_input_update_task(
                     parse_mode=PARSE_MODE,
                     link_preview_options=NO_LINK_PREVIEW,
                 )
-                log_telegram_delivery(
+                _audit_task_delivery(
                     action="edit",
                     user_id=user_id,
                     chat_id=chat_id,
-                    thread_id=task.thread_id,
+                    task=task,
                     message_id=msg_id,
-                    window_id=wid,
-                    task_type="pending_input_update",
                     content_type="pending_input",
                     semantic_kind="pending_input",
                     text=pending_text,
@@ -3452,6 +3531,7 @@ async def _process_pending_input_update_task(
         chat_id=_task_chat_id(user_id, task),
         state_chat_id=task.chat_id,
         surface_key=task.surface_key,
+        audit_task=task,
     )
 
 
@@ -3679,6 +3759,7 @@ async def _do_send_pending_input_message(
     chat_id: int | None = None,
     state_chat_id: int | None | object = _STATE_CHAT_UNSET,
     surface_key: str | None = None,
+    audit_task: MessageTask | None = None,
 ) -> None:
     """Send a new pending-input preview artifact."""
     pkey = _topic_state_key(
@@ -3703,10 +3784,11 @@ async def _do_send_pending_input_message(
         text,
         **_send_kwargs(thread_id),  # type: ignore[arg-type]
     )
-    log_telegram_delivery(
+    _audit_delivery_for_optional_task(
         action="send",
         user_id=user_id,
         chat_id=chat_id,
+        task=audit_task,
         thread_id=thread_id,
         message_id=(sent.message_id if sent else None),
         window_id=window_id,
@@ -3793,7 +3875,7 @@ async def _do_clear_status_message(
                 content_type="status",
                 semantic_kind="technical_status",
                 success=False,
-                error=str(e),
+                error=e,
                 reason="clear_status_failed",
             )
             logger.debug(f"Failed to delete status message {msg_id}: {e}")
@@ -3878,7 +3960,7 @@ async def _do_clear_plan_update_message(
                 content_type="plan_update",
                 semantic_kind="plan_update",
                 success=False,
-                error=str(e),
+                error=e,
                 reason="clear_plan_update_failed",
             )
             logger.debug(f"Failed to delete plan update message {info[0]}: {e}")
@@ -3992,7 +4074,7 @@ async def _clear_image_preview_message_result(
             content_type="image_preview",
             semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
             success=False,
-            error=str(e),
+            error=e,
             reason=f"{reason}_retry_after",
         )
         logger.debug(
@@ -4038,7 +4120,7 @@ async def _clear_image_preview_message_result(
             content_type="image_preview",
             semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
             success=False,
-            error=str(e),
+            error=e,
             reason=(
                 f"{reason}_already_gone"
                 if known_gone
@@ -4301,6 +4383,7 @@ async def enqueue_content_message(
         document_data=document_data,
         turn_generation=turn_generation,
     )
+    task.depth_at_enqueue = queue.qsize()
     queue.put_nowait(task)
 
 
@@ -4447,6 +4530,8 @@ async def enqueue_ingress_receipt(
         if not placed:
             reordered.append(task)
         for item in reordered:
+            if item is task:
+                task.depth_at_enqueue = queue.qsize()
             queue.put_nowait(item)
             if item is not task:
                 queue.task_done()

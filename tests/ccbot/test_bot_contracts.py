@@ -7,6 +7,7 @@ behavior in shared modules.
 """
 
 import inspect
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -17,6 +18,7 @@ from telegram.error import BadRequest, RetryAfter
 from telegram.ext import ApplicationHandlerStop
 
 from ccbot import bot as bot_mod
+from ccbot import delivery_audit
 from ccbot.handlers import message_queue as message_queue_mod
 from ccbot import typing_indicator as typing_indicator_mod
 from ccbot.input_safety import (
@@ -5972,9 +5974,15 @@ class TestTelegramDelivery:
         bot.send_chat_action.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_runtime_update_typing_backpressure_suppresses_followup(self, monkeypatch):
+    async def test_runtime_update_typing_backpressure_suppresses_followup(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
         bot = AsyncMock()
         bot.send_chat_action.side_effect = RetryAfter(5)
+        audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+        monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
         now = 1000.0
         monkeypatch.setattr(typing_indicator_mod.time, "monotonic", lambda: now)
 
@@ -5994,6 +6002,18 @@ class TestTelegramDelivery:
         assert first is False
         assert second is False
         bot.send_chat_action.assert_awaited_once()
+        rows = [
+            json.loads(line)
+            for line in audit_path.read_text(encoding="utf-8").splitlines()
+        ]
+        retry_row = next(
+            row
+            for row in rows
+            if row["action"] == "runtime_update_typing_suppressed"
+            and row.get("transport_error_type") == "retry_after"
+        )
+        assert retry_row["retry_after"] == 5
+        assert retry_row["backpressure_reason"] == "telegram_backpressure:retry_after:5"
 
     @pytest.mark.asyncio
     async def test_handle_new_message_sends_runtime_update_typing_before_content(self, monkeypatch):

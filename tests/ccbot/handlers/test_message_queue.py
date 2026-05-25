@@ -245,6 +245,139 @@ async def test_queue_worker_retries_status_after_retryafter_without_consuming_ta
 
 
 @pytest.mark.asyncio
+async def test_retryafter_audit_records_transport_and_queue_context(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    bot = AsyncMock()
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    user_id = 81
+
+    try:
+        with (
+            patch(
+                "ccbot.handlers.message_queue._process_status_update_task",
+                new_callable=AsyncMock,
+                side_effect=[RetryAfter(3), None],
+            ),
+            patch(
+                "ccbot.handlers.message_queue.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await enqueue_status_update(
+                bot,
+                user_id=user_id,
+                window_id="@7",
+                status_text="⌘ Command\n```sh\npytest\n```",
+                chat_id=100,
+                thread_id=42,
+            )
+            queue = get_message_queue(user_id)
+            assert queue is not None
+            await asyncio.wait_for(queue.join(), timeout=1)
+
+        rows = [
+            json.loads(line)
+            for line in audit_path.read_text(encoding="utf-8").splitlines()
+        ]
+        retry = next(row for row in rows if row["action"] == "retry_scheduled")
+        assert retry["transport_error_type"] == "retry_after"
+        assert retry["error_class"] == "RetryAfter"
+        assert retry["retry_after"] == 3
+        assert retry["task_class"] == "mutable"
+        assert retry["depth_at_enqueue"] == 0
+        assert retry["depth_at_send"] == 0
+        assert retry["queue_age_ms"] >= 0
+        assert retry["backpressure_reason"].startswith("retry_after_scheduled:mutable")
+    finally:
+        await shutdown_workers()
+        _flood_until.pop(user_id, None)
+
+
+@pytest.mark.asyncio
+async def test_pending_input_coalesce_audit_records_queue_context(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    bot = AsyncMock()
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    user_id = 82
+    blocker_started = asyncio.Event()
+    unblock = asyncio.Event()
+
+    async def _block_content(*_args, **_kwargs):
+        blocker_started.set()
+        await unblock.wait()
+
+    try:
+        with (
+            patch(
+                "ccbot.handlers.message_queue._process_content_task",
+                new_callable=AsyncMock,
+                side_effect=_block_content,
+            ),
+            patch(
+                "ccbot.handlers.message_queue._process_pending_input_update_task",
+                new_callable=AsyncMock,
+            ) as mock_pending,
+        ):
+            await enqueue_content_message(
+                bot,
+                user_id=user_id,
+                window_id="@7",
+                parts=["blocking durable content"],
+                chat_id=100,
+                thread_id=42,
+            )
+            await asyncio.wait_for(blocker_started.wait(), timeout=1)
+
+            await enqueue_pending_input_update(
+                bot,
+                user_id=user_id,
+                window_id="@7",
+                pending_input_text="pending one",
+                chat_id=100,
+                thread_id=42,
+                turn_generation=1,
+            )
+            await enqueue_pending_input_update(
+                bot,
+                user_id=user_id,
+                window_id="@7",
+                pending_input_text="pending two",
+                chat_id=100,
+                thread_id=42,
+                turn_generation=1,
+            )
+            queue = get_message_queue(user_id)
+            assert queue is not None
+            assert queue.qsize() == 1
+
+            unblock.set()
+            await asyncio.wait_for(queue.join(), timeout=1)
+
+        mock_pending.assert_awaited_once()
+        delivered_task = mock_pending.await_args.args[2]
+        assert delivered_task.text == "pending two"
+        rows = [
+            json.loads(line)
+            for line in audit_path.read_text(encoding="utf-8").splitlines()
+        ]
+        coalesce = next(row for row in rows if row["action"] == "coalesce")
+        assert coalesce["reason"].startswith("mutable_queue_coalesced:")
+        assert coalesce["task_class"] == "mutable"
+        assert coalesce["depth_at_enqueue"] == 0
+        assert coalesce["depth_at_send"] == 1
+        assert coalesce["queue_age_ms"] >= 0
+    finally:
+        unblock.set()
+        await shutdown_workers()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("enqueue_kind", "processor_name"),
     [
