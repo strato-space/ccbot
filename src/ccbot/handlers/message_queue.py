@@ -2934,21 +2934,43 @@ async def _process_status_update_task(
                             reason="message_not_modified",
                         )
                         return
+                    if _is_message_known_gone_error(e):
+                        logger.debug(
+                            "Tracked status message %s is gone after plain fallback: %s",
+                            msg_id,
+                            e,
+                        )
+                        _status_msg_info.pop(skey, None)
+                        _clear_persisted_status_msg_info(skey)
+                        await _do_send_status_message(
+                            bot,
+                            user_id,
+                            tid,
+                            wid,
+                            status_text,
+                            chat_id=chat_id,
+                            state_chat_id=task.chat_id,
+                            surface_key=task.surface_key,
+                            content_type=_status_audit_content_type(task),
+                            semantic_kind=_status_audit_semantic_kind(task),
+                            audit_task=task,
+                        )
+                        return
                     logger.debug(f"Failed to edit status message: {e}")
-                    _status_msg_info.pop(skey, None)
-                    _clear_persisted_status_msg_info(skey)
-                    await _do_send_status_message(
-                        bot,
-                        user_id,
-                        tid,
-                        wid,
-                        status_text,
+                    _status_msg_info[skey] = (msg_id, stored_wid, last_text)
+                    _persist_status_msg_info(skey, (msg_id, stored_wid, last_text))
+                    _audit_task_delivery(
+                        action="edit_failed_preserved",
+                        user_id=user_id,
                         chat_id=chat_id,
-                        state_chat_id=task.chat_id,
-                        surface_key=task.surface_key,
+                        task=task,
+                        text=status_text,
+                        message_id=msg_id,
+                        success=False,
+                        error=e,
                         content_type=_status_audit_content_type(task),
                         semantic_kind=_status_audit_semantic_kind(task),
-                        audit_task=task,
+                        reason="status_edit_failed_old_maybe_visible",
                     )
     else:
         # No existing status message, send new

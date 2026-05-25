@@ -3573,6 +3573,258 @@ async def test_status_edit_not_modified_does_not_create_duplicate_bubble(
 
     mq._status_msg_info.clear()
 
+
+@pytest.mark.asyncio
+async def test_status_edit_unknown_failure_preserves_existing_status_without_replacement(
+    monkeypatch, tmp_path
+) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(
+        delivery_audit.config, "telegram_delivery_audit_file", audit_path
+    )
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    key = mq._topic_state_key(1, 42)
+    mq._status_msg_info.clear()
+    mq._status_msg_info[key] = (501, "@7", "old status")
+    mq._persist_status_msg_info(key, (501, "@7", "old status"))
+
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="new status",
+        turn_generation=0,
+    )
+    bot = AsyncMock()
+    bot.edit_message_text.side_effect = [
+        Exception("formatted edit timed out"),
+        Exception("plain edit timed out"),
+    ]
+
+    with (
+        patch(
+            "ccbot.handlers.message_queue._is_task_binding_active",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("ccbot.handlers.message_queue.current_turn_generation", return_value=0),
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.message_queue.send_with_fallback",
+            new_callable=AsyncMock,
+        ) as mock_send,
+    ):
+        mock_sm.resolve_chat_id.return_value = 100
+        await _process_status_update_task(bot, 1, task)
+
+    assert bot.edit_message_text.await_count == 2
+    mock_send.assert_not_awaited()
+    assert mq._status_msg_info[key] == (501, "@7", "old status")
+    persisted = mq._load_status_artifacts()[mq._status_key_to_storage_key(key)]
+    assert persisted["message_id"] == 501
+    assert persisted["window_id"] == "@7"
+    assert persisted["last_text"] == "old status"
+    rows = [
+        json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[-1]["action"] == "edit_failed_preserved"
+    assert rows[-1]["success"] is False
+    assert rows[-1]["reason"] == "status_edit_failed_old_maybe_visible"
+    assert rows[-1]["message_id"] == 501
+    assert rows[-1]["error_class"] == "Exception"
+    assert rows[-1]["transport_error_type"] == "exception"
+
+    mq._status_msg_info.clear()
+    mq._clear_persisted_status_msg_info(key)
+
+
+@pytest.mark.asyncio
+async def test_status_edit_plain_fallback_success_updates_existing_status(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    key = mq._topic_state_key(1, 42)
+    mq._status_msg_info.clear()
+    mq._status_msg_info[key] = (501, "@7", "old status")
+    mq._persist_status_msg_info(key, (501, "@7", "old status"))
+
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="new status",
+        turn_generation=0,
+    )
+    bot = AsyncMock()
+    bot.edit_message_text.side_effect = [Exception("formatted failed"), None]
+
+    with (
+        patch(
+            "ccbot.handlers.message_queue._is_task_binding_active",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("ccbot.handlers.message_queue.current_turn_generation", return_value=0),
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.message_queue.send_with_fallback",
+            new_callable=AsyncMock,
+        ) as mock_send,
+    ):
+        mock_sm.resolve_chat_id.return_value = 100
+        await _process_status_update_task(bot, 1, task)
+
+    assert bot.edit_message_text.await_count == 2
+    mock_send.assert_not_awaited()
+    assert mq._status_msg_info[key] == (501, "@7", "new status")
+    persisted = mq._load_status_artifacts()[mq._status_key_to_storage_key(key)]
+    assert persisted["message_id"] == 501
+    assert persisted["window_id"] == "@7"
+    assert persisted["last_text"] == "new status"
+
+    mq._status_msg_info.clear()
+    mq._clear_persisted_status_msg_info(key)
+
+
+@pytest.mark.asyncio
+async def test_status_edit_plain_fallback_known_gone_replaces_status(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    key = mq._topic_state_key(1, 42)
+    mq._status_msg_info.clear()
+    mq._status_msg_info[key] = (501, "@7", "old status")
+    mq._persist_status_msg_info(key, (501, "@7", "old status"))
+    sent = AsyncMock()
+    sent.message_id = 777
+
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="new status",
+        turn_generation=0,
+    )
+    bot = AsyncMock()
+    bot.edit_message_text.side_effect = [
+        Exception("formatted failed"),
+        BadRequest("Message not found"),
+    ]
+
+    with (
+        patch(
+            "ccbot.handlers.message_queue._is_task_binding_active",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("ccbot.handlers.message_queue.current_turn_generation", return_value=0),
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.message_queue.send_with_fallback",
+            new_callable=AsyncMock,
+            return_value=sent,
+        ) as mock_send,
+    ):
+        mock_sm.resolve_chat_id.return_value = 100
+        await _process_status_update_task(bot, 1, task)
+
+    assert bot.edit_message_text.await_count == 2
+    mock_send.assert_awaited_once()
+    assert mq._status_msg_info[key] == (777, "@7", "new status")
+
+    mq._status_msg_info.clear()
+    mq._clear_persisted_status_msg_info(key)
+
+
+@pytest.mark.asyncio
+async def test_status_edit_retry_after_from_formatted_edit_is_re_raised(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    key = mq._topic_state_key(1, 42)
+    mq._status_msg_info.clear()
+    mq._status_msg_info[key] = (501, "@7", "old status")
+    mq._persist_status_msg_info(key, (501, "@7", "old status"))
+
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="new status",
+        turn_generation=0,
+    )
+    bot = AsyncMock()
+    bot.edit_message_text.side_effect = RetryAfter(1)
+
+    with (
+        patch(
+            "ccbot.handlers.message_queue._is_task_binding_active",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("ccbot.handlers.message_queue.current_turn_generation", return_value=0),
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.message_queue.send_with_fallback",
+            new_callable=AsyncMock,
+        ) as mock_send,
+    ):
+        mock_sm.resolve_chat_id.return_value = 100
+        with pytest.raises(RetryAfter):
+            await _process_status_update_task(bot, 1, task)
+
+    mock_send.assert_not_awaited()
+    assert mq._status_msg_info[key] == (501, "@7", "old status")
+
+    mq._status_msg_info.clear()
+    mq._clear_persisted_status_msg_info(key)
+
+
+@pytest.mark.asyncio
+async def test_status_edit_retry_after_from_plain_fallback_is_re_raised(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    key = mq._topic_state_key(1, 42)
+    mq._status_msg_info.clear()
+    mq._status_msg_info[key] = (501, "@7", "old status")
+    mq._persist_status_msg_info(key, (501, "@7", "old status"))
+
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="new status",
+        turn_generation=0,
+    )
+    bot = AsyncMock()
+    bot.edit_message_text.side_effect = [Exception("formatted failed"), RetryAfter(1)]
+
+    with (
+        patch(
+            "ccbot.handlers.message_queue._is_task_binding_active",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("ccbot.handlers.message_queue.current_turn_generation", return_value=0),
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.message_queue.send_with_fallback",
+            new_callable=AsyncMock,
+        ) as mock_send,
+    ):
+        mock_sm.resolve_chat_id.return_value = 100
+        with pytest.raises(RetryAfter):
+            await _process_status_update_task(bot, 1, task)
+
+    assert bot.edit_message_text.await_count == 2
+    mock_send.assert_not_awaited()
+    assert mq._status_msg_info[key] == (501, "@7", "old status")
+
+    mq._status_msg_info.clear()
+    mq._clear_persisted_status_msg_info(key)
+
+
 @pytest.mark.asyncio
 async def test_status_update_hydrates_persisted_status_message_after_restart(
     monkeypatch, tmp_path
