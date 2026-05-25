@@ -4,6 +4,10 @@ from pathlib import Path
 
 from ccbot.runtime_types import (
     InputAction,
+    OMX_WORKFLOW_PANEL_CONTENT_TYPE,
+    OMX_WORKFLOW_STATUS_SEMANTIC_KIND,
+    TERMINAL_CONTROL_PANEL_CONTENT_TYPE,
+    TERMINAL_CONTROL_SEMANTIC_KIND,
     LiveProcessDescriptor,
     NormalizedEvent,
     RolloutSource,
@@ -99,6 +103,18 @@ class TestNormalizedEvent:
 
         assert event.semantic_kind == "command_execution"
         assert event.delivery_class == "history"
+
+
+    def test_terminal_control_content_type_maps_to_terminal_control(self) -> None:
+        event = NormalizedEvent(content_type=TERMINAL_CONTROL_PANEL_CONTENT_TYPE)
+
+        assert event.semantic_kind == TERMINAL_CONTROL_SEMANTIC_KIND
+
+    def test_omx_workflow_panel_maps_to_distinct_semantic_kind(self) -> None:
+        event = NormalizedEvent(content_type=OMX_WORKFLOW_PANEL_CONTENT_TYPE)
+
+        assert event.semantic_kind == OMX_WORKFLOW_STATUS_SEMANTIC_KIND
+        assert event.semantic_kind != TERMINAL_CONTROL_SEMANTIC_KIND
 
     def test_tool_progress_is_not_included_in_history(self) -> None:
         event = NormalizedEvent(content_type="tool_progress", event_kind="tool_progress")

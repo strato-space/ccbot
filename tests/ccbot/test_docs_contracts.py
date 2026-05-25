@@ -94,6 +94,8 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "mutable technical status surface" in readme
     assert "no pre-final visible artifact" in readme
     assert "late technical status" in readme
+    assert "`omx_workflow_panel` / `omx_workflow_status`" in readme
+    assert "pure-Codex windows behave unchanged" in readme
     assert "lifecycle `turn_started`" in readme
     assert "Generated-image terminal media result" in readme
     assert "terminal Telegram photo bubble with a caption" in readme
@@ -282,6 +284,9 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "Genuine non-command tool results remain" in delivery
     assert "Pending input artifact" in delivery
     assert "Interactive question artifact" in delivery
+    assert "OMX workflow status artifact" in delivery
+    assert "`omx_workflow_panel`" in delivery
+    assert "`omx_workflow_status`" in delivery
     assert "omx.question/v1" in delivery
     assert "`--state-path`" in delivery
     assert "same-window OMX question" in delivery
@@ -432,6 +437,10 @@ def test_runtime_event_contract_doc_names_semantic_and_delivery_layers() -> None
     assert "product surface chooses to" in doc
     assert "collapse them into compact status delivery" in doc
     assert "terminal turn artifact" in doc
+    assert "`omx_workflow_panel`" in doc
+    assert "`omx_workflow_status`" in doc
+    assert "pure-Codex" in doc
+    assert "OMX state behave as before" in doc
     assert "pre-final visible artifact" in doc
     assert "technical status artifact" in doc
     assert "pending input artifact" in doc

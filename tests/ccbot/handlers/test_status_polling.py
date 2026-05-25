@@ -1129,3 +1129,103 @@ async def test_status_polling_projects_conversation_interrupted_as_terminal_cont
     assert args[3].startswith("⚠️ Codex conversation interrupted")
     assert kwargs["content_type"] == "terminal_control_panel"
     assert kwargs["semantic_kind"] == "terminal_control"
+
+
+@pytest.mark.asyncio
+async def test_status_polling_projects_omx_workflow_status_from_state(
+    mock_bot: AsyncMock, tmp_path: Path
+):
+    window_id = "@5"
+    mock_window = MagicMock()
+    mock_window.window_id = window_id
+    mock_window.cwd = str(tmp_path)
+    mock_window.pane_current_command = "node"
+    state_path = tmp_path / ".omx" / "ultragoal" / "goals.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "goals": [
+                    {
+                        "id": "G001-implement-omx-workflow-status-reader",
+                        "title": "Implement OMX workflow status reader and renderer",
+                        "status": "in_progress",
+                    }
+                ]
+            }
+        )
+    )
+
+    with (
+        patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+        patch(
+            "ccbot.handlers.status_polling.enqueue_pending_input_update",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "ccbot.handlers.status_polling.enqueue_status_update",
+            new_callable=AsyncMock,
+        ) as mock_status,
+        patch(
+            "ccbot.handlers.status_polling.current_turn_generation",
+            return_value=12,
+        ),
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
+        mock_tmux.capture_pane = AsyncMock(return_value="ordinary pane text\n› ")
+
+        await update_status_message(mock_bot, user_id=1, window_id=window_id, thread_id=42)
+
+    mock_status.assert_awaited_once()
+    args = mock_status.await_args.args
+    kwargs = mock_status.await_args.kwargs
+    assert args[3].startswith("🧭 OMX ultragoal 1/1 · G001 · running")
+    assert "↳ Implement OMX workflow status reader" in args[3]
+    assert kwargs["content_type"] == "omx_workflow_panel"
+    assert kwargs["semantic_kind"] == "omx_workflow_status"
+    assert kwargs["turn_generation"] == 12
+
+
+@pytest.mark.asyncio
+async def test_status_polling_prefers_terminal_control_over_omx_status(
+    mock_bot: AsyncMock, tmp_path: Path
+):
+    window_id = "@5"
+    mock_window = MagicMock()
+    mock_window.window_id = window_id
+    mock_window.cwd = str(tmp_path)
+    mock_window.pane_current_command = "node"
+    state_path = tmp_path / ".omx" / "ultragoal" / "goals.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(json.dumps({"goals": [{"id": "G001-x", "status": "in_progress"}]}))
+    pane_text = (
+        "Goal\n"
+        "Status: complete\n"
+        "Objective: Complete the durable ultragoal plan.\n"
+        "Time used: 58m\n"
+        "Tokens used: 638K\n\n"
+        "Commands: /goal edit, /goal clear\n"
+        "› \n"
+    )
+
+    with (
+        patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+        patch(
+            "ccbot.handlers.status_polling.enqueue_pending_input_update",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "ccbot.handlers.status_polling.enqueue_status_update",
+            new_callable=AsyncMock,
+        ) as mock_status,
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
+        mock_tmux.capture_pane = AsyncMock(return_value=pane_text)
+
+        await update_status_message(mock_bot, user_id=1, window_id=window_id, thread_id=42)
+
+    mock_status.assert_awaited_once()
+    kwargs = mock_status.await_args.kwargs
+    assert mock_status.await_args.args[3].startswith("🎯 Codex goal")
+    assert kwargs["content_type"] == "terminal_control_panel"
+    assert kwargs["semantic_kind"] == "terminal_control"

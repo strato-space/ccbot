@@ -157,6 +157,13 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   surfaces such as `/goal` status panels and `Conversation interrupted` notices
   are projected to the bound Telegram topic as mutable operator-status artifacts,
   not as user echo or assistant-final content.
+- **OMX workflow status is optional** — When a bound runtime exposes recognized,
+  fresh `.omx` workflow state, compact mode may show one latest-only
+  `omx_workflow_panel` / `omx_workflow_status` bubble such as
+  `🧭 OMX ultragoal 1/6 · G002 · running` with a clipped current-unit summary.
+  This is telemetry, not Codex terminal-control: it edits one status slot per
+  delivery surface/window, obeys final-answer closure, suppresses stale/corrupt
+  or unrelated state, and pure-Codex windows behave unchanged when OMX is absent.
 - **Runtime discontinuity guardrails** — True runtime termination or live tmux
   surface loss is delivered as a warning artifact with replay-native evidence
   first and screenshot fallback only for real loss. Active Codex panes that

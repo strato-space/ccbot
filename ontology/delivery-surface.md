@@ -29,6 +29,24 @@ control surface at a time.
     - command execution progress
     - file-change churn
 
+- **OMX workflow status artifact**
+  - optional mutable operator-progress artifact derived state-first from
+    recognized `.omx` workflow state, with strict visible-pane statusline/footer
+    fallback only when state is unavailable
+  - current normalized content/semantic pair: `omx_workflow_panel` /
+    `omx_workflow_status`
+  - one latest-only status slot per delivery surface/window; workflow changes
+    edit or replace the same artifact rather than creating one bubble per
+    workflow
+  - telemetry, not terminal control: it does not bypass final-answer closure and
+    must not reappear below a delivered assistant-final unless a new user turn
+    reopens status delivery
+  - unknown, stale, corrupt, or unrelated OMX state suppresses silently and must
+    not expose raw `.omx` paths, JSON, ledger records, stack traces, or debug
+    payloads
+  - pure-Codex runtimes do not require this artifact and behave unchanged when
+    no recognized OMX state exists
+
 - **Terminal control panel artifact**
   - mutable operator-status surface derived from the visible tmux control pane
     when Codex exposes terminal-only controls that do not enter replay as

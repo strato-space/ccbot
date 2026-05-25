@@ -37,10 +37,17 @@ from ..runtime_discontinuity import (
     is_codex_termination_summary_text,
 )
 from ..runtime_types import (
+    OMX_WORKFLOW_PANEL_CONTENT_TYPE,
+    OMX_WORKFLOW_STATUS_SEMANTIC_KIND,
     TERMINAL_CONTROL_PANEL_CONTENT_TYPE,
     TERMINAL_CONTROL_SEMANTIC_KIND,
     WARNING_SEMANTIC_KIND,
     runtime_capability_registry,
+)
+from ..omx_workflow_status import (
+    parse_omx_statusline,
+    read_omx_workflow_status,
+    render_omx_workflow_status,
 )
 from ..session import session_manager
 from ..input_safety import update_window_input_safety_snapshot
@@ -600,6 +607,28 @@ async def update_status_message(
             semantic_kind=TERMINAL_CONTROL_SEMANTIC_KIND,
         )
         return
+
+    if not skip_status:
+        cwd = str(getattr(w, "cwd", "") or "").strip()
+        omx_workflow_status = (
+            read_omx_workflow_status(Path(cwd), pane_text=pane_text)
+            if cwd
+            else parse_omx_statusline(pane_text)
+        )
+        if omx_workflow_status is not None:
+            await enqueue_status_update(
+                bot,
+                user_id,
+                window_id,
+                render_omx_workflow_status(omx_workflow_status),
+                thread_id=thread_id,
+                chat_id=chat_id,
+                surface_key=surface_key,
+                turn_generation=turn_generation,
+                content_type=OMX_WORKFLOW_PANEL_CONTENT_TYPE,
+                semantic_kind=OMX_WORKFLOW_STATUS_SEMANTIC_KIND,
+            )
+            return
 
     usage_limit_notice = _extract_usage_limit_notice(pane_text)
     if usage_limit_notice:

@@ -45,7 +45,12 @@ from ccbot.handlers.message_queue import (
     _process_content_task,
     _process_status_update_task,
 )
-from ccbot.runtime_types import IMAGE_PREVIEW_SEMANTIC_KIND, WARNING_SEMANTIC_KIND
+from ccbot.runtime_types import (
+    IMAGE_PREVIEW_SEMANTIC_KIND,
+    OMX_WORKFLOW_PANEL_CONTENT_TYPE,
+    OMX_WORKFLOW_STATUS_SEMANTIC_KIND,
+    WARNING_SEMANTIC_KIND,
+)
 
 
 def test_can_merge_tasks_rejects_mixed_content_types():
@@ -3858,4 +3863,25 @@ async def test_terminal_control_status_bypasses_closed_technical_status(
     assert rows[-1]["semantic_kind"] == "terminal_control"
     assert mq._status_msg_info[mq._topic_state_key(100, 42)][0] == 777
     await mq.shutdown_workers()
+    mq._technical_status_closed.clear()
+
+
+@pytest.mark.asyncio
+async def test_omx_workflow_status_does_not_bypass_closed_technical_status() -> None:
+    mq._technical_status_closed.clear()
+    mq._mark_technical_status_closed(100, 42)
+    bot = AsyncMock()
+
+    with patch("ccbot.handlers.message_queue.get_or_create_queue") as mock_queue_factory:
+        await mq.enqueue_status_update(
+            bot,
+            100,
+            "@7",
+            "🧭 OMX ultragoal 1/1 · G001 · running",
+            thread_id=42,
+            content_type=OMX_WORKFLOW_PANEL_CONTENT_TYPE,
+            semantic_kind=OMX_WORKFLOW_STATUS_SEMANTIC_KIND,
+        )
+
+    mock_queue_factory.assert_not_called()
     mq._technical_status_closed.clear()

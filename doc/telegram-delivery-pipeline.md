@@ -357,6 +357,20 @@ from the closed turn. Polling sanitizes these panels to human-facing fields such
 as goal status/objective/time/tokens/commands and suppresses raw transport
 metadata.
 
+OMX workflow progress is a separate optional status artifact, not a Codex
+terminal-control panel. When a bound window has recognized, fresh `.omx` state,
+ccbot may project it as `omx_workflow_panel` / `omx_workflow_status`, rendered as
+one compact latest-only status bubble such as `🧭 OMX ultragoal 1/6 · G002 ·
+running` plus a clipped current-unit summary. The artifact is scoped to the same
+delivery surface/window mutable status identity and workflow transitions edit or
+replace that single slot. Because this is telemetry rather than live terminal
+control, it obeys final-answer closure: stale or new OMX workflow status must
+not appear below an already delivered final answer unless a new user turn
+reopens status delivery. Unknown, stale, corrupt, or unrelated `.omx` state is
+suppressed silently; strict pane fallback recognizes only OMX statusline/footer
+shapes and never ordinary assistant prose. Pure-Codex windows with no recognized
+OMX state behave as before.
+
 Queued follow-up messages are different again. They describe future input that
 has not yet opened its turn, so compact mode may surface them as a separate
 latest-only pending-input artifact modeled after the Codex bottom pane:

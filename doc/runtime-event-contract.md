@@ -73,6 +73,14 @@ Two higher-order ontological classes matter at delivery time:
   - mutable progress/status surface for ephemeral execution detail
   - may appear while the turn is running, but must not reappear below the
     terminal turn artifact for the same turn
+- `OMX workflow status artifact`
+  - optional telemetry surface represented by `omx_workflow_panel` /
+    `omx_workflow_status` when recognized, fresh OMX state exists
+  - sourced state-first from `.omx` workflow records with strict pane fallback
+  - shares the mutable status lane identity for a delivery surface/window, but
+    is not Codex terminal-control and must obey final-answer closure
+  - unknown, stale, corrupt, or unrelated state suppresses silently; pure-Codex
+    windows with no recognized OMX state behave as before
 - `pending input artifact`
   - mutable preview surface for queued future input that is waiting behind the
     current turn
