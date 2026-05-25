@@ -5908,7 +5908,7 @@ class TestTelegramDelivery:
         )
 
     @pytest.mark.asyncio
-    async def test_runtime_update_typing_is_scoped_by_surface(self, monkeypatch):
+    async def test_runtime_update_typing_is_chat_budgeted_across_topics(self, monkeypatch):
         bot = AsyncMock()
         monkeypatch.setattr(typing_indicator_mod.time, "monotonic", lambda: 1000.0)
 
@@ -5927,7 +5927,7 @@ class TestTelegramDelivery:
             surface_key="t:-100200300:43",
         )
 
-        assert bot.send_chat_action.await_count == 2
+        assert bot.send_chat_action.await_count == 1
 
 
     @pytest.mark.asyncio
@@ -5969,6 +5969,30 @@ class TestTelegramDelivery:
         )
 
         assert sent is False
+        bot.send_chat_action.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_runtime_update_typing_backpressure_suppresses_followup(self, monkeypatch):
+        bot = AsyncMock()
+        bot.send_chat_action.side_effect = RetryAfter(5)
+        now = 1000.0
+        monkeypatch.setattr(typing_indicator_mod.time, "monotonic", lambda: now)
+
+        first = await bot_mod._send_runtime_update_typing_once(
+            bot,
+            1,
+            chat_id=-100200300,
+            thread_id=42,
+        )
+        second = await bot_mod._send_runtime_update_typing_once(
+            bot,
+            1,
+            chat_id=-100200300,
+            thread_id=43,
+        )
+
+        assert first is False
+        assert second is False
         bot.send_chat_action.assert_awaited_once()
 
     @pytest.mark.asyncio

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter
 
 from ccbot.handlers.status_polling import update_status_message
 from ccbot.handlers import status_polling as status_polling_mod
@@ -624,6 +624,80 @@ async def test_status_poll_loop_probes_chat_qualified_topic_surface(
     )
     mock_sm.unbind_thread.assert_not_called()
     mock_clear.assert_awaited_once_with(1, 42, mock_bot)
+
+
+@pytest.mark.asyncio
+async def test_status_poll_loop_uses_delivery_backlog_gate_for_skip_status(
+    mock_bot: AsyncMock,
+):
+    binding = SimpleNamespace(
+        user_id=1,
+        thread_id=42,
+        window_id="@7",
+        surface_key="t:-100200300:42",
+        chat_id=-100200300,
+    )
+    window = MagicMock()
+    window.window_id = "@7"
+    with (
+        patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+        patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+        patch(
+            "ccbot.handlers.status_polling.is_user_delivery_backlog_active",
+            return_value=True,
+        ),
+        patch(
+            "ccbot.handlers.status_polling.update_status_message",
+            new_callable=AsyncMock,
+        ) as mock_update,
+        patch(
+            "ccbot.handlers.status_polling.asyncio.sleep",
+            side_effect=asyncio.CancelledError,
+        ),
+    ):
+        mock_sm.iter_topic_bindings.side_effect = [[], [binding]]
+        mock_sm.is_external_binding_window_id.return_value = False
+        mock_tmux.find_window_by_id = AsyncMock(return_value=window)
+
+        with pytest.raises(asyncio.CancelledError):
+            await status_polling_mod.status_poll_loop(mock_bot)
+
+    mock_update.assert_awaited_once()
+    assert mock_update.await_args.kwargs["skip_status"] is True
+
+
+@pytest.mark.asyncio
+async def test_status_poll_loop_records_probe_retryafter_as_backpressure(
+    mock_bot: AsyncMock,
+):
+    binding = SimpleNamespace(
+        user_id=1,
+        thread_id=42,
+        window_id="@7",
+        surface_key="t:-100200300:42",
+        chat_id=-100200300,
+    )
+    with (
+        patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.status_polling.record_runtime_update_backpressure",
+        ) as mock_backpressure,
+        patch(
+            "ccbot.handlers.status_polling.asyncio.sleep",
+            side_effect=asyncio.CancelledError,
+        ),
+    ):
+        mock_sm.iter_topic_bindings.side_effect = [[binding], []]
+        mock_bot.unpin_all_forum_topic_messages = AsyncMock(side_effect=RetryAfter(5))
+
+        with pytest.raises(asyncio.CancelledError):
+            await status_polling_mod.status_poll_loop(mock_bot)
+
+    mock_backpressure.assert_called_once_with(
+        -100200300,
+        seconds=5,
+        reason="topic_probe_retry_after:5",
+    )
 
 
 @pytest.mark.asyncio

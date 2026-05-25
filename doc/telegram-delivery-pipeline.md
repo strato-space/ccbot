@@ -605,9 +605,13 @@ For runtime-originated updates that ccbot will dispatch to Telegram, ccbot sends
 a Telegram `typing` chat action to the same delivery surface before enqueueing
 the update. This is a transport hint only; it does not create durable content and
 does not change compact bubble ordering. Typing actions are throttled per
-effective Telegram `chat_id`/`message_thread_id` control surface to at most once
-every three seconds so streaming runtime updates cannot overload Telegram Bot API request limits. Suppressed or
-non-dispatched internal events do not emit typing.
+effective Telegram `chat_id`/`message_thread_id` control surface and co-budgeted
+per Telegram `chat_id` to at most one runtime-update typing action every three
+seconds. When Telegram returns `RetryAfter` or repeated transport timeouts, the
+chat enters a short degraded-transport cooldown: typing/status probes are
+suppressed and audited as `telegram_backpressure`, while durable content
+delivery remains queue-owned. Suppressed or non-dispatched internal events do
+not emit typing.
 
 ## Queue And Steer
 

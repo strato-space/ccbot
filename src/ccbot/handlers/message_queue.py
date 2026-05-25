@@ -219,6 +219,7 @@ class MessageTask:
 _message_queues: dict[int, asyncio.Queue[MessageTask]] = {}
 _queue_workers: dict[int, asyncio.Task[None]] = {}
 _queue_locks: dict[int, asyncio.Lock] = {}  # Protect drain/refill operations
+_inflight_task_users: set[int] = set()
 
 # Map (tool_use_id, user_id, thread_id_or_0) -> telegram message_id
 # for editing tool_use messages with results
@@ -543,6 +544,16 @@ def get_or_create_queue(bot: Bot, user_id: int) -> asyncio.Queue[MessageTask]:
     return _message_queues[user_id]
 
 
+def is_user_delivery_backlog_active(user_id: int) -> bool:
+    """Return True when Telegram delivery is queued, in-flight, or flood-delayed."""
+    queue = _message_queues.get(user_id)
+    if queue is not None and not queue.empty():
+        return True
+    if user_id in _inflight_task_users:
+        return True
+    return _flood_until.get(user_id, 0) > time.monotonic()
+
+
 def _inspect_queue(queue: asyncio.Queue[MessageTask]) -> list[MessageTask]:
     """Non-destructively inspect all items in queue.
 
@@ -798,6 +809,7 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
     while True:
         try:
             task = await queue.get()
+            _inflight_task_users.add(user_id)
             try:
                 # Flood control: drop status, wait for content
                 flood_end = _flood_until.get(user_id, 0)
@@ -962,6 +974,7 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
             except Exception as e:
                 logger.error(f"Error processing message task for user {user_id}: {e}")
             finally:
+                _inflight_task_users.discard(user_id)
                 queue.task_done()
         except asyncio.CancelledError:
             logger.info(f"Message queue worker cancelled for user {user_id}")
@@ -4853,6 +4866,7 @@ async def shutdown_workers() -> None:
     _queue_workers.clear()
     _message_queues.clear()
     _queue_locks.clear()
+    _inflight_task_users.clear()
     _status_msg_info.clear()
     _commentary_msg_info.clear()
     _commentary_extra_msg_ids.clear()

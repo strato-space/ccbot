@@ -401,6 +401,10 @@ tool results rather than being forced into command execution.
   semantic delivery. Durable queued content and ingress receipts remain pending
   until a retry attempt succeeds; mutable or ephemeral artifacts may be retried
   or intentionally suppressed, but not silently consumed as delivered.
+- Telegram typing indicators and status probes are transport hints, not
+  delivery artifacts. They share chat-level degraded-transport backpressure, so
+  parallel topics cannot multiply typing/probe calls while durable content is
+  waiting on Telegram.
 - pending input preview remains outside this terminal ordering barrier; it
   describes future queued input rather than current-turn output
 - pending input preview closes on queue-owned lifecycle transitions such as

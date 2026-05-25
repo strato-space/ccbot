@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 
 from telegram import Bot
-from telegram.error import BadRequest
+from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 
 from ..runtime_discontinuity import (
     build_discontinuity_image_data,
@@ -70,9 +70,10 @@ from .message_queue import (
     enqueue_content_message,
     enqueue_pending_input_update,
     enqueue_status_update,
-    get_message_queue,
+    is_user_delivery_backlog_active,
     is_pre_final_visible_lane_closed,
 )
+from ..typing_indicator import record_runtime_update_backpressure
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,37 @@ _USAGE_LIMIT_NOTICE_RE = re.compile(
     re.IGNORECASE,
 )
 _SHELL_PROMPT_RE = re.compile(r"^[^\n]*[#$>]\s*$")
+
+
+def _retry_after_seconds(exc: RetryAfter) -> int:
+    retry_after = exc.retry_after
+    seconds = (
+        retry_after
+        if isinstance(retry_after, int | float)
+        else int(retry_after.total_seconds())
+    )
+    return max(1, int(seconds))
+
+
+def _record_probe_backpressure(
+    *,
+    user_id: int,
+    thread_id: int | None,
+    chat_id: int | None,
+    retry_after: int | None = None,
+    reason: str,
+) -> None:
+    resolved_chat_id = chat_id
+    if resolved_chat_id is None:
+        try:
+            resolved_chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+        except Exception:
+            return
+    record_runtime_update_backpressure(
+        resolved_chat_id,
+        seconds=retry_after if retry_after is not None else 15.0,
+        reason=reason if retry_after is None else f"{reason}:{retry_after}",
+    )
 _SHELL_COMMAND_NAMES = {"bash", "dash", "fish", "sh", "zsh"}
 
 
@@ -834,6 +866,32 @@ async def status_poll_loop(bot: Bot) -> None:
                                 wid,
                                 e,
                             )
+                    except RetryAfter as e:
+                        retry_after = _retry_after_seconds(e)
+                        _record_probe_backpressure(
+                            user_id=user_id,
+                            thread_id=thread_id,
+                            chat_id=chat_id,
+                            retry_after=retry_after,
+                            reason="topic_probe_retry_after",
+                        )
+                        logger.debug(
+                            "Topic probe retry-after for %s: %s",
+                            wid,
+                            e,
+                        )
+                    except (TimedOut, NetworkError) as e:
+                        _record_probe_backpressure(
+                            user_id=user_id,
+                            thread_id=thread_id,
+                            chat_id=chat_id,
+                            reason="topic_probe_transport_timeout",
+                        )
+                        logger.debug(
+                            "Topic probe transport error for %s: %s",
+                            wid,
+                            e,
+                        )
                     except Exception as e:
                         logger.debug(
                             "Topic probe error for %s: %s",
@@ -880,8 +938,7 @@ async def status_poll_loop(bot: Bot) -> None:
                     # UI detection happens unconditionally in update_status_message.
                     # Status enqueue is skipped inside update_status_message when
                     # interactive UI is detected (returns early) or when queue is non-empty.
-                    queue = get_message_queue(user_id)
-                    skip_status = queue is not None and not queue.empty()
+                    skip_status = is_user_delivery_backlog_active(user_id)
 
                     await update_status_message(
                         bot,
