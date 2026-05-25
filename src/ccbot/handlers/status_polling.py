@@ -611,7 +611,7 @@ async def update_status_message(
     if not skip_status:
         cwd = str(getattr(w, "cwd", "") or "").strip()
         omx_workflow_status = (
-            read_omx_workflow_status(Path(cwd), pane_text=pane_text)
+            read_omx_workflow_status(Path(cwd), pane_text=pane_text, window_id=window_id)
             if cwd
             else parse_omx_statusline(pane_text)
         )

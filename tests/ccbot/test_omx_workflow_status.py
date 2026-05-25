@@ -123,6 +123,36 @@ def test_reads_generic_workflow_state(tmp_path: Path):
 
 
 
+
+def test_window_id_filter_suppresses_goals_json_without_window_proof(tmp_path: Path):
+    goals_path = tmp_path / ".omx" / "ultragoal" / "goals.json"
+    goals_path.parent.mkdir(parents=True)
+    goals_path.write_text(json.dumps({"goals": [{"id": "G001-x", "status": "in_progress"}]}))
+
+    assert read_omx_workflow_status(tmp_path, window_id="@5") is None
+
+
+def test_window_id_filter_accepts_matching_session_state(tmp_path: Path):
+    state_path = tmp_path / ".omx" / "state" / "sessions" / "abc" / "ultraqa-state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "mode": "ultraqa",
+                "status": "running",
+                "tmux_window_id": "@5",
+                "current_unit_summary": "Matched window",
+            }
+        )
+    )
+
+    status = read_omx_workflow_status(tmp_path, window_id="@5")
+
+    assert status is not None
+    assert status.workflow == "ultraqa"
+    assert status.current_unit_summary == "Matched window"
+
+
 def test_completed_ultragoal_plan_reports_last_goal_progress(tmp_path: Path):
     goals_path = tmp_path / ".omx" / "ultragoal" / "goals.json"
     goals_path.parent.mkdir(parents=True)

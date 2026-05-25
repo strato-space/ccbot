@@ -88,6 +88,7 @@ def read_omx_workflow_status(
     cwd: Path | str,
     *,
     pane_text: str | None = None,
+    window_id: str | None = None,
     now: datetime | None = None,
     max_age_seconds: int = 24 * 60 * 60,
 ) -> OmxWorkflowStatus | None:
@@ -98,6 +99,7 @@ def read_omx_workflow_status(
         status = load_omx_workflow_status_path(
             path,
             cwd=root,
+            window_id=window_id,
             now=now,
             max_age_seconds=max_age_seconds,
         )
@@ -112,6 +114,7 @@ def load_omx_workflow_status_path(
     path: Path | str,
     *,
     cwd: Path | str | None = None,
+    window_id: str | None = None,
     now: datetime | None = None,
     max_age_seconds: int = 24 * 60 * 60,
 ) -> OmxWorkflowStatus | None:
@@ -135,7 +138,11 @@ def load_omx_workflow_status_path(
     if not isinstance(payload, dict):
         return None
 
+    if not _matches_window(payload, window_id):
+        return None
     if state_path.name == "goals.json" or "goals" in payload:
+        if window_id is not None:
+            return None
         return _status_from_ultragoal_plan(payload, state_path)
     return _status_from_workflow_state(payload, state_path)
 
@@ -171,6 +178,19 @@ def parse_omx_statusline(pane_text: str) -> OmxWorkflowStatus | None:
             source="pane",
         )
     return None
+
+
+
+def _matches_window(payload: dict[str, Any], window_id: str | None) -> bool:
+    if window_id is None:
+        return True
+    candidate = str(
+        payload.get("tmux_window_id")
+        or payload.get("window_id")
+        or payload.get("windowId")
+        or ""
+    ).strip()
+    return bool(candidate) and candidate == window_id
 
 
 def _candidate_state_paths(cwd: Path) -> list[Path]:
