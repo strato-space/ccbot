@@ -3010,16 +3010,22 @@ class SessionManager:
             state is not None
             and state.thread_id
             and state.thread_id != thread_id
-            and state.thread_id_source == THREAD_ID_SOURCE_LIVE_FD
+            and state.thread_id_source
+            in {
+                THREAD_ID_SOURCE_LIVE_FD,
+                THREAD_ID_SOURCE_LAUNCHER,
+                THREAD_ID_SOURCE_SESSION_MAP,
+            }
         ):
             warning_key = (window_id, thread_id, state.thread_id)
             if warning_key not in self._stale_restore_intent_warnings:
                 self._stale_restore_intent_warnings.add(warning_key)
                 logger.warning(
                     "Ignoring stale restore intent for window %s: restore thread %s "
-                    "differs from live fd-proven thread %s",
+                    "differs from current non-restore %s identity thread %s",
                     window_id,
                     thread_id,
+                    state.thread_id_source,
                     state.thread_id,
                 )
             return None

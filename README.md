@@ -569,9 +569,12 @@ services when live identity is ambiguous.  `CCBOT_RESTORE_*` remains restore
 intent, not proof; when no explicit restore intent is present, controller
 startup may derive one target only from exact `CCBOT_AUTONOMOUS_RESTORE_SURFACES`
 or `CCBOT_OWNED_SURFACES` plus durable `surface_bindings`, `window_states`,
-chat-qualified routing coordinates, and replay/cwd/runtime proof.  When current
-live Codex fd proof disagrees with stale restore intent for the same window, the
-live fd-proven identity wins.  Duplicate runtime-thread reclamation requires a
+chat-qualified routing coordinates, and replay/cwd/runtime proof.  For an
+already bound tmux window, a current non-restore runtime identity from live fd
+proof, launcher registration, or `session_map` outranks stale
+`CCBOT_RESTORE_*` intent; live fd remains the strongest process proof, while
+launcher/session-map evidence is current identity registration rather than pane
+topology.  Duplicate runtime-thread reclamation requires a
 current-process restore-owner proof that validates runtime id, cwd, tmux window,
 `(user_id, surface_key)`, chat/topic coordinates, and service epoch; stale env
 or stale proof data must not clear other windows' runtime claims.  Local automation and live smoke validation must use `ccbot binding-preflight`, `ccbot runtime-input`,

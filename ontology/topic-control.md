@@ -113,8 +113,11 @@ If this note conflicts with any explanatory note in `doc/`, this note wins.
     refer to the same live binding
   - cwd equality alone is not sufficient proof for Codex/OMX because helper or
     stale sessions may share the same cwd
-  - for an already live tmux window, current process fd proof outranks stale
-    `CCBOT_RESTORE_*` intent when selecting replay delivery identity
+  - for an already bound tmux window, a current non-restore runtime identity
+    from live fd proof, launcher registration, or `session_map` outranks stale
+    `CCBOT_RESTORE_*` intent when selecting replay delivery identity; live fd
+    remains the strongest process proof, while launcher/session-map evidence is
+    current binding identity and not pane topology or raw restore intent
   - duplicate runtime-thread reclamation requires validated restore-owner proof
     for the current service epoch; raw restore env alone cannot delete peer
     window claims

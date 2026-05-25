@@ -20,8 +20,10 @@ from ccbot.session import (
     _stable_text_hash,
 )
 from ccbot.runtime_types import (
+    THREAD_ID_SOURCE_LAUNCHER,
     THREAD_ID_SOURCE_LIVE_FD,
     THREAD_ID_SOURCE_RESTORE_INTENT,
+    THREAD_ID_SOURCE_SESSION_MAP,
     LiveProcessDescriptor,
     ThreadLocator,
 )
@@ -1010,6 +1012,114 @@ class TestWindowState:
 
         assert locator is None
         assert manager.window_states["@8"].thread_id == stale_thread_id
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "thread_id_source",
+        [THREAD_ID_SOURCE_LAUNCHER, THREAD_ID_SOURCE_SESSION_MAP],
+    )
+    async def test_resolve_thread_for_window_ignores_stale_restore_after_current_rebind(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        thread_id_source: str,
+    ) -> None:
+        codex_home = tmp_path / ".codex"
+        sessions_root = codex_home / "sessions" / "2026" / "05" / "25"
+        sessions_root.mkdir(parents=True)
+        restore_thread_id = "019e58ce-6f9e-7ea2-8c4d-5273ed295670"
+        current_thread_id = "019e5abc-1111-7222-8333-aaaaaaaaaaaa"
+        for thread_id in (restore_thread_id, current_thread_id):
+            (sessions_root / f"rollout-2026-05-25T13-00-00-{thread_id}.jsonl").write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-05-25T13:00:00Z",
+                        "type": "session_meta",
+                        "payload": {
+                            "id": thread_id,
+                            "cwd": "/tmp/project",
+                            "originator": "codex_cli",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+        monkeypatch.setattr(SessionManager, "_save_state", lambda self: None)
+        monkeypatch.setenv("CCBOT_RESTORE_RUNTIME_ID", restore_thread_id)
+        monkeypatch.setenv("CCBOT_RESTORE_USER_ID", "100")
+        monkeypatch.setenv("CCBOT_RESTORE_SURFACE_KEY", "t:1")
+        monkeypatch.setenv("CCBOT_RESTORE_CWD", "/tmp/project")
+        monkeypatch.setenv("CCBOT_RESTORE_RUNTIME_KIND", "codex")
+        manager = SessionManager(
+            codex_thread_catalog=CodexThreadCatalog(codex_home=codex_home)
+        )
+        manager.bind_thread(100, 1, "@8")
+        manager.window_states["@8"] = LiveProcessDescriptor(
+            thread_id=current_thread_id,
+            cwd="/tmp/project",
+            runtime_kind="codex",
+            window_name="comfy-agent",
+            thread_id_source=thread_id_source,
+        )
+
+        locator = await manager.resolve_thread_for_window("@8")
+
+        assert locator is not None
+        assert locator.thread_id == current_thread_id
+        assert manager.window_states["@8"].thread_id == current_thread_id
+        assert manager.window_states["@8"].thread_id_source == thread_id_source
+
+    @pytest.mark.asyncio
+    async def test_resolve_thread_for_window_still_uses_restore_intent_without_stronger_identity(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        codex_home = tmp_path / ".codex"
+        sessions_root = codex_home / "sessions" / "2026" / "05" / "25"
+        sessions_root.mkdir(parents=True)
+        restore_thread_id = "019e58ce-6f9e-7ea2-8c4d-5273ed295670"
+        (sessions_root / f"rollout-2026-05-25T13-00-00-{restore_thread_id}.jsonl").write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-05-25T13:00:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": restore_thread_id,
+                        "cwd": "/tmp/project",
+                        "originator": "codex_cli",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+        monkeypatch.setattr(SessionManager, "_save_state", lambda self: None)
+        monkeypatch.setenv("CCBOT_RESTORE_RUNTIME_ID", restore_thread_id)
+        monkeypatch.setenv("CCBOT_RESTORE_USER_ID", "100")
+        monkeypatch.setenv("CCBOT_RESTORE_SURFACE_KEY", "t:1")
+        monkeypatch.setenv("CCBOT_RESTORE_CWD", "/tmp/project")
+        monkeypatch.setenv("CCBOT_RESTORE_RUNTIME_KIND", "codex")
+        manager = SessionManager(
+            codex_thread_catalog=CodexThreadCatalog(codex_home=codex_home)
+        )
+        manager.bind_thread(100, 1, "@8")
+        manager.window_states["@8"] = LiveProcessDescriptor(
+            thread_id="",
+            cwd="/tmp/project",
+            runtime_kind="codex",
+            window_name="comfy-agent",
+        )
+
+        locator = await manager.resolve_thread_for_window("@8")
+
+        assert locator is not None
+        assert locator.thread_id == restore_thread_id
+        assert manager.window_states["@8"].thread_id == restore_thread_id
+        assert manager.window_states["@8"].thread_id_source == THREAD_ID_SOURCE_RESTORE_INTENT
 
     def test_reconcile_live_tmux_window_same_cwd_without_fd_proof_keeps_binding(
         self, mgr: SessionManager, monkeypatch: pytest.MonkeyPatch
