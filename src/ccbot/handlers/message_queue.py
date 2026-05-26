@@ -1998,7 +1998,7 @@ def _command_output_history_item(preview: str, kind: str) -> str | None:
         return None
     if kind in {"path", "json"}:
         return f"↳ {preview}"
-    return f"↳ output: \"{preview}\""
+    return f"↳ `{preview}`"
 
 
 def _status_code_blocks(text: str) -> list[str]:

@@ -524,7 +524,8 @@ Preview refinements:
   entries may be rendered as locators (for example `↳ .omx/...`) without the
   generic `output` label, and structured JSON command-output history may render
   as a compact JSON prefix from the whole block instead of `↳ output: "{"`.
-  Non-path, non-JSON output remains explicitly labeled. Locator rendering is
+  Non-path, non-JSON output renders as inline monospace after `↳` rather than
+  keeping the generic `output` label. Locator rendering is
   limited to known locator prefixes such as `.omx/`, `./`, `../`, `/data/`,
   `/home/`, `/tmp/`, `~/`, and `file://`;
   this is visible delivery history, not

@@ -88,7 +88,7 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   a bounded delivered technical-status history above a fenced current detail
   panel; path-like and structured-JSON command-output history entries may
   elide the generic `output` label and render as `↳ .omx/...` or `↳ {"kind": ...}`
-  while non-path prose output remains explicitly labeled. Command preview panels
+  while non-path prose output renders as inline monospace after `↳`. Command preview panels
   prefer useful first-lines over low-value `preview 1/N lines` footers. This is Telegram delivery evidence, not durable runtime history. Once
   the final assistant answer lands, the
   whole pre-final visible surface closes until the next user turn, and the

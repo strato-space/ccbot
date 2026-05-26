@@ -272,9 +272,9 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
   Codex-style preview contract:
   - eligible compact technical-status previews render as a bounded delivered
     technical-status history above a fenced current detail panel; path-like
-    command-output summaries use the locator directly and structured JSON
-    output summaries use a compact JSON prefix instead of quoted generic
-    output
+    command-output summaries use the locator directly, structured JSON
+    output summaries use a compact JSON prefix, and generic prose output uses
+    inline monospace after `↳` instead of quoted `output:` text
   - code block body contains only preview lines
   - truncation footer lives outside the fenced block
   - outcome footer is separate and should not redundantly say

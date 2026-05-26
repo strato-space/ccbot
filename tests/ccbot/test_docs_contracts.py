@@ -99,6 +99,7 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "fenced current detail\n  panel" in readme
     assert "path-like and structured-JSON command-output history entries" in readme
     assert '`↳ .omx/...` or `↳ {"kind": ...}`' in readme
+    assert "inline monospace after `↳`" in readme
     assert "not durable runtime history" in readme
     assert "no pre-final visible artifact" in readme
     assert "late technical status" in readme
@@ -507,6 +508,7 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "bounded delivered technical-status history" in doc
     assert "fenced current detail panel" in doc
     assert "structured JSON command-output summaries render" in doc
+    assert "Non-path, non-JSON output uses inline monospace after `↳`" in doc
     assert "Path-like\n  means a locator prefix" in doc
     assert "`/data/`, `/home/`,\n  `/tmp/`, `~/`, or `file://`" in doc
     assert "not durable runtime history" in doc

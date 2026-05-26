@@ -53,7 +53,8 @@ The default Telegram surface is `compact`, not `verbose`.
   that history render as the locator itself (for example `↳ .omx/...`) rather
   than quoted generic output; structured JSON command-output summaries render
   from the whole JSON block as a compact one-line prefix instead of only the
-  first `{` line. Non-path, non-JSON output keeps the `output` label. Path-like
+  first `{` line. Non-path, non-JSON output uses inline monospace after `↳`
+  instead of the generic `output` label. Path-like
   means a locator prefix such as `.omx/`, `./`, `../`, `/data/`, `/home/`,
   `/tmp/`, `~/`, or `file://`, not arbitrary slash-prefixed prose. This
   history is delivery evidence for the

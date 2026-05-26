@@ -5152,11 +5152,11 @@ def test_file_path_command_output_history_works_for_command_detail_output() -> N
 def test_non_file_command_output_history_keeps_generic_output_label() -> None:
     assert (
         mq._extract_status_history_item("⌘ Command output\n```text\n✓ 22 passed\n```")
-        == '↳ output: "✓ 22 passed"'
+        == "↳ `✓ 22 passed`"
     )
     assert (
         mq._extract_status_history_item("⌘ Command output\n```text\n{not json\n```")
-        == '↳ output: "{not json"'
+        == "↳ `{not json`"
     )
     assert (
         mq._extract_status_history_item("⌘ Command output\n```text\n/home/tools/out.md\n```")
@@ -5164,15 +5164,15 @@ def test_non_file_command_output_history_keeps_generic_output_label() -> None:
     )
     assert (
         mq._extract_status_history_item("⌘ Command output\n```text\n/service\n```")
-        == '↳ output: "/service"'
+        == "↳ `/service`"
     )
     assert (
         mq._extract_status_history_item("⌘ Command output\n```text\n/service healthy\n```")
-        == '↳ output: "/service healthy"'
+        == "↳ `/service healthy`"
     )
     assert (
         mq._extract_status_history_item("⌘ Command output\n```text\nservice/path healthy\n```")
-        == '↳ output: "service/path healthy"'
+        == "↳ `service/path healthy`"
     )
 
 
@@ -5288,7 +5288,7 @@ async def test_status_tool_output_wrapper_is_cleaned_for_humans(
         await _process_status_update_task(bot, 1, task)
 
     sent_text = bot.edit_message_text.await_args.kwargs["text"]
-    assert sent_text.startswith('↳ output: "✓ 22')
+    assert sent_text.startswith("↳ `✓ 22")
     assert "```text" in sent_text
     assert "desktop" in sent_text
     assert "preview 10/11 lines" in sent_text
@@ -5300,7 +5300,7 @@ async def test_status_tool_output_wrapper_is_cleaned_for_humans(
         json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
     ]
     assert rows[-1]["action"] == "edit"
-    assert rows[-1]["preview"].startswith('↳ output: "✓ 22')
+    assert rows[-1]["preview"].startswith("↳ `✓ 22")
 
     mq._status_msg_info.clear()
 
@@ -5941,7 +5941,7 @@ async def test_ccbot_j3t_processed_status_is_cleared_after_final_via_worker(
             await queue.join()
 
         sent_texts = [call.args[2] for call in mock_send.await_args_list]
-        assert sent_texts[0].startswith('↳ output: "== service =="')
+        assert sent_texts[0].startswith("↳ `== service ==")
         assert "⌘ Command output" in sent_texts[0]
         assert sent_texts[1] == "Deploy выполнен."
         bot.delete_message.assert_awaited_once_with(
