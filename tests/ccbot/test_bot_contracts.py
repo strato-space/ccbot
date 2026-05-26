@@ -8,6 +8,7 @@ behavior in shared modules.
 
 import inspect
 import json
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -8451,3 +8452,303 @@ class TestRebootCommand:
         assert "reboot_command" in callbacks
         assert callbacks.index("reboot_command") < callbacks.index("forward_command_handler")
         assert any(command.command == "reboot" for command in bot_mod.build_bot_commands())
+
+@pytest.mark.asyncio
+async def test_bash_capture_send_audits_markdown_success(monkeypatch, tmp_path):
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    bot = AsyncMock()
+    sent = MagicMock()
+    sent.message_id = 901
+    bot.send_message.return_value = sent
+
+    async def _sleep(_delay):
+        return None
+
+    with (
+        patch("ccbot.bot.asyncio.sleep", new=AsyncMock(side_effect=_sleep)),
+        patch("ccbot.bot.tmux_manager") as mock_tmux,
+        patch("ccbot.bot.extract_bash_output", side_effect=["```text\nok\n```"] + [None] * 29),
+    ):
+        mock_tmux.capture_pane = AsyncMock(return_value="pane")
+        await bot_mod._capture_bash_output(bot, 1, 42, "@7", "echo ok", chat_id=100)
+
+    rows = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert rows[-1]["action"] == "send"
+    assert rows[-1]["task_type"] == "direct_bash_capture"
+    assert rows[-1]["render_mode"] == "markdown_v2"
+    assert rows[-1]["transport_outcome"] == "sent"
+
+
+@pytest.mark.asyncio
+async def test_bash_capture_send_audits_plain_fallback(monkeypatch, tmp_path):
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    bot = AsyncMock()
+    sent = MagicMock()
+    sent.message_id = 902
+    bot.send_message.side_effect = [Exception("bad markdown token=abc"), sent]
+
+    async def _sleep(_delay):
+        return None
+
+    with (
+        patch("ccbot.bot.asyncio.sleep", new=AsyncMock(side_effect=_sleep)),
+        patch("ccbot.bot.tmux_manager") as mock_tmux,
+        patch("ccbot.bot.extract_bash_output", side_effect=["bad * output"] + [None] * 29),
+    ):
+        mock_tmux.capture_pane = AsyncMock(return_value="pane")
+        await bot_mod._capture_bash_output(bot, 1, 42, "@7", "echo ok", chat_id=100)
+
+    row = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["render_mode"] == "plain_text"
+    assert row["transport_outcome"] == "fallback_sent"
+    assert row["formatted_error_class"] == "Exception"
+    assert "token=abc" not in json.dumps(row)
+
+
+@pytest.mark.asyncio
+async def test_bash_capture_send_audits_total_failure(monkeypatch, tmp_path):
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    bot = AsyncMock()
+    bot.send_message.side_effect = [Exception("bad markdown"), RuntimeError("telegram down")]
+
+    async def _sleep(_delay):
+        return None
+
+    with (
+        patch("ccbot.bot.asyncio.sleep", new=AsyncMock(side_effect=_sleep)),
+        patch("ccbot.bot.tmux_manager") as mock_tmux,
+        patch("ccbot.bot.extract_bash_output", side_effect=["bad output"] + [None] * 29),
+    ):
+        mock_tmux.capture_pane = AsyncMock(return_value="pane")
+        await bot_mod._capture_bash_output(bot, 1, 42, "@7", "echo ok", chat_id=100)
+
+    row = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["success"] is False
+    assert "render_mode" not in row
+    assert row["transport_outcome"] == "failed"
+    assert row["formatted_error_class"] == "Exception"
+    assert row["plain_error_class"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_bash_capture_edit_audits_plain_fallback_and_noop_prior_mode(monkeypatch, tmp_path):
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    bot = AsyncMock()
+    sent = MagicMock()
+    sent.message_id = 903
+    bot.send_message.side_effect = [Exception("bad markdown"), sent]
+    bot.edit_message_text.side_effect = [
+        Exception("formatted edit failed"),
+        BadRequest("Message is not modified"),
+    ]
+
+    async def _sleep(_delay):
+        return None
+
+    with (
+        patch("ccbot.bot.asyncio.sleep", new=AsyncMock(side_effect=_sleep)),
+        patch("ccbot.bot.tmux_manager") as mock_tmux,
+        patch("ccbot.bot.extract_bash_output", side_effect=["plain output", "plain output v2"] + [None] * 28),
+    ):
+        mock_tmux.capture_pane = AsyncMock(return_value="pane")
+        await bot_mod._capture_bash_output(bot, 1, 42, "@7", "echo ok", chat_id=100)
+
+    rows = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert rows[-1]["action"] == "edit"
+    assert rows[-1]["success"] is True
+    assert rows[-1]["render_mode"] == "plain_text"
+    assert rows[-1]["transport_outcome"] == "fallback_edit_noop"
+    assert rows[-1]["formatted_error_class"] == "Exception"
+    assert rows[-1]["plain_error_class"] == "BadRequest"
+
+
+@pytest.mark.asyncio
+async def test_bash_capture_edit_audits_total_failure(monkeypatch, tmp_path):
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    bot = AsyncMock()
+    sent = MagicMock()
+    sent.message_id = 904
+    bot.send_message.return_value = sent
+    bot.edit_message_text.side_effect = [Exception("formatted edit failed"), RuntimeError("edit down")]
+
+    async def _sleep(_delay):
+        return None
+
+    with (
+        patch("ccbot.bot.asyncio.sleep", new=AsyncMock(side_effect=_sleep)),
+        patch("ccbot.bot.tmux_manager") as mock_tmux,
+        patch("ccbot.bot.extract_bash_output", side_effect=["```text\none\n```", "```text\ntwo\n```"] + [None] * 28),
+    ):
+        mock_tmux.capture_pane = AsyncMock(return_value="pane")
+        await bot_mod._capture_bash_output(bot, 1, 42, "@7", "echo ok", chat_id=100)
+
+    row = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["action"] == "edit"
+    assert row["success"] is False
+    assert "render_mode" not in row
+    assert row["transport_outcome"] == "failed"
+    assert row["plain_error_class"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_bash_capture_edit_audits_markdown_success(monkeypatch, tmp_path):
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    bot = AsyncMock()
+    sent = MagicMock()
+    sent.message_id = 905
+    edited = MagicMock()
+    edited.message_id = 905
+    bot.send_message.return_value = sent
+    bot.edit_message_text.return_value = edited
+
+    async def _sleep(_delay):
+        return None
+
+    with (
+        patch("ccbot.bot.asyncio.sleep", new=AsyncMock(side_effect=_sleep)),
+        patch("ccbot.bot.tmux_manager") as mock_tmux,
+        patch("ccbot.bot.extract_bash_output", side_effect=["```text\none\n```", "```text\ntwo\n```"] + [None] * 28),
+    ):
+        mock_tmux.capture_pane = AsyncMock(return_value="pane")
+        await bot_mod._capture_bash_output(bot, 1, 42, "@7", "echo ok", chat_id=100)
+
+    row = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["action"] == "edit"
+    assert row["render_mode"] == "markdown_v2"
+    assert row["transport_outcome"] == "edited"
+
+
+@pytest.mark.asyncio
+async def test_bash_capture_edit_audits_plain_fallback_success(monkeypatch, tmp_path):
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    bot = AsyncMock()
+    sent = MagicMock()
+    sent.message_id = 906
+    edited = MagicMock()
+    edited.message_id = 906
+    bot.send_message.return_value = sent
+    bot.edit_message_text.side_effect = [Exception("formatted edit failed"), edited]
+
+    async def _sleep(_delay):
+        return None
+
+    with (
+        patch("ccbot.bot.asyncio.sleep", new=AsyncMock(side_effect=_sleep)),
+        patch("ccbot.bot.tmux_manager") as mock_tmux,
+        patch("ccbot.bot.extract_bash_output", side_effect=["```text\none\n```", "plain two"] + [None] * 28),
+    ):
+        mock_tmux.capture_pane = AsyncMock(return_value="pane")
+        await bot_mod._capture_bash_output(bot, 1, 42, "@7", "echo ok", chat_id=100)
+
+    row = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["action"] == "edit"
+    assert row["render_mode"] == "plain_text"
+    assert row["transport_outcome"] == "fallback_edited"
+    assert row["formatted_error_class"] == "Exception"
+
+
+@pytest.mark.asyncio
+async def test_bash_capture_edit_audits_formatted_noop_prior_mode(monkeypatch, tmp_path):
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    bot = AsyncMock()
+    sent = MagicMock()
+    sent.message_id = 907
+    bot.send_message.side_effect = [Exception("bad markdown"), sent]
+    bot.edit_message_text.side_effect = BadRequest("Message is not modified")
+
+    async def _sleep(_delay):
+        return None
+
+    with (
+        patch("ccbot.bot.asyncio.sleep", new=AsyncMock(side_effect=_sleep)),
+        patch("ccbot.bot.tmux_manager") as mock_tmux,
+        patch("ccbot.bot.extract_bash_output", side_effect=["plain one", "plain two"] + [None] * 28),
+    ):
+        mock_tmux.capture_pane = AsyncMock(return_value="pane")
+        await bot_mod._capture_bash_output(bot, 1, 42, "@7", "echo ok", chat_id=100)
+
+    row = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["action"] == "edit"
+    assert row["render_mode"] == "plain_text"
+    assert row["transport_outcome"] == "edit_noop"
+    assert row["formatted_error_class"] == "BadRequest"
+
+
+@pytest.mark.asyncio
+async def test_bash_capture_edit_retry_after_is_audited_and_capture_continues(monkeypatch, tmp_path):
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    bot = AsyncMock()
+    sent = MagicMock()
+    sent.message_id = 908
+    edited = MagicMock()
+    edited.message_id = 908
+    bot.send_message.return_value = sent
+    bot.edit_message_text.side_effect = [RetryAfter(timedelta(seconds=1)), edited]
+
+    async def _sleep(_delay):
+        return None
+
+    with (
+        patch("ccbot.bot.asyncio.sleep", new=AsyncMock(side_effect=_sleep)),
+        patch("ccbot.bot.tmux_manager") as mock_tmux,
+        patch(
+            "ccbot.bot.extract_bash_output",
+            side_effect=["! curl token=abc123\n⎿ one", "! curl token=abc123\n⎿ two", "! curl token=abc123\n⎿ two"] + [None] * 27,
+        ),
+    ):
+        mock_tmux.capture_pane = AsyncMock(return_value="pane")
+        await bot_mod._capture_bash_output(bot, 1, 42, "@7", "curl token=abc123", chat_id=100)
+
+    serialized = audit_path.read_text(encoding="utf-8")
+    assert "token=abc123" not in serialized
+    rows = [json.loads(line) for line in serialized.splitlines()]
+    assert rows[1]["action"] == "edit"
+    assert rows[1]["transport_outcome"] == "retry_after"
+    assert rows[1]["transport_error_type"] == "retry_after"
+    assert rows[1]["render_mode"] == "markdown_v2"
+    assert rows[-1]["action"] == "edit"
+    assert rows[-1]["transport_outcome"] == "edited"
+
+
+@pytest.mark.asyncio
+async def test_bash_capture_send_retry_after_is_audited_and_capture_continues(monkeypatch, tmp_path):
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    bot = AsyncMock()
+    sent = MagicMock()
+    sent.message_id = 909
+    bot.send_message.side_effect = [RetryAfter(timedelta(seconds=1)), sent]
+
+    async def _sleep(_delay):
+        return None
+
+    with (
+        patch("ccbot.bot.asyncio.sleep", new=AsyncMock(side_effect=_sleep)),
+        patch("ccbot.bot.tmux_manager") as mock_tmux,
+        patch(
+            "ccbot.bot.extract_bash_output",
+            side_effect=["! curl token=abc123\n⎿ one token=abc123", "! curl token=abc123\n⎿ one token=abc123"] + [None] * 28,
+        ),
+    ):
+        mock_tmux.capture_pane = AsyncMock(return_value="pane")
+        await bot_mod._capture_bash_output(bot, 1, 42, "@7", "curl token=abc123", chat_id=100)
+
+    serialized = audit_path.read_text(encoding="utf-8")
+    assert "curl token=abc123" not in serialized
+    assert "token=abc123" not in serialized
+    assert "! curl" not in serialized
+    rows = [json.loads(line) for line in serialized.splitlines()]
+    assert rows[0]["action"] == "send"
+    assert rows[0]["transport_outcome"] == "retry_after"
+    assert rows[0]["transport_error_type"] == "retry_after"
+    assert rows[-1]["action"] == "send"
+    assert rows[-1]["transport_outcome"] == "sent"

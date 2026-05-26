@@ -140,6 +140,78 @@ async def send_with_fallback(
     return (await send_with_fallback_result(bot, chat_id, text, **kwargs)).message
 
 
+def is_message_not_modified_error(exc: Exception) -> bool:
+    """Return True when Telegram reports an idempotent text edit no-op."""
+    return "message is not modified" in str(exc).lower()
+
+
+async def edit_message_text_with_fallback_result(
+    bot: Bot,
+    *,
+    chat_id: int,
+    message_id: int,
+    text: str,
+    **kwargs: Any,
+) -> FallbackDeliveryResult:
+    """Edit message text and return structured render/fallback outcome for audit."""
+    kwargs.setdefault("link_preview_options", NO_LINK_PREVIEW)
+    try:
+        message = await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=_ensure_formatted(text),
+            parse_mode=PARSE_MODE,
+            **kwargs,
+        )
+        return FallbackDeliveryResult(
+            message=message if isinstance(message, Message) else None,
+            render_mode="markdown_v2",
+            transport_outcome="edited",
+        )
+    except RetryAfter:
+        raise
+    except Exception as formatted_error:
+        if is_message_not_modified_error(formatted_error):
+            return FallbackDeliveryResult(
+                message=None,
+                render_mode="markdown_v2",
+                transport_outcome="edit_noop",
+                formatted_error=formatted_error,
+            )
+        try:
+            message = await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=strip_sentinels(text),
+                **kwargs,
+            )
+            return FallbackDeliveryResult(
+                message=message if isinstance(message, Message) else None,
+                render_mode="plain_text",
+                transport_outcome="fallback_edited",
+                formatted_error=formatted_error,
+            )
+        except RetryAfter:
+            raise
+        except Exception as plain_error:
+            if is_message_not_modified_error(plain_error):
+                return FallbackDeliveryResult(
+                    message=None,
+                    render_mode="plain_text",
+                    transport_outcome="fallback_edit_noop",
+                    formatted_error=formatted_error,
+                    plain_error=plain_error,
+                )
+            logger.error("Failed to edit message %s in %s: %s", message_id, chat_id, plain_error)
+            return FallbackDeliveryResult(
+                message=None,
+                render_mode=None,
+                transport_outcome="failed",
+                formatted_error=formatted_error,
+                plain_error=plain_error,
+            )
+
+
 async def send_photo(
     bot: Bot,
     chat_id: int,

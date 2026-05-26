@@ -159,3 +159,81 @@ async def test_send_with_fallback_result_reraises_plain_retry_after() -> None:
 
     with pytest.raises(RetryAfter):
         await send_with_fallback_result(bot, 123, "slow fallback")
+
+@pytest.mark.asyncio
+async def test_edit_message_text_with_fallback_result_reports_markdown_success() -> None:
+    from ccbot.handlers.message_sender import edit_message_text_with_fallback_result
+
+    bot = AsyncMock()
+    sent = object()
+    bot.edit_message_text = AsyncMock(return_value=sent)
+
+    result = await edit_message_text_with_fallback_result(
+        bot,
+        chat_id=123,
+        message_id=456,
+        text="**ok**",
+    )
+
+    assert result.render_mode == "markdown_v2"
+    assert result.transport_outcome == "edited"
+    assert result.formatted_error is None
+    kwargs = bot.edit_message_text.await_args.kwargs
+    assert kwargs["parse_mode"] == "MarkdownV2"
+
+
+@pytest.mark.asyncio
+async def test_edit_message_text_with_fallback_result_reports_plain_fallback() -> None:
+    from ccbot.handlers.message_sender import edit_message_text_with_fallback_result
+
+    bot = AsyncMock()
+    sent = object()
+    formatted_error = ValueError("bad markdown")
+    bot.edit_message_text = AsyncMock(side_effect=[formatted_error, sent])
+
+    result = await edit_message_text_with_fallback_result(
+        bot,
+        chat_id=123,
+        message_id=456,
+        text="**bad**",
+    )
+
+    assert result.render_mode == "plain_text"
+    assert result.transport_outcome == "fallback_edited"
+    assert result.formatted_error is formatted_error
+    assert result.plain_error is None
+    first_call, second_call = bot.edit_message_text.await_args_list
+    assert first_call.kwargs["parse_mode"] == "MarkdownV2"
+    assert "parse_mode" not in second_call.kwargs
+
+
+@pytest.mark.asyncio
+async def test_edit_message_text_with_fallback_result_reraises_retry_after() -> None:
+    from ccbot.handlers.message_sender import edit_message_text_with_fallback_result
+
+    bot = AsyncMock()
+    bot.edit_message_text = AsyncMock(side_effect=RetryAfter(1))
+
+    with pytest.raises(RetryAfter):
+        await edit_message_text_with_fallback_result(
+            bot,
+            chat_id=123,
+            message_id=456,
+            text="slow",
+        )
+
+
+@pytest.mark.asyncio
+async def test_edit_message_text_with_fallback_result_reraises_plain_retry_after() -> None:
+    from ccbot.handlers.message_sender import edit_message_text_with_fallback_result
+
+    bot = AsyncMock()
+    bot.edit_message_text = AsyncMock(side_effect=[ValueError("bad markdown"), RetryAfter(1)])
+
+    with pytest.raises(RetryAfter):
+        await edit_message_text_with_fallback_result(
+            bot,
+            chat_id=123,
+            message_id=456,
+            text="slow fallback",
+        )

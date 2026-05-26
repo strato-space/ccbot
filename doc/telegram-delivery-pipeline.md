@@ -809,5 +809,8 @@ diagnosable without reading raw Bot API payloads. MarkdownV2 text sends/edits
 that fall back to plain text also record the effective `render_mode`, the
 `transport_outcome`, and formatted-vs-plain fallback error classes/types so a
 plain-text rescue can be distinguished from a formatted Telegram render and
-from a total transport failure. It deliberately omits full raw payloads and
-secrets, and redacts credential-shaped fragments from error text.
+from a total transport failure. Direct `!` bash-capture output remains a
+non-queue `bot.py` path, but its human-visible sends/edits also emit audit rows
+with `task_type=direct_bash_capture` and the same render/outcome fields. It
+deliberately omits full raw payloads and secrets, and redacts
+credential-shaped fragments from error text.

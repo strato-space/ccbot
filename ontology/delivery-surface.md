@@ -482,6 +482,11 @@ Additional artifact rules:
     `retry_after`, and `backpressure_reason`; these fields explain delivery
     lag/backpressure without treating raw Bot API payloads or credentials as
     evidence
+  - Markdown-capable text delivery rows may record effective `render_mode`,
+    `transport_outcome`, and formatted-vs-plain fallback errors; direct `!`
+    bash-capture output is a non-queue `bot.py` delivery path, but it is still
+    a human-visible Telegram send/edit lifecycle and uses
+    `task_type=direct_bash_capture` in the audit
   - negative lifecycle rows (`suppress`, failed `delete`, failed send/edit) are
     first-class evidence, not debug noise; without them the audit cannot explain
     why a Codex/tmux-visible artifact did not appear in Telegram

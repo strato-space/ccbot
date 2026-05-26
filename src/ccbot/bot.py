@@ -55,6 +55,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -68,7 +69,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatAction
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter
 from telegram.ext import (
     AIORateLimiter,
     Application,
@@ -82,7 +83,7 @@ from telegram.ext import (
 )
 
 from .config import config
-from .delivery_audit import log_telegram_delivery
+from .delivery_audit import log_telegram_delivery, _sanitize_error_text
 from .attachment_batching import (
     AttachmentBatcher,
     AttachmentBatchFailure,
@@ -165,11 +166,12 @@ from .handlers.message_queue import (
 )
 from .launcher_registration import infer_runtime_kind_from_command
 from .handlers.message_sender import (
-    NO_LINK_PREVIEW,
+    FallbackDeliveryResult,
+    edit_message_text_with_fallback_result,
     safe_edit,
     safe_reply,
     safe_send,
-    send_with_fallback,
+    send_with_fallback_result,
 )
 from .handlers.omx_questions import (
     answer_omx_question_other,
@@ -179,7 +181,6 @@ from .handlers.omx_questions import (
     handle_omx_question_callback,
     handle_omx_question_ui,
 )
-from .markdown_v2 import convert_markdown
 from .handlers.response_builder import (
     build_commentary_parts,
     build_response_parts,
@@ -5157,6 +5158,85 @@ def _cancel_bash_capture(
         task.cancel()
 
 
+def _bash_capture_error(result: FallbackDeliveryResult) -> Exception | None:
+    """Return legacy error for audit compatibility, preferring terminal failure."""
+    return result.plain_error or result.formatted_error
+
+
+def _bash_capture_effective_render_mode(
+    result: FallbackDeliveryResult,
+    current_render_mode: str | None,
+) -> str | None:
+    """Return the effective display render mode, preserving prior mode on no-op."""
+    if result.transport_outcome in {"edit_noop", "fallback_edit_noop"}:
+        return current_render_mode
+    return result.render_mode
+
+
+def _bash_capture_audit_text(output: str, command: str) -> str:
+    """Return bash output text safe for audit preview/hash, excluding command echo."""
+    lines = (output or "").splitlines()
+    if not lines:
+        return _sanitize_error_text(output)
+    first = lines[0].strip()
+    match_prefix = command[:10]
+    if first.startswith(f"! {match_prefix}") or first.startswith(f"!{match_prefix}"):
+        output = "\n".join(lines[1:]).strip()
+    return _sanitize_error_text(output)
+
+
+def _retry_after_delay_seconds(exc: RetryAfter) -> int:
+    retry_after = exc.retry_after
+    if isinstance(retry_after, timedelta):
+        seconds = retry_after.total_seconds()
+    elif isinstance(retry_after, int | float):
+        seconds = retry_after
+    else:
+        seconds = 1
+    return min(5, max(1, int(seconds)))
+
+
+def _audit_bash_capture_delivery(
+    *,
+    action: str,
+    user_id: int,
+    chat_id: int,
+    thread_id: int | None,
+    window_id: str,
+    command: str,
+    text: str,
+    result: FallbackDeliveryResult,
+    current_render_mode: str | None = None,
+    message_id: int | None = None,
+) -> None:
+    """Record direct ``!`` bash-capture Telegram delivery outcome."""
+    effective_render_mode = _bash_capture_effective_render_mode(
+        result,
+        current_render_mode,
+    )
+    log_telegram_delivery(
+        action=action,
+        user_id=user_id,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        message_id=message_id if message_id is not None else (
+            result.message.message_id if result.message else None
+        ),
+        window_id=window_id,
+        task_type="direct_bash_capture",
+        content_type="bash_output",
+        semantic_kind="direct_bash_capture",
+        text=_bash_capture_audit_text(text, command),
+        success=result.success,
+        error=_bash_capture_error(result),
+        reason="direct_bash_capture",
+        render_mode=effective_render_mode,
+        transport_outcome=result.transport_outcome,
+        formatted_error=result.formatted_error,
+        plain_error=result.plain_error,
+    )
+
+
 async def _capture_bash_output(
     bot: Bot,
     user_id: int,
@@ -5179,6 +5259,7 @@ async def _capture_bash_output(
 
         delivery_chat_id = chat_id or session_manager.resolve_chat_id(user_id, thread_id)
         msg_id: int | None = None
+        current_render_mode: str | None = None
         last_output: str = ""
 
         for _ in range(30):
@@ -5191,12 +5272,10 @@ async def _capture_bash_output(
                 await asyncio.sleep(1.0)
                 continue
 
-            # Skip edit if nothing changed
+            # Skip edit if nothing changed and the last observed output was delivered.
             if output == last_output:
                 await asyncio.sleep(1.0)
                 continue
-
-            last_output = output
 
             # Truncate to fit Telegram's 4096-char limit
             if len(output) > 3800:
@@ -5204,34 +5283,96 @@ async def _capture_bash_output(
 
             if msg_id is None:
                 # First capture — send a new message
-                sent = await send_with_fallback(
-                    bot,
-                    delivery_chat_id,
-                    output,
-                    message_thread_id=thread_id,
+                try:
+                    send_result = await send_with_fallback_result(
+                        bot,
+                        delivery_chat_id,
+                        output,
+                        message_thread_id=thread_id,
+                    )
+                except RetryAfter as exc:
+                    log_telegram_delivery(
+                        action="send",
+                        user_id=user_id,
+                        chat_id=delivery_chat_id,
+                        thread_id=thread_id,
+                        message_id=None,
+                        window_id=window_id,
+                        task_type="direct_bash_capture",
+                        content_type="bash_output",
+                        semantic_kind="direct_bash_capture",
+                        text=_bash_capture_audit_text(output, command),
+                        success=False,
+                        error=exc,
+                        reason="direct_bash_capture_retry_after",
+                        transport_outcome="retry_after",
+                    )
+                    await asyncio.sleep(_retry_after_delay_seconds(exc))
+                    continue
+                _audit_bash_capture_delivery(
+                    action="send",
+                    user_id=user_id,
+                    chat_id=delivery_chat_id,
+                    thread_id=thread_id,
+                    window_id=window_id,
+                    command=command,
+                    text=output,
+                    result=send_result,
                 )
+                sent = send_result.message
                 if sent:
                     msg_id = sent.message_id
+                    current_render_mode = send_result.render_mode
+                    last_output = output
             else:
                 # Subsequent captures — edit in place
                 try:
-                    await bot.edit_message_text(
+                    edit_result = await edit_message_text_with_fallback_result(
+                        bot,
                         chat_id=delivery_chat_id,
                         message_id=msg_id,
-                        text=convert_markdown(output),
-                        parse_mode="MarkdownV2",
-                        link_preview_options=NO_LINK_PREVIEW,
+                        text=output,
                     )
-                except Exception:
-                    try:
-                        await bot.edit_message_text(
-                            chat_id=delivery_chat_id,
-                            message_id=msg_id,
-                            text=output,
-                            link_preview_options=NO_LINK_PREVIEW,
-                        )
-                    except Exception:
-                        pass
+                except RetryAfter as exc:
+                    log_telegram_delivery(
+                        action="edit",
+                        user_id=user_id,
+                        chat_id=delivery_chat_id,
+                        thread_id=thread_id,
+                        message_id=msg_id,
+                        window_id=window_id,
+                        task_type="direct_bash_capture",
+                        content_type="bash_output",
+                        semantic_kind="direct_bash_capture",
+                        text=_bash_capture_audit_text(output, command),
+                        success=False,
+                        error=exc,
+                        reason="direct_bash_capture_retry_after",
+                        render_mode=current_render_mode,
+                        transport_outcome="retry_after",
+                    )
+                    await asyncio.sleep(_retry_after_delay_seconds(exc))
+                    continue
+                _audit_bash_capture_delivery(
+                    action="edit",
+                    user_id=user_id,
+                    chat_id=delivery_chat_id,
+                    thread_id=thread_id,
+                    window_id=window_id,
+                    command=command,
+                    text=output,
+                    result=edit_result,
+                    current_render_mode=current_render_mode,
+                    message_id=msg_id,
+                )
+                effective_render_mode = _bash_capture_effective_render_mode(
+                    edit_result,
+                    current_render_mode,
+                )
+                if edit_result.success:
+                    last_output = output
+                    if effective_render_mode:
+                        current_render_mode = effective_render_mode
 
             await asyncio.sleep(1.0)
     except asyncio.CancelledError:
