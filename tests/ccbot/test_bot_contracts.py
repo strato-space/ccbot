@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from telegram import CallbackQuery, MessageEntity, User
-from telegram.error import BadRequest, RetryAfter
+from telegram.error import BadRequest, RetryAfter, TimedOut
 from telegram.ext import ApplicationHandlerStop
 
 from ccbot import bot as bot_mod
@@ -6289,6 +6289,52 @@ class TestTelegramDelivery:
         )
         assert retry_row["retry_after"] == 5
         assert retry_row["backpressure_reason"] == "telegram_backpressure:retry_after:5"
+
+
+    @pytest.mark.asyncio
+    async def test_runtime_update_typing_timeout_suppresses_followup(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        bot = AsyncMock()
+        bot.send_chat_action.side_effect = TimedOut("slow")
+        audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+        monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+        now = 1000.0
+        monkeypatch.setattr(typing_indicator_mod.time, "monotonic", lambda: now)
+
+        first = await bot_mod._send_runtime_update_typing_once(
+            bot,
+            1,
+            chat_id=-100200300,
+            thread_id=42,
+        )
+        second = await bot_mod._send_runtime_update_typing_once(
+            bot,
+            1,
+            chat_id=-100200300,
+            thread_id=43,
+        )
+
+        assert first is False
+        assert second is False
+        bot.send_chat_action.assert_awaited_once()
+        rows = [
+            json.loads(line)
+            for line in audit_path.read_text(encoding="utf-8").splitlines()
+        ]
+        timeout_row = next(
+            row
+            for row in rows
+            if row["action"] == "runtime_update_typing_suppressed"
+            and row.get("transport_error_type") == "timeout"
+        )
+        assert timeout_row["backpressure_reason"] == (
+            "telegram_backpressure:transport_timeout"
+        )
+        followup_row = rows[-1]
+        assert followup_row["reason"] == "telegram_backpressure:transport_timeout"
 
     @pytest.mark.asyncio
     async def test_handle_new_message_sends_runtime_update_typing_before_content(self, monkeypatch):

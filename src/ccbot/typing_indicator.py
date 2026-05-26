@@ -67,7 +67,7 @@ def runtime_update_backpressure_reason(chat_id: int) -> str | None:
     return reason
 
 
-def _audit_typing_suppressed(
+def _audit_transport_suppressed(
     *,
     user_id: int,
     chat_id: int,
@@ -76,22 +76,79 @@ def _audit_typing_suppressed(
     reason: str,
     error: Exception | None = None,
     retry_after: float | None = None,
+    action: str = "runtime_update_typing_suppressed",
+    content_type: str = "chat_action",
+    semantic_kind: str = "typing_suppressed",
+    text: str = "typing",
 ) -> None:
     log_telegram_delivery(
-        action="runtime_update_typing_suppressed",
+        action=action,
         user_id=user_id,
         chat_id=chat_id,
         thread_id=thread_id,
         window_id=window_id,
         task_type="telegram_transport",
-        content_type="chat_action",
-        semantic_kind="typing_suppressed",
-        text="typing",
+        content_type=content_type,
+        semantic_kind=semantic_kind,
+        text=text,
         reason=reason,
         error=error,
         retry_after=retry_after,
         backpressure_reason=reason,
     )
+
+def reserve_runtime_update_transport_budget(
+    *,
+    user_id: int,
+    chat_id: int,
+    thread_id: int | None,
+    window_id: str | None = None,
+    action: str,
+    content_type: str = "chat_action",
+    semantic_kind: str,
+    text: str,
+) -> bool:
+    """Reserve chat-level budget for nonessential runtime Telegram traffic.
+
+    This gate is shared by typing indicators, mutable status updates, and
+    status/topic probes so parallel topics in one chat cannot multiply optional
+    Bot API calls while durable content delivery remains queue-owned.
+    """
+    now = time.monotonic()
+    backpressure_reason = runtime_update_backpressure_reason(chat_id)
+    if backpressure_reason is not None:
+        _audit_transport_suppressed(
+            user_id=user_id,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            window_id=window_id,
+            reason=f"telegram_backpressure:{backpressure_reason}",
+            action=action,
+            content_type=content_type,
+            semantic_kind=semantic_kind,
+            text=text,
+        )
+        return False
+    chat_last_sent = _runtime_update_typing_chat_last_sent.get(chat_id)
+    if (
+        chat_last_sent is not None
+        and now - chat_last_sent < RUNTIME_UPDATE_TYPING_THROTTLE_SECONDS
+    ):
+        _audit_transport_suppressed(
+            user_id=user_id,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            window_id=window_id,
+            reason="telegram_chat_budget",
+            action=action,
+            content_type=content_type,
+            semantic_kind=semantic_kind,
+            text=text,
+        )
+        return False
+    _runtime_update_typing_chat_last_sent[chat_id] = now
+    return True
+
 
 
 async def send_runtime_update_typing_once(
@@ -109,16 +166,6 @@ async def send_runtime_update_typing_once(
     not the owner user id, so shared group surfaces cannot multiply request rate.
     """
     now = time.monotonic()
-    backpressure_reason = runtime_update_backpressure_reason(chat_id)
-    if backpressure_reason is not None:
-        _audit_typing_suppressed(
-            user_id=user_id,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            window_id=window_id,
-            reason=f"telegram_backpressure:{backpressure_reason}",
-        )
-        return False
     key = _runtime_update_typing_key(
         chat_id=chat_id,
         thread_id=thread_id,
@@ -129,25 +176,31 @@ async def send_runtime_update_typing_once(
         and now - last_sent < RUNTIME_UPDATE_TYPING_THROTTLE_SECONDS
     ):
         return False
-    chat_last_sent = _runtime_update_typing_chat_last_sent.get(chat_id)
-    if (
-        chat_last_sent is not None
-        and now - chat_last_sent < RUNTIME_UPDATE_TYPING_THROTTLE_SECONDS
+    if not reserve_runtime_update_transport_budget(
+        user_id=user_id,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        window_id=window_id,
+        action="runtime_update_typing_suppressed",
+        semantic_kind="typing_suppressed",
+        text="typing",
     ):
         return False
     # Reserve the throttle slot before the network call. This keeps repeated
     # transport failures/timeouts from producing one Bot API attempt per update.
     _runtime_update_typing_last_sent[key] = now
-    _runtime_update_typing_chat_last_sent[chat_id] = now
     try:
-        kwargs: dict[str, object] = {}
         if thread_id is not None:
-            kwargs["message_thread_id"] = thread_id
-        await bot.send_chat_action(
-            chat_id=chat_id,
-            action=ChatAction.TYPING,
-            **kwargs,
-        )
+            await bot.send_chat_action(
+                chat_id=chat_id,
+                action=ChatAction.TYPING,
+                message_thread_id=thread_id,
+            )
+        else:
+            await bot.send_chat_action(
+                chat_id=chat_id,
+                action=ChatAction.TYPING,
+            )
         log_telegram_delivery(
             action="runtime_update_typing",
             user_id=user_id,
@@ -167,7 +220,7 @@ async def send_runtime_update_typing_once(
             seconds=retry_after,
             reason=f"retry_after:{retry_after}",
         )
-        _audit_typing_suppressed(
+        _audit_transport_suppressed(
             user_id=user_id,
             chat_id=chat_id,
             thread_id=thread_id,
@@ -184,7 +237,7 @@ async def send_runtime_update_typing_once(
             seconds=RUNTIME_UPDATE_TYPING_DEGRADED_COOLDOWN_SECONDS,
             reason="transport_timeout",
         )
-        _audit_typing_suppressed(
+        _audit_transport_suppressed(
             user_id=user_id,
             chat_id=chat_id,
             thread_id=thread_id,

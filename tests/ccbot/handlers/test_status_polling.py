@@ -17,6 +17,7 @@ import pytest
 from telegram.error import BadRequest, RetryAfter
 
 from ccbot.handlers.status_polling import update_status_message
+from ccbot import typing_indicator as typing_indicator_mod
 from ccbot.handlers import status_polling as status_polling_mod
 from ccbot.tmux_manager import TmuxWindow
 
@@ -43,22 +44,27 @@ def _clear_interactive_state():
 
 
 @pytest.fixture(autouse=True)
-def _clear_runtime_presence():
+async def _clear_runtime_presence():
     from ccbot.handlers import message_queue as mq
 
     status_polling_mod._runtime_presence.clear()
     status_polling_mod._last_pane_text.clear()
+    status_polling_mod._optional_transport_rotation_cursors.clear()
     mq._latest_pre_final_visible_kind.clear()
     mq._pre_final_visible_closed.clear()
     mq._technical_status_closed.clear()
     mq._turn_generations.clear()
+    typing_indicator_mod.clear_runtime_update_typing_state()
     yield
     status_polling_mod._runtime_presence.clear()
     status_polling_mod._last_pane_text.clear()
+    status_polling_mod._optional_transport_rotation_cursors.clear()
     mq._latest_pre_final_visible_kind.clear()
     mq._pre_final_visible_closed.clear()
     mq._technical_status_closed.clear()
     mq._turn_generations.clear()
+    typing_indicator_mod.clear_runtime_update_typing_state()
+    await mq.shutdown_workers()
 
 
 @pytest.mark.usefixtures("_clear_interactive_state")
@@ -135,6 +141,85 @@ class TestStatusPollerSettingsDetection:
             mock_handle_ui.assert_not_called()
             mock_status.assert_awaited_once()
             assert mock_status.await_args.kwargs["turn_generation"] == 7
+
+
+    @pytest.mark.asyncio
+    async def test_runtime_status_is_chat_budgeted_across_topics(
+        self,
+        mock_bot: AsyncMock,
+        monkeypatch,
+        tmp_path,
+    ):
+        audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+        monkeypatch.setattr(
+            "ccbot.delivery_audit.config.telegram_delivery_audit_file",
+            audit_path,
+        )
+        monkeypatch.setattr(status_polling_mod.time, "monotonic", lambda: 1000.0)
+        window_a = MagicMock(window_id="@5")
+        window_b = MagicMock(window_id="@6")
+        pane_text = (
+            "some output\n"
+            "✻ Reading file\n"
+            "──────────────────────────────────────\n"
+            "❯ \n"
+            "──────────────────────────────────────\n"
+            "  [Opus 4.6] Context: 50%\n"
+        )
+
+        with (
+            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+            patch(
+                "ccbot.handlers.status_polling.handle_interactive_ui",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "ccbot.handlers.status_polling.handle_omx_question_ui",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "ccbot.handlers.status_polling.enqueue_status_update",
+                new_callable=AsyncMock,
+            ) as mock_status,
+            patch(
+                "ccbot.handlers.status_polling._maybe_enqueue_runtime_exit_warning",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "ccbot.handlers.status_polling.current_turn_generation",
+                return_value=7,
+            ),
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(side_effect=[window_a, window_b])
+            mock_tmux.capture_pane = AsyncMock(return_value=pane_text)
+
+            await update_status_message(
+                mock_bot,
+                user_id=1,
+                window_id="@5",
+                thread_id=42,
+                chat_id=-100200300,
+            )
+            await update_status_message(
+                mock_bot,
+                user_id=1,
+                window_id="@6",
+                thread_id=43,
+                chat_id=-100200300,
+            )
+
+        assert mock_status.await_count == 1
+        rows = [
+            json.loads(line)
+            for line in audit_path.read_text(encoding="utf-8").splitlines()
+        ]
+        suppressed = next(
+            row for row in rows if row["action"] == "runtime_update_status_suppressed"
+        )
+        assert suppressed["reason"] == "telegram_chat_budget"
+        assert suppressed["content_type"] == "status"
+        assert suppressed["thread_id"] == 43
 
     @pytest.mark.asyncio
     async def test_omx_question_does_not_skip_terminal_safety_checks(
@@ -667,6 +752,68 @@ async def test_status_poll_loop_uses_delivery_backlog_gate_for_skip_status(
 
 
 @pytest.mark.asyncio
+async def test_status_poll_loop_rotation_eventually_serves_second_topic(
+    mock_bot: AsyncMock,
+    monkeypatch,
+):
+    now = 1000.0
+
+    def _now():
+        return now
+
+    async def _sleep(_seconds: float):
+        nonlocal now
+        now += 4.0
+        if now > 1004.0:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(status_polling_mod.time, "monotonic", _now)
+    bindings = [
+        SimpleNamespace(
+            user_id=1,
+            thread_id=42,
+            window_id="@7",
+            surface_key="t:-100200300:42",
+            chat_id=-100200300,
+        ),
+        SimpleNamespace(
+            user_id=1,
+            thread_id=43,
+            window_id="@8",
+            surface_key="t:-100200300:43",
+            chat_id=-100200300,
+        ),
+    ]
+    windows = {thread: MagicMock(window_id=f"@{thread}") for thread in (42, 43)}
+
+    async def _find_window(window_id: str):
+        thread = 42 if window_id == "@7" else 43
+        return windows[thread]
+
+    with (
+        patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+        patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+        patch(
+            "ccbot.handlers.status_polling.update_status_message",
+            new_callable=AsyncMock,
+        ) as mock_update,
+        patch(
+            "ccbot.handlers.status_polling.asyncio.sleep",
+            side_effect=_sleep,
+        ),
+    ):
+        mock_sm.iter_topic_bindings.side_effect = [[], bindings, bindings]
+        mock_sm.is_external_binding_window_id.return_value = False
+        mock_tmux.find_window_by_id = AsyncMock(side_effect=_find_window)
+
+        with pytest.raises(asyncio.CancelledError):
+            await status_polling_mod.status_poll_loop(mock_bot)
+
+    served_threads = [call.kwargs["thread_id"] for call in mock_update.await_args_list]
+    assert served_threads[:4] == [42, 43, 43, 42]
+
+
+@pytest.mark.asyncio
 async def test_status_poll_loop_records_probe_retryafter_as_backpressure(
     mock_bot: AsyncMock,
 ):
@@ -698,6 +845,165 @@ async def test_status_poll_loop_records_probe_retryafter_as_backpressure(
         seconds=5,
         reason="topic_probe_retry_after:5",
     )
+
+
+@pytest.mark.asyncio
+async def test_topic_probe_is_chat_budgeted_across_topics(
+    mock_bot: AsyncMock,
+    monkeypatch,
+    tmp_path,
+):
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(
+        "ccbot.delivery_audit.config.telegram_delivery_audit_file",
+        audit_path,
+    )
+    monkeypatch.setattr(status_polling_mod.time, "monotonic", lambda: 1000.0)
+    bindings = [
+        SimpleNamespace(
+            user_id=1,
+            thread_id=42,
+            window_id="@7",
+            surface_key="t:-100200300:42",
+            chat_id=-100200300,
+        ),
+        SimpleNamespace(
+            user_id=1,
+            thread_id=43,
+            window_id="@8",
+            surface_key="t:-100200300:43",
+            chat_id=-100200300,
+        ),
+    ]
+    with (
+        patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.status_polling.asyncio.sleep",
+            side_effect=asyncio.CancelledError,
+        ),
+    ):
+        mock_sm.iter_topic_bindings.side_effect = [bindings, []]
+        mock_bot.unpin_all_forum_topic_messages = AsyncMock()
+
+        with pytest.raises(asyncio.CancelledError):
+            await status_polling_mod.status_poll_loop(mock_bot)
+
+    mock_bot.unpin_all_forum_topic_messages.assert_awaited_once_with(
+        chat_id=-100200300,
+        message_thread_id=42,
+    )
+    rows = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    suppressed = next(
+        row for row in rows if row["action"] == "runtime_update_probe_suppressed"
+    )
+    assert suppressed["reason"] == "telegram_chat_budget"
+    assert suppressed["content_type"] == "transport_probe"
+    assert suppressed["thread_id"] == 43
+
+
+@pytest.mark.asyncio
+async def test_topic_probe_rotation_eventually_serves_second_topic(
+    mock_bot: AsyncMock,
+    monkeypatch,
+):
+    now = 1000.0
+
+    def _now():
+        return now
+
+    async def _sleep(_seconds: float):
+        nonlocal now
+        now += 61.0
+        if now > 1061.0:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(status_polling_mod.time, "monotonic", _now)
+    bindings = [
+        SimpleNamespace(
+            user_id=1,
+            thread_id=42,
+            window_id="@7",
+            surface_key="t:-100200300:42",
+            chat_id=-100200300,
+        ),
+        SimpleNamespace(
+            user_id=1,
+            thread_id=43,
+            window_id="@8",
+            surface_key="t:-100200300:43",
+            chat_id=-100200300,
+        ),
+    ]
+    with (
+        patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.status_polling.asyncio.sleep",
+            side_effect=_sleep,
+        ),
+    ):
+        mock_sm.iter_topic_bindings.side_effect = [bindings, [], bindings, []]
+        mock_sm.is_external_binding_window_id.return_value = True
+        mock_bot.unpin_all_forum_topic_messages = AsyncMock()
+
+        with pytest.raises(asyncio.CancelledError):
+            await status_polling_mod.status_poll_loop(mock_bot)
+
+    probed_threads = [
+        call.kwargs["message_thread_id"]
+        for call in mock_bot.unpin_all_forum_topic_messages.await_args_list
+    ]
+    assert probed_threads == [42, 43]
+
+
+@pytest.mark.asyncio
+async def test_topic_probe_skips_active_backpressure_without_api_call(
+    mock_bot: AsyncMock,
+    monkeypatch,
+    tmp_path,
+):
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(
+        "ccbot.delivery_audit.config.telegram_delivery_audit_file",
+        audit_path,
+    )
+    status_polling_mod.record_runtime_update_backpressure(
+        -100200300,
+        seconds=15,
+        reason="transport_timeout",
+    )
+    binding = SimpleNamespace(
+        user_id=1,
+        thread_id=42,
+        window_id="@7",
+        surface_key="t:-100200300:42",
+        chat_id=-100200300,
+    )
+    with (
+        patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.status_polling.asyncio.sleep",
+            side_effect=asyncio.CancelledError,
+        ),
+    ):
+        mock_sm.iter_topic_bindings.side_effect = [[binding], []]
+        mock_bot.unpin_all_forum_topic_messages = AsyncMock()
+
+        with pytest.raises(asyncio.CancelledError):
+            await status_polling_mod.status_poll_loop(mock_bot)
+
+    mock_bot.unpin_all_forum_topic_messages.assert_not_awaited()
+    rows = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    suppressed = next(
+        row for row in rows if row["action"] == "runtime_update_probe_suppressed"
+    )
+    assert suppressed["reason"] == "telegram_backpressure:transport_timeout"
+    assert suppressed["content_type"] == "transport_probe"
 
 
 @pytest.mark.asyncio

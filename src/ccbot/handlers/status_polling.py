@@ -22,6 +22,8 @@ import re
 import shlex
 import time
 from pathlib import Path
+from collections.abc import Sequence
+from typing import Protocol, TypeVar
 
 from telegram import Bot
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
@@ -73,7 +75,10 @@ from .message_queue import (
     is_user_delivery_backlog_active,
     is_pre_final_visible_lane_closed,
 )
-from ..typing_indicator import record_runtime_update_backpressure
+from ..typing_indicator import (
+    record_runtime_update_backpressure,
+    reserve_runtime_update_transport_budget,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,11 +94,100 @@ TOPIC_CHECK_INTERVAL = 60.0  # seconds
 # no-topics main-chat surfaces that all share `thread_id is None`.
 _runtime_presence: dict[tuple[int, str], bool] = {}
 _last_pane_text: dict[str, str] = {}
+_optional_transport_rotation_cursors: dict[tuple[str, int], int] = {}
 _USAGE_LIMIT_NOTICE_RE = re.compile(
     r"(you've hit your usage limit|purchase more credits|credits?\b.*try again at|usage to purchase more credits)",
     re.IGNORECASE,
 )
 _SHELL_PROMPT_RE = re.compile(r"^[^\n]*[#$>]\s*$")
+
+
+class _TransportBinding(Protocol):
+    @property
+    def chat_id(self) -> int | None: ...
+
+
+_TTransportBinding = TypeVar("_TTransportBinding", bound=_TransportBinding)
+
+
+
+
+
+
+def _rotate_bindings_for_transport_fairness(
+    bindings: Sequence[_TTransportBinding],
+    *,
+    lane: str,
+) -> list[_TTransportBinding]:
+    """Rotate same-chat optional transport candidates to avoid first-topic starvation."""
+    by_chat: dict[int, list[_TTransportBinding]] = {}
+    chat_order: list[int] = []
+    passthrough: list[_TTransportBinding] = []
+    for binding in bindings:
+        chat_id = getattr(binding, "chat_id", None)
+        if chat_id is None:
+            passthrough.append(binding)
+            continue
+        if chat_id not in by_chat:
+            by_chat[chat_id] = []
+            chat_order.append(chat_id)
+        by_chat[chat_id].append(binding)
+
+    rotated: list[_TTransportBinding] = list(passthrough)
+    for chat_id in chat_order:
+        group = by_chat[chat_id]
+        if len(group) <= 1:
+            rotated.extend(group)
+            continue
+        key = (lane, chat_id)
+        cursor = _optional_transport_rotation_cursors.get(key, 0) % len(group)
+        rotated.extend(group[cursor:] + group[:cursor])
+        _optional_transport_rotation_cursors[key] = (cursor + 1) % len(group)
+    return rotated
+
+
+def _resolve_transport_chat_id(
+    *,
+    user_id: int,
+    thread_id: int | None,
+    chat_id: int | None,
+) -> int | None:
+    if chat_id is not None:
+        return chat_id
+    try:
+        return session_manager.resolve_chat_id(user_id, thread_id)
+    except Exception:
+        return None
+
+
+def _reserve_status_transport_budget(
+    *,
+    user_id: int,
+    thread_id: int | None,
+    chat_id: int | None,
+    window_id: str | None,
+    action: str = "runtime_update_status_suppressed",
+    content_type: str = "status",
+    semantic_kind: str = "status_suppressed",
+    text: str = "status",
+) -> bool:
+    resolved_chat_id = _resolve_transport_chat_id(
+        user_id=user_id,
+        thread_id=thread_id,
+        chat_id=chat_id,
+    )
+    if resolved_chat_id is None:
+        return True
+    return reserve_runtime_update_transport_budget(
+        user_id=user_id,
+        chat_id=resolved_chat_id,
+        thread_id=thread_id,
+        window_id=window_id,
+        action=action,
+        content_type=content_type,
+        semantic_kind=semantic_kind,
+        text=text,
+    )
 
 
 def _retry_after_seconds(exc: RetryAfter) -> int:
@@ -648,18 +742,28 @@ async def update_status_message(
             else parse_omx_statusline(pane_text)
         )
         if omx_workflow_status is not None:
-            await enqueue_status_update(
-                bot,
-                user_id,
-                window_id,
-                render_omx_workflow_status(omx_workflow_status),
+            if not skip_status and _reserve_status_transport_budget(
+                user_id=user_id,
                 thread_id=thread_id,
                 chat_id=chat_id,
-                surface_key=surface_key,
-                turn_generation=turn_generation,
+                window_id=window_id,
+                action="runtime_update_status_suppressed",
                 content_type=OMX_WORKFLOW_PANEL_CONTENT_TYPE,
                 semantic_kind=OMX_WORKFLOW_STATUS_SEMANTIC_KIND,
-            )
+                text="omx_workflow_status",
+            ):
+                await enqueue_status_update(
+                    bot,
+                    user_id,
+                    window_id,
+                    render_omx_workflow_status(omx_workflow_status),
+                    thread_id=thread_id,
+                    chat_id=chat_id,
+                    surface_key=surface_key,
+                    turn_generation=turn_generation,
+                    content_type=OMX_WORKFLOW_PANEL_CONTENT_TYPE,
+                    semantic_kind=OMX_WORKFLOW_STATUS_SEMANTIC_KIND,
+                )
             return
 
     usage_limit_notice = _extract_usage_limit_notice(pane_text)
@@ -801,6 +905,13 @@ async def update_status_message(
         return
 
     if surface.kind == "busy" and surface.status_line:
+        if not _reserve_status_transport_budget(
+            user_id=user_id,
+            thread_id=thread_id,
+            chat_id=chat_id,
+            window_id=window_id,
+        ):
+            return
         await enqueue_status_update(
             bot,
             user_id,
@@ -824,7 +935,10 @@ async def status_poll_loop(bot: Bot) -> None:
             now = time.monotonic()
             if now - last_topic_check >= TOPIC_CHECK_INTERVAL:
                 last_topic_check = now
-                for binding in list(session_manager.iter_topic_bindings()):
+                for binding in _rotate_bindings_for_transport_fairness(
+                    list(session_manager.iter_topic_bindings()),
+                    lane="topic_probe",
+                ):
                     user_id = binding.user_id
                     thread_id = binding.thread_id
                     wid = binding.window_id
@@ -833,14 +947,31 @@ async def status_poll_loop(bot: Bot) -> None:
                     try:
                         if thread_id is None:
                             continue
-                        await bot.unpin_all_forum_topic_messages(
-                            chat_id=chat_id
+                        assert thread_id is not None
+                        resolved_chat_id = (
+                            chat_id
                             if chat_id is not None
-                            else session_manager.resolve_chat_id(user_id, thread_id),
+                            else session_manager.resolve_chat_id(user_id, thread_id)
+                        )
+                        if not _reserve_status_transport_budget(
+                            user_id=user_id,
+                            thread_id=thread_id,
+                            chat_id=resolved_chat_id,
+                            window_id=wid,
+                            action="runtime_update_probe_suppressed",
+                            content_type="transport_probe",
+                            semantic_kind="topic_probe_suppressed",
+                            text="topic_probe",
+                        ):
+                            continue
+                        await bot.unpin_all_forum_topic_messages(
+                            chat_id=resolved_chat_id,
                             message_thread_id=thread_id,
                         )
                     except BadRequest as e:
                         if "Topic_id_invalid" in str(e):
+                            if thread_id is None:
+                                continue
                             # Topic deleted — kill window, unbind, and clean up state
                             w = await tmux_manager.find_window_by_id(wid)
                             if w:
@@ -899,7 +1030,10 @@ async def status_poll_loop(bot: Bot) -> None:
                             e,
                         )
 
-            for binding in list(session_manager.iter_topic_bindings()):
+            for binding in _rotate_bindings_for_transport_fairness(
+                list(session_manager.iter_topic_bindings()),
+                lane="status",
+            ):
                 user_id = binding.user_id
                 thread_id = binding.thread_id
                 wid = binding.window_id
