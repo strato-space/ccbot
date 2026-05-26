@@ -194,6 +194,7 @@ These commands are registered in the Telegram bot menu as the stable topic-contr
 | `/resume <token>` | Bind this topic to a persisted runtime thread | Not valid for unbound shared group named topics; works only after active binding or in non-shared/non-named-topic lanes that explicitly support resume |
 | `/rename <name>` | Rename the current tmux window and topic | Sync the live tmux label, forum topic title, and supported runtime title metadata |
 | `/esc` | Interrupt the active runtime task | Sends Escape to the current tmux pane |
+| `/reboot` | Admin maintenance restart | Requires `ALLOWED_USERS` plus Telegram `administrator`/`creator` status, or `CCBOT_REBOOT_ADMIN_USERS`; restarts only configured current-user OMX/runtime process targets and allowlisted `systemctl --user` `.service` units, orders `ccbot.service` last, hard-ignores foreign/unbound topics, and never reboots the host |
 
 When the configured launch lane is Codex, ccbot also advertises the Codex core lane:
 
@@ -233,11 +234,12 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
   - mutable Codex plan-update artifact
   - any future surfaced preview bubble explicitly promoted by product policy
 - Once the final assistant answer lands, that whole pre-final visible surface is
-  closed until the next user turn, and the mutable technical status artifact
-  are both closed with it. In other words, the mutable technical status artifact
-  are both closed until the next user turn once the terminal assistant bubble lands.
-- Exact invariant: `mutable technical status artifact are both closed` once the
-  terminal assistant bubble lands for that turn.
+  closed until the next user turn, and mutable status lanes (technical status and
+  optional OMX workflow status) are closed with it. In other words, mutable
+  status artifacts stay closed until the next user turn once the terminal
+  assistant bubble lands.
+- Exact invariant: mutable status artifacts are closed once the terminal
+  assistant bubble lands for that turn.
 
 ### Compact Telegram Delivery Contract
 

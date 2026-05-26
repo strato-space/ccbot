@@ -1191,6 +1191,7 @@ class TestBotRegistration:
             "switch",
             "steer",
             "queue",
+            "reboot",
             "clear",
             "compact",
             "diff",
@@ -1219,6 +1220,7 @@ class TestBotRegistration:
             "switch",
             "steer",
             "queue",
+            "reboot",
         ]
         assert "status" not in names
 
@@ -8234,3 +8236,172 @@ class TestTopicTitleSyncNoop:
         rendered = mock_edit.await_args.args[1]
         assert "Telegram topic title could not be synced" not in rendered
         assert "Started fresh thread" in rendered
+
+
+class TestRebootCommand:
+    @pytest.mark.asyncio
+    async def test_reboot_denies_allowed_non_admin_without_scheduling(self):
+        update = _make_topic_update(thread_id=42, chat_id=100, text="/reboot")
+        context = _make_context()
+        context.bot.get_chat_member = AsyncMock(return_value=SimpleNamespace(status="member"))
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch.object(bot_mod.config, "reboot_admin_users", set()),
+            patch("ccbot.bot._should_hard_ignore_unbound_group_topic_update", return_value=False),
+            patch("ccbot.bot._schedule_reboot_maintenance") as mock_schedule,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            await bot_mod.reboot_command(update, context)
+
+        mock_schedule.assert_not_called()
+        assert "restricted" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_reboot_allows_chat_admin_and_schedules_after_reply(self):
+        update = _make_topic_update(thread_id=42, chat_id=100, text="/reboot")
+        context = _make_context()
+        context.bot.get_chat_member = AsyncMock(return_value=SimpleNamespace(status="administrator"))
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch.object(bot_mod.config, "reboot_admin_users", set()),
+            patch.object(bot_mod.config, "reboot_process_patterns", ["omx"]),
+            patch.object(bot_mod.config, "reboot_systemd_units", ["ccbot.service"]),
+            patch("ccbot.bot._should_hard_ignore_unbound_group_topic_update", return_value=False),
+            patch("ccbot.bot._schedule_reboot_maintenance") as mock_schedule,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            await bot_mod.reboot_command(update, context)
+
+        mock_reply.assert_awaited_once()
+        mock_schedule.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_reboot_admin_lookup_failure_fails_closed_without_override(self):
+        update = _make_topic_update(thread_id=42, chat_id=100, text="/reboot")
+        context = _make_context()
+        context.bot.get_chat_member = AsyncMock(side_effect=RuntimeError("telegram down"))
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch.object(bot_mod.config, "reboot_admin_users", set()),
+            patch("ccbot.bot._should_hard_ignore_unbound_group_topic_update", return_value=False),
+            patch("ccbot.bot._schedule_reboot_maintenance") as mock_schedule,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            await bot_mod.reboot_command(update, context)
+
+        mock_schedule.assert_not_called()
+        assert "restricted" in mock_reply.await_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_reboot_override_allows_without_chat_admin_lookup(self):
+        update = _make_topic_update(thread_id=42, chat_id=100, user_id=77, text="/reboot")
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch.object(bot_mod.config, "reboot_admin_users", {77}),
+            patch.object(bot_mod.config, "reboot_process_patterns", []),
+            patch.object(bot_mod.config, "reboot_systemd_units", ["ccbot.service"]),
+            patch("ccbot.bot._should_hard_ignore_unbound_group_topic_update", return_value=False),
+            patch("ccbot.bot._schedule_reboot_maintenance") as mock_schedule,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            await bot_mod.reboot_command(update, context)
+
+        context.bot.get_chat_member.assert_not_called()
+        mock_schedule.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_reboot_hard_ignored_unbound_topic_is_silent(self):
+        update = _make_topic_update(thread_id=5733, chat_id=100, text="/reboot")
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._should_hard_ignore_unbound_group_topic_update", return_value=True),
+            patch("ccbot.bot._schedule_reboot_maintenance") as mock_schedule,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            await bot_mod.reboot_command(update, context)
+
+        mock_schedule.assert_not_called()
+        mock_reply.assert_not_awaited()
+
+    def test_reboot_maintenance_argv_is_allowlisted_and_orders_ccbot_last(self):
+        with (
+            patch.object(bot_mod.config, "reboot_process_patterns", ["omx", "bad/pattern", "ccbot", "reboot", "..", "a+"]),
+            patch.object(
+                bot_mod.config,
+                "reboot_systemd_units",
+                ["ccbot.service", "hermes-gateway.service", "bad;unit.service"],
+            ),
+            patch("ccbot.bot.os.getuid", return_value=123),
+        ):
+            commands = bot_mod._build_reboot_maintenance_argv()
+            transient = bot_mod._build_reboot_transient_argv()
+
+        assert ["pkill", "-TERM", "-u", "123", "-f", "--", "omx"] in commands
+        systemd_units = [cmd[-1] for cmd in commands if cmd[:3] == ["systemctl", "--user", "restart"]]
+        assert systemd_units == ["hermes-gateway.service", "ccbot.service"]
+        pkill_flat = " ".join(" ".join(cmd) for cmd in commands if cmd and cmd[0] == "pkill")
+        flat = " ".join(" ".join(cmd) for cmd in commands)
+        assert "bad/pattern" not in flat
+        assert "ccbot" not in pkill_flat
+        assert "reboot" not in pkill_flat
+        assert ".." not in pkill_flat
+        assert "a+" not in pkill_flat
+        assert "bad;unit" not in flat
+        assert "sudo" not in flat
+        assert "shutdown" not in flat
+        assert transient is not None
+        assert transient[:3] == ["systemd-run", "--user", "--collect"]
+        transient_text = " ".join(transient)
+        assert "omx" not in transient_text
+        assert "hermes-gateway.service" not in transient_text
+        command_file = Path(transient[-1])
+        assert command_file.exists()
+        assert command_file.stat().st_mode & 0o777 == 0o600
+        command_file.unlink()
+
+    def test_reboot_command_registered_before_generic_forwarder(self, monkeypatch):
+        class _StubApp:
+            def __init__(self):
+                self.handlers = []
+                self.handler_groups = []
+                self.bot = SimpleNamespace(rate_limiter=SimpleNamespace(_base_limiter=None))
+
+            def add_handler(self, handler, group=0):
+                self.handlers.append(handler)
+                self.handler_groups.append(group)
+
+        class _StubBuilder:
+            def __init__(self):
+                self._app = _StubApp()
+            def token(self, _token): return self
+            def rate_limiter(self, _limiter): return self
+            def post_init(self, _callback): return self
+            def post_shutdown(self, _callback): return self
+            def proxy(self, _value): return self
+            def get_updates_proxy(self, _value): return self
+            def get_updates_connection_pool_size(self, _value): return self
+            def get_updates_pool_timeout(self, _value): return self
+            def get_updates_connect_timeout(self, _value): return self
+            def get_updates_read_timeout(self, _value): return self
+            def get_updates_write_timeout(self, _value): return self
+            def connection_pool_size(self, _value): return self
+            def pool_timeout(self, _value): return self
+            def connect_timeout(self, _value): return self
+            def read_timeout(self, _value): return self
+            def write_timeout(self, _value): return self
+            def build(self): return self._app
+
+        monkeypatch.setattr(bot_mod.config, "telegram_bot_token", "test-token")
+        monkeypatch.setattr(bot_mod.Application, "builder", lambda: _StubBuilder())
+        app = bot_mod.create_bot()
+        callbacks = [getattr(handler, "callback", None).__name__ for handler in app.handlers if getattr(handler, "callback", None) is not None]
+        assert "reboot_command" in callbacks
+        assert callbacks.index("reboot_command") < callbacks.index("forward_command_handler")
+        assert any(command.command == "reboot" for command in bot_mod.build_bot_commands())

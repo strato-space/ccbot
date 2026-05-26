@@ -373,8 +373,9 @@ terminal-control panel. When a bound window has recognized, fresh `.omx` state,
 ccbot may project it as `omx_workflow_panel` / `omx_workflow_status`, rendered as
 one compact latest-only status bubble such as `🧭 OMX ultragoal 1/6 · G002 ·
 running` plus a clipped current-unit summary. The artifact is scoped to the same
-delivery surface/window mutable status identity and workflow transitions edit or
-replace that single slot. Because this is telemetry rather than live terminal
+delivery surface/window as a dedicated OMX workflow status lane; workflow
+transitions edit or replace that lane and must not overwrite the ordinary
+technical-status lane. Because this is telemetry rather than live terminal
 control, it obeys final-answer closure: stale or new OMX workflow status must
 not appear below an already delivered final answer unless a new user turn
 reopens status delivery. Unknown, stale, corrupt, or unrelated `.omx` state is

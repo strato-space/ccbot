@@ -46,9 +46,12 @@ import mimetypes
 import os
 import contextlib
 import inspect
+import json
+import tempfile
 import re
 import shutil
 import subprocess  # nosec B404 - ffmpeg is invoked with fixed argv and no shell
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -273,6 +276,11 @@ CLAUDE_ONLY_COMMAND_HINTS: dict[str, str] = {
 CODEX_REJECTED_COMMAND_HINTS: dict[str, str] = {
     "quit": "⚠️ `/quit` is no longer part of the supported Codex Telegram surface. Use `/exit` instead.",
 }
+
+_REBOOT_ADMIN_STATUSES = {"administrator", "creator", "owner"}
+_SAFE_SYSTEMD_UNIT_RE = re.compile(r"^[A-Za-z0-9_.@:-]+\.service$")
+_SAFE_REBOOT_PATTERN_RE = re.compile(r"^[A-Za-z0-9_:@-]{2,80}$")
+_REBOOT_PROCESS_PATTERN_DENYLIST = {"ccbot", "tmux", "systemd", "python", "python3", "reboot", "maintenance"}
 
 UNBOUND_TOPIC_MESSAGE = "❌ No live tmux window is bound to this topic."
 BIND_FLOW_ACTIVE_MESSAGE = (
@@ -2012,6 +2020,7 @@ def build_bot_commands() -> list[BotCommand]:
         BotCommand("switch", "Toggle or set Telegram steer/queue routing mode"),
         BotCommand("steer", "Send prompt with immediate steer semantics"),
         BotCommand("queue", "Send prompt with queued runtime semantics"),
+        BotCommand("reboot", "Admin maintenance restart for OMX/services"),
     ]
     if default_runtime_kind == "codex":
         for cmd_name, desc in CODEX_MENU_COMMANDS.items():
@@ -2729,6 +2738,167 @@ async def bind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     await _start_bind_flow(update, context, user, surface, explicit=True)
+
+
+def _safe_reboot_systemd_units() -> list[str]:
+    """Return configured user-service units safe for maintenance restart."""
+    units: list[str] = []
+    for unit in getattr(config, "reboot_systemd_units", []):
+        name = str(unit or "").strip()
+        if not name:
+            continue
+        if not _SAFE_SYSTEMD_UNIT_RE.match(name):
+            logger.warning("Ignoring unsafe reboot systemd unit name: %r", name)
+            continue
+        if name not in units:
+            units.append(name)
+    return sorted(units, key=lambda value: value == "ccbot.service")
+
+
+def _safe_reboot_process_patterns() -> list[str]:
+    """Return configured current-user process patterns for maintenance stops."""
+    patterns: list[str] = []
+    for pattern in getattr(config, "reboot_process_patterns", []):
+        value = str(pattern or "").strip()
+        if not value:
+            continue
+        if not _SAFE_REBOOT_PATTERN_RE.match(value):
+            logger.warning("Ignoring unsafe reboot process pattern: %r", value)
+            continue
+        if value.casefold() in _REBOOT_PROCESS_PATTERN_DENYLIST:
+            logger.warning("Ignoring runner-colliding reboot process pattern: %r", value)
+            continue
+        if value not in patterns:
+            patterns.append(value)
+    return patterns
+
+
+def _build_reboot_maintenance_argv() -> list[list[str]]:
+    """Build allowlisted argv-only maintenance commands for tests/runner."""
+    commands: list[list[str]] = []
+    for pattern in _safe_reboot_process_patterns():
+        commands.append(["pkill", "-TERM", "-u", str(os.getuid()), "-f", "--", pattern])
+    for unit in _safe_reboot_systemd_units():
+        commands.append(["systemctl", "--user", "restart", unit])
+    return commands
+
+
+def _write_reboot_command_file(commands: list[list[str]]) -> str:
+    """Persist sanitized maintenance argv outside the runner command line."""
+    config.config_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        prefix="reboot-maintenance-",
+        suffix=".json",
+        dir=config.config_dir,
+        delete=False,
+    ) as handle:
+        os.chmod(handle.name, 0o600)
+        json.dump(commands, handle, separators=(",", ":"))
+        handle.write("\n")
+        return handle.name
+
+
+def _build_reboot_transient_argv() -> list[str] | None:
+    """Build a detached user systemd transient argv for /reboot maintenance."""
+    commands = _build_reboot_maintenance_argv()
+    if not commands:
+        return None
+    command_file = _write_reboot_command_file(commands)
+    unit_name = f"ccbot-maintenance-reboot-{int(time.time())}"
+    runner = (
+        "import json, os, subprocess, sys; "
+        "path=sys.argv[1]; "
+        "cmds=json.load(open(path, encoding='utf-8')); "
+        "os.unlink(path); "
+        "[subprocess.run(cmd, timeout=30, check=False) for cmd in cmds]"
+    )
+    return [
+        "systemd-run",
+        "--user",
+        "--collect",
+        f"--unit={unit_name}",
+        sys.executable or (shutil.which("python3") or "python3"),
+        "-c",
+        runner,
+        command_file,
+    ]
+
+
+def _schedule_reboot_maintenance() -> asyncio.Task[None]:
+    """Schedule admin maintenance after the Telegram acknowledgement."""
+
+    async def _runner() -> None:
+        delay = float(getattr(config, "reboot_schedule_delay_seconds", 1.5) or 0.0)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        argv = _build_reboot_transient_argv()
+        if argv is None:
+            logger.warning("/reboot requested but no maintenance targets are configured")
+            return
+        try:
+            subprocess.Popen(  # noqa: S603 - fixed executable plus sanitized allowlist argv
+                argv,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            logger.info("Scheduled /reboot maintenance transient unit")
+        except Exception as exc:
+            logger.error("Failed to schedule /reboot maintenance: %s", exc)
+
+    return asyncio.create_task(_runner())
+
+
+async def _is_reboot_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        return False
+    if user.id in getattr(config, "reboot_admin_users", set()):
+        return True
+    chat = update.effective_chat
+    if chat is None:
+        return False
+    chat_type = str(getattr(chat, "type", "") or "").lower()
+    if chat_type == "private":
+        return False
+    try:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+    except Exception as exc:
+        logger.warning("Could not verify Telegram admin for /reboot: %s", exc)
+        return False
+    status = str(getattr(member, "status", "") or "").lower()
+    return status in _REBOOT_ADMIN_STATUSES
+
+
+async def reboot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin-only maintenance restart for OMX processes and user services."""
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        return
+    if not update.message:
+        return
+    if _should_hard_ignore_unbound_group_topic_update(update, context):
+        return
+    _remember_group_chat_id_for_surface(user.id, update)
+    if not await _is_reboot_admin(update, context):
+        await safe_reply(
+            update.message,
+            "❌ /reboot is restricted to Telegram chat admins or configured maintenance admins.",
+        )
+        return
+
+    if not _build_reboot_maintenance_argv():
+        await safe_reply(update.message, "❌ /reboot has no configured maintenance targets.")
+        return
+
+    await safe_reply(
+        update.message,
+        "✅ Maintenance reboot scheduled. Restarting configured OMX/runtime processes "
+        "and allowlisted user systemd services; host reboot is not used.",
+    )
+    _schedule_reboot_maintenance()
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -7518,6 +7688,7 @@ def create_bot() -> Application:
     application.add_handler(CommandHandler("switch", switch_command))
     application.add_handler(CommandHandler("steer", steer_command))
     application.add_handler(CommandHandler("queue", queue_command))
+    application.add_handler(CommandHandler("reboot", reboot_command))
     application.add_handler(CallbackQueryHandler(callback_handler))
     # Topic closed event — auto-kill associated window
     application.add_handler(

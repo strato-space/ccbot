@@ -4571,3 +4571,99 @@ async def test_omx_workflow_status_does_not_bypass_closed_technical_status() -> 
 
     mock_queue_factory.assert_not_called()
     mq._technical_status_closed.clear()
+
+
+@pytest.mark.asyncio
+async def test_omx_workflow_status_uses_separate_mutable_status_lane(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", tmp_path / "audit.jsonl")
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    await mq.shutdown_workers()
+
+    sent_omx = SimpleNamespace(message_id=101)
+    sent_technical = SimpleNamespace(message_id=202)
+    bot = AsyncMock()
+
+    with (
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        patch("ccbot.handlers.message_queue.send_with_fallback", new_callable=AsyncMock) as mock_send,
+        patch("ccbot.handlers.message_queue.current_turn_generation", return_value=0),
+        patch("ccbot.handlers.message_queue._is_task_binding_active", new_callable=AsyncMock, return_value=True),
+    ):
+        mock_sm.resolve_chat_id.return_value = 100
+        mock_send.side_effect = [sent_omx, sent_technical]
+        await enqueue_status_update(
+            bot,
+            1,
+            "@7",
+            "🧭 OMX ultragoal 4/8 · G005 · running",
+            thread_id=42,
+            content_type=OMX_WORKFLOW_PANEL_CONTENT_TYPE,
+            semantic_kind=OMX_WORKFLOW_STATUS_SEMANTIC_KIND,
+        )
+        await enqueue_status_update(
+            bot,
+            1,
+            "@7",
+            "⌘ Command\n```sh\npytest\n```",
+            thread_id=42,
+        )
+        queue = mq.get_or_create_queue(bot, 1)
+        await queue.join()
+
+    base_key = mq._topic_state_key(1, 42)
+    omx_key = mq._status_tracking_key(
+        base_key,
+        content_type=OMX_WORKFLOW_PANEL_CONTENT_TYPE,
+        semantic_kind=OMX_WORKFLOW_STATUS_SEMANTIC_KIND,
+    )
+    assert mq._status_msg_info[omx_key][0] == 101
+    assert mq._status_msg_info[base_key][0] == 202
+    bot.edit_message_text.assert_not_awaited()
+    await mq.shutdown_workers()
+    mq._status_msg_info.clear()
+
+
+@pytest.mark.asyncio
+async def test_status_clear_deletes_all_status_lanes_with_lane_metadata(monkeypatch, tmp_path) -> None:
+    audit_path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    await mq.shutdown_workers()
+
+    base_key = mq._topic_state_key(1, 42)
+    omx_key = mq._status_tracking_key(
+        base_key,
+        content_type=OMX_WORKFLOW_PANEL_CONTENT_TYPE,
+        semantic_kind=OMX_WORKFLOW_STATUS_SEMANTIC_KIND,
+    )
+    mq._status_msg_info[base_key] = (202, "@7", "technical")
+    mq._status_msg_info[omx_key] = (101, "@7", "omx")
+    mq._persist_status_msg_info(base_key, (202, "@7", "technical"))
+    mq._persist_status_msg_info(
+        omx_key,
+        (101, "@7", "omx"),
+        content_type=OMX_WORKFLOW_PANEL_CONTENT_TYPE,
+        semantic_kind=OMX_WORKFLOW_STATUS_SEMANTIC_KIND,
+    )
+    bot = AsyncMock()
+
+    with (
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        patch("ccbot.handlers.message_queue.current_turn_generation", return_value=0),
+        patch("ccbot.handlers.message_queue._is_task_binding_active", new_callable=AsyncMock, return_value=True),
+    ):
+        mock_sm.resolve_chat_id.return_value = 100
+        await enqueue_status_update(bot, 1, "@7", None, thread_id=42)
+        queue = mq.get_or_create_queue(bot, 1)
+        await queue.join()
+
+    assert bot.delete_message.await_count == 2
+    assert base_key not in mq._status_msg_info
+    assert omx_key not in mq._status_msg_info
+    rows = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    deleted_semantics = {row["semantic_kind"] for row in rows if row["action"] == "delete"}
+    assert {"technical_status", OMX_WORKFLOW_STATUS_SEMANTIC_KIND} <= deleted_semantics
+    await mq.shutdown_workers()
+    mq._status_msg_info.clear()

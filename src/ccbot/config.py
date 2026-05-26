@@ -24,6 +24,7 @@ SENSITIVE_ENV_VARS = {
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_TOKEN",
     "ALLOWED_USERS",
+    "CCBOT_REBOOT_ADMIN_USERS",
     "OPENAI_API_KEY",
 }
 
@@ -92,6 +93,13 @@ def _csv_env_set(name: str) -> set[str]:
         return set()
     return {item.strip() for item in value.split(",") if item.strip()}
 
+
+def _csv_env_list(name: str, default: str = "") -> list[str]:
+    value = os.getenv(name, default).strip()
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
 def _bool_env(name: str, default: bool = False) -> bool:
     value = os.getenv(name, "").strip().lower()
     if not value:
@@ -154,6 +162,33 @@ class Config:
         # side effects (typing, replies, downloads, runtime input).
         self.owned_surface_keys = _csv_env_set("CCBOT_OWNED_SURFACES")
         self.ignored_surface_keys = _csv_env_set("CCBOT_IGNORED_SURFACES")
+
+        reboot_admins = os.getenv("CCBOT_REBOOT_ADMIN_USERS", "").strip()
+        try:
+            self.reboot_admin_users: set[int] = {
+                int(uid.strip()) for uid in reboot_admins.split(",") if uid.strip()
+            }
+        except ValueError as e:
+            raise ValueError(
+                f"CCBOT_REBOOT_ADMIN_USERS contains non-numeric value: {e}. "
+                "Expected comma-separated Telegram user IDs."
+            ) from e
+        self.reboot_process_patterns: list[str] = _csv_env_list(
+            "CCBOT_REBOOT_PROCESS_PATTERNS",
+            "omx,oh-my-codex",
+        )
+        self.reboot_systemd_units: list[str] = _csv_env_list(
+            "CCBOT_REBOOT_SYSTEMD_UNITS",
+            "ccbot.service,hermes-gateway.service,hermes-gateway-comfy.service,"
+            "hermes-gateway-hercules.service,hermes-gateway-imm.service,"
+            "imm_arena_bot.service",
+        )
+        self.reboot_schedule_delay_seconds = _bounded_float_env(
+            "CCBOT_REBOOT_SCHEDULE_DELAY_SECONDS",
+            1.5,
+            minimum=0.0,
+            maximum=60.0,
+        )
 
         draft_preview_mode = os.getenv("CCBOT_TELEGRAM_DRAFT_PREVIEW", "off").strip().lower()
         if draft_preview_mode not in {"off", "probe", "on"}:

@@ -270,12 +270,21 @@ def _write_status_artifacts(data: dict[str, dict[str, object]]) -> None:
         logger.debug("Failed to write status artifact registry: %s", exc)
 
 
-def _persist_status_msg_info(key: TopicStateKey, info: tuple[int, str, str]) -> None:
+def _persist_status_msg_info(
+    key: TopicStateKey,
+    info: tuple[int, str, str],
+    *,
+    content_type: str = "status",
+    semantic_kind: str = "technical_status",
+) -> None:
     data = _load_status_artifacts()
     data[_status_key_to_storage_key(key)] = {
         "message_id": info[0],
         "window_id": info[1],
         "last_text": info[2],
+        "content_type": content_type,
+        "semantic_kind": semantic_kind,
+        "status_lane": _status_lane_suffix(content_type, semantic_kind) or "technical_status",
         "updated_at": time.time(),
     }
     _write_status_artifacts(data)
@@ -287,6 +296,20 @@ def _clear_persisted_status_msg_info(key: TopicStateKey) -> None:
     if storage_key in data:
         data.pop(storage_key, None)
         _write_status_artifacts(data)
+
+
+def _status_artifact_metadata(key: TopicStateKey) -> tuple[str, str]:
+    raw = _load_status_artifacts().get(_status_key_to_storage_key(key))
+    if isinstance(raw, dict):
+        content_type = str(raw.get("content_type") or "status")
+        semantic_kind = str(raw.get("semantic_kind") or "technical_status")
+        return content_type, semantic_kind
+    if isinstance(key[1], str) and "|status:" in key[1]:
+        _prefix, _sep, suffix = key[1].partition("|status:")
+        content_type, sep, semantic_kind = suffix.partition(":")
+        if sep and content_type and semantic_kind:
+            return content_type, semantic_kind
+    return "status", "technical_status"
 
 
 def _hydrate_status_msg_info(key: TopicStateKey, window_id: str) -> tuple[int, str, str] | None:
@@ -412,6 +435,62 @@ def _task_state_key(user_id: int, task: MessageTask) -> TopicStateKey:
         chat_id=task.chat_id,
         surface_key=task.surface_key,
     )
+
+
+def _status_lane_suffix(content_type: str, semantic_kind: str) -> str | None:
+    """Return a non-default mutable status lane suffix.
+
+    The historical technical status bubble keeps the legacy topic key for
+    compatibility.  Special status panels (for example OMX workflow progress)
+    need their own tracked Telegram message so command/tool status edits cannot
+    overwrite them.
+    """
+    normalized_content = content_type or "status"
+    normalized_semantic = semantic_kind or "technical_status"
+    if normalized_content in {"status", "text"} and normalized_semantic == "technical_status":
+        return None
+    if normalized_content == TERMINAL_CONTROL_PANEL_CONTENT_TYPE or normalized_semantic == TERMINAL_CONTROL_SEMANTIC_KIND:
+        return None
+    return f"status:{normalized_content}:{normalized_semantic}"
+
+
+def _status_tracking_key(
+    base_key: TopicStateKey,
+    *,
+    content_type: str = "status",
+    semantic_kind: str = "technical_status",
+) -> TopicStateKey:
+    suffix = _status_lane_suffix(content_type, semantic_kind)
+    if suffix is None:
+        return base_key
+    return (base_key[0], f"{base_key[1]}|{suffix}")
+
+
+def _status_lane_keys_for_surface(base_key: TopicStateKey) -> list[TopicStateKey]:
+    prefix = f"{base_key[1]}|status:"
+    keys = [base_key]
+    keys.extend(
+        key
+        for key in list(_status_msg_info)
+        if key[0] == base_key[0] and isinstance(key[1], str) and key[1].startswith(prefix)
+    )
+    data = _load_status_artifacts()
+    for storage_key in data:
+        try:
+            raw = json.loads(storage_key)
+        except Exception:
+            continue
+        if not isinstance(raw, list) or len(raw) != 2:
+            continue
+        candidate = (raw[0], raw[1])
+        if (
+            candidate[0] == base_key[0]
+            and isinstance(candidate[1], str)
+            and candidate[1].startswith(prefix)
+            and candidate not in keys
+        ):
+            keys.append(candidate)
+    return keys
 
 
 def _queue_depth_for_user(user_id: int) -> int | None:
@@ -2612,7 +2691,12 @@ async def _process_status_update_task(
     """Process a status update task."""
     wid = task.window_id or ""
     tid = task.thread_id or 0
-    state_key = _task_state_key(user_id, task)
+    base_state_key = _task_state_key(user_id, task)
+    state_key = _status_tracking_key(
+        base_state_key,
+        content_type=_status_audit_content_type(task),
+        semantic_kind=_status_audit_semantic_kind(task),
+    )
     current_generation = current_turn_generation(
         user_id,
         task.thread_id,
@@ -2703,7 +2787,7 @@ async def _process_status_update_task(
             reason="stale_turn_generation",
         )
         return
-    if state_key in _technical_status_closed and not _is_terminal_control_status_task(task):
+    if base_state_key in _technical_status_closed and not _is_terminal_control_status_task(task):
         logger.debug(
             "Dropping technical status after terminal artifact: user=%d window=%s thread=%s",
             user_id,
@@ -2872,13 +2956,13 @@ async def _process_status_update_task(
                     semantic_kind=_status_audit_semantic_kind(task),
                 )
                 _status_msg_info[skey] = (msg_id, wid, status_text)
-                _persist_status_msg_info(skey, (msg_id, wid, status_text))
+                _persist_status_msg_info(skey, (msg_id, wid, status_text), content_type=_status_audit_content_type(task), semantic_kind=_status_audit_semantic_kind(task))
             except RetryAfter:
                 raise
             except (BadRequest, Exception) as exc:
                 if _is_message_not_modified_error(exc):
                     _status_msg_info[skey] = (msg_id, wid, status_text)
-                    _persist_status_msg_info(skey, (msg_id, wid, status_text))
+                    _persist_status_msg_info(skey, (msg_id, wid, status_text), content_type=_status_audit_content_type(task), semantic_kind=_status_audit_semantic_kind(task))
                     _audit_task_delivery(
                         action="edit_noop",
                         user_id=user_id,
@@ -2915,13 +2999,13 @@ async def _process_status_update_task(
                         link_preview_options=NO_LINK_PREVIEW,
                     )
                     _status_msg_info[skey] = (msg_id, wid, status_text)
-                    _persist_status_msg_info(skey, (msg_id, wid, status_text))
+                    _persist_status_msg_info(skey, (msg_id, wid, status_text), content_type=_status_audit_content_type(task), semantic_kind=_status_audit_semantic_kind(task))
                 except RetryAfter:
                     raise
                 except (BadRequest, Exception) as e:
                     if _is_message_not_modified_error(e):
                         _status_msg_info[skey] = (msg_id, wid, status_text)
-                        _persist_status_msg_info(skey, (msg_id, wid, status_text))
+                        _persist_status_msg_info(skey, (msg_id, wid, status_text), content_type=_status_audit_content_type(task), semantic_kind=_status_audit_semantic_kind(task))
                         _audit_task_delivery(
                             action="edit_noop",
                             user_id=user_id,
@@ -2958,7 +3042,7 @@ async def _process_status_update_task(
                         return
                     logger.debug(f"Failed to edit status message: {e}")
                     _status_msg_info[skey] = (msg_id, stored_wid, last_text)
-                    _persist_status_msg_info(skey, (msg_id, stored_wid, last_text))
+                    _persist_status_msg_info(skey, (msg_id, stored_wid, last_text), content_type=_status_audit_content_type(task), semantic_kind=_status_audit_semantic_kind(task))
                     _audit_task_delivery(
                         action="edit_failed_preserved",
                         user_id=user_id,
@@ -3009,11 +3093,16 @@ async def _do_send_status_message(
     text = _normalize_technical_status_text(text)
     if not text:
         return
-    skey = _topic_state_key(
+    base_skey = _topic_state_key(
         user_id,
         thread_id_or_0,
         chat_id=chat_id if state_chat_id is _STATE_CHAT_UNSET else state_chat_id,
         surface_key=surface_key,
+    )
+    skey = _status_tracking_key(
+        base_skey,
+        content_type=content_type,
+        semantic_kind=semantic_kind,
     )
     thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
     if chat_id is None:
@@ -3066,7 +3155,7 @@ async def _do_send_status_message(
     )
     if sent:
         _status_msg_info[skey] = (sent.message_id, window_id, text)
-        _persist_status_msg_info(skey, (sent.message_id, window_id, text))
+        _persist_status_msg_info(skey, (sent.message_id, window_id, text), content_type=content_type, semantic_kind=semantic_kind)
 
 
 async def _process_commentary_update_task(
@@ -3838,64 +3927,73 @@ async def _do_clear_status_message(
     surface_key: str | None = None,
     expected_window_id: str | None = None,
 ) -> None:
-    """Delete the status message for a user (internal, called from worker)."""
-    skey = _topic_state_key(
+    """Delete tracked mutable status messages for a delivery surface.
+
+    The public clear operation closes the whole pre-final status lane for the
+    surface, including dedicated sub-lanes such as OMX workflow panels.
+    """
+    base_skey = _topic_state_key(
         user_id,
         thread_id_or_0,
         chat_id=chat_id,
         surface_key=surface_key,
     )
-    info = _status_msg_info.pop(skey, None)
-    if info is not None and expected_window_id is not None and info[1] != expected_window_id:
-        _status_msg_info[skey] = info
-        return
-    if info is None:
-        persisted = _load_status_artifacts().get(_status_key_to_storage_key(skey))
-        if isinstance(persisted, dict):
-            try:
-                message_id = int(persisted.get("message_id"))
-            except (TypeError, ValueError):
-                message_id = 0
-            stored_window = str(persisted.get("window_id") or "")
-            last_text = str(persisted.get("last_text") or "")
-            if (
-                message_id
-                and stored_window
-                and (expected_window_id is None or stored_window == expected_window_id)
-            ):
-                info = (message_id, stored_window, last_text)
-            elif message_id and stored_window:
-                return
-    _clear_persisted_status_msg_info(skey)
-    if info:
+    keys = _status_lane_keys_for_surface(base_skey)
+    resolved_chat_id = chat_id
+    for skey in keys:
+        info = _status_msg_info.pop(skey, None)
+        if info is not None and expected_window_id is not None and info[1] != expected_window_id:
+            _status_msg_info[skey] = info
+            continue
+        if info is None:
+            persisted = _load_status_artifacts().get(_status_key_to_storage_key(skey))
+            if isinstance(persisted, dict):
+                try:
+                    message_id = int(persisted.get("message_id"))
+                except (TypeError, ValueError):
+                    message_id = 0
+                stored_window = str(persisted.get("window_id") or "")
+                last_text = str(persisted.get("last_text") or "")
+                if (
+                    message_id
+                    and stored_window
+                    and (expected_window_id is None or stored_window == expected_window_id)
+                ):
+                    info = (message_id, stored_window, last_text)
+                elif message_id and stored_window:
+                    continue
+        content_type, semantic_kind = _status_artifact_metadata(skey)
+        _clear_persisted_status_msg_info(skey)
+        if not info:
+            continue
         msg_id = info[0]
-        if chat_id is None:
-            chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
+        if resolved_chat_id is None:
+            resolved_chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
         try:
-            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            await bot.delete_message(chat_id=resolved_chat_id, message_id=msg_id)
             log_telegram_delivery(
                 action="delete",
                 user_id=user_id,
-                chat_id=chat_id,
+                chat_id=resolved_chat_id,
                 thread_id=thread_id_or_0 or None,
                 message_id=msg_id,
                 window_id=info[1],
                 task_type="status_clear",
-                content_type="status",
-                semantic_kind="technical_status",
+                content_type=content_type,
+                semantic_kind=semantic_kind,
                 reason="clear_status",
             )
         except Exception as e:
             log_telegram_delivery(
                 action="delete",
                 user_id=user_id,
-                chat_id=chat_id,
+                chat_id=resolved_chat_id,
                 thread_id=thread_id_or_0 or None,
                 message_id=msg_id,
                 window_id=info[1],
                 task_type="status_clear",
-                content_type="status",
-                semantic_kind="technical_status",
+                content_type=content_type,
+                semantic_kind=semantic_kind,
                 success=False,
                 error=e,
                 reason="clear_status_failed",

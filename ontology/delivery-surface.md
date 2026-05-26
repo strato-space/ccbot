@@ -35,9 +35,9 @@ control surface at a time.
     fallback only when state is unavailable
   - current normalized content/semantic pair: `omx_workflow_panel` /
     `omx_workflow_status`
-  - one latest-only status slot per delivery surface/window; workflow changes
-    edit or replace the same artifact rather than creating one bubble per
-    workflow
+  - one latest-only OMX workflow status lane per delivery surface/window;
+    workflow changes edit or replace the same OMX artifact rather than creating
+    one bubble per workflow, and must not overwrite the technical-status lane
   - telemetry, not terminal control: it does not bypass final-answer closure and
     must not reappear below a delivered assistant-final unless a new user turn
     reopens status delivery

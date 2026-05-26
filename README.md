@@ -161,9 +161,10 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   fresh `.omx` workflow state, compact mode may show one latest-only
   `omx_workflow_panel` / `omx_workflow_status` bubble such as
   `🧭 OMX ultragoal 1/6 · G002 · running` with a clipped current-unit summary.
-  This is telemetry, not Codex terminal-control: it edits one status slot per
-  delivery surface/window, obeys final-answer closure, suppresses stale/corrupt
-  or unrelated state, and pure-Codex windows behave unchanged when OMX is absent.
+  This is telemetry, not Codex terminal-control: it edits a dedicated OMX workflow
+  status lane for the delivery surface/window, separate from the mutable technical
+  status lane, obeys final-answer closure, suppresses stale/corrupt or unrelated
+  state, and pure-Codex windows behave unchanged when OMX is absent.
 - **Runtime discontinuity guardrails** — True runtime termination or live tmux
   surface loss is delivered as a warning artifact with replay-native evidence
   first and screenshot fallback only for real loss. Active Codex panes that
@@ -263,6 +264,10 @@ ALLOWED_USERS=your_telegram_user_id
 | `CCBOT_OWNED_SURFACES` | _(none)_ | Optional comma-separated allow list of chat-qualified surfaces (`t:<chat_id>:<thread_id>`, `c:<chat_id>`). When set, shared group updates outside these surfaces are hard-ignored before typing/reply/download/runtime side effects |
 | `CCBOT_AUTONOMOUS_RESTORE_SURFACES` | _(uses `CCBOT_OWNED_SURFACES`)_ | Optional narrower comma-separated allow list for env-absent startup restore; exact chat-qualified surfaces only |
 | `CCBOT_IGNORED_SURFACES` | _(none)_ | Optional comma-separated deny list of surfaces to hard-ignore; supports canonical keys plus legacy `t:<thread_id>` aliases for migrations |
+| `CCBOT_REBOOT_ADMIN_USERS` | _(none)_ | Optional comma-separated Telegram user IDs allowed to run `/reboot` without Telegram chat-admin lookup; users must still be in `ALLOWED_USERS` |
+| `CCBOT_REBOOT_PROCESS_PATTERNS` | `omx,oh-my-codex` | Safe process-name patterns terminated for the current user by admin `/reboot`; unsafe path/shell-like patterns are ignored |
+| `CCBOT_REBOOT_SYSTEMD_UNITS` | controller/gateway service allowlist | Comma-separated user `.service` units restarted by admin `/reboot`; `ccbot.service` is ordered last and host reboot is never used |
+| `CCBOT_REBOOT_SCHEDULE_DELAY_SECONDS` | `1.5` | Delay after Telegram acknowledgement before scheduling the detached maintenance restart |
 | `MONITOR_POLL_INTERVAL` | `2.0`      | Polling interval in seconds                      |
 | `CCBOT_SHOW_HIDDEN_DIRS` | `false` | Show hidden (dot) directories in directory browser |
 | `OPENAI_API_KEY` | _(none)_ | OpenAI API key for voice message transcription when using `openai` or `auto` fallback |
@@ -336,6 +341,7 @@ ccbot --help
 | `/switch [steer|queue]` | Toggle this Telegram `chat_id`/`message_thread_id` surface between `steer` and `queue`, or set the named mode explicitly |
 | `/steer <prompt>` | Send one prompt with immediate steer semantics; without a prompt, set this surface to `steer` |
 | `/queue <prompt>` | Send one prompt with runtime queue semantics; without a prompt, set this surface to `queue` |
+| `/reboot` | Admin-only maintenance restart for configured OMX/runtime processes and allowlisted user systemd services; never reboots the host |
 
 **Supported Codex core-lane commands shown in the Telegram menu when the configured launch lane is Codex:**
 
@@ -643,7 +649,7 @@ routing warm-up in shared group surfaces.
   silent: the bot does not download the media, reply with bind guidance, or
   mutate bind state.
 - In **no-topics group main chat mode**, ordinary text and bot-addressed `@mention` stay silent.
-- In an **unbound group/supergroup named topic**, only exact `/bind` or `/bind@ThisBot` is a valid explicit entry path; `/bind <thread-name|id>`, `/resume`, `/steer`, `/queue`, `/switch`, help, raw text, mentions, media, and non-bind callbacks remain silent until a binding exists. Fresh bind-flow picker callbacks may continue the bind flow opened by exact `/bind`.
+- In an **unbound group/supergroup named topic**, only exact `/bind` or `/bind@ThisBot` is a valid explicit entry path; `/bind <thread-name|id>`, `/resume`, `/steer`, `/queue`, `/switch`, `/reboot`, help, raw text, mentions, media, and non-bind callbacks remain silent until a binding exists. Fresh bind-flow picker callbacks may continue the bind flow opened by exact `/bind`.
 - Command handlers that are valid for their current surface persist group routing metadata before binding, resuming,
   unbinding, renaming, history lookup, screenshot capture, interrupt, or usage
   actions that address the shared surface.

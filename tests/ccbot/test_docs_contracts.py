@@ -589,7 +589,7 @@ def test_telegram_bot_features_doc_describes_resume_and_manual_bind_policy() -> 
     assert "service-alive-but-polling-dead" in doc
     assert "OMX interactive question artifacts" in doc
     assert "whole pre-final visible surface is" in doc
-    assert "mutable technical status artifact are both closed" in doc
+    assert "mutable status artifacts are closed" in doc
     assert "In external read-only bind mode" in doc
     assert "read-only warning and a hint to reattach writable live control" in doc
     assert "Draft answer artifact" in doc
