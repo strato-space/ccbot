@@ -542,7 +542,13 @@ Compact marker registry:
 | `💻 terminal:` | technical status history | shell command preview/history item | inline monospace payload, no quotes |
 | `⌘ Command` / `⌘ Command output` | technical status detail | current command or output detail panel | fenced `sh`/`text`/`json` block |
 | `↳` | technical status history/result | command output, locator, JSON prefix, or subline summary | locator/JSON raw, prose as inline monospace |
-| `🛠` | technical status history/detail | non-shell tool lifecycle or tool payload | inline monospace payload when payload differs from name |
+| `📚` | technical status history | Hermes-style skill_view / skills_list progress | inline monospace payload |
+| `🐍` | technical status history | Hermes-style execute_code progress | inline monospace payload |
+| `📨` | technical status history | Hermes-style send_message progress | inline monospace payload |
+| `✍️` | technical status history | Hermes-style write_file progress | inline monospace payload |
+| `📖` | technical status history | Hermes-style read_file progress | inline monospace payload or bare name |
+| `🔧` / `🔎` | technical status history | Hermes-style patch/search progress | inline monospace payload |
+| `🛠` | technical status history/detail | unknown non-shell tool lifecycle or tool payload fallback | inline monospace payload when payload differs from name |
 | `• Explored` | orchestration | parsed read/list/search exploration summary | compact tree lines |
 | `🖼` | media preview/result | generated/viewed image preview caption | media caption with file/provenance |
 | `🧭 OMX` | OMX workflow status | optional OMX workflow progress telemetry | latest-only workflow status plus `↳` summary |

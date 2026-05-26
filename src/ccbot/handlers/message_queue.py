@@ -2028,10 +2028,36 @@ def _command_output_preview_from_block(text: str) -> tuple[str, str]:
     )
 
 
+HERMES_TOOL_HISTORY_ICONS: dict[str, str] = {
+    "browser_navigate": "🌐",
+    "browser_screenshot": "📸",
+    "browser_snapshot": "🌐",
+    "execute_code": "🐍",
+    "patch": "🔧",
+    "read_file": "📖",
+    "search_files": "🔎",
+    "send_message": "📨",
+    "skill_view": "📚",
+    "skills_list": "📚",
+    "terminal": "💻",
+    "write_file": "✍️",
+}
+
+
 def _inline_code_status_history_item(label: str, preview: str) -> str | None:
     if not preview:
         return None
     return f"{label}: `{preview}`"
+
+
+def _tool_history_label(name: str) -> str:
+    normalized = (name or "").strip()
+    if not normalized:
+        return ""
+    icon = HERMES_TOOL_HISTORY_ICONS.get(normalized)
+    if icon:
+        return f"{icon} {normalized}"
+    return f"🛠 {normalized}"
 
 
 def _command_output_history_item(preview: str, kind: str) -> str | None:
@@ -2077,16 +2103,18 @@ def _extract_status_history_item(text: str) -> str | None:
     if raw.startswith("🛠 Tool") and blocks:
         preview = _sanitize_status_history_preview(_first_nonempty_line(blocks[0]))
         name, payload = _tool_history_name_and_payload(preview)
-        if name and payload:
-            return _inline_code_status_history_item(f"🛠 {name}", payload)
-        return f"🛠 {name}" if name else None
+        label = _tool_history_label(name)
+        if label and payload:
+            return _inline_code_status_history_item(label, payload)
+        return label or None
     tool_match = re.match(r"^(?:🛠\s*)?Tool\s+([A-Za-z0-9_.:-]+)(.*)$", raw, re.DOTALL)
     if tool_match:
         name = tool_match.group(1)
         preview = _sanitize_status_history_preview(tool_match.group(2).strip() or name)
+        label = _tool_history_label(name)
         if preview and preview != name:
-            return _inline_code_status_history_item(f"🛠 {name}", preview)
-        return f"🛠 {name}"
+            return _inline_code_status_history_item(label, preview)
+        return label
     return None
 
 

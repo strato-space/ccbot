@@ -57,17 +57,20 @@ The default Telegram surface is `compact`, not `verbose`.
   from the whole JSON block as a compact one-line prefix instead of only the
   first `{` line. Non-path, non-JSON output uses inline monospace after `↳`
   instead of the generic `output` label; command/tool history payloads likewise
-  use inline monospace after labels such as `💻 terminal:` and `🛠 read_file:`
-  rather than quoted strings. Path-like
+  use inline monospace after Hermes-aligned labels such as `💻 terminal:`,
+  `📚 skill_view:`, `🐍 execute_code:`, `📨 send_message:`, `✍️ write_file:`,
+  and `📖 read_file:` rather than quoted strings. Path-like
   means a locator prefix such as `.omx/`, `./`, `../`, `/data/`, `/home/`,
   `/tmp/`, `~/`, or `file://`, not arbitrary slash-prefixed prose. This
   history is delivery evidence for the
   visible Telegram artifact, not durable runtime history, and it excludes final
   answers, user echo, commentary, warnings, pending-input previews, generated
   media/result bubbles, terminal-control panels, and OMX workflow panels. The
-  marker registry reserves `💻` for shell command history, `🛠` for non-shell
-  tool lifecycle, `↳` for output/subline summaries, `🖼` for media previews,
-  and `🧭 OMX` for optional workflow telemetry.
+  marker registry follows Hermes Agent for common tools: `💻` terminal, `📚`
+  skill_view/skills, `🐍` execute_code, `📨` send_message, `✍️` write_file,
+  `📖` read_file, `🔧` patch, and `🔎` search; `🛠` remains a fallback for
+  unknown non-shell tools. It reserves `↳` for output/subline summaries, `🖼`
+  for media previews, and `🧭 OMX` for optional workflow telemetry.
 - command-execution summaries, including Claude-style `local_command`, are
   routed through the mutable status artifact
 - file-change summaries are routed through the mutable status artifact

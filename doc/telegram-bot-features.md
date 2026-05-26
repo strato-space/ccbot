@@ -280,8 +280,10 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
   - outcome footer is separate and should not redundantly say
     `completed · output 1 line(s)` when the preview already conveys the result
   - shell commands are one mutable command artifact: bare command previews are
-    `sh` fenced, delivered history uses inline monospace payloads after marker
-    labels like `💻 terminal:` / `🛠 read_file:`, previews skip leading
+    `sh` fenced, delivered history uses inline monospace payloads after
+    Hermes-aligned marker labels like `💻 terminal:`, `📚 skill_view:`,
+    `🐍 execute_code:`, `📨 send_message:`, `✍️ write_file:`, and
+    `📖 read_file:`, previews skip leading
     `set -euo pipefail` boilerplate when real command lines follow, and
     `exec_command` output edits the command bubble while
     dropping Codex/developer transport metadata before

@@ -89,8 +89,9 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   panel; path-like and structured-JSON command-output history entries may
   elide the generic `output` label and render as `↳ .omx/...` or `↳ {"kind": ...}`
   while non-path prose output renders as inline monospace after `↳`; command/tool
-  history payloads render as inline monospace after labels such as `💻 terminal:`
-  and `🛠 read_file:` rather than quoted strings. Command preview panels
+  history payloads render as inline monospace after Hermes-aligned labels such as
+  `💻 terminal:`, `📚 skill_view:`, `🐍 execute_code:`, `📨 send_message:`,
+  `✍️ write_file:`, and `📖 read_file:` rather than quoted strings. Command preview panels
   skip leading `set -euo pipefail` boilerplate when real command lines follow and
   prefer useful first-lines over low-value `preview 1/N lines` footers. This is Telegram delivery evidence, not durable runtime history. Once
   the final assistant answer lands, the
@@ -850,8 +851,10 @@ Technical execution classes stay out of permanent bubbles by default:
 - **Command execution / local command** — Summarized into the mutable status
   artifact with compact command text rather than raw shell dumps
   Bare command previews are normalized into `sh` fences, delivered history uses
-  a compact marker registry (`💻 terminal`, `🛠 tool`, `↳ output`, `🧭 OMX`,
-  `🖼 media`), and previews skip leading `set -euo pipefail` boilerplate when
+  a compact Hermes-aligned marker registry (`💻 terminal`, `📚 skill_view`,
+  `🐍 execute_code`, `📨 send_message`, `✍️ write_file`, `📖 read_file`,
+  fallback `🛠 tool`, `↳ output`, `🧭 OMX`, `🖼 media`), and previews skip
+  leading `set -euo pipefail` boilerplate when
   real command lines follow, while command
   output remains a separate output category with `text`/`json` fences. The active
   compact technical-status artifact shows bounded delivered history above the

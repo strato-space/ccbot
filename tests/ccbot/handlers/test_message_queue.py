@@ -4801,7 +4801,7 @@ def test_normalize_command_status_keeps_strict_mode_when_it_is_only_line() -> No
 def test_tool_status_history_uses_inline_code_payload_without_quotes() -> None:
     item = mq._extract_status_history_item("Tool read_file Reading chunk 1/2")
 
-    assert item == "🛠 read_file: `Reading chunk 1/2`"
+    assert item == "📖 read_file: `Reading chunk 1/2`"
 
 
 def test_normalized_tool_status_history_splits_name_and_payload() -> None:
@@ -4809,13 +4809,27 @@ def test_normalized_tool_status_history_splits_name_and_payload() -> None:
     item = mq._extract_status_history_item(normalized)
 
     assert normalized == "🛠 Tool\n```text\nread_file Reading chunk 1/2\n```"
-    assert item == "🛠 read_file: `Reading chunk 1/2`"
+    assert item == "📖 read_file: `Reading chunk 1/2`"
 
 
 def test_tool_status_history_keeps_bare_tool_name_when_no_payload() -> None:
     item = mq._extract_status_history_item("🛠 Tool\n```text\nread_file\n```")
 
-    assert item == "🛠 read_file"
+    assert item == "📖 read_file"
+
+
+def test_tool_status_history_uses_hermes_style_icons_for_common_tools() -> None:
+    samples = {
+        "Tool skill_view mediagen-comfy": "📚 skill_view: `mediagen-comfy`",
+        "Tool execute_code from hermes_tools import terminal": "🐍 execute_code: `from hermes_tools import terminal`",
+        "Tool send_message to telegram:-1003685295814:5733": "📨 send_message: `to telegram:-1003685295814:5733`",
+        "Tool write_file /tmp/send_marat_longcat_media.py": "✍️ write_file: `/tmp/send_marat_longcat_media.py`",
+        "Tool terminal python3 /tmp/send_marat_longcat_media.py": "💻 terminal: `python3 /tmp/send_marat_longcat_media.py`",
+        "Tool unknown_tool doing work": "🛠 unknown_tool: `doing work`",
+    }
+
+    for raw, expected in samples.items():
+        assert mq._extract_status_history_item(raw) == expected
 
 
 def test_normalize_already_fenced_command_status_is_idempotent() -> None:
@@ -4986,7 +5000,7 @@ async def test_compact_tool_status_renders_history_with_fenced_detail_panel(
         await_args = mock_send.await_args
         assert await_args is not None
         sent_text = await_args.args[2]
-        assert sent_text.startswith("🛠 read_file")
+        assert sent_text.startswith("📖 read_file")
         assert "\n\n🛠 Tool\n```text\nread_file\n```" in sent_text
     finally:
         mq._status_msg_info.clear()
