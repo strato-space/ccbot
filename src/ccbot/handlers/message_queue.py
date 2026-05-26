@@ -2028,6 +2028,12 @@ def _command_output_preview_from_block(text: str) -> tuple[str, str]:
     )
 
 
+def _inline_code_status_history_item(label: str, preview: str) -> str | None:
+    if not preview:
+        return None
+    return f"{label}: `{preview}`"
+
+
 def _command_output_history_item(preview: str, kind: str) -> str | None:
     if not preview:
         return None
@@ -2055,16 +2061,20 @@ def _extract_status_history_item(text: str) -> str | None:
             return _command_output_history_item(preview, kind)
         command_block = _strip_command_shell_preamble(blocks[0] if blocks else raw)
         preview = _sanitize_status_history_preview(_first_nonempty_line(command_block))
-        return f"💻 terminal: \"{preview}\"" if preview else None
+        return _inline_code_status_history_item("💻 terminal", preview)
     if raw.startswith("🛠 Tool") and blocks:
         preview = _sanitize_status_history_preview(_first_nonempty_line(blocks[0]))
         name = preview.split("(", 1)[0].strip() if preview else ""
-        return f"🛠 {name}: \"{preview}\"" if name and preview != name else (f"🛠 {name}" if name else None)
+        if name and preview != name:
+            return _inline_code_status_history_item(f"🛠 {name}", preview)
+        return f"🛠 {name}" if name else None
     tool_match = re.match(r"^(?:🛠\s*)?Tool\s+([A-Za-z0-9_.:-]+)(.*)$", raw, re.DOTALL)
     if tool_match:
         name = tool_match.group(1)
         preview = _sanitize_status_history_preview(tool_match.group(2).strip() or name)
-        return f"🛠 {name}: \"{preview}\"" if preview and preview != name else f"🛠 {name}"
+        if preview and preview != name:
+            return _inline_code_status_history_item(f"🛠 {name}", preview)
+        return f"🛠 {name}"
     return None
 
 

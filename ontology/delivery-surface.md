@@ -532,6 +532,22 @@ Preview refinements:
   this is visible delivery history, not
   durable runtime history, and it is separate from final/user/commentary/
   warning/pending-input/media/terminal-control/OMX workflow artifact lanes
+
+Compact marker registry:
+
+| Marker | Artifact lane | Meaning | Payload style |
+| --- | --- | --- | --- |
+| `👤` | user echo | Replay/tmux-originated user prompt echo | ordinary text |
+| `↗` / `⏭` / `⏳` | ingress receipt | steer, queue, or delivered-but-unconfirmed Telegram input | target line plus prompt preview |
+| `💻 terminal:` | technical status history | shell command preview/history item | inline monospace payload, no quotes |
+| `⌘ Command` / `⌘ Command output` | technical status detail | current command or output detail panel | fenced `sh`/`text`/`json` block |
+| `↳` | technical status history/result | command output, locator, JSON prefix, or subline summary | locator/JSON raw, prose as inline monospace |
+| `🛠` | technical status history/detail | non-shell tool lifecycle or tool payload | inline monospace payload when payload differs from name |
+| `• Explored` | orchestration | parsed read/list/search exploration summary | compact tree lines |
+| `🖼` | media preview/result | generated/viewed image preview caption | media caption with file/provenance |
+| `🧭 OMX` | OMX workflow status | optional OMX workflow progress telemetry | latest-only workflow status plus `↳` summary |
+| `❓` / `✅` / `❌` / `⚠️` | question/control/warning | interactive question, success, hard failure, or warning | ordinary control text |
+
 - plan-update artifacts are latest-only within one assistant turn, not across
   turns; a new user turn must open a fresh plan artifact instead of editing the
   previous turn's plan bubble up-thread

@@ -4787,7 +4787,7 @@ def test_command_history_drops_strict_mode_preamble_when_content_follows() -> No
         "⌘ Command\n```sh\nset -euo pipefail\npython - <<'PY'\nprint('ok')\nPY\n```"
     )
 
-    assert item == "💻 terminal: \"python - <<'PY'\""
+    assert item == "💻 terminal: `python - <<'PY'`"
 
 
 def test_normalize_command_status_keeps_strict_mode_when_it_is_only_line() -> None:
@@ -4796,6 +4796,18 @@ def test_normalize_command_status_keeps_strict_mode_when_it_is_only_line() -> No
     )
 
     assert rendered == "⌘ Command\n```sh\nset -euo pipefail\n```"
+
+
+def test_tool_status_history_uses_inline_code_payload_without_quotes() -> None:
+    item = mq._extract_status_history_item("Tool read_file Reading chunk 1/2")
+
+    assert item == "🛠 read_file: `Reading chunk 1/2`"
+
+
+def test_tool_status_history_keeps_bare_tool_name_when_no_payload() -> None:
+    item = mq._extract_status_history_item("🛠 Tool\n```text\nread_file\n```")
+
+    assert item == "🛠 read_file"
 
 
 def test_normalize_already_fenced_command_status_is_idempotent() -> None:
@@ -4869,19 +4881,19 @@ async def test_compact_status_renders_delivered_history_above_current_panel(
         await_args = mock_send.await_args
         assert await_args is not None
         sent_text = await_args.args[2]
-        assert sent_text.startswith('💻 terminal: "pytest -q"')
+        assert sent_text.startswith('💻 terminal: `pytest -q`')
         assert "\n\n⌘ Command\n```sh\npytest -q\n```" in sent_text
 
         edit_args = bot.edit_message_text.await_args
         assert edit_args is not None
         edited_text = edit_args.kwargs["text"]
-        assert '💻 terminal: "pytest \\-q"' in edited_text
-        assert '💻 terminal: "ruff check"' in edited_text
+        assert '💻 terminal: `pytest \\-q`' in edited_text
+        assert '💻 terminal: `ruff check`' in edited_text
         assert "\n\n⌘ Command\n```sh\nruff check\n```" in edited_text
         assert mq._status_msg_info[mq._topic_state_key(1, 42)][0] == 501
         assert mq._technical_status_history[(mq._topic_state_key(1, 42), "@7", 1)] == (
-            '💻 terminal: "pytest -q"',
-            '💻 terminal: "ruff check"',
+            '💻 terminal: `pytest -q`',
+            '💻 terminal: `ruff check`',
         )
     finally:
         mq._status_msg_info.clear()
@@ -4981,9 +4993,9 @@ async def test_compact_status_commits_history_after_plain_fallback_edit(
     mq._status_msg_info.clear()
     mq._technical_status_history.clear()
     key = mq._topic_state_key(1, 42)
-    old_text = '💻 terminal: "pytest -q"\n\n⌘ Command\n```sh\npytest -q\n```'
+    old_text = '💻 terminal: `pytest -q`\n\n⌘ Command\n```sh\npytest -q\n```'
     mq._status_msg_info[key] = (501, "@7", old_text)
-    mq._technical_status_history[(key, "@7", 1)] = ('💻 terminal: "pytest -q"',)
+    mq._technical_status_history[(key, "@7", 1)] = ('💻 terminal: `pytest -q`',)
     bot = AsyncMock()
     bot.edit_message_text.side_effect = [Exception("markdown failed"), None]
     task = MessageTask(
@@ -5009,10 +5021,10 @@ async def test_compact_status_commits_history_after_plain_fallback_edit(
 
         assert bot.edit_message_text.await_count == 2
         assert mq._technical_status_history[(key, "@7", 1)] == (
-            '💻 terminal: "pytest -q"',
-            '💻 terminal: "ruff check"',
+            '💻 terminal: `pytest -q`',
+            '💻 terminal: `ruff check`',
         )
-        assert '💻 terminal: "ruff check"' in mq._status_msg_info[key][2]
+        assert '💻 terminal: `ruff check`' in mq._status_msg_info[key][2]
     finally:
         mq._status_msg_info.clear()
         mq._technical_status_history.clear()
@@ -5026,9 +5038,9 @@ async def test_compact_status_preserves_history_after_unknown_edit_failure(
     mq._status_msg_info.clear()
     mq._technical_status_history.clear()
     key = mq._topic_state_key(1, 42)
-    old_text = '💻 terminal: "pytest -q"\n\n⌘ Command\n```sh\npytest -q\n```'
+    old_text = '💻 terminal: `pytest -q`\n\n⌘ Command\n```sh\npytest -q\n```'
     mq._status_msg_info[key] = (501, "@7", old_text)
-    mq._technical_status_history[(key, "@7", 1)] = ('💻 terminal: "pytest -q"',)
+    mq._technical_status_history[(key, "@7", 1)] = ('💻 terminal: `pytest -q`',)
     bot = AsyncMock()
     bot.edit_message_text.side_effect = [Exception("markdown failed"), Exception("plain failed")]
     task = MessageTask(
@@ -5054,7 +5066,7 @@ async def test_compact_status_preserves_history_after_unknown_edit_failure(
 
         assert bot.edit_message_text.await_count == 2
         assert mq._technical_status_history[(key, "@7", 1)] == (
-            '💻 terminal: "pytest -q"',
+            '💻 terminal: `pytest -q`',
         )
         assert mq._status_msg_info[key] == (501, "@7", old_text)
     finally:
