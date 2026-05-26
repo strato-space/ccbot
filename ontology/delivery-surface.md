@@ -513,6 +513,11 @@ Preview refinements:
 - bare `⌘ Command` previews are shell command previews and must be rendered in
   a `sh` fence; `⌘ Command output` is a distinct output category and may keep
   `text` or `json` fences based on payload
+- eligible command/tool technical statuses render as one mutable compact
+  technical status artifact with a bounded delivered technical-status history
+  above a fenced current detail panel; this is visible delivery history, not
+  durable runtime history, and it is separate from final/user/commentary/
+  warning/pending-input/media/terminal-control/OMX workflow artifact lanes
 - plan-update artifacts are latest-only within one assistant turn, not across
   turns; a new user turn must open a fresh plan artifact instead of editing the
   previous turn's plan bubble up-thread

@@ -84,7 +84,10 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   orchestration milestones, and final assistant answers remain ordinary content
   bubbles, the latest human-facing commentary stays visible as a dedicated
   artifact, and technical reasoning/tool/command/file-change churn stays in
-  the mutable status artifact. Once the final assistant answer lands, the
+  the mutable status artifact. Eligible command/tool status previews render as
+  a bounded delivered technical-status history above a fenced current detail
+  panel; this is Telegram delivery evidence, not durable runtime history. Once
+  the final assistant answer lands, the
   whole pre-final visible surface closes until the next user turn, and the
   mutable technical status surface closes with it, so no late commentary, orchestration
   milestone, or surfaced preview artifact appears below the
@@ -842,6 +845,10 @@ Technical execution classes stay out of permanent bubbles by default:
   artifact with compact command text rather than raw shell dumps
   Bare command previews are normalized into `sh` fences, while command output
   remains a separate output category with `text`/`json` fences. The active
+  compact technical-status artifact shows bounded delivered history above the
+  fenced current detail panel; final answers, user echo, commentary, warnings,
+  pending-input previews, generated media results, terminal-control panels, and
+  OMX workflow panels stay in separate artifact lanes. The active
   status bubble identity is persisted by surface key and window id so restarts
   can resume editing or intentionally replace the same artifact instead of
   leaving duplicates.

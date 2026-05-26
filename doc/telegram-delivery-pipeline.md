@@ -47,6 +47,12 @@ The default Telegram surface is `compact`, not `verbose`.
 - bare `⌘ Command` previews are shell command previews and must be rendered in
   a `sh` fence; `⌘ Command output` is a distinct output category and may keep
   `text` or `json` fences based on payload
+- eligible command/tool technical statuses use a two-part mutable compact
+  technical status artifact: a bounded delivered technical-status history above
+  a fenced current detail panel. This history is delivery evidence for the
+  visible Telegram artifact, not durable runtime history, and it excludes final
+  answers, user echo, commentary, warnings, pending-input previews, generated
+  media/result bubbles, terminal-control panels, and OMX workflow panels.
 - command-execution summaries, including Claude-style `local_command`, are
   routed through the mutable status artifact
 - file-change summaries are routed through the mutable status artifact
@@ -360,6 +366,12 @@ Compact mode keeps commentary visible as a latest-only artifact, because it is
 the human-readable execution narrative. The mutable status artifact is reserved
 for ephemeral technical execution surface that would otherwise churn too
 quickly.
+
+For eligible command/tool statuses, that mutable compact technical status
+artifact has a stable visual shape: a bounded delivered technical-status history
+followed by a fenced current detail panel. The history commits only after
+Telegram accepts the send/edit/no-op for that exact status bubble and resets on
+turn boundaries, final-answer closure, status clear, or window mismatch.
 
 Codex terminal-control panels observed only in the live tmux pane are projected
 through a distinct `terminal_control_panel` status class. The class is mutable

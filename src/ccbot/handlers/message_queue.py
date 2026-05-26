@@ -284,12 +284,22 @@ TopicStateKey = tuple[int, int | str]
 # Status message tracking: delivery surface -> (message_id, window_id, last_text)
 _status_msg_info: dict[TopicStateKey, tuple[int, str, str]] = {}
 
+StatusHistoryKey = tuple[TopicStateKey, str, int]
+STATUS_HISTORY_LIMIT = 8
+STATUS_HISTORY_ITEM_MAX_CHARS = 160
+
+# Delivered technical-status history for the compact mutable status artifact.
+# This is intentionally not durable runtime history: it is only committed after
+# Telegram accepts a send/edit/no-op for the current status bubble.
+_technical_status_history: dict[StatusHistoryKey, tuple[str, ...]] = {}
+
 
 _STATUS_ARTIFACTS_FILENAME = "status_message_artifacts.json"
 _BARE_COMMAND_PREVIEW_RE = re.compile(
     r"^(?P<body>.+?)\s+(?P<footer>preview\s+\d+/\d+\s+lines?)$",
     re.IGNORECASE | re.DOTALL,
 )
+_STATUS_CODE_BLOCK_RE = re.compile(r"```[^\n`]*\n(?P<body>.*?)(?:\n```|```$)", re.DOTALL)
 
 
 def _status_artifacts_file() -> Path:
@@ -540,6 +550,41 @@ def _status_lane_keys_for_surface(base_key: TopicStateKey) -> list[TopicStateKey
         ):
             keys.append(candidate)
     return keys
+
+
+def _status_history_key(
+    skey: TopicStateKey,
+    window_id: str,
+    turn_generation: int,
+) -> StatusHistoryKey:
+    return (skey, window_id, int(turn_generation or 0))
+
+
+def _status_history_surface_matches(skey: TopicStateKey, base_key: TopicStateKey) -> bool:
+    if skey == base_key:
+        return True
+    if skey[0] != base_key[0]:
+        return False
+    return (
+        isinstance(skey[1], str)
+        and str(skey[1]).startswith(f"{base_key[1]}|status:")
+    )
+
+
+def _clear_status_history_for_key(
+    skey: TopicStateKey,
+    *,
+    window_id: str | None = None,
+) -> None:
+    for history_key in list(_technical_status_history):
+        if history_key[0] == skey and (window_id is None or history_key[1] == window_id):
+            _technical_status_history.pop(history_key, None)
+
+
+def _clear_status_history_for_surface(base_key: TopicStateKey) -> None:
+    for history_key in list(_technical_status_history):
+        if _status_history_surface_matches(history_key[0], base_key):
+            _technical_status_history.pop(history_key, None)
 
 
 def _queue_depth_for_user(user_id: int) -> int | None:
@@ -1635,6 +1680,21 @@ def _normalize_bare_command_status(text: str) -> str:
     return rendered
 
 
+def _normalize_bare_tool_status(text: str) -> str:
+    raw = (text or "").strip()
+    if not (raw.startswith("🛠 Tool") or raw.startswith("Tool ")):
+        return text
+    if "```" in raw:
+        return text
+    if raw.startswith("🛠 Tool"):
+        body = raw.removeprefix("🛠 Tool").strip()
+        if not body:
+            return text
+        return f"🛠 Tool\n```text\n{body}\n```"
+    body = raw.removeprefix("Tool").strip()
+    return f"🛠 Tool\n```text\n{body or raw}\n```"
+
+
 def _status_audit_content_type(task: MessageTask) -> str:
     return task.content_type if task.content_type != "text" else "status"
 
@@ -1704,7 +1764,99 @@ def _normalize_technical_status_text(text: str) -> str:
     raw = (text or "").strip()
     if raw.startswith("↳ Tool Output"):
         return _render_clean_tool_output_status(raw) or ""
-    return _normalize_bare_command_status(text)
+    return _normalize_bare_tool_status(_normalize_bare_command_status(text))
+
+
+def _sanitize_status_history_preview(text: str) -> str:
+    compact = " ".join((text or "").strip().split())
+    compact = compact.replace("```", "′′′").replace("`", "′")
+    compact = compact.replace("[", "［").replace("]", "］")
+    if len(compact) > STATUS_HISTORY_ITEM_MAX_CHARS:
+        return compact[: STATUS_HISTORY_ITEM_MAX_CHARS - 1].rstrip() + "…"
+    return compact
+
+
+def _first_nonempty_line(text: str) -> str:
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def _status_code_blocks(text: str) -> list[str]:
+    return [match.group("body").strip() for match in _STATUS_CODE_BLOCK_RE.finditer(text or "")]
+
+
+def _extract_status_history_item(text: str) -> str | None:
+    """Extract one delivered-history line for eligible technical status text."""
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    blocks = _status_code_blocks(raw)
+    if raw.startswith("⌘ Command output"):
+        preview = _sanitize_status_history_preview(_first_nonempty_line(blocks[0] if blocks else raw))
+        return f"↳ output: \"{preview}\"" if preview else None
+    if raw.startswith("⌘ Command"):
+        if "↳ Output" in raw and len(blocks) >= 2:
+            preview = _sanitize_status_history_preview(_first_nonempty_line(blocks[1]))
+            return f"↳ output: \"{preview}\"" if preview else None
+        preview = _sanitize_status_history_preview(_first_nonempty_line(blocks[0] if blocks else raw))
+        return f"💻 terminal: \"{preview}\"" if preview else None
+    if raw.startswith("🛠 Tool") and blocks:
+        preview = _sanitize_status_history_preview(_first_nonempty_line(blocks[0]))
+        name = preview.split("(", 1)[0].strip() if preview else ""
+        return f"🛠 {name}: \"{preview}\"" if name and preview != name else (f"🛠 {name}" if name else None)
+    tool_match = re.match(r"^(?:🛠\s*)?Tool\s+([A-Za-z0-9_.:-]+)(.*)$", raw, re.DOTALL)
+    if tool_match:
+        name = tool_match.group(1)
+        preview = _sanitize_status_history_preview(tool_match.group(2).strip() or name)
+        return f"🛠 {name}: \"{preview}\"" if preview and preview != name else f"🛠 {name}"
+    return None
+
+
+def _is_status_history_eligible_task(task: MessageTask) -> bool:
+    return (
+        task.task_type == "status_update"
+        and task.content_type in {"text", "status"}
+        and task.semantic_kind in {"", "technical_status"}
+        and not _is_terminal_control_status_task(task)
+    )
+
+
+def _render_status_with_history(text: str, history: tuple[str, ...]) -> str:
+    if not history:
+        return text
+    history_text = "\n".join(history)
+    return f"{history_text}\n\n{text}"
+
+
+def _prepare_status_history_candidate(
+    task: MessageTask,
+    skey: TopicStateKey,
+    window_id: str,
+    turn_generation: int,
+    status_text: str,
+) -> tuple[str, StatusHistoryKey | None, tuple[str, ...] | None]:
+    """Build a rendered status with delivered-history candidate, without committing it."""
+    if not _is_status_history_eligible_task(task):
+        return status_text, None, None
+    item = _extract_status_history_item(status_text)
+    if not item:
+        return status_text, None, None
+    history_key = _status_history_key(skey, window_id, turn_generation)
+    history = _technical_status_history.get(history_key, ())
+    if not history or history[-1] != item:
+        history = (*history, item)[-STATUS_HISTORY_LIMIT:]
+    return _render_status_with_history(status_text, history), history_key, history
+
+
+def _commit_status_history(
+    history_key: StatusHistoryKey | None,
+    candidate_history: tuple[str, ...] | None,
+) -> None:
+    if history_key is not None and candidate_history is not None:
+        _technical_status_history[history_key] = candidate_history
 
 
 async def _send_task_images(bot: Bot, chat_id: int, task: MessageTask) -> bool:
@@ -3004,6 +3156,13 @@ async def _process_status_update_task(
             reason="empty_after_status_normalization",
         )
         return
+    status_text, history_key, candidate_history = _prepare_status_history_candidate(
+        task,
+        skey,
+        wid,
+        task.turn_generation or current_generation,
+        status_text,
+    )
 
     draft_result = None
     if _is_draft_preview_eligible_status_task(task, status_text):
@@ -3042,15 +3201,16 @@ async def _process_status_update_task(
 
         if stored_wid != wid:
             # Window changed - delete old and send new
+            _clear_status_history_for_key(skey, window_id=stored_wid)
             await _do_clear_status_message(
                 bot,
                 user_id,
                 tid,
                 chat_id=task.chat_id,
                 surface_key=task.surface_key,
-                expected_window_id=wid,
+                expected_window_id=stored_wid,
             )
-            await _do_send_status_message(
+            if await _do_send_status_message(
                 bot,
                 user_id,
                 tid,
@@ -3062,7 +3222,8 @@ async def _process_status_update_task(
                 content_type=_status_audit_content_type(task),
                 semantic_kind=_status_audit_semantic_kind(task),
                 audit_task=task,
-            )
+            ):
+                _commit_status_history(history_key, candidate_history)
         elif status_text == last_text:
             # Same content, skip edit
             return
@@ -3097,12 +3258,14 @@ async def _process_status_update_task(
                 )
                 _status_msg_info[skey] = (msg_id, wid, status_text)
                 _persist_status_msg_info(skey, (msg_id, wid, status_text), content_type=_status_audit_content_type(task), semantic_kind=_status_audit_semantic_kind(task))
+                _commit_status_history(history_key, candidate_history)
             except RetryAfter:
                 raise
             except (BadRequest, Exception) as exc:
                 if _is_message_not_modified_error(exc):
                     _status_msg_info[skey] = (msg_id, wid, status_text)
                     _persist_status_msg_info(skey, (msg_id, wid, status_text), content_type=_status_audit_content_type(task), semantic_kind=_status_audit_semantic_kind(task))
+                    _commit_status_history(history_key, candidate_history)
                     _audit_task_delivery(
                         action="edit_noop",
                         user_id=user_id,
@@ -3117,7 +3280,8 @@ async def _process_status_update_task(
                     logger.debug("Tracked status message %s is gone: %s", msg_id, exc)
                     _status_msg_info.pop(skey, None)
                     _clear_persisted_status_msg_info(skey)
-                    await _do_send_status_message(
+                    _clear_status_history_for_key(skey, window_id=stored_wid)
+                    if await _do_send_status_message(
                         bot,
                         user_id,
                         tid,
@@ -3129,7 +3293,8 @@ async def _process_status_update_task(
                         content_type=_status_audit_content_type(task),
                         semantic_kind=_status_audit_semantic_kind(task),
                         audit_task=task,
-                    )
+                    ):
+                        _commit_status_history(history_key, candidate_history)
                     return
                 try:
                     await bot.edit_message_text(
@@ -3140,12 +3305,14 @@ async def _process_status_update_task(
                     )
                     _status_msg_info[skey] = (msg_id, wid, status_text)
                     _persist_status_msg_info(skey, (msg_id, wid, status_text), content_type=_status_audit_content_type(task), semantic_kind=_status_audit_semantic_kind(task))
+                    _commit_status_history(history_key, candidate_history)
                 except RetryAfter:
                     raise
                 except (BadRequest, Exception) as e:
                     if _is_message_not_modified_error(e):
                         _status_msg_info[skey] = (msg_id, wid, status_text)
                         _persist_status_msg_info(skey, (msg_id, wid, status_text), content_type=_status_audit_content_type(task), semantic_kind=_status_audit_semantic_kind(task))
+                        _commit_status_history(history_key, candidate_history)
                         _audit_task_delivery(
                             action="edit_noop",
                             user_id=user_id,
@@ -3166,7 +3333,8 @@ async def _process_status_update_task(
                         )
                         _status_msg_info.pop(skey, None)
                         _clear_persisted_status_msg_info(skey)
-                        await _do_send_status_message(
+                        _clear_status_history_for_key(skey, window_id=stored_wid)
+                        if await _do_send_status_message(
                             bot,
                             user_id,
                             tid,
@@ -3178,7 +3346,8 @@ async def _process_status_update_task(
                             content_type=_status_audit_content_type(task),
                             semantic_kind=_status_audit_semantic_kind(task),
                             audit_task=task,
-                        )
+                        ):
+                            _commit_status_history(history_key, candidate_history)
                         return
                     logger.debug(f"Failed to edit status message: {e}")
                     _status_msg_info[skey] = (msg_id, stored_wid, last_text)
@@ -3198,7 +3367,7 @@ async def _process_status_update_task(
                     )
     else:
         # No existing status message, send new
-        await _do_send_status_message(
+        if await _do_send_status_message(
             bot,
             user_id,
             tid,
@@ -3210,7 +3379,8 @@ async def _process_status_update_task(
             content_type=_status_audit_content_type(task),
             semantic_kind=_status_audit_semantic_kind(task),
             audit_task=task,
-        )
+        ):
+            _commit_status_history(history_key, candidate_history)
 
 
 async def _do_send_status_message(
@@ -3226,13 +3396,13 @@ async def _do_send_status_message(
     content_type: str = "status",
     semantic_kind: str = "technical_status",
     audit_task: MessageTask | None = None,
-) -> None:
+) -> bool:
     """Send a new status message and track it (internal, called from worker)."""
     if _is_poll_only_status_text(text):
-        return
+        return False
     text = _normalize_technical_status_text(text)
     if not text:
-        return
+        return False
     base_skey = _topic_state_key(
         user_id,
         thread_id_or_0,
@@ -3296,6 +3466,8 @@ async def _do_send_status_message(
     if sent:
         _status_msg_info[skey] = (sent.message_id, window_id, text)
         _persist_status_msg_info(skey, (sent.message_id, window_id, text), content_type=content_type, semantic_kind=semantic_kind)
+        return True
+    return False
 
 
 async def _process_commentary_update_task(
@@ -4104,6 +4276,7 @@ async def _do_clear_status_message(
                     continue
         content_type, semantic_kind = _status_artifact_metadata(skey)
         _clear_persisted_status_msg_info(skey)
+        _clear_status_history_for_key(skey)
         if not info:
             continue
         msg_id = info[0]
@@ -5028,14 +5201,14 @@ def _mark_technical_status_closed(
     surface_key: str | None = None,
 ) -> None:
     """Prevent technical status artifacts from surfacing until the next user turn."""
-    _technical_status_closed.add(
-        _topic_state_key(
-            user_id,
-            thread_id or 0,
-            chat_id=chat_id,
-            surface_key=surface_key,
-        )
+    key = _topic_state_key(
+        user_id,
+        thread_id or 0,
+        chat_id=chat_id,
+        surface_key=surface_key,
     )
+    _technical_status_closed.add(key)
+    _clear_status_history_for_surface(key)
     resolved_chat_id = chat_id
     if resolved_chat_id is None:
         try:
@@ -5113,6 +5286,7 @@ def clear_pre_final_visible_lane_state(
     _technical_status_closed.discard(key)
     _turn_generations.pop(key, None)
     _latest_pre_final_visible_kind.pop(key, None)
+    _clear_status_history_for_surface(key)
     _pending_input_enqueued.pop(key, None)
     _pending_input_enqueued.pop(legacy_key, None)
     _plan_update_msg_info.pop(key, None)
@@ -5191,6 +5365,7 @@ def open_new_turn_generation(
     # edit. Drop only the pointer; the old message remains as historical
     # evidence and the next plan update opens a fresh visible bubble.
     _plan_update_msg_info.pop(key, None)
+    _clear_status_history_for_surface(key)
     return generation
 
 
@@ -5210,6 +5385,7 @@ def clear_status_msg_info(user_id: int, thread_id: int | None = None) -> None:
     skey = _topic_state_key(user_id, thread_id or 0)
     _status_msg_info.pop(skey, None)
     _clear_persisted_status_msg_info(skey)
+    _clear_status_history_for_key(skey)
 
 
 async def clear_status_message(
@@ -5381,6 +5557,7 @@ async def shutdown_workers() -> None:
     _inflight_tasks.clear()
     _mutable_coalesced_counts.clear()
     _status_msg_info.clear()
+    _technical_status_history.clear()
     _commentary_msg_info.clear()
     _commentary_extra_msg_ids.clear()
     _plan_update_msg_info.clear()

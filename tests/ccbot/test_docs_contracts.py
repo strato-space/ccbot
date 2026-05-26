@@ -95,6 +95,9 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "the binding goes stale, or an explicit clear path runs" in readme
     assert "whole pre-final visible surface closes until the next user turn" in readme
     assert "mutable technical status surface" in readme
+    assert "bounded delivered technical-status history" in readme
+    assert "fenced current detail\n  panel" in readme
+    assert "not durable runtime history" in readme
     assert "no pre-final visible artifact" in readme
     assert "late technical status" in readme
     assert "`omx_workflow_panel` / `omx_workflow_status`" in readme
@@ -499,6 +502,9 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "fenced `sh` blocks" in doc
     assert "fenced `json` blocks" in doc
     assert "truncation footers outside the fenced block" in doc
+    assert "bounded delivered technical-status history" in doc
+    assert "fenced current detail panel" in doc
+    assert "not durable runtime history" in doc
     assert "outcome metadata rendered as a separate footer" in doc
     assert "visibility-first mutable updates" in doc
     assert "`tool_use` summaries" in doc

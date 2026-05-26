@@ -4296,6 +4296,258 @@ def test_normalize_command_output_status_keeps_output_category() -> None:
     assert mq._normalize_technical_status_text(text) == text
 
 
+def test_normalize_bare_tool_status_wraps_text_fence() -> None:
+    rendered = mq._normalize_technical_status_text("🛠 Tool\nread_file")
+
+    assert rendered == "🛠 Tool\n```text\nread_file\n```"
+
+
+def test_normalize_raw_tool_status_wraps_text_fence() -> None:
+    rendered = mq._normalize_technical_status_text("Tool read_file Reading chunk 1/2")
+
+    assert rendered == "🛠 Tool\n```text\nread_file Reading chunk 1/2\n```"
+
+
+@pytest.mark.asyncio
+async def test_compact_status_renders_delivered_history_above_current_panel(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    mq._technical_status_history.clear()
+    bot = AsyncMock()
+    sent = SimpleNamespace(message_id=501)
+
+    first = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="⌘ Command pytest -q preview 1/2 lines",
+        turn_generation=1,
+    )
+    second = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="⌘ Command ruff check preview 1/1 lines",
+        turn_generation=1,
+    )
+
+    try:
+        with (
+            patch(
+                "ccbot.handlers.message_queue._is_task_binding_active",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch("ccbot.handlers.message_queue.current_turn_generation", return_value=1),
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                return_value=sent,
+            ) as mock_send,
+        ):
+            mock_sm.resolve_chat_id.return_value = 100
+            await _process_status_update_task(bot, 1, first)
+            await _process_status_update_task(bot, 1, second)
+
+        await_args = mock_send.await_args
+        assert await_args is not None
+        sent_text = await_args.args[2]
+        assert sent_text.startswith('💻 terminal: "pytest -q"')
+        assert "\n\n⌘ Command\n```sh\npytest -q\n```" in sent_text
+
+        edit_args = bot.edit_message_text.await_args
+        assert edit_args is not None
+        edited_text = edit_args.kwargs["text"]
+        assert '💻 terminal: "pytest \\-q"' in edited_text
+        assert '💻 terminal: "ruff check"' in edited_text
+        assert "\n\n⌘ Command\n```sh\nruff check\n```" in edited_text
+        assert mq._status_msg_info[mq._topic_state_key(1, 42)][0] == 501
+        assert mq._technical_status_history[(mq._topic_state_key(1, 42), "@7", 1)] == (
+            '💻 terminal: "pytest -q"',
+            '💻 terminal: "ruff check"',
+        )
+    finally:
+        mq._status_msg_info.clear()
+        mq._technical_status_history.clear()
+
+
+@pytest.mark.asyncio
+async def test_compact_status_does_not_commit_history_when_initial_send_fails(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    mq._technical_status_history.clear()
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="⌘ Command pytest -q preview 1/2 lines",
+        turn_generation=1,
+    )
+
+    try:
+        with (
+            patch(
+                "ccbot.handlers.message_queue._is_task_binding_active",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch("ccbot.handlers.message_queue.current_turn_generation", return_value=1),
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            mock_sm.resolve_chat_id.return_value = 100
+            await _process_status_update_task(AsyncMock(), 1, task)
+
+        assert mq._status_msg_info == {}
+        assert mq._technical_status_history == {}
+    finally:
+        mq._status_msg_info.clear()
+        mq._technical_status_history.clear()
+
+
+@pytest.mark.asyncio
+async def test_compact_tool_status_renders_history_with_fenced_detail_panel(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    mq._technical_status_history.clear()
+    bot = AsyncMock()
+    sent = SimpleNamespace(message_id=501)
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="🛠 Tool\nread_file",
+        turn_generation=1,
+    )
+
+    try:
+        with (
+            patch(
+                "ccbot.handlers.message_queue._is_task_binding_active",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch("ccbot.handlers.message_queue.current_turn_generation", return_value=1),
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                return_value=sent,
+            ) as mock_send,
+        ):
+            mock_sm.resolve_chat_id.return_value = 100
+            await _process_status_update_task(bot, 1, task)
+
+        await_args = mock_send.await_args
+        assert await_args is not None
+        sent_text = await_args.args[2]
+        assert sent_text.startswith("🛠 read_file")
+        assert "\n\n🛠 Tool\n```text\nread_file\n```" in sent_text
+    finally:
+        mq._status_msg_info.clear()
+        mq._technical_status_history.clear()
+
+
+@pytest.mark.asyncio
+async def test_compact_status_commits_history_after_plain_fallback_edit(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    mq._technical_status_history.clear()
+    key = mq._topic_state_key(1, 42)
+    old_text = '💻 terminal: "pytest -q"\n\n⌘ Command\n```sh\npytest -q\n```'
+    mq._status_msg_info[key] = (501, "@7", old_text)
+    mq._technical_status_history[(key, "@7", 1)] = ('💻 terminal: "pytest -q"',)
+    bot = AsyncMock()
+    bot.edit_message_text.side_effect = [Exception("markdown failed"), None]
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="⌘ Command ruff check preview 1/1 lines",
+        turn_generation=1,
+    )
+
+    try:
+        with (
+            patch(
+                "ccbot.handlers.message_queue._is_task_binding_active",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch("ccbot.handlers.message_queue.current_turn_generation", return_value=1),
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        ):
+            mock_sm.resolve_chat_id.return_value = 100
+            await _process_status_update_task(bot, 1, task)
+
+        assert bot.edit_message_text.await_count == 2
+        assert mq._technical_status_history[(key, "@7", 1)] == (
+            '💻 terminal: "pytest -q"',
+            '💻 terminal: "ruff check"',
+        )
+        assert '💻 terminal: "ruff check"' in mq._status_msg_info[key][2]
+    finally:
+        mq._status_msg_info.clear()
+        mq._technical_status_history.clear()
+
+
+@pytest.mark.asyncio
+async def test_compact_status_preserves_history_after_unknown_edit_failure(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    mq._technical_status_history.clear()
+    key = mq._topic_state_key(1, 42)
+    old_text = '💻 terminal: "pytest -q"\n\n⌘ Command\n```sh\npytest -q\n```'
+    mq._status_msg_info[key] = (501, "@7", old_text)
+    mq._technical_status_history[(key, "@7", 1)] = ('💻 terminal: "pytest -q"',)
+    bot = AsyncMock()
+    bot.edit_message_text.side_effect = [Exception("markdown failed"), Exception("plain failed")]
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="⌘ Command ruff check preview 1/1 lines",
+        turn_generation=1,
+    )
+
+    try:
+        with (
+            patch(
+                "ccbot.handlers.message_queue._is_task_binding_active",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch("ccbot.handlers.message_queue.current_turn_generation", return_value=1),
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        ):
+            mock_sm.resolve_chat_id.return_value = 100
+            await _process_status_update_task(bot, 1, task)
+
+        assert bot.edit_message_text.await_count == 2
+        assert mq._technical_status_history[(key, "@7", 1)] == (
+            '💻 terminal: "pytest -q"',
+        )
+        assert mq._status_msg_info[key] == (501, "@7", old_text)
+    finally:
+        mq._status_msg_info.clear()
+        mq._technical_status_history.clear()
+
+
 @pytest.mark.asyncio
 async def test_poll_only_write_stdin_does_not_replace_existing_status_bubble(
     monkeypatch, tmp_path
@@ -4391,7 +4643,7 @@ async def test_status_tool_output_wrapper_is_cleaned_for_humans(
         await _process_status_update_task(bot, 1, task)
 
     sent_text = bot.edit_message_text.await_args.kwargs["text"]
-    assert sent_text.startswith("⌘ Command output")
+    assert sent_text.startswith('↳ output: "✓ 22')
     assert "```text" in sent_text
     assert "desktop" in sent_text
     assert "preview 10/11 lines" in sent_text
@@ -4403,7 +4655,7 @@ async def test_status_tool_output_wrapper_is_cleaned_for_humans(
         json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
     ]
     assert rows[-1]["action"] == "edit"
-    assert rows[-1]["preview"].startswith("⌘ Command output")
+    assert rows[-1]["preview"].startswith('↳ output: "✓ 22')
 
     mq._status_msg_info.clear()
 
