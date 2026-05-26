@@ -368,8 +368,9 @@ tool results rather than being forced into command execution.
 
 ## Ordering Invariants
 
-- pre-final visible artifacts already queued may land before the terminal final
-  answer
+- pre-final visible artifacts already in flight may land before the terminal
+  final answer, but queued same-surface/window/turn mutable progress is dropped
+  with audit once an `assistant_final` final barrier is observed
 - the terminal turn artifact is always delivered as a fresh message sequence;
   it must not replace the visible commentary artifact
 - before a new user turn advances the control-surface generation, any already
@@ -408,13 +409,17 @@ tool results rather than being forced into command execution.
 - Compact mutable artifact lanes are latest-state lanes while queued behind a
   durable ordering barrier: status, commentary, plan, and pending-input updates
   may replace older same-surface/window/turn/lane updates before Telegram sees
-  them. Durable content/final/warning/ingress artifacts remain ordered facts,
-  not replaceable state.
+  them. When the durable barrier is `assistant_final`, queued status,
+  commentary, and plan updates for the same surface/window/turn are obsolete and
+  may be dropped with audit; pending-input remains future-input state and is
+  preserved. Durable content/final/warning/ingress artifacts remain ordered
+  facts, not replaceable state.
 - Backlog metrics are payload-free observations, not delivery artifacts:
   Telegram delivery backlog is queue/in-flight/flood state, while replay backlog
   is unread/read-but-not-dispatched replay evidence state.
 - pending input preview remains outside this terminal ordering barrier; it
-  describes future queued input rather than current-turn output
+  describes future queued input rather than current-turn output and is not
+  dropped by the final barrier
 - pending input preview closes on queue-owned lifecycle transitions such as
   queue-empty, binding-stale, or explicit clear, not on terminal assistant
   closure alone

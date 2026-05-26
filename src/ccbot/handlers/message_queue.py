@@ -67,6 +67,55 @@ from .message_sender import (
 
 logger = logging.getLogger(__name__)
 _STATE_CHAT_UNSET = object()
+_assistant_final_delivery_failures: dict[tuple[int, int | str, str, int], str] = {}
+
+
+def _assistant_final_failure_key(user_id: int, task: MessageTask) -> tuple[int, int | str, str, int]:
+    return (
+        user_id,
+        _topic_state_token(
+            task.thread_id or 0,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        ),
+        task.window_id or "",
+        task.turn_generation,
+    )
+
+
+def pop_assistant_final_delivery_failure(
+    user_id: int,
+    *,
+    thread_id: int | None,
+    chat_id: int | None,
+    surface_key: str | None,
+    window_id: str,
+    turn_generation: int,
+) -> str | None:
+    """Return and clear a terminal delivery failure recorded by the queue."""
+    return _assistant_final_delivery_failures.pop(
+        (
+            user_id,
+            _topic_state_token(
+                thread_id or 0,
+                chat_id=chat_id,
+                surface_key=surface_key,
+            ),
+            window_id,
+            turn_generation,
+        ),
+        None,
+    )
+
+
+def _record_assistant_final_delivery_failure(task: MessageTask, user_id: int, reason: str) -> None:
+    if task.semantic_kind == ASSISTANT_FINAL_SEMANTIC_KIND:
+        _assistant_final_delivery_failures[_assistant_final_failure_key(user_id, task)] = reason
+
+
+def _clear_assistant_final_delivery_failure(task: MessageTask, user_id: int) -> None:
+    if task.semantic_kind == ASSISTANT_FINAL_SEMANTIC_KIND:
+        _assistant_final_delivery_failures.pop(_assistant_final_failure_key(user_id, task), None)
 
 
 def _ensure_formatted(text: str) -> str:
@@ -950,6 +999,76 @@ async def _enqueue_coalescing_mutable_task(
             reason=f"mutable_queue_coalesced:{_mutable_coalesce_lane(task)}:count={collapsed}",
         )
     return collapsed
+
+
+def _is_final_barrier_droppable_task(task: MessageTask) -> bool:
+    """Return True for obsolete same-turn mutable progress behind a final."""
+    if task.semantic_kind == ASSISTANT_FINAL_SEMANTIC_KIND:
+        return False
+    if task.semantic_kind in {USER_ECHO_SEMANTIC_KIND, IMAGE_PREVIEW_SEMANTIC_KIND}:
+        return False
+    if task.content_type == GENERATED_IMAGE_PREVIEW_CONTENT_TYPE:
+        return False
+    # Pending input previews belong to the future-input lane, not current-turn
+    # output ordering, so the final barrier must not drop them.
+    if task.task_type in {"pending_input_update", "pending_input_clear"}:
+        return False
+    return task.task_type in {
+        "status_update",
+        "commentary_update",
+        "plan_update",
+    }
+
+
+async def _drop_queued_mutable_progress_before_final(
+    queue: asyncio.Queue[MessageTask],
+    lock: asyncio.Lock,
+    user_id: int,
+    final_task: MessageTask,
+) -> int:
+    """Drop obsolete queued mutable progress for final_task's surface/turn."""
+    dropped = 0
+    tid = final_task.thread_id or 0
+    async with lock:
+        items = _inspect_queue(queue)
+        remaining: list[MessageTask] = []
+        for item in items:
+            if (
+                item.turn_generation == final_task.turn_generation
+                and item.window_id == final_task.window_id
+                and _task_matches_surface(
+                    item,
+                    tid,
+                    chat_id=final_task.chat_id,
+                    surface_key=final_task.surface_key,
+                )
+                and _is_final_barrier_droppable_task(item)
+            ):
+                dropped += 1
+                _audit_task_delivery(
+                    action="suppress",
+                    user_id=user_id,
+                    chat_id=_safe_task_chat_id(user_id, item),
+                    task=item,
+                    text=item.text or "\n\n".join(item.parts),
+                    reason="final_barrier_dropped_queued_mutable_progress",
+                )
+                queue.task_done()
+                continue
+            remaining.append(item)
+
+        for item in remaining:
+            queue.put_nowait(item)
+            queue.task_done()
+
+    if dropped:
+        logger.info(
+            "Dropped %d queued mutable progress task(s) before assistant_final: user=%d thread=%s",
+            dropped,
+            user_id,
+            final_task.thread_id,
+        )
+    return dropped
 
 
 async def _merge_content_tasks(
@@ -2153,8 +2272,11 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             reason="image_preview_media_send_failed",
             success=False,
         )
-        if task.text and not task.parts:
-            task.parts = [task.text]
+        if not task.parts:
+            fallback_text = task.text or task.image_caption or ""
+            if fallback_text:
+                task.parts = [fallback_text]
+                task.text = fallback_text
         task.image_data = None
         task.image_caption = None
 
@@ -2176,6 +2298,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                 text=task.image_caption or task.text or "",
                 success=True,
             )
+            _clear_assistant_final_delivery_failure(task, user_id)
             _mark_pre_final_visible_closed(
                 user_id,
                 task.thread_id,
@@ -2220,8 +2343,11 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             reason="generated_image_preview_media_send_failed",
             success=False,
         )
-        if task.text and not task.parts:
-            task.parts = [task.text]
+        if not task.parts:
+            fallback_text = task.text or task.image_caption or ""
+            if fallback_text:
+                task.parts = [fallback_text]
+                task.text = fallback_text
         task.image_data = None
         task.image_caption = None
 
@@ -2486,6 +2612,18 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             surface_key=task.surface_key,
             expected_window_id=wid,
         )
+        _clear_assistant_final_delivery_failure(task, user_id)
+        return
+
+    if is_terminal_artifact and (
+        not final_delivery_complete or task.last_message_id is None
+    ):
+        reason = (
+            "assistant_final_delivery_incomplete"
+            if not final_delivery_complete
+            else "assistant_final_delivery_missing_message"
+        )
+        _record_assistant_final_delivery_failure(task, user_id, reason)
         return
 
     # 5. After content, check and send status
@@ -4503,6 +4641,14 @@ async def enqueue_content_message(
         document_data=document_data,
         turn_generation=turn_generation,
     )
+    if semantic_kind == ASSISTANT_FINAL_SEMANTIC_KIND:
+        _clear_assistant_final_delivery_failure(task, user_id)
+        await _drop_queued_mutable_progress_before_final(
+            queue,
+            _queue_locks[user_id],
+            user_id,
+            task,
+        )
     task.depth_at_enqueue = queue.qsize()
     queue.put_nowait(task)
 

@@ -90,7 +90,9 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   milestone, or surfaced preview artifact appears below the
   final answer for the same turn, and no late status artifact appears below the
   final answer for the same turn. Put bluntly: no pre-final visible artifact
-  or late technical status may leak below the terminal assistant bubble.
+  or late technical status may leak below the terminal assistant bubble. Queued
+  same-turn mutable status/commentary/plan updates that have not reached
+  Telegram are dropped with audit when the final answer becomes available.
   When compactness and semantic clarity conflict, the delivery surface prefers
   visibility-first edit-in-place updates over ambiguous silence.
   Long-wait reviewer/progress commentary may be re-sent at the chat tail while
@@ -938,7 +940,11 @@ storing full raw tool payloads. For outbound video delivery, audit rows may also
 include sanitized requested video geometry, request method, provided thumbnail
 path, and Telegram-returned video/thumbnail geometry so final-preview gates can
 reject status/message-id/url-only evidence.
-Queue-backed delivery rows may also include payload-free backlog context
+Replay byte offsets for dispatchable final answers are persisted only after the
+Telegram delivery callback has completed or exposed an explicit retryable
+failure path, so a crash or send failure does not silently consume the final
+from Codex replay evidence. Queue-backed delivery rows may also include
+payload-free backlog context
 (`task_class`, queue age, enqueue/send queue depth) and structured transport
 context (`transport_error_type`, `error_class`, `retry_after`,
 `backpressure_reason`). Error text is compact and redacted so Bot API tokens,

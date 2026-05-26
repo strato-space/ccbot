@@ -11,7 +11,7 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 from ccbot.codex_threads import CodexThreadCatalog
-from ccbot.runtime_types import RolloutSource
+from ccbot.runtime_types import NormalizedEvent, RolloutSource
 from ccbot.session import SessionManager
 from ccbot.monitor_state import TrackedSession
 from ccbot.session_monitor import SessionMonitor
@@ -890,3 +890,177 @@ class TestCheckForUpdatesCodexRollout:
 
         assert [event.text for event in first if event.dispatch_to_telegram] == []
         assert second == []
+
+@pytest.mark.asyncio
+async def test_check_for_updates_does_not_persist_offset_before_callback_handoff(tmp_path):
+    thread_id = "thread-final-offset"
+    rollout = tmp_path / "rollout.jsonl"
+    first = {
+        "timestamp": "2026-05-26T12:18:21.525Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "phase": "final_answer",
+            "content": [{"type": "output_text", "text": "Final answer"}],
+        },
+    }
+    rollout.write_text(json.dumps(first) + "\n", encoding="utf-8")
+    state_file = tmp_path / "monitor_state.json"
+    monitor = SessionMonitor(
+        projects_path=tmp_path / "projects",
+        state_file=state_file,
+    )
+    monitor._active_rollout_sources = {
+        thread_id: RolloutSource(
+            thread_id=thread_id,
+            file_path=rollout,
+            runtime_kind="codex",
+        )
+    }
+    tracked = TrackedSession(
+        session_id=thread_id,
+        file_path=str(rollout),
+        last_byte_offset=0,
+        runtime_kind="codex",
+    )
+    monitor.state.update_tracked_source(tracked)
+    monitor.state.save()
+    old_state = json.loads(state_file.read_text())
+    assert old_state["tracked_sessions"][thread_id]["last_byte_offset"] == 0
+
+    events = await monitor.check_for_updates({thread_id})
+
+    assert any(
+        event.semantic_kind == "assistant_final" and event.dispatch_to_telegram
+        for event in events
+    )
+    assert monitor.state.tracked_sessions[thread_id].last_byte_offset > 0
+    persisted = json.loads(state_file.read_text())
+    assert persisted["tracked_sessions"][thread_id]["last_byte_offset"] == 0
+
+
+@pytest.mark.asyncio
+async def test_monitor_loop_rolls_back_new_source_offset_on_callback_failure(tmp_path):
+    thread_id = "thread-new-final-failure"
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-05-26T12:18:21.525Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "Final answer"}],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    state_file = tmp_path / "monitor_state.json"
+    monitor = SessionMonitor(
+        projects_path=tmp_path / "projects",
+        state_file=state_file,
+        poll_interval=0,
+    )
+    monitor._active_rollout_sources = {
+        thread_id: RolloutSource(
+            thread_id=thread_id,
+            file_path=rollout,
+            runtime_kind="codex",
+            live_since=time.time(),
+        )
+    }
+    monitor._cleanup_all_stale_sessions = AsyncMock()  # type: ignore[method-assign]
+    monitor._load_current_session_map = AsyncMock(  # type: ignore[method-assign]
+        return_value={"@1": thread_id}
+    )
+    monitor._detect_and_cleanup_changes = AsyncMock(  # type: ignore[method-assign]
+        return_value={"@1": thread_id}
+    )
+
+    async def _failing_callback(event):
+        assert event.semantic_kind == "assistant_final"
+        monitor._running = False
+        raise RuntimeError("delivery failed")
+
+    monitor.set_message_callback(_failing_callback)
+
+    with (
+        patch("ccbot.session.session_manager.load_session_map", new_callable=AsyncMock),
+        patch.object(monitor, "_initial_codex_backfill_offset", return_value=0),
+    ):
+        monitor._running = True
+        await monitor._monitor_loop()
+
+    persisted = json.loads(state_file.read_text())
+    assert persisted["tracked_sessions"][thread_id]["last_byte_offset"] == 0
+    assert monitor.state.tracked_sessions[thread_id].last_byte_offset == 0
+
+
+@pytest.mark.asyncio
+async def test_monitor_loop_skips_same_thread_events_after_callback_failure(tmp_path):
+    thread_id = "thread-final-failure-barrier"
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text("{}\n", encoding="utf-8")
+    state_file = tmp_path / "monitor_state.json"
+    monitor = SessionMonitor(
+        projects_path=tmp_path / "projects",
+        state_file=state_file,
+        poll_interval=0,
+    )
+    tracked = TrackedSession(
+        session_id=thread_id,
+        file_path=str(rollout),
+        last_byte_offset=10,
+        runtime_kind="codex",
+    )
+    monitor.state.update_tracked_source(tracked)
+    monitor.state.save()
+    monitor._cleanup_all_stale_sessions = AsyncMock()  # type: ignore[method-assign]
+    monitor._load_current_session_map = AsyncMock(  # type: ignore[method-assign]
+        return_value={"@1": thread_id}
+    )
+    monitor._detect_and_cleanup_changes = AsyncMock(  # type: ignore[method-assign]
+        return_value={"@1": thread_id}
+    )
+
+    async def _fake_check_for_updates(active_thread_ids):
+        assert active_thread_ids == {thread_id}
+        monitor._last_pre_read_offsets = {thread_id: 10}
+        monitor.state.tracked_sessions[thread_id].last_byte_offset = 100
+        return [
+            NormalizedEvent(
+                thread_id=thread_id,
+                text="Final failed",
+                semantic_kind="assistant_final",
+                dispatch_to_telegram=True,
+            ),
+            NormalizedEvent(
+                thread_id=thread_id,
+                text="Must not deliver after failed final",
+                semantic_kind="commentary",
+                dispatch_to_telegram=True,
+            ),
+        ]
+
+    monitor.check_for_updates = _fake_check_for_updates  # type: ignore[method-assign]
+    seen: list[str] = []
+
+    async def _failing_callback(event):
+        seen.append(event.text)
+        monitor._running = False
+        raise RuntimeError("delivery failed")
+
+    monitor.set_message_callback(_failing_callback)
+
+    with patch("ccbot.session.session_manager.load_session_map", new_callable=AsyncMock):
+        monitor._running = True
+        await monitor._monitor_loop()
+
+    assert seen == ["Final failed"]
+    persisted = json.loads(state_file.read_text())
+    assert persisted["tracked_sessions"][thread_id]["last_byte_offset"] == 10

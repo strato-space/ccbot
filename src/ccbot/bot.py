@@ -160,6 +160,7 @@ from .handlers.message_queue import (
     get_message_queue,
     is_pre_final_visible_lane_closed,
     open_new_turn_generation_with_cleanup,
+    pop_assistant_final_delivery_failure,
     shutdown_workers,
 )
 from .launcher_registration import infer_runtime_kind_from_command
@@ -7458,6 +7459,18 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 queue = get_message_queue(user_id)
                 if queue is not None:
                     await queue.join()
+                final_failure = pop_assistant_final_delivery_failure(
+                    user_id,
+                    thread_id=thread_id,
+                    chat_id=binding.chat_id,
+                    surface_key=binding.surface_key,
+                    window_id=wid,
+                    turn_generation=turn_generation,
+                )
+                if final_failure:
+                    raise RuntimeError(
+                        f"assistant_final_delivery_failed:{final_failure}"
+                    )
 
             # Update user's read offset to current file position
             # This marks these messages as "read" for this user

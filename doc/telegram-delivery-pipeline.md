@@ -206,9 +206,11 @@ Ordering guarantees:
 1. progress/status updates may appear while a turn is still running
 2. the first real content part may convert the status artifact into content
 3. when tool lifecycle is materialized as content, `tool_result` may edit the earlier `tool_use` message in place
-4. pre-final visible artifacts already queued may land before the terminal
-   final answer
-5. final assistant content lands in the topic after the progress/tool lifecycle
+4. pre-final visible artifacts already in flight may land before the terminal
+   final answer, but queued mutable progress for the same surface/window/turn is
+   dropped with audit when the final barrier is observed
+5. final assistant content lands in the topic after any already-in-flight
+   progress/tool lifecycle
 6. only after final assistant content has been delivered successfully, the
    whole pre-final visible
    surface is closed until the next user turn
@@ -596,6 +598,12 @@ Late delivery must fail closed.
   the latest same-surface/window/turn/lane task after the most recent durable
   ordering barrier. Durable content, final answers, warnings, ingress receipts,
   and terminal close tasks are never coalesced away.
+- When a canonical `assistant_final` enters the queue, it becomes a final
+  barrier for the same surface/window/turn. Queued `status`, `commentary`, and
+  `plan` updates behind that barrier are dropped with
+  `final_barrier_dropped_queued_mutable_progress` audit instead of being sent
+  just before or after the final. Pending-input previews are not dropped by this
+  barrier because they describe future input rather than current-turn output.
 
 This prevents:
 
@@ -766,6 +774,10 @@ Compact rendering uses these projections:
 For self-improvement, every Telegram delivery lifecycle decision is appended to
 `telegram_delivery_audit.jsonl` under the ccbot config directory. The audit is
 schema-versioned and records both positive and negative lifecycle events.
+Dispatchable final answers are not treated as safely consumed merely because
+their Codex replay bytes were read: the monitor persists replay offsets only
+after callback handoff finishes, and assistant-final send failures produce an
+explicit retryable failure path instead of silently accepting the replay cursor.
 `send`, `edit`, and `delete` rows describe Telegram API attempts; `suppress`
 rows explain intentional non-delivery such as stale turn output or a poll-only
 `write_stdin` update arriving when no mutable status artifact exists, including

@@ -77,6 +77,10 @@ class SessionMonitor:
         self._last_parsed_event_counts: dict[str, int] = {}
         self._last_delivery_queued_counts: dict[str, int] = {}
         self._callback_inflight_count = 0
+        # Per-poll pre-read offsets used to roll back callback failures,
+        # including newly discovered rollout sources that were not present when
+        # the monitor loop captured its initial rollback map.
+        self._last_pre_read_offsets: dict[str, int] = {}
         # In-memory mtime cache for quick file change detection (not persisted)
         self._file_mtimes: dict[str, float] = {}  # thread_id -> last_seen_mtime
 
@@ -550,6 +554,7 @@ class SessionMonitor:
             active_thread_ids: Set of persisted thread ids currently in the binding map
         """
         new_messages = []
+        self._last_pre_read_offsets = {}
 
         rollout_sources: list[RolloutSource] = [
             rollout_source
@@ -604,6 +609,7 @@ class SessionMonitor:
                                 initial_offset,
                                 file_size,
                             )
+                    self._last_pre_read_offsets[rollout_source.thread_id] = initial_offset
                     tracked = TrackedSession(
                         session_id=rollout_source.thread_id,
                         file_path=str(rollout_source.file_path),
@@ -658,6 +664,9 @@ class SessionMonitor:
 
                 # File changed, read new content from last offset
                 previous_offset = tracked.last_byte_offset
+                self._last_pre_read_offsets.setdefault(
+                    rollout_source.thread_id, previous_offset
+                )
                 new_entries = await self._read_new_lines(
                     tracked, rollout_source.file_path
                 )
@@ -722,7 +731,11 @@ class SessionMonitor:
                     e,
                 )
 
-        self.state.save_if_dirty()
+        # Do not persist replay offsets here. Offsets are advanced in memory by
+        # _read_new_lines(), but persisting them before message callbacks finish
+        # can silently skip dispatchable events if the service restarts or a
+        # previous surface blocks delivery. The monitor loop saves only after
+        # callback handoff completes (or rolls back failed threads).
         return new_messages
 
     async def _load_current_session_map(self) -> dict[str, str]:
@@ -887,10 +900,26 @@ class SessionMonitor:
                 current_map = await self._detect_and_cleanup_changes()
                 active_thread_ids = set(current_map.values())
 
-                # Check for new messages (all I/O is async)
+                # Check for new messages (all I/O is async). Capture accepted
+                # offsets before reading so callback failures can roll back the
+                # durable replay cursor instead of marking dispatchable events
+                # consumed without delivery/audit evidence.
+                offsets_before_callbacks = {
+                    thread_id: tracked.last_byte_offset
+                    for thread_id, tracked in self.state.tracked_sessions.items()
+                }
                 new_messages = await self.check_for_updates(active_thread_ids)
+                offsets_before_callbacks.update(self._last_pre_read_offsets)
+                failed_callback_threads: set[str] = set()
 
                 for msg in new_messages:
+                    if msg.thread_id in failed_callback_threads:
+                        logger.warning(
+                            "Skipping replay event after same-thread callback failure: thread=%s semantic=%s",
+                            msg.thread_id,
+                            msg.semantic_kind,
+                        )
+                        continue
                     if (
                         not msg.dispatch_to_telegram
                         and msg.semantic_kind != USER_ECHO_SEMANTIC_KIND
@@ -909,12 +938,33 @@ class SessionMonitor:
                             self._callback_inflight_count += 1
                             await self._message_callback(msg)
                         except Exception as e:
+                            failed_callback_threads.add(msg.thread_id)
                             logger.error(f"Message callback error: {e}")
                         finally:
                             self._callback_inflight_count = max(
                                 0,
                                 self._callback_inflight_count - 1,
                             )
+
+                for thread_id in failed_callback_threads:
+                    previous_offset = offsets_before_callbacks.get(thread_id)
+                    tracked = self.state.tracked_sessions.get(thread_id)
+                    if tracked is not None and previous_offset is not None:
+                        logger.warning(
+                            "Rolling back replay offset after callback failure: thread=%s offset=%d -> %d",
+                            thread_id,
+                            tracked.last_byte_offset,
+                            previous_offset,
+                        )
+                        tracked.last_byte_offset = previous_offset
+                        self._file_mtimes.pop(thread_id, None)
+                        self._codex_rollout_states.pop(thread_id, None)
+                        self.state.update_tracked_source(tracked)
+
+                # Persist offsets only after callbacks for this poll completed.
+                # If the process dies mid-callback, the previous monitor_state
+                # offset remains on disk and the batch is retried after restart.
+                self.state.save_if_dirty()
 
             except Exception as e:
                 logger.error(f"Monitor loop error: {e}")

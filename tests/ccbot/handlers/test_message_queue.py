@@ -701,7 +701,6 @@ async def test_ingress_receipt_does_not_cross_later_final_barrier() -> None:
         await queue.join()
 
     assert sent == [
-        ("status", "Working"),
         ("content", "assistant_final"),
         ("receipt", "pending"),
     ]
@@ -2221,7 +2220,7 @@ async def test_final_send_failure_does_not_close_pre_final_visible_lane() -> Non
             await _process_commentary_update_task(AsyncMock(), 1, commentary_task)
 
         assert mock_send.await_count == 2
-        mock_status.assert_awaited_once()
+        mock_status.assert_not_awaited()
         mock_images.assert_awaited_once()
     finally:
         clear_commentary_lane_state(1, 42)
@@ -2412,6 +2411,68 @@ async def test_generated_image_terminal_preview_photo_failure_falls_back_to_text
         mock_status.assert_not_awaited()
     finally:
         clear_commentary_lane_state(1, 42)
+
+
+
+
+@pytest.mark.asyncio
+async def test_generated_image_terminal_preview_photo_and_text_failure_records_final_failure() -> None:
+    final_task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=[],
+        text="",
+        content_type="generated_image_preview",
+        semantic_kind="assistant_final",
+        image_data=[("image/png", b"png-bytes")],
+        image_caption="🖼 Generated Image\nRequest: frame",
+        turn_generation=1,
+    )
+
+    with (
+        patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.message_queue.current_turn_generation",
+            return_value=1,
+        ),
+        patch(
+            "ccbot.handlers.message_queue.send_photo",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "ccbot.handlers.message_queue.send_with_fallback",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_send,
+        patch(
+            "ccbot.handlers.message_queue._check_and_send_status",
+            new_callable=AsyncMock,
+        ) as mock_status,
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+        mock_sm.get_window_for_thread.return_value = "@7"
+        mock_sm.get_topic_binding_state.return_value = "bound"
+        mock_sm.resolve_chat_id.return_value = 100
+
+        bot = AsyncMock()
+        await _process_content_task(bot, 1, final_task)
+
+    mock_send.assert_awaited_once()
+    mock_status.assert_not_awaited()
+    assert (
+        mq.pop_assistant_final_delivery_failure(
+            1,
+            thread_id=42,
+            chat_id=None,
+            surface_key=None,
+            window_id="@7",
+            turn_generation=1,
+        )
+        == "assistant_final_delivery_incomplete"
+    )
 
 
 @pytest.mark.asyncio
@@ -3471,7 +3532,7 @@ async def test_partial_multipart_final_does_not_close_pre_final_visible_lane() -
             await _process_commentary_update_task(AsyncMock(), 1, commentary_task)
 
         assert mock_send.await_count == 3
-        mock_status.assert_awaited_once()
+        mock_status.assert_not_awaited()
         mock_images.assert_awaited_once()
     finally:
         clear_commentary_lane_state(1, 42)
@@ -4667,3 +4728,158 @@ async def test_status_clear_deletes_all_status_lanes_with_lane_metadata(monkeypa
     assert {"technical_status", OMX_WORKFLOW_STATUS_SEMANTIC_KIND} <= deleted_semantics
     await mq.shutdown_workers()
     mq._status_msg_info.clear()
+
+@pytest.mark.asyncio
+async def test_final_barrier_drops_queued_mutable_progress_but_preserves_pending_input() -> None:
+    queue: asyncio.Queue[MessageTask] = asyncio.Queue()
+    lock = asyncio.Lock()
+    user_id = 987654
+    final_task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["Final"],
+        content_type="text",
+        semantic_kind="assistant_final",
+        turn_generation=3,
+    )
+    status_task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="⌘ Command running",
+        content_type="status",
+        semantic_kind="technical_status",
+        turn_generation=3,
+    )
+    commentary_task = MessageTask(
+        task_type="commentary_update",
+        window_id="@7",
+        thread_id=42,
+        text="Working...",
+        content_type="commentary",
+        semantic_kind="commentary",
+        turn_generation=3,
+    )
+    pending_task = MessageTask(
+        task_type="pending_input_update",
+        window_id="@7",
+        thread_id=42,
+        text="queued future input",
+        semantic_kind="pending_input",
+        turn_generation=3,
+    )
+    status_clear_task = MessageTask(
+        task_type="status_clear",
+        window_id="@7",
+        thread_id=42,
+        text="clear status",
+        content_type="status",
+        semantic_kind="technical_status",
+        turn_generation=3,
+    )
+    commentary_clear_task = MessageTask(
+        task_type="commentary_clear",
+        window_id="@7",
+        thread_id=42,
+        text="clear commentary",
+        content_type="commentary",
+        semantic_kind="commentary",
+        turn_generation=3,
+    )
+    plan_clear_task = MessageTask(
+        task_type="plan_clear",
+        window_id="@7",
+        thread_id=42,
+        text="clear plan",
+        content_type="plan",
+        semantic_kind="plan",
+        turn_generation=3,
+    )
+    other_turn_status = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="older turn",
+        content_type="status",
+        semantic_kind="technical_status",
+        turn_generation=2,
+    )
+    for task in [
+        status_task,
+        commentary_task,
+        pending_task,
+        status_clear_task,
+        commentary_clear_task,
+        plan_clear_task,
+        other_turn_status,
+    ]:
+        queue.put_nowait(task)
+
+    with patch("ccbot.handlers.message_queue.session_manager") as mock_sm:
+        mock_sm.resolve_chat_id.return_value = 100
+        dropped = await mq._drop_queued_mutable_progress_before_final(
+            queue,
+            lock,
+            user_id,
+            final_task,
+        )
+
+    remaining = mq._inspect_queue(queue)
+    assert dropped == 2
+    assert pending_task in remaining
+    assert status_clear_task in remaining
+    assert commentary_clear_task in remaining
+    assert plan_clear_task in remaining
+    assert other_turn_status in remaining
+    assert status_task not in remaining
+    assert commentary_task not in remaining
+
+
+@pytest.mark.asyncio
+async def test_assistant_final_send_failure_records_terminal_delivery_failure() -> None:
+    task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["Final answer"],
+        content_type="text",
+        semantic_kind="assistant_final",
+        turn_generation=5,
+    )
+    with (
+        patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        patch(
+            "ccbot.handlers.message_queue.current_turn_generation",
+            return_value=5,
+        ),
+        patch(
+            "ccbot.handlers.message_queue.send_with_fallback",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "ccbot.handlers.message_queue._check_and_send_status",
+            new_callable=AsyncMock,
+        ) as mock_status,
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+        mock_sm.get_window_for_thread.return_value = "@7"
+        mock_sm.get_topic_binding_state.return_value = "bound"
+        mock_sm.resolve_chat_id.return_value = 100
+
+        await _process_content_task(AsyncMock(), 123, task)
+
+    assert (
+        mq.pop_assistant_final_delivery_failure(
+            123,
+            thread_id=42,
+            chat_id=None,
+            surface_key=None,
+            window_id="@7",
+            turn_generation=5,
+        )
+        == "assistant_final_delivery_incomplete"
+    )
+    mock_status.assert_not_awaited()
