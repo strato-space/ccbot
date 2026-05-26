@@ -3771,7 +3771,98 @@ async def test_status_edit_not_modified_does_not_create_duplicate_bubble(
     ]
     assert rows[-1]["action"] == "edit_noop"
     assert rows[-1]["reason"] == "message_not_modified"
+    assert rows[-1]["success"] is True
+    assert rows[-1]["render_mode"] == "markdown_v2"
+    assert rows[-1]["transport_outcome"] == "edit_noop"
 
+    mq._status_msg_info.clear()
+
+
+@pytest.mark.asyncio
+async def test_status_edit_success_audits_markdown_render_mode(
+    monkeypatch, tmp_path
+) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    key = mq._topic_state_key(1, 42)
+    mq._status_msg_info.clear()
+    mq._status_msg_info[key] = (501, "@7", "old status")
+
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="new status",
+        turn_generation=0,
+    )
+    bot = AsyncMock()
+
+    with (
+        patch(
+            "ccbot.handlers.message_queue._is_task_binding_active",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("ccbot.handlers.message_queue.current_turn_generation", return_value=0),
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+    ):
+        mock_sm.resolve_chat_id.return_value = 100
+        await _process_status_update_task(bot, 1, task)
+
+    rows = [
+        json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[-1]["success"] is True
+    assert rows[-1]["render_mode"] == "markdown_v2"
+    assert rows[-1]["transport_outcome"] == "edited"
+    mq._status_msg_info.clear()
+
+
+@pytest.mark.asyncio
+async def test_status_edit_plain_fallback_noop_audits_success(
+    monkeypatch, tmp_path
+) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    key = mq._topic_state_key(1, 42)
+    mq._status_msg_info.clear()
+    mq._status_msg_info[key] = (501, "@7", "old status")
+
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text="new status",
+        turn_generation=0,
+    )
+    bot = AsyncMock()
+    bot.edit_message_text.side_effect = [
+        Exception("formatted failed"),
+        BadRequest("Message is not modified"),
+    ]
+
+    with (
+        patch(
+            "ccbot.handlers.message_queue._is_task_binding_active",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("ccbot.handlers.message_queue.current_turn_generation", return_value=0),
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+    ):
+        mock_sm.resolve_chat_id.return_value = 100
+        await _process_status_update_task(bot, 1, task)
+
+    rows = [
+        json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[-1]["success"] is True
+    assert rows[-1]["render_mode"] == "plain_text"
+    assert rows[-1]["transport_outcome"] == "fallback_edit_noop"
+    assert rows[-1]["formatted_error_class"] == "Exception"
+    assert rows[-1]["plain_error_class"] == "BadRequest"
     mq._status_msg_info.clear()
 
 
@@ -3834,6 +3925,10 @@ async def test_status_edit_unknown_failure_preserves_existing_status_without_rep
     assert rows[-1]["message_id"] == 501
     assert rows[-1]["error_class"] == "Exception"
     assert rows[-1]["transport_error_type"] == "exception"
+    assert "render_mode" not in rows[-1]
+    assert rows[-1]["transport_outcome"] == "failed"
+    assert rows[-1]["formatted_error_class"] == "Exception"
+    assert rows[-1]["plain_error_class"] == "Exception"
 
     mq._status_msg_info.clear()
     mq._clear_persisted_status_msg_info(key)
@@ -3843,6 +3938,10 @@ async def test_status_edit_unknown_failure_preserves_existing_status_without_rep
 async def test_status_edit_plain_fallback_success_updates_existing_status(
     monkeypatch, tmp_path
 ) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(
+        delivery_audit.config, "telegram_delivery_audit_file", audit_path
+    )
     monkeypatch.setattr(mq.config, "config_dir", tmp_path)
     key = mq._topic_state_key(1, 42)
     mq._status_msg_info.clear()
@@ -3882,6 +3981,12 @@ async def test_status_edit_plain_fallback_success_updates_existing_status(
     assert persisted["message_id"] == 501
     assert persisted["window_id"] == "@7"
     assert persisted["last_text"] == "new status"
+    rows = [
+        json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[-1]["render_mode"] == "plain_text"
+    assert rows[-1]["transport_outcome"] == "fallback_edited"
+    assert rows[-1]["formatted_error_class"] == "Exception"
 
     mq._status_msg_info.clear()
     mq._clear_persisted_status_msg_info(key)
@@ -3935,6 +4040,250 @@ async def test_status_edit_plain_fallback_known_gone_replaces_status(
 
     mq._status_msg_info.clear()
     mq._clear_persisted_status_msg_info(key)
+
+
+@pytest.mark.asyncio
+async def test_content_send_audit_records_markdown_render_mode(monkeypatch, tmp_path) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["⌘ Command output\n```text\n189 passed\n```"],
+        content_type="command_execution",
+        semantic_kind="command_execution",
+    )
+    bot = AsyncMock()
+    sent = SimpleNamespace(message_id=700)
+    bot.send_message.return_value = sent
+
+    with (
+        patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(
+            return_value=type("Window", (), {"window_id": "@7"})()
+        )
+        mock_tmux.capture_pane = AsyncMock(return_value="")
+        mock_sm.get_window_for_thread.return_value = "@7"
+        mock_sm.get_topic_binding_state.return_value = "bound"
+        mock_sm.resolve_chat_id.return_value = 100
+
+        await _process_content_task(bot, 1, task)
+
+    rows = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    send_row = next(row for row in rows if row.get("action") == "send" and row.get("message_id") == 700)
+    assert send_row["success"] is True
+    assert send_row["render_mode"] == "markdown_v2"
+    assert send_row["transport_outcome"] == "sent"
+
+
+@pytest.mark.asyncio
+async def test_content_send_audit_records_plain_fallback_render_mode(monkeypatch, tmp_path) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["⌘ Command output\n```text\n189 passed\n```"],
+        content_type="command_execution",
+        semantic_kind="command_execution",
+    )
+    bot = AsyncMock()
+    sent = SimpleNamespace(message_id=701)
+    bot.send_message.side_effect = [Exception("bad markdown token=abc"), sent]
+
+    with (
+        patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(
+            return_value=type("Window", (), {"window_id": "@7"})()
+        )
+        mock_tmux.capture_pane = AsyncMock(return_value="")
+        mock_sm.get_window_for_thread.return_value = "@7"
+        mock_sm.get_topic_binding_state.return_value = "bound"
+        mock_sm.resolve_chat_id.return_value = 100
+
+        await _process_content_task(bot, 1, task)
+
+    rows = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    send_row = next(row for row in rows if row.get("action") == "send" and row.get("message_id") == 701)
+    assert send_row["render_mode"] == "plain_text"
+    assert send_row["transport_outcome"] == "fallback_sent"
+    assert send_row["formatted_error_class"] == "Exception"
+    assert "token=abc" not in json.dumps(send_row)
+
+
+@pytest.mark.asyncio
+async def test_command_edit_audit_records_plain_fallback_render_mode(monkeypatch, tmp_path) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    mq._status_msg_info.clear()
+    first = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["⌘ Command\n```sh\necho hi\n```"],
+        content_type="command_execution",
+        semantic_kind="command_execution",
+        tool_use_id="call_exec_audit",
+    )
+    second = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["⌘ Command\n```sh\necho hi\n```\n```text\nhi\n```"],
+        content_type="command_execution",
+        semantic_kind="command_execution",
+        tool_use_id="call_exec_audit",
+    )
+    bot = AsyncMock()
+    sent_first = SimpleNamespace(message_id=801)
+    bot.send_message.return_value = sent_first
+    bot.edit_message_text.side_effect = [Exception("bad markdown token=abc"), SimpleNamespace(message_id=801)]
+
+    mq._tool_msg_ids.clear()
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=type("Window", (), {"window_id": "@7"})()
+            )
+            mock_tmux.capture_pane = AsyncMock(return_value="")
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+
+            await _process_content_task(bot, 1, first)
+            await _process_content_task(bot, 1, second)
+
+        rows = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+        edit_row = next(row for row in rows if row.get("action") == "edit" and row.get("message_id") == 801)
+        assert edit_row["render_mode"] == "plain_text"
+        assert edit_row["transport_outcome"] == "fallback_edited"
+        assert edit_row["formatted_error_class"] == "Exception"
+        assert "token=abc" not in json.dumps(edit_row)
+    finally:
+        mq._tool_msg_ids.clear()
+
+
+@pytest.mark.asyncio
+async def test_convert_status_to_content_audits_plain_fallback(monkeypatch, tmp_path) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    key = mq._topic_state_key(1, 42, chat_id=100)
+    mq._status_msg_info.clear()
+    mq._status_msg_info[key] = (901, "@7", "old status")
+    bot = AsyncMock()
+    bot.edit_message_text.side_effect = [Exception("bad markdown token=abc"), SimpleNamespace(message_id=901)]
+
+    converted = await mq._convert_status_to_content(bot, 1, 42, "@7", "new content", chat_id=100)
+
+    assert converted == 901
+    rows = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert rows[-1]["success"] is True
+    assert rows[-1]["render_mode"] == "plain_text"
+    assert rows[-1]["transport_outcome"] == "fallback_edited"
+    assert rows[-1]["formatted_error_class"] == "Exception"
+    assert "token=abc" not in json.dumps(rows[-1])
+    mq._status_msg_info.clear()
+    mq._clear_persisted_status_msg_info(key)
+
+
+@pytest.mark.asyncio
+async def test_convert_status_to_content_audits_total_failure(monkeypatch, tmp_path) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    key = mq._topic_state_key(1, 42, chat_id=100)
+    mq._status_msg_info.clear()
+    mq._status_msg_info[key] = (902, "@7", "old status")
+    bot = AsyncMock()
+    bot.edit_message_text.side_effect = [Exception("bad markdown"), RuntimeError("telegram down")]
+
+    converted = await mq._convert_status_to_content(bot, 1, 42, "@7", "new content", chat_id=100)
+
+    assert converted is None
+    rows = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert rows[-1]["success"] is False
+    assert "render_mode" not in rows[-1]
+    assert rows[-1]["transport_outcome"] == "failed"
+    assert rows[-1]["formatted_error_class"] == "Exception"
+    assert rows[-1]["plain_error_class"] == "RuntimeError"
+    mq._status_msg_info.clear()
+    mq._clear_persisted_status_msg_info(key)
+
+
+@pytest.mark.asyncio
+async def test_status_send_audit_records_plain_fallback_render_mode(
+    monkeypatch, tmp_path
+) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    sent = SimpleNamespace(message_id=601)
+    bot = AsyncMock()
+    bot.send_message.side_effect = [Exception("bad markdown token=abc"), sent]
+
+    with patch("ccbot.handlers.message_queue.session_manager") as mock_sm:
+        mock_sm.resolve_chat_id.return_value = 100
+        delivered = await mq._do_send_status_message(
+            bot,
+            1,
+            42,
+            "@7",
+            "⌘ Command\n```sh\npytest\n```",
+        )
+
+    assert delivered is True
+    rows = [
+        json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[-1]["render_mode"] == "plain_text"
+    assert rows[-1]["transport_outcome"] == "fallback_sent"
+    assert rows[-1]["formatted_error_class"] == "Exception"
+    assert "token=abc" not in json.dumps(rows[-1])
+    mq._status_msg_info.clear()
+
+
+@pytest.mark.asyncio
+async def test_status_send_audit_records_total_failure(
+    monkeypatch, tmp_path
+) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    bot = AsyncMock()
+    bot.send_message.side_effect = [
+        Exception("bad markdown"),
+        RuntimeError("telegram down"),
+    ]
+
+    with patch("ccbot.handlers.message_queue.session_manager") as mock_sm:
+        mock_sm.resolve_chat_id.return_value = 100
+        delivered = await mq._do_send_status_message(bot, 1, 42, "@7", "new status")
+
+    assert delivered is False
+    rows = [
+        json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[-1]["success"] is False
+    assert "render_mode" not in rows[-1]
+    assert rows[-1]["transport_outcome"] == "failed"
+    assert rows[-1]["formatted_error_class"] == "Exception"
+    assert rows[-1]["plain_error_class"] == "RuntimeError"
+    mq._status_msg_info.clear()
 
 
 @pytest.mark.asyncio

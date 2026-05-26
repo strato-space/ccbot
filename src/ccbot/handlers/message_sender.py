@@ -18,6 +18,7 @@ RetryAfter exceptions are re-raised so callers (queue worker) can handle them.
 
 import io
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from telegram import (
@@ -57,6 +58,74 @@ PARSE_MODE = "MarkdownV2"
 NO_LINK_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 
+@dataclass(frozen=True)
+class FallbackDeliveryResult:
+    """Structured Telegram text delivery outcome for audit callers."""
+
+    message: Message | None
+    render_mode: str | None
+    transport_outcome: str
+    formatted_error: Exception | None = None
+    plain_error: Exception | None = None
+
+    @property
+    def success(self) -> bool:
+        if self.transport_outcome in {
+            "edited",
+            "fallback_edited",
+            "edit_noop",
+            "fallback_edit_noop",
+        }:
+            return True
+        return self.message is not None
+
+
+async def send_with_fallback_result(
+    bot: Bot,
+    chat_id: int,
+    text: str,
+    **kwargs: Any,
+) -> FallbackDeliveryResult:
+    """Send message and return structured render/fallback outcome for audit."""
+    kwargs.setdefault("link_preview_options", NO_LINK_PREVIEW)
+    try:
+        message = await bot.send_message(
+            chat_id=chat_id,
+            text=_ensure_formatted(text),
+            parse_mode=PARSE_MODE,
+            **kwargs,
+        )
+        return FallbackDeliveryResult(
+            message=message,
+            render_mode="markdown_v2",
+            transport_outcome="sent",
+        )
+    except RetryAfter:
+        raise
+    except Exception as formatted_error:
+        try:
+            message = await bot.send_message(
+                chat_id=chat_id, text=strip_sentinels(text), **kwargs
+            )
+            return FallbackDeliveryResult(
+                message=message,
+                render_mode="plain_text",
+                transport_outcome="fallback_sent",
+                formatted_error=formatted_error,
+            )
+        except RetryAfter:
+            raise
+        except Exception as plain_error:
+            logger.error(f"Failed to send message to {chat_id}: {plain_error}")
+            return FallbackDeliveryResult(
+                message=None,
+                render_mode=None,
+                transport_outcome="failed",
+                formatted_error=formatted_error,
+                plain_error=plain_error,
+            )
+
+
 async def send_with_fallback(
     bot: Bot,
     chat_id: int,
@@ -68,26 +137,7 @@ async def send_with_fallback(
     Returns the sent Message on success, None on failure.
     RetryAfter is re-raised for caller handling.
     """
-    kwargs.setdefault("link_preview_options", NO_LINK_PREVIEW)
-    try:
-        return await bot.send_message(
-            chat_id=chat_id,
-            text=_ensure_formatted(text),
-            parse_mode=PARSE_MODE,
-            **kwargs,
-        )
-    except RetryAfter:
-        raise
-    except Exception:
-        try:
-            return await bot.send_message(
-                chat_id=chat_id, text=strip_sentinels(text), **kwargs
-            )
-        except RetryAfter:
-            raise
-        except Exception as e:
-            logger.error(f"Failed to send message to {chat_id}: {e}")
-            return None
+    return (await send_with_fallback_result(bot, chat_id, text, **kwargs)).message
 
 
 async def send_photo(

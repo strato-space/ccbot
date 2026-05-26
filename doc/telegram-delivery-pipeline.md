@@ -805,5 +805,9 @@ does not depend on mutable monitor offsets. Queue-backed rows may add task class
 queue age/depth, collapsed-mutable count context, and structured transport
 fields (`transport_error_type`, `error_class`, `retry_after`,
 `backpressure_reason`) so RetryAfter/timeout/backpressure incidents are
-diagnosable without reading raw Bot API payloads. It deliberately omits full raw
-payloads and secrets, and redacts credential-shaped fragments from error text.
+diagnosable without reading raw Bot API payloads. MarkdownV2 text sends/edits
+that fall back to plain text also record the effective `render_mode`, the
+`transport_outcome`, and formatted-vs-plain fallback error classes/types so a
+plain-text rescue can be distinguished from a formatted Telegram render and
+from a total transport failure. It deliberately omits full raw payloads and
+secrets, and redacts credential-shaped fragments from error text.

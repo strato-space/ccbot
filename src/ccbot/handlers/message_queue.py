@@ -27,10 +27,10 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, TypedDict, cast
 from pathlib import Path
 
-from telegram import Bot, InputMediaPhoto
+from telegram import Bot, InputMediaPhoto, Message
 from telegram.error import BadRequest, RetryAfter
 
 from ..markdown_v2 import convert_markdown
@@ -57,17 +57,29 @@ from ..utils import atomic_write_json
 from ..tmux_manager import tmux_manager
 from ..typing_indicator import send_runtime_update_typing_once
 from .message_sender import (
+    FallbackDeliveryResult,
     NO_LINK_PREVIEW,
     PARSE_MODE,
     send_document,
     send_photo,
     send_with_fallback,
+    send_with_fallback_result,
     strip_sentinels,
 )
 
 logger = logging.getLogger(__name__)
+_ORIGINAL_SEND_WITH_FALLBACK = send_with_fallback
 _STATE_CHAT_UNSET = object()
 _assistant_final_delivery_failures: dict[tuple[int, int | str, str, int], str] = {}
+
+
+class _FallbackAuditKwargs(TypedDict, total=False):
+    success: bool
+    error: str | Exception | None
+    render_mode: str | None
+    transport_outcome: str
+    formatted_error: str | Exception | None
+    plain_error: str | Exception | None
 
 
 def _assistant_final_failure_key(user_id: int, task: MessageTask) -> tuple[int, int | str, str, int]:
@@ -1465,6 +1477,9 @@ def _audit_task_delivery(
     part_index: int | None = None,
     part_count: int | None = None,
     render_mode: str | None = None,
+    transport_outcome: str | None = None,
+    formatted_error: str | Exception | None = None,
+    plain_error: str | Exception | None = None,
 ) -> None:
     log_telegram_delivery(
         action=action,
@@ -1499,6 +1514,9 @@ def _audit_task_delivery(
         part_index=part_index,
         part_count=part_count,
         render_mode=render_mode,
+        transport_outcome=transport_outcome,
+        formatted_error=formatted_error,
+        plain_error=plain_error,
         queue_age_ms=(
             int(max(0.0, time.monotonic() - task.enqueued_at) * 1000)
             if task
@@ -1531,6 +1549,10 @@ def _audit_delivery_for_optional_task(
     success: bool = True,
     error: str | Exception | None = None,
     reason: str | None = None,
+    render_mode: str | None = None,
+    transport_outcome: str | None = None,
+    formatted_error: str | Exception | None = None,
+    plain_error: str | Exception | None = None,
 ) -> None:
     """Audit a queue-backed delivery with queue context when a task is available."""
     if task is not None:
@@ -1549,6 +1571,10 @@ def _audit_delivery_for_optional_task(
             content_type=content_type,
             semantic_kind=semantic_kind,
             reason=reason,
+            render_mode=render_mode,
+            transport_outcome=transport_outcome,
+            formatted_error=formatted_error,
+            plain_error=plain_error,
         )
         return
     log_telegram_delivery(
@@ -1565,7 +1591,136 @@ def _audit_delivery_for_optional_task(
         success=success,
         error=error,
         reason=reason,
+        render_mode=render_mode,
+        transport_outcome=transport_outcome,
+        formatted_error=formatted_error,
+        plain_error=plain_error,
     )
+
+
+def _fallback_audit_kwargs(
+    result: FallbackDeliveryResult,
+    *,
+    success_on_noop: bool = False,
+) -> _FallbackAuditKwargs:
+    legacy_error = result.plain_error or result.formatted_error
+    success = result.success or (
+        success_on_noop
+        and result.transport_outcome in {"edit_noop", "fallback_edit_noop"}
+    )
+    return {
+        "success": success,
+        "render_mode": result.render_mode,
+        "transport_outcome": result.transport_outcome,
+        "formatted_error": result.formatted_error,
+        "plain_error": result.plain_error,
+        "error": legacy_error,
+    }
+
+
+def _state_chat_id_for_key(
+    *,
+    chat_id: int | None,
+    state_chat_id: int | None | object,
+) -> int | None:
+    """Resolve optional state-chat sentinel into the concrete key chat id."""
+    if state_chat_id is _STATE_CHAT_UNSET:
+        return chat_id
+    return cast(int | None, state_chat_id)
+
+
+async def _edit_text_with_fallback_result(
+    bot: Bot,
+    *,
+    chat_id: int,
+    message_id: int,
+    text: str,
+    formatted_outcome: str = "edited",
+    plain_outcome: str = "fallback_edited",
+    noop_outcome: str = "edit_noop",
+) -> FallbackDeliveryResult:
+    """Edit Telegram text and return structured render/fallback outcome."""
+    try:
+        message = cast(
+            Message | None,
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=_ensure_formatted(text),
+                parse_mode=PARSE_MODE,
+                link_preview_options=NO_LINK_PREVIEW,
+            ),
+        )
+        return FallbackDeliveryResult(message, "markdown_v2", formatted_outcome)
+    except RetryAfter:
+        raise
+    except Exception as formatted_error:
+        if _is_message_not_modified_error(formatted_error):
+            return FallbackDeliveryResult(
+                None,
+                "markdown_v2",
+                noop_outcome,
+                formatted_error=formatted_error,
+            )
+        try:
+            message = cast(
+                Message | None,
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=strip_sentinels(text),
+                    link_preview_options=NO_LINK_PREVIEW,
+                ),
+            )
+            return FallbackDeliveryResult(
+                message,
+                "plain_text",
+                plain_outcome,
+                formatted_error=formatted_error,
+            )
+        except RetryAfter:
+            raise
+        except Exception as plain_error:
+            if _is_message_not_modified_error(plain_error):
+                return FallbackDeliveryResult(
+                    None,
+                    "plain_text",
+                    "fallback_edit_noop",
+                    formatted_error=formatted_error,
+                    plain_error=plain_error,
+                )
+            return FallbackDeliveryResult(
+                None,
+                None,
+                "failed",
+                formatted_error=formatted_error,
+                plain_error=plain_error,
+            )
+
+
+async def _queue_send_with_fallback_result(
+    bot: Bot,
+    chat_id: int,
+    text: str,
+    **kwargs: object,
+) -> FallbackDeliveryResult:
+    """Send text with structured audit data while preserving old test patches.
+
+    Older queue tests patch this module's ``send_with_fallback`` symbol to
+    assert queue ordering/retry behavior.  Production code needs the newer
+    structured result, but honoring that monkeypatch keeps those tests focused
+    on queue semantics instead of audit plumbing.
+    """
+    if send_with_fallback is not _ORIGINAL_SEND_WITH_FALLBACK:
+        message = await send_with_fallback(bot, chat_id, text, **kwargs)  # type: ignore[arg-type]
+        if isinstance(message, FallbackDeliveryResult):
+            return message
+        return FallbackDeliveryResult(
+            message,
+            "markdown_v2" if message else None,
+            "sent" if message else "failed",
+        )
+    return await send_with_fallback_result(bot, chat_id, text, **kwargs)  # type: ignore[arg-type]
 
 
 def _is_poll_only_status_text(text: str) -> bool:
@@ -2527,22 +2682,22 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             )
             # Join all parts for editing (merged content goes together)
             full_text = "\n\n".join(task.parts)
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=edit_msg_id,
-                    text=_ensure_formatted(full_text),
-                    parse_mode=PARSE_MODE,
-                    link_preview_options=NO_LINK_PREVIEW,
-                )
-                _audit_task_delivery(
-                    action="edit",
-                    user_id=user_id,
-                    chat_id=chat_id,
-                    task=task,
-                    text=full_text,
-                    message_id=edit_msg_id,
-                )
+            result = await _edit_text_with_fallback_result(
+                bot,
+                chat_id=chat_id,
+                message_id=edit_msg_id,
+                text=full_text,
+            )
+            _audit_task_delivery(
+                action="edit",
+                user_id=user_id,
+                chat_id=chat_id,
+                task=task,
+                text=full_text,
+                message_id=edit_msg_id,
+                **_fallback_audit_kwargs(result, success_on_noop=True),
+            )
+            if result.success or result.transport_outcome in {"edit_noop", "fallback_edit_noop"}:
                 await _send_task_images(bot, chat_id, task)
                 await _send_task_documents(bot, chat_id, task)
                 await _check_and_send_status(
@@ -2555,35 +2710,12 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                     expected_turn_generation=task.turn_generation,
                 )
                 return
-            except RetryAfter:
-                raise
-            except Exception:
-                try:
-                    # Fallback: plain text with sentinels stripped
-                    plain_text = strip_sentinels(task.text or full_text)
-                    await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=edit_msg_id,
-                        text=plain_text,
-                        link_preview_options=NO_LINK_PREVIEW,
-                    )
-                    await _send_task_images(bot, chat_id, task)
-                    await _send_task_documents(bot, chat_id, task)
-                    await _check_and_send_status(
-                        bot,
-                        user_id,
-                        wid,
-                        task.thread_id,
-                        chat_id=task.chat_id,
-                        surface_key=task.surface_key,
-                        expected_turn_generation=task.turn_generation,
-                    )
-                    return
-                except RetryAfter:
-                    raise
-                except Exception:
-                    logger.debug(f"Failed to edit tool msg {edit_msg_id}, sending new")
-                    # Fall through to send as new message
+            logger.debug(
+                "Failed to edit tool msg %s, sending new: %s",
+                edit_msg_id,
+                result.plain_error or result.formatted_error,
+            )
+            # Fall through to send as new message
 
     # 2. Send content messages, converting status message to first content part
     first_part = task.delivered_part_count == 0
@@ -2653,12 +2785,13 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                 task.delivered_part_count += 1
                 continue
 
-        sent = await send_with_fallback(
+        send_result = await _queue_send_with_fallback_result(
             bot,
             chat_id,
             part,
             **_send_kwargs(task.thread_id),  # type: ignore[arg-type]
         )
+        sent = send_result.message
         _audit_task_delivery(
             action="send",
             user_id=user_id,
@@ -2666,7 +2799,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             task=task,
             text=part,
             message_id=(sent.message_id if sent else None),
-            success=sent is not None,
+            **_fallback_audit_kwargs(send_result),
         )
 
         if sent:
@@ -2818,7 +2951,7 @@ async def _convert_status_to_content(
     skey = _topic_state_key(
         user_id,
         thread_id_or_0,
-        chat_id=chat_id if state_chat_id is _STATE_CHAT_UNSET else state_chat_id,
+        chat_id=_state_chat_id_for_key(chat_id=chat_id, state_chat_id=state_chat_id),
         surface_key=surface_key,
     )
     info = _status_msg_info.pop(skey, None)
@@ -2837,45 +2970,28 @@ async def _convert_status_to_content(
     if chat_id is None:
         chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
 
-    # Edit status message to show content
-    try:
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=msg_id,
-            text=_ensure_formatted(content_text),
-            parse_mode=PARSE_MODE,
-            link_preview_options=NO_LINK_PREVIEW,
-        )
-        log_telegram_delivery(
-            action="edit",
-            user_id=user_id,
-            chat_id=chat_id,
-            thread_id=(thread_id_or_0 or None),
-            message_id=msg_id,
-            window_id=window_id,
-            task_type="content",
-            text=content_text,
-        )
+    result = await _edit_text_with_fallback_result(
+        bot,
+        chat_id=chat_id,
+        message_id=msg_id,
+        text=content_text,
+    )
+    log_telegram_delivery(
+        action="edit",
+        user_id=user_id,
+        chat_id=chat_id,
+        thread_id=(thread_id_or_0 or None),
+        message_id=msg_id,
+        window_id=window_id,
+        task_type="content",
+        text=content_text,
+        **_fallback_audit_kwargs(result, success_on_noop=True),
+    )
+    if result.success or result.transport_outcome in {"edit_noop", "fallback_edit_noop"}:
         return msg_id
-    except RetryAfter:
-        raise
-    except Exception:
-        try:
-            # Fallback to plain text with sentinels stripped
-            plain = strip_sentinels(content_text)
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=msg_id,
-                text=plain,
-                link_preview_options=NO_LINK_PREVIEW,
-            )
-            return msg_id
-        except RetryAfter:
-            raise
-        except Exception as e:
-            logger.debug(f"Failed to convert status to content: {e}")
-            # Message might be deleted or too old, caller will send new message
-            return None
+    logger.debug("Failed to convert status to content: %s", result.plain_error or result.formatted_error)
+    # Message might be deleted or too old, caller will send new message
+    return None
 
 
 def _render_warning_text(base_text: str, repeat_count: int) -> str:
@@ -2938,40 +3054,37 @@ async def _process_warning_content_task(
                 return
 
             rendered = _render_warning_text(text, new_count)
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=msg_id,
-                    text=_ensure_formatted(rendered),
-                    parse_mode=PARSE_MODE,
-                    link_preview_options=NO_LINK_PREVIEW,
-                )
+            result = await _edit_text_with_fallback_result(
+                bot,
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=rendered,
+            )
+            _audit_task_delivery(
+                action="edit",
+                user_id=user_id,
+                chat_id=chat_id,
+                task=task,
+                text=rendered,
+                message_id=msg_id,
+                content_type="warning",
+                semantic_kind=WARNING_SEMANTIC_KIND,
+                **_fallback_audit_kwargs(result, success_on_noop=True),
+            )
+            if result.success or result.transport_outcome in {"edit_noop", "fallback_edit_noop"}:
                 return
-            except RetryAfter:
-                raise
-            except Exception:
-                try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=msg_id,
-                        text=rendered,
-                        link_preview_options=NO_LINK_PREVIEW,
-                    )
-                    return
-                except RetryAfter:
-                    raise
-                except Exception:
-                    _warning_msg_info.pop(wkey, None)
+            _warning_msg_info.pop(wkey, None)
 
     if not text:
         return
 
-    sent = await send_with_fallback(
+    send_result = await _queue_send_with_fallback_result(
         bot,
         chat_id,
         text,
         **_send_kwargs(thread_id),  # type: ignore[arg-type]
     )
+    sent = send_result.message
     _audit_task_delivery(
         action="send",
         user_id=user_id,
@@ -2979,7 +3092,7 @@ async def _process_warning_content_task(
         task=task,
         text=text,
         message_id=(sent.message_id if sent else None),
-        success=sent is not None,
+        **_fallback_audit_kwargs(send_result),
     )
     if sent:
         _warning_msg_info[wkey] = (sent.message_id, window_id, text, 1)
@@ -3269,6 +3382,8 @@ async def _process_status_update_task(
                     message_id=msg_id,
                     content_type=_status_audit_content_type(task),
                     semantic_kind=_status_audit_semantic_kind(task),
+                    render_mode="markdown_v2",
+                    transport_outcome="edited",
                 )
                 _status_msg_info[skey] = (msg_id, wid, status_text)
                 _persist_status_msg_info(skey, (msg_id, wid, status_text), content_type=_status_audit_content_type(task), semantic_kind=_status_audit_semantic_kind(task))
@@ -3288,6 +3403,9 @@ async def _process_status_update_task(
                         text=status_text,
                         message_id=msg_id,
                         reason="message_not_modified",
+                        render_mode="markdown_v2",
+                        transport_outcome="edit_noop",
+                        formatted_error=exc,
                     )
                     return
                 if _is_message_known_gone_error(exc):
@@ -3320,6 +3438,19 @@ async def _process_status_update_task(
                     _status_msg_info[skey] = (msg_id, wid, status_text)
                     _persist_status_msg_info(skey, (msg_id, wid, status_text), content_type=_status_audit_content_type(task), semantic_kind=_status_audit_semantic_kind(task))
                     _commit_status_history(history_key, candidate_history)
+                    _audit_task_delivery(
+                        action="edit",
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        task=task,
+                        text=status_text,
+                        message_id=msg_id,
+                        content_type=_status_audit_content_type(task),
+                        semantic_kind=_status_audit_semantic_kind(task),
+                        render_mode="plain_text",
+                        transport_outcome="fallback_edited",
+                        formatted_error=exc,
+                    )
                 except RetryAfter:
                     raise
                 except (BadRequest, Exception) as e:
@@ -3337,6 +3468,10 @@ async def _process_status_update_task(
                             content_type=_status_audit_content_type(task),
                             semantic_kind=_status_audit_semantic_kind(task),
                             reason="message_not_modified",
+                            render_mode="plain_text",
+                            transport_outcome="fallback_edit_noop",
+                            formatted_error=exc,
+                            plain_error=e,
                         )
                         return
                     if _is_message_known_gone_error(e):
@@ -3378,6 +3513,10 @@ async def _process_status_update_task(
                         content_type=_status_audit_content_type(task),
                         semantic_kind=_status_audit_semantic_kind(task),
                         reason="status_edit_failed_old_maybe_visible",
+                        render_mode=None,
+                        transport_outcome="failed",
+                        formatted_error=exc,
+                        plain_error=e,
                     )
     else:
         # No existing status message, send new
@@ -3420,7 +3559,7 @@ async def _do_send_status_message(
     base_skey = _topic_state_key(
         user_id,
         thread_id_or_0,
-        chat_id=chat_id if state_chat_id is _STATE_CHAT_UNSET else state_chat_id,
+        chat_id=_state_chat_id_for_key(chat_id=chat_id, state_chat_id=state_chat_id),
         surface_key=surface_key,
     )
     skey = _status_tracking_key(
@@ -3457,12 +3596,13 @@ async def _do_send_status_message(
             surface_key=surface_key,
             window_id=window_id,
         )
-    sent = await send_with_fallback(
+    send_result = await _queue_send_with_fallback_result(
         bot,
         chat_id,
         text,
         **_send_kwargs(thread_id),  # type: ignore[arg-type]
     )
+    sent = send_result.message
     _audit_delivery_for_optional_task(
         action="send",
         user_id=user_id,
@@ -3475,7 +3615,7 @@ async def _do_send_status_message(
         content_type=content_type,
         semantic_kind=semantic_kind,
         text=text,
-        success=sent is not None,
+        **_fallback_audit_kwargs(send_result),
     )
     if sent:
         _status_msg_info[skey] = (sent.message_id, window_id, text)
@@ -3573,42 +3713,27 @@ async def _process_commentary_update_task(
             and not _should_reemit_commentary_at_tail(commentary_text)
         ):
             chat_id = _task_chat_id(user_id, task)
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=msg_id,
-                    text=_ensure_formatted(commentary_text),
-                    parse_mode=PARSE_MODE,
-                    link_preview_options=NO_LINK_PREVIEW,
-                )
-                _audit_task_delivery(
-                    action="edit",
-                    user_id=user_id,
-                    chat_id=chat_id,
-                    task=task,
-                    message_id=msg_id,
-                    content_type="commentary",
-                    semantic_kind="commentary",
-                    text=commentary_text,
-                )
+            result = await _edit_text_with_fallback_result(
+                bot,
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=commentary_text,
+            )
+            _audit_task_delivery(
+                action="edit",
+                user_id=user_id,
+                chat_id=chat_id,
+                task=task,
+                message_id=msg_id,
+                content_type="commentary",
+                semantic_kind="commentary",
+                text=commentary_text,
+                **_fallback_audit_kwargs(result, success_on_noop=True),
+            )
+            if result.success or result.transport_outcome in {"edit_noop", "fallback_edit_noop"}:
                 _commentary_msg_info[ckey] = (msg_id, wid, commentary_text)
                 return
-            except RetryAfter:
-                raise
-            except Exception:
-                try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=msg_id,
-                        text=commentary_text,
-                        link_preview_options=NO_LINK_PREVIEW,
-                    )
-                    _commentary_msg_info[ckey] = (msg_id, wid, commentary_text)
-                    return
-                except RetryAfter:
-                    raise
-                except Exception:
-                    _commentary_msg_info.pop(ckey, None)
+            _commentary_msg_info.pop(ckey, None)
 
     await _do_send_commentary_message(
         bot,
@@ -3641,7 +3766,7 @@ async def _do_send_commentary_message(
     ckey = _topic_state_key(
         user_id,
         thread_id_or_0,
-        chat_id=chat_id if state_chat_id is _STATE_CHAT_UNSET else state_chat_id,
+        chat_id=_state_chat_id_for_key(chat_id=chat_id, state_chat_id=state_chat_id),
         surface_key=surface_key,
     )
     thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
@@ -3662,12 +3787,13 @@ async def _do_send_commentary_message(
 
     sent_ids: list[int] = []
     for part in parts:
-        sent = await send_with_fallback(
+        send_result = await _queue_send_with_fallback_result(
             bot,
             chat_id,
             part,
             **_send_kwargs(thread_id),  # type: ignore[arg-type]
         )
+        sent = send_result.message
         _audit_delivery_for_optional_task(
             action="send",
             user_id=user_id,
@@ -3680,7 +3806,7 @@ async def _do_send_commentary_message(
             content_type="commentary",
             semantic_kind="commentary",
             text=part,
-            success=sent is not None,
+            **_fallback_audit_kwargs(send_result),
         )
         if sent:
             sent_ids.append(sent.message_id)
@@ -3765,44 +3891,28 @@ async def _process_plan_update_task(
             return
         if stored_wid == wid:
             chat_id = _task_chat_id(user_id, task)
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=msg_id,
-                    text=_ensure_formatted(plan_text),
-                    parse_mode=PARSE_MODE,
-                    link_preview_options=NO_LINK_PREVIEW,
-                )
-                _audit_task_delivery(
-                    action="edit",
-                    user_id=user_id,
-                    chat_id=chat_id,
-                    task=task,
-                    message_id=msg_id,
-                    content_type="plan_update",
-                    semantic_kind="plan_update",
-                    text=plan_text,
-                )
+            result = await _edit_text_with_fallback_result(
+                bot,
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=plan_text,
+            )
+            _audit_task_delivery(
+                action="edit",
+                user_id=user_id,
+                chat_id=chat_id,
+                task=task,
+                message_id=msg_id,
+                content_type="plan_update",
+                semantic_kind="plan_update",
+                text=plan_text,
+                **_fallback_audit_kwargs(result, success_on_noop=True),
+            )
+            if result.success or result.transport_outcome in {"edit_noop", "fallback_edit_noop"}:
                 _plan_update_msg_info[pkey] = (msg_id, wid, plan_text)
                 _latest_pre_final_visible_kind[pkey] = "plan_update"
                 return
-            except RetryAfter:
-                raise
-            except Exception:
-                try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=msg_id,
-                        text=plan_text,
-                        link_preview_options=NO_LINK_PREVIEW,
-                    )
-                    _plan_update_msg_info[pkey] = (msg_id, wid, plan_text)
-                    _latest_pre_final_visible_kind[pkey] = "plan_update"
-                    return
-                except RetryAfter:
-                    raise
-                except Exception:
-                    _plan_update_msg_info.pop(pkey, None)
+            _plan_update_msg_info.pop(pkey, None)
 
     await _do_send_plan_update_message(
         bot,
@@ -3830,8 +3940,9 @@ async def _do_send_plan_update_message(
     audit_task: MessageTask | None = None,
 ) -> None:
     """Send a new dedicated plan artifact."""
-    state_chat_for_key = (
-        chat_id if state_chat_id is _STATE_CHAT_UNSET else state_chat_id
+    state_chat_for_key = _state_chat_id_for_key(
+        chat_id=chat_id,
+        state_chat_id=state_chat_id,
     )
     pkey = _topic_state_key(
         user_id,
@@ -3849,12 +3960,13 @@ async def _do_send_plan_update_message(
         except Exception:
             pass
 
-    sent = await send_with_fallback(
+    send_result = await _queue_send_with_fallback_result(
         bot,
         chat_id,
         text,
         **_send_kwargs(thread_id),  # type: ignore[arg-type]
     )
+    sent = send_result.message
     _audit_delivery_for_optional_task(
         action="send",
         user_id=user_id,
@@ -3867,7 +3979,7 @@ async def _do_send_plan_update_message(
         content_type="plan_update",
         semantic_kind="plan_update",
         text=text,
-        success=sent is not None,
+        **_fallback_audit_kwargs(send_result),
     )
     if sent:
         _plan_update_msg_info[pkey] = (sent.message_id, window_id, text)
@@ -3922,42 +4034,27 @@ async def _process_pending_input_update_task(
             return
         if stored_wid == wid:
             chat_id = _task_chat_id(user_id, task)
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=msg_id,
-                    text=_ensure_formatted(pending_text),
-                    parse_mode=PARSE_MODE,
-                    link_preview_options=NO_LINK_PREVIEW,
-                )
-                _audit_task_delivery(
-                    action="edit",
-                    user_id=user_id,
-                    chat_id=chat_id,
-                    task=task,
-                    message_id=msg_id,
-                    content_type="pending_input",
-                    semantic_kind="pending_input",
-                    text=pending_text,
-                )
+            result = await _edit_text_with_fallback_result(
+                bot,
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=pending_text,
+            )
+            _audit_task_delivery(
+                action="edit",
+                user_id=user_id,
+                chat_id=chat_id,
+                task=task,
+                message_id=msg_id,
+                content_type="pending_input",
+                semantic_kind="pending_input",
+                text=pending_text,
+                **_fallback_audit_kwargs(result, success_on_noop=True),
+            )
+            if result.success or result.transport_outcome in {"edit_noop", "fallback_edit_noop"}:
                 _pending_input_msg_info[pkey] = (msg_id, wid, pending_text)
                 return
-            except RetryAfter:
-                raise
-            except Exception:
-                try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=msg_id,
-                        text=pending_text,
-                        link_preview_options=NO_LINK_PREVIEW,
-                    )
-                    _pending_input_msg_info[pkey] = (msg_id, wid, pending_text)
-                    return
-                except RetryAfter:
-                    raise
-                except Exception:
-                    _pending_input_msg_info.pop(pkey, None)
+            _pending_input_msg_info.pop(pkey, None)
 
     await _do_send_pending_input_message(
         bot,
@@ -4098,38 +4195,36 @@ async def _process_ingress_receipt_task(
         if stored_wid == wid and last_text == text:
             return
         if stored_wid == wid:
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=msg_id,
-                    text=_ensure_formatted(text),
-                    parse_mode=PARSE_MODE,
-                    link_preview_options=NO_LINK_PREVIEW,
-                )
+            result = await _edit_text_with_fallback_result(
+                bot,
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+            )
+            _audit_task_delivery(
+                action="edit",
+                user_id=user_id,
+                chat_id=chat_id,
+                task=task,
+                text=text,
+                message_id=msg_id,
+                content_type="ingress_receipt",
+                semantic_kind="telegram_ingress_receipt",
+                **_fallback_audit_kwargs(result, success_on_noop=True),
+            )
+            if result.success or result.transport_outcome in {"edit_noop", "fallback_edit_noop"}:
                 _ingress_receipt_msg_info[rkey] = (msg_id, wid, text)
                 session_manager.update_fast_proof_receipt_message_id(proof_id, msg_id)
-                _audit_task_delivery(
-                    action="edit",
-                    user_id=user_id,
-                    chat_id=chat_id,
-                    task=task,
-                    text=text,
-                    message_id=msg_id,
-                    content_type="ingress_receipt",
-                    semantic_kind="telegram_ingress_receipt",
-                )
                 return
-            except RetryAfter:
-                raise
-            except Exception:
-                _ingress_receipt_msg_info.pop(rkey, None)
+            _ingress_receipt_msg_info.pop(rkey, None)
 
-    sent = await send_with_fallback(
+    send_result = await _queue_send_with_fallback_result(
         bot,
         chat_id,
         text,
         **_send_kwargs(task.thread_id),  # type: ignore[arg-type]
     )
+    sent = send_result.message
     _audit_task_delivery(
         action="send",
         user_id=user_id,
@@ -4137,9 +4232,9 @@ async def _process_ingress_receipt_task(
         task=task,
         text=text,
         message_id=(sent.message_id if sent else None),
-        success=sent is not None,
         content_type="ingress_receipt",
         semantic_kind="telegram_ingress_receipt",
+        **_fallback_audit_kwargs(send_result),
     )
     if sent:
         _ingress_receipt_msg_info[rkey] = (sent.message_id, wid, text)
@@ -4202,7 +4297,7 @@ async def _do_send_pending_input_message(
     pkey = _topic_state_key(
         user_id,
         thread_id_or_0,
-        chat_id=chat_id if state_chat_id is _STATE_CHAT_UNSET else state_chat_id,
+        chat_id=_state_chat_id_for_key(chat_id=chat_id, state_chat_id=state_chat_id),
         surface_key=surface_key,
     )
     thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
@@ -4215,12 +4310,13 @@ async def _do_send_pending_input_message(
         except Exception:
             pass
 
-    sent = await send_with_fallback(
+    send_result = await _queue_send_with_fallback_result(
         bot,
         chat_id,
         text,
         **_send_kwargs(thread_id),  # type: ignore[arg-type]
     )
+    sent = send_result.message
     _audit_delivery_for_optional_task(
         action="send",
         user_id=user_id,
@@ -4233,7 +4329,7 @@ async def _do_send_pending_input_message(
         content_type="pending_input",
         semantic_kind="pending_input",
         text=text,
-        success=sent is not None,
+        **_fallback_audit_kwargs(send_result),
     )
     if sent:
         _pending_input_msg_info[pkey] = (sent.message_id, window_id, text)
@@ -4458,8 +4554,9 @@ async def _clear_image_preview_message_result(
     Returns True when tracking is gone or the specific Telegram message is
     authoritatively gone. Returns False when cleanup debt remains.
     """
-    state_chat_for_key = (
-        chat_id if state_chat_id is _STATE_CHAT_UNSET else state_chat_id
+    state_chat_for_key = _state_chat_id_for_key(
+        chat_id=chat_id,
+        state_chat_id=state_chat_id,
     )
     pkey = _topic_state_key(
         user_id,
@@ -4611,7 +4708,7 @@ def _schedule_image_preview_delete_retry(
         user_id,
         thread_id_or_0,
         info,
-        chat_id=chat_id if state_chat_id is _STATE_CHAT_UNSET else state_chat_id,
+        chat_id=_state_chat_id_for_key(chat_id=chat_id, state_chat_id=state_chat_id),
         surface_key=surface_key,
     )
     existing = _image_preview_delete_retry_tasks.get(retry_key)
@@ -4648,7 +4745,7 @@ async def _retry_image_preview_delete(
         user_id,
         thread_id_or_0,
         info,
-        chat_id=chat_id if state_chat_id is _STATE_CHAT_UNSET else state_chat_id,
+        chat_id=_state_chat_id_for_key(chat_id=chat_id, state_chat_id=state_chat_id),
         surface_key=surface_key,
     )
     delay = initial_delay_seconds

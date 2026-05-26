@@ -123,6 +123,13 @@ def log_telegram_delivery(
     part_index: int | None = None,
     part_count: int | None = None,
     render_mode: str | None = None,
+    transport_outcome: str | None = None,
+    formatted_error: str | Exception | None = None,
+    formatted_error_class: str | None = None,
+    formatted_transport_error_type: str | None = None,
+    plain_error: str | Exception | None = None,
+    plain_error_class: str | None = None,
+    plain_transport_error_type: str | None = None,
     media: dict[str, Any] | None = None,
 ) -> None:
     """Append a single Telegram delivery audit row.
@@ -156,6 +163,29 @@ def log_telegram_delivery(
             "part_index": part_index,
             "part_count": part_count,
             "render_mode": render_mode,
+            "transport_outcome": transport_outcome,
+            "formatted_transport_error_type": _transport_error_type(
+                formatted_error,
+                formatted_transport_error_type,
+            ),
+            "formatted_error_class": formatted_error_class
+            if formatted_error_class is not None
+            else (
+                formatted_error.__class__.__name__
+                if isinstance(formatted_error, Exception)
+                else None
+            ),
+            "plain_transport_error_type": _transport_error_type(
+                plain_error,
+                plain_transport_error_type,
+            ),
+            "plain_error_class": plain_error_class
+            if plain_error_class is not None
+            else (
+                plain_error.__class__.__name__
+                if isinstance(plain_error, Exception)
+                else None
+            ),
             "transport_error_type": _transport_error_type(
                 error,
                 transport_error_type,
@@ -173,6 +203,16 @@ def log_telegram_delivery(
             "backpressure_reason": backpressure_reason,
         }
         row.update({key: value for key, value in optional.items() if value is not None})
+        if formatted_error:
+            row["formatted_error"] = _preview(
+                _sanitize_error_text(formatted_error),
+                max_chars=180,
+            )
+        if plain_error:
+            row["plain_error"] = _preview(
+                _sanitize_error_text(plain_error),
+                max_chars=180,
+            )
         if error:
             row["error"] = _preview(_sanitize_error_text(error), max_chars=180)
         if media:

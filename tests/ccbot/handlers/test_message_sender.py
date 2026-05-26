@@ -3,8 +3,9 @@
 from unittest.mock import AsyncMock
 
 import pytest
+from telegram.error import RetryAfter
 
-from ccbot.handlers.message_sender import safe_edit, safe_send
+from ccbot.handlers.message_sender import safe_edit, safe_send, send_with_fallback_result
 
 
 @pytest.mark.asyncio
@@ -83,3 +84,78 @@ async def test_safe_send_returns_none_after_final_failure() -> None:
 
     assert result is None
     assert bot.send_message.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_send_with_fallback_result_reports_markdown_success() -> None:
+    bot = AsyncMock()
+    sent = object()
+    bot.send_message = AsyncMock(return_value=sent)
+
+    result = await send_with_fallback_result(bot, 123, "**ok**", message_thread_id=42)
+
+    assert result.message is sent
+    assert result.render_mode == "markdown_v2"
+    assert result.transport_outcome == "sent"
+    assert result.formatted_error is None
+    assert result.plain_error is None
+    kwargs = bot.send_message.await_args.kwargs
+    assert kwargs["parse_mode"] == "MarkdownV2"
+    assert kwargs["message_thread_id"] == 42
+    assert kwargs["link_preview_options"].is_disabled is True
+
+
+@pytest.mark.asyncio
+async def test_send_with_fallback_result_reports_plain_fallback() -> None:
+    bot = AsyncMock()
+    sent = object()
+    formatted_error = ValueError("bad markdown")
+    bot.send_message = AsyncMock(side_effect=[formatted_error, sent])
+
+    result = await send_with_fallback_result(bot, 123, "**bad**", message_thread_id=42)
+
+    assert result.message is sent
+    assert result.render_mode == "plain_text"
+    assert result.transport_outcome == "fallback_sent"
+    assert result.formatted_error is formatted_error
+    assert result.plain_error is None
+    first_call, second_call = bot.send_message.await_args_list
+    assert first_call.kwargs["parse_mode"] == "MarkdownV2"
+    assert first_call.kwargs["message_thread_id"] == 42
+    assert "parse_mode" not in second_call.kwargs
+    assert second_call.kwargs["message_thread_id"] == 42
+    assert second_call.kwargs["link_preview_options"].is_disabled is True
+
+
+@pytest.mark.asyncio
+async def test_send_with_fallback_result_reports_total_failure() -> None:
+    bot = AsyncMock()
+    formatted_error = ValueError("bad markdown token=abc")
+    plain_error = RuntimeError("telegram down")
+    bot.send_message = AsyncMock(side_effect=[formatted_error, plain_error])
+
+    result = await send_with_fallback_result(bot, 123, "**bad**")
+
+    assert result.message is None
+    assert result.render_mode is None
+    assert result.transport_outcome == "failed"
+    assert result.formatted_error is formatted_error
+    assert result.plain_error is plain_error
+
+
+@pytest.mark.asyncio
+async def test_send_with_fallback_result_reraises_retry_after() -> None:
+    bot = AsyncMock()
+    bot.send_message = AsyncMock(side_effect=RetryAfter(1))
+
+    with pytest.raises(RetryAfter):
+        await send_with_fallback_result(bot, 123, "slow")
+
+
+@pytest.mark.asyncio
+async def test_send_with_fallback_result_reraises_plain_retry_after() -> None:
+    bot = AsyncMock()
+    bot.send_message = AsyncMock(side_effect=[ValueError("bad markdown"), RetryAfter(1)])
+
+    with pytest.raises(RetryAfter):
+        await send_with_fallback_result(bot, 123, "slow fallback")

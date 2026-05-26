@@ -190,3 +190,38 @@ def test_delivery_audit_redacts_sensitive_error_fragments(
     row = json.loads(serialized)
     assert row["transport_error_type"] == "exception"
     assert row["error_class"] == "RuntimeError"
+
+
+def test_delivery_audit_records_render_outcome_and_dual_errors(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", path)
+
+    delivery_audit.log_telegram_delivery(
+        action="send",
+        user_id=1,
+        chat_id=2,
+        text="safe text",
+        success=True,
+        render_mode="plain_text",
+        transport_outcome="fallback_sent",
+        formatted_error=RuntimeError(
+            "POST https://api.telegram.org/bot123:SECRET/sendMessage token=abc123"
+        ),
+        plain_error=TimedOut("timed out"),
+    )
+
+    serialized = path.read_text(encoding="utf-8")
+    assert "SECRET" not in serialized
+    assert "token=abc123" not in serialized
+    row = json.loads(serialized)
+    assert row["render_mode"] == "plain_text"
+    assert row["transport_outcome"] == "fallback_sent"
+    assert row["formatted_error_class"] == "RuntimeError"
+    assert row["formatted_transport_error_type"] == "exception"
+    assert row["plain_error_class"] == "TimedOut"
+    assert row["plain_transport_error_type"] == "timeout"
+    assert "formatted_error" in row
+    assert "plain_error" in row

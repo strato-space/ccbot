@@ -954,5 +954,9 @@ from Codex replay evidence. Queue-backed delivery rows may also include
 payload-free backlog context
 (`task_class`, queue age, enqueue/send queue depth) and structured transport
 context (`transport_error_type`, `error_class`, `retry_after`,
-`backpressure_reason`). Error text is compact and redacted so Bot API tokens,
-credentials, and raw request payloads are not audit evidence.
+`backpressure_reason`). Text send/edit rows that use MarkdownV2 with plain-text
+fallback may additionally record `render_mode` (`markdown_v2` or `plain_text`),
+`transport_outcome` (`sent`, `edited`, `edit_noop`, `fallback_sent`,
+`fallback_edited`, `fallback_edit_noop`, or `failed`), and separate formatted
+vs plain fallback error classes/types. Error text is compact and redacted so Bot
+API tokens, credentials, and raw request payloads are not audit evidence.
