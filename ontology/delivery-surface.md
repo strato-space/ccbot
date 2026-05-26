@@ -520,7 +520,12 @@ Preview refinements:
   `text` or `json` fences based on payload
 - eligible command/tool technical statuses render as one mutable compact
   technical status artifact with a bounded delivered technical-status history
-  above a fenced current detail panel; this is visible delivery history, not
+  above a fenced current detail panel; file/path-like command-output history
+  entries may be rendered as locators (for example `↳ .omx/...`) without the
+  generic `output` label, while non-path output remains explicitly labeled.
+  Locator rendering is limited to known locator prefixes such as `.omx/`,
+  `./`, `../`, `/data/`, `/home/`, `/tmp/`, `~/`, and `file://`;
+  this is visible delivery history, not
   durable runtime history, and it is separate from final/user/commentary/
   warning/pending-input/media/terminal-control/OMX workflow artifact lanes
 - plan-update artifacts are latest-only within one assistant turn, not across

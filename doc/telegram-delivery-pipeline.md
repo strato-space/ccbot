@@ -49,7 +49,12 @@ The default Telegram surface is `compact`, not `verbose`.
   `text` or `json` fences based on payload
 - eligible command/tool technical statuses use a two-part mutable compact
   technical status artifact: a bounded delivered technical-status history above
-  a fenced current detail panel. This history is delivery evidence for the
+  a fenced current detail panel. File/path-like command-output summaries in
+  that history render as the locator itself (for example `↳ .omx/...`) rather
+  than quoted generic output; non-path output keeps the `output` label. Path-like
+  means a locator prefix such as `.omx/`, `./`, `../`, `/data/`, `/home/`,
+  `/tmp/`, `~/`, or `file://`, not arbitrary slash-prefixed prose. This
+  history is delivery evidence for the
   visible Telegram artifact, not durable runtime history, and it excludes final
   answers, user echo, commentary, warnings, pending-input previews, generated
   media/result bubbles, terminal-control panels, and OMX workflow panels.

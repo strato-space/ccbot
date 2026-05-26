@@ -97,6 +97,8 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "mutable technical status surface" in readme
     assert "bounded delivered technical-status history" in readme
     assert "fenced current detail\n  panel" in readme
+    assert "path-like command-output history entries" in readme
+    assert "`↳ .omx/...`" in readme
     assert "not durable runtime history" in readme
     assert "no pre-final visible artifact" in readme
     assert "late technical status" in readme
@@ -504,6 +506,8 @@ def test_telegram_delivery_pipeline_doc_captures_status_and_teardown_rules() -> 
     assert "truncation footers outside the fenced block" in doc
     assert "bounded delivered technical-status history" in doc
     assert "fenced current detail panel" in doc
+    assert "Path-like\n  means a locator prefix" in doc
+    assert "`/data/`, `/home/`,\n  `/tmp/`, `~/`, or `file://`" in doc
     assert "not durable runtime history" in doc
     assert "outcome metadata rendered as a separate footer" in doc
     assert "visibility-first mutable updates" in doc

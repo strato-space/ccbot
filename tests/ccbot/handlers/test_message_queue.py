@@ -5087,6 +5087,125 @@ async def test_poll_only_write_stdin_does_not_replace_existing_status_bubble(
     mq._status_msg_info.clear()
 
 
+def test_file_path_command_output_history_drops_generic_output_label() -> None:
+    text = (
+        "⌘ Command output\n"
+        "```text\n"
+        ".omx/cinematic-shorts-ava/media-joke-brief-20260525T072046Z/live-submit_path.txt\n"
+        "```"
+    )
+
+    assert (
+        mq._extract_status_history_item(text)
+        == "↳ .omx/cinematic-shorts-ava/media-joke-brief-20260525T072046Z/live-submit_path.txt"
+    )
+
+
+def test_file_path_command_output_history_works_for_command_detail_output() -> None:
+    text = (
+        "⌘ Command\n"
+        "```sh\n"
+        "python build.py\n"
+        "```\n"
+        "↳ Output\n"
+        "```text\n"
+        "./dist/media-joke-brief.md\n"
+        "```"
+    )
+
+    assert mq._extract_status_history_item(text) == "↳ ./dist/media-joke-brief.md"
+
+
+def test_non_file_command_output_history_keeps_generic_output_label() -> None:
+    assert (
+        mq._extract_status_history_item("⌘ Command output\n```text\n✓ 22 passed\n```")
+        == '↳ output: "✓ 22 passed"'
+    )
+    assert (
+        mq._extract_status_history_item("⌘ Command output\n```text\n/home/tools/out.md\n```")
+        == "↳ /home/tools/out.md"
+    )
+    assert (
+        mq._extract_status_history_item("⌘ Command output\n```text\n/service\n```")
+        == '↳ output: "/service"'
+    )
+    assert (
+        mq._extract_status_history_item("⌘ Command output\n```text\n/service healthy\n```")
+        == '↳ output: "/service healthy"'
+    )
+    assert (
+        mq._extract_status_history_item("⌘ Command output\n```text\nservice/path healthy\n```")
+        == '↳ output: "service/path healthy"'
+    )
+
+
+@pytest.mark.asyncio
+async def test_file_path_command_output_history_is_sent_and_audited(
+    monkeypatch, tmp_path
+) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    monkeypatch.setattr(
+        delivery_audit.config, "telegram_delivery_audit_file", audit_path
+    )
+    mq._status_msg_info.clear()
+    mq._technical_status_history.clear()
+    mq._technical_status_closed.clear()
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@7",
+        thread_id=42,
+        text=(
+            "⌘ Command output\n"
+            "```text\n"
+            ".omx/cinematic-shorts-ava/media-joke-brief-20260525T072046Z/live-submit_path.txt\n"
+            "```"
+        ),
+        turn_generation=1,
+    )
+    bot = AsyncMock()
+    sent = SimpleNamespace(message_id=501)
+
+    try:
+        with (
+            patch(
+                "ccbot.handlers.message_queue._is_task_binding_active",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch("ccbot.handlers.message_queue.current_turn_generation", return_value=1),
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                return_value=sent,
+            ) as mock_send,
+        ):
+            mock_sm.resolve_chat_id.return_value = 100
+            await _process_status_update_task(bot, 1, task)
+
+        await_args = mock_send.await_args
+        assert await_args is not None
+        sent_text = await_args.args[2]
+        assert sent_text.startswith(
+            "↳ .omx/cinematic-shorts-ava/media-joke-brief-20260525T072046Z/live-submit_path.txt"
+        )
+        assert '↳ output: ".omx/' not in sent_text
+        assert "⌘ Command output" in sent_text
+
+        rows = [
+            json.loads(line)
+            for line in audit_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert rows[-1]["action"] == "send"
+        assert rows[-1]["preview"].startswith("↳ .omx/cinematic-shorts-ava/")
+        assert '↳ output: ".omx/' not in rows[-1]["preview"]
+    finally:
+        mq._status_msg_info.clear()
+        mq._technical_status_history.clear()
+        mq._technical_status_closed.clear()
+
+
 @pytest.mark.asyncio
 async def test_status_tool_output_wrapper_is_cleaned_for_humans(
     monkeypatch, tmp_path

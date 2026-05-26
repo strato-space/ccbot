@@ -1939,6 +1939,22 @@ def _first_nonempty_line(text: str) -> str:
     return ""
 
 
+def _is_path_like_output_preview(text: str) -> bool:
+    """Return True when a command-output history preview is a locator token."""
+    preview = (text or "").strip()
+    if not preview or any(ch.isspace() for ch in preview):
+        return False
+    return preview.startswith((".omx/", "./", "../", "/data/", "/home/", "/tmp/", "~/", "file://"))
+
+
+def _command_output_history_item(preview: str) -> str | None:
+    if not preview:
+        return None
+    if _is_path_like_output_preview(preview):
+        return f"↳ {preview}"
+    return f"↳ output: \"{preview}\""
+
+
 def _status_code_blocks(text: str) -> list[str]:
     return [match.group("body").strip() for match in _STATUS_CODE_BLOCK_RE.finditer(text or "")]
 
@@ -1951,11 +1967,11 @@ def _extract_status_history_item(text: str) -> str | None:
     blocks = _status_code_blocks(raw)
     if raw.startswith("⌘ Command output"):
         preview = _sanitize_status_history_preview(_first_nonempty_line(blocks[0] if blocks else raw))
-        return f"↳ output: \"{preview}\"" if preview else None
+        return _command_output_history_item(preview)
     if raw.startswith("⌘ Command"):
         if "↳ Output" in raw and len(blocks) >= 2:
             preview = _sanitize_status_history_preview(_first_nonempty_line(blocks[1]))
-            return f"↳ output: \"{preview}\"" if preview else None
+            return _command_output_history_item(preview)
         preview = _sanitize_status_history_preview(_first_nonempty_line(blocks[0] if blocks else raw))
         return f"💻 terminal: \"{preview}\"" if preview else None
     if raw.startswith("🛠 Tool") and blocks:

@@ -271,7 +271,9 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
 - When compact/verbose lanes surface command or tool previews, they follow the
   Codex-style preview contract:
   - eligible compact technical-status previews render as a bounded delivered
-    technical-status history above a fenced current detail panel
+    technical-status history above a fenced current detail panel; path-like
+    command-output summaries use the locator directly instead of quoted
+    generic output
   - code block body contains only preview lines
   - truncation footer lives outside the fenced block
   - outcome footer is separate and should not redundantly say
