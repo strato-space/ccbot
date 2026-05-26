@@ -5665,3 +5665,279 @@ async def test_assistant_final_send_failure_records_terminal_delivery_failure() 
         == "assistant_final_delivery_incomplete"
     )
     mock_status.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ccbot_j3t_final_barrier_drops_queued_status_via_public_enqueue(
+    monkeypatch, tmp_path
+) -> None:
+    """Fixture for @17 14:25-14:27: final supersedes queued status churn."""
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    user_id = 91001
+    mq._message_queues[user_id] = asyncio.Queue()
+    mq._queue_locks[user_id] = asyncio.Lock()
+
+    try:
+        await enqueue_status_update(
+            AsyncMock(),
+            user_id,
+            "@17",
+            "⌘ Command\n```sh\nsystemctl --user restart ccbot.service\n```",
+            thread_id=8739,
+            chat_id=-1003685295814,
+            surface_key="t:-1003685295814:8739",
+            turn_generation=2,
+        )
+        await enqueue_content_message(
+            AsyncMock(),
+            user_id,
+            "@17",
+            ["Deploy выполнен."],
+            semantic_kind="assistant_final",
+            thread_id=8739,
+            chat_id=-1003685295814,
+            surface_key="t:-1003685295814:8739",
+            turn_generation=2,
+        )
+
+        queue = mq.get_message_queue(user_id)
+        assert queue is not None
+        queued = mq._inspect_queue(queue)
+        assert [(task.task_type, task.semantic_kind) for task in queued] == [
+            ("content", "assistant_final")
+        ]
+        # Refill so queue accounting is left consistent for cleanup.
+        for task in queued:
+            queue.put_nowait(task)
+            queue.task_done()
+
+        rows = [
+            json.loads(line)
+            for line in audit_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert rows[-1]["action"] == "suppress"
+        assert rows[-1]["reason"] == "final_barrier_dropped_queued_mutable_progress"
+        assert rows[-1]["task_type"] == "status_update"
+        assert rows[-1]["window_id"] == "@17"
+    finally:
+        await shutdown_workers()
+        mq._message_queues.pop(user_id, None)
+        mq._queue_locks.pop(user_id, None)
+
+
+@pytest.mark.asyncio
+async def test_ccbot_j3t_processed_status_is_cleared_after_final_via_worker(
+    monkeypatch, tmp_path
+) -> None:
+    """Fixture for @17 14:26: status 10490 is cleared after final 10491."""
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    user_id = 91002
+    status_message = SimpleNamespace(message_id=10490)
+    final_message = SimpleNamespace(message_id=10491)
+    bot = AsyncMock()
+
+    try:
+        with (
+            patch(
+                "ccbot.handlers.message_queue._is_task_binding_active",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch("ccbot.handlers.message_queue.current_turn_generation", return_value=2),
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                side_effect=[status_message, final_message],
+            ) as mock_send,
+            patch(
+                "ccbot.handlers.message_queue._check_and_send_status",
+                new_callable=AsyncMock,
+            ) as mock_check_status,
+        ):
+            await enqueue_status_update(
+                bot,
+                user_id,
+                "@17",
+                "⌘ Command output\n```text\n== service ==\nactive\n```",
+                thread_id=8739,
+                chat_id=-1003685295814,
+                surface_key="t:-1003685295814:8739",
+                turn_generation=2,
+            )
+            queue = mq.get_message_queue(user_id)
+            assert queue is not None
+            await queue.join()
+
+            await enqueue_content_message(
+                bot,
+                user_id,
+                "@17",
+                ["Deploy выполнен."],
+                semantic_kind="assistant_final",
+                thread_id=8739,
+                chat_id=-1003685295814,
+                surface_key="t:-1003685295814:8739",
+                turn_generation=2,
+            )
+            await queue.join()
+
+        sent_texts = [call.args[2] for call in mock_send.await_args_list]
+        assert sent_texts[0].startswith('↳ output: "== service =="')
+        assert "⌘ Command output" in sent_texts[0]
+        assert sent_texts[1] == "Deploy выполнен."
+        bot.delete_message.assert_awaited_once_with(
+            chat_id=-1003685295814,
+            message_id=10490,
+        )
+        mock_check_status.assert_not_awaited()
+        rows = [
+            json.loads(line)
+            for line in audit_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert [row["action"] for row in rows if row.get("message_id") in {10490, 10491}] == [
+            "send",
+            "send",
+            "delete",
+        ]
+        assert rows[-1]["task_type"] == "status_clear"
+        assert rows[-1]["message_id"] == 10490
+    finally:
+        await shutdown_workers()
+        mq._status_msg_info.clear()
+        clear_commentary_lane_state(user_id, 8739)
+
+
+@pytest.mark.asyncio
+async def test_ccbot_j3t_orphan_replacement_requires_known_gone_proof(
+    monkeypatch, tmp_path
+) -> None:
+    """Fixture for @31 14:16-14:18: do not replace an ambiguously failed status."""
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    monkeypatch.setattr(mq.config, "config_dir", tmp_path)
+    key = mq._topic_state_key(
+        1,
+        555,
+        chat_id=-1003685295814,
+        surface_key="t:-1003685295814:555",
+    )
+    mq._status_msg_info.clear()
+    mq._status_msg_info[key] = (10475, "@31", "old status")
+    mq._persist_status_msg_info(key, (10475, "@31", "old status"))
+    task = MessageTask(
+        task_type="status_update",
+        window_id="@31",
+        thread_id=555,
+        chat_id=-1003685295814,
+        surface_key="t:-1003685295814:555",
+        text="new status after timeout",
+        turn_generation=2,
+    )
+    bot = AsyncMock()
+    bot.edit_message_text.side_effect = [
+        TimeoutError("formatted transport timeout"),
+        TimeoutError("plain transport timeout"),
+    ]
+
+    try:
+        with (
+            patch(
+                "ccbot.handlers.message_queue._is_task_binding_active",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch("ccbot.handlers.message_queue.current_turn_generation", return_value=2),
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+            ) as mock_send,
+        ):
+            mock_sm.resolve_chat_id.return_value = -1003685295814
+            await _process_status_update_task(bot, 1, task)
+
+        mock_send.assert_not_awaited()
+        assert mq._status_msg_info[key] == (10475, "@31", "old status")
+        rows = [
+            json.loads(line)
+            for line in audit_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert rows[-1]["action"] == "edit_failed_preserved"
+        assert rows[-1]["message_id"] == 10475
+        assert rows[-1]["reason"] == "status_edit_failed_old_maybe_visible"
+        assert rows[-1]["transport_outcome"] == "failed"
+    finally:
+        mq._status_msg_info.clear()
+        mq._clear_persisted_status_msg_info(key)
+
+
+@pytest.mark.asyncio
+async def test_ccbot_j3t_user_echo_command_output_shape_is_durable_content(
+    monkeypatch, tmp_path
+) -> None:
+    """Fixture for @17 14:30: command-output-looking user text stays user_echo."""
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
+    user_text = (
+        "👤 ⌘ Command output\n"
+        "```text\n................... [ 76%]\n"
+        "............................................. [100%]\n"
+        "189 passed in 21.83s\n```"
+    )
+    task = MessageTask(
+        task_type="content",
+        window_id="@17",
+        thread_id=8739,
+        chat_id=-1003685295814,
+        surface_key="t:-1003685295814:8739",
+        parts=[user_text],
+        text=user_text,
+        content_type="text",
+        semantic_kind="user_echo",
+        turn_generation=2,
+    )
+    sent = SimpleNamespace(message_id=10492)
+    bot = AsyncMock()
+
+    try:
+        with (
+            patch(
+                "ccbot.handlers.message_queue._is_task_binding_active",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch("ccbot.handlers.message_queue.current_turn_generation", return_value=2),
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                return_value=sent,
+            ) as mock_send,
+            patch(
+                "ccbot.handlers.message_queue._process_status_update_task",
+                new_callable=AsyncMock,
+            ) as mock_status,
+            patch(
+                "ccbot.handlers.message_queue._check_and_send_status",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await _process_content_task(bot, 1, task)
+
+        mock_send.assert_awaited_once()
+        send_args = mock_send.await_args
+        assert send_args is not None
+        assert send_args.args[2] == user_text
+        mock_status.assert_not_awaited()
+        rows = [
+            json.loads(line)
+            for line in audit_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert rows[-1]["action"] == "send"
+        assert rows[-1]["task_type"] == "content"
+        assert rows[-1]["semantic_kind"] == "user_echo"
+        assert rows[-1]["message_id"] == 10492
+    finally:
+        clear_commentary_lane_state(1, 8739)

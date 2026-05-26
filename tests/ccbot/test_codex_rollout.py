@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from ccbot.codex_rollout import CodexRolloutNormalizer, CodexRolloutState
 from ccbot.transcript_parser import TranscriptParser
+from ccbot.telegram_delivery_policy import apply_telegram_delivery_policy
 
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "codex" / "rollouts"
@@ -31,6 +32,44 @@ def _load_many(*names: str) -> list[dict]:
 
 def _image_data_url(media_type: str, raw_bytes: bytes) -> str:
     return f"data:{media_type};base64,{base64.b64encode(raw_bytes).decode('ascii')}"
+
+
+def test_ccbot_j3t_command_output_shaped_user_replay_remains_user_echo() -> None:
+    records = [
+        {
+            "timestamp": "2026-05-25T14:30:19.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "⌘ Command output\n"
+                            "```text\n"
+                            "................... [ 76%]\n"
+                            "............................................. [100%]\n"
+                            "189 passed in 21.83s\n"
+                            "```\n"
+                            "наблюдаю в Telegram чате такое сообщение"
+                        ),
+                    }
+                ],
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+    user_event = next(event for event in events if event.role == "user")
+    projected = apply_telegram_delivery_policy(user_event)
+
+    assert projected.semantic_kind == "user_echo"
+    assert projected.content_type == "text"
+    assert projected.dispatch_to_telegram is True
+    assert projected.include_in_history is True
+    assert projected.status_message_eligible is False
+    assert "⌘ Command output" in projected.text
 
 
 def test_codex_rollout_view_image_output_is_pre_final_preview() -> None:
