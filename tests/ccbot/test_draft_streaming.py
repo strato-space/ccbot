@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from telegram.error import BadRequest, RetryAfter, TimedOut
+from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 
 from ccbot import draft_streaming
 from ccbot.config import config
@@ -183,6 +183,55 @@ async def test_send_message_draft_unsupported_method_disables_surface(monkeypatc
     assert result.status == "unsupported"
     caps = json.loads((config.config_dir / "draft_preview_capabilities.json").read_text())
     assert caps["c:123"]["status"] == "unsupported"
+
+
+
+
+@pytest.mark.asyncio
+async def test_send_message_draft_peer_invalid_marks_surface_unsupported(monkeypatch):
+    monkeypatch.setattr(config, "telegram_draft_preview_mode", "probe", raising=False)
+    monkeypatch.setattr(
+        config,
+        "telegram_draft_preview_allowed_surfaces",
+        {"t:-100:555"},
+        raising=False,
+    )
+    bot = SimpleNamespace(
+        send_message_draft=AsyncMock(side_effect=NetworkError("Textdraft_peer_invalid"))
+    )
+
+    result = await maybe_send_draft_preview(
+        bot,
+        user_id=1,
+        chat_id=-100,
+        thread_id=555,
+        surface_key="t:-100:555",
+        window_id="@1",
+        text="Working",
+        turn_generation=1,
+        lane="technical_status",
+    )
+
+    assert result.status == "unsupported"
+    caps = json.loads((config.config_dir / "draft_preview_capabilities.json").read_text())
+    assert caps["t:-100:555"]["status"] == "unsupported"
+    assert caps["t:-100:555"]["reason"] == "bad_request_unsupported"
+
+    blocked = await maybe_send_draft_preview(
+        bot,
+        user_id=1,
+        chat_id=-100,
+        thread_id=555,
+        surface_key="t:-100:555",
+        window_id="@1",
+        text="Working again",
+        turn_generation=1,
+        lane="technical_status",
+    )
+
+    assert blocked.status == "unsupported"
+    assert blocked.reason == "unsupported"
+    assert bot.send_message_draft.await_count == 1
 
 
 def test_draft_id_is_stable_per_surface_generation_lane_and_changes_next_turn():

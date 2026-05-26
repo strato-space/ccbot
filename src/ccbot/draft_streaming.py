@@ -64,6 +64,8 @@ _UNSUPPORTED_MARKERS = (
     "not implemented",
     "can't use this method",
     "sendmessagedraft",
+    "textdraft_peer_invalid",
+    "draft_peer_invalid",
 )
 _SECRET_MARKERS_RE = re.compile(
     r"(?i)(?:telegram_bot_token|telegram_token|openai_api_key|api[_-]?key|"
@@ -607,14 +609,14 @@ def _handle_draft_exception(
         _state.cooldown_until[surface] = time.monotonic() + seconds
         status: DraftPreviewStatus = "cooldown"
         reason = "retry_after"
+    elif _is_unsupported_error(exc):
+        mark_draft_surface_unsupported(surface, reason="bad_request_unsupported")
+        status = "unsupported"
+        reason = "bad_request_unsupported"
     elif isinstance(exc, TimedOut | NetworkError):
         _state.cooldown_until[surface] = time.monotonic() + _timeout_cooldown_seconds()
         status = "failed"
         reason = "transport_timeout"
-    elif isinstance(exc, BadRequest) and _is_unsupported_error(exc):
-        mark_draft_surface_unsupported(surface, reason="bad_request_unsupported")
-        status = "unsupported"
-        reason = "bad_request_unsupported"
     else:
         status = "failed"
         reason = type(exc).__name__
