@@ -100,6 +100,7 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "path-like and structured-JSON command-output history entries" in readme
     assert '`↳ .omx/...` or `↳ {"kind": ...}`' in readme
     assert "inline monospace after `↳`" in readme
+    assert "skip leading `set -euo pipefail` boilerplate" in readme
     assert "not durable runtime history" in readme
     assert "no pre-final visible artifact" in readme
     assert "late technical status" in readme
@@ -289,6 +290,7 @@ def test_ontology_folder_collects_project_core_nouns() -> None:
     assert "terminal turn artifact" in delivery
     assert "pre-final visible artifact" in delivery
     assert "technical status artifact" in delivery
+    assert "leading `set -euo pipefail` is boilerplate" in delivery
     assert "Command-like tool output belongs to command execution" in delivery
     assert "Genuine non-command tool results remain" in delivery
     assert "Pending input artifact" in delivery

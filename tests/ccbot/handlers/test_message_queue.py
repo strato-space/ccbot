@@ -4766,6 +4766,31 @@ async def test_convert_status_to_content_preserves_cross_window_in_memory_status
 
 
 def test_normalize_bare_command_status_wraps_shell_fence() -> None:
+    rendered = mq._normalize_technical_status_text("⌘ Command pytest -q preview 1/11 lines")
+
+    assert rendered == "⌘ Command\n```sh\npytest -q\n```"
+
+
+def test_normalize_command_status_drops_strict_mode_preamble_when_content_follows() -> None:
+    rendered = mq._normalize_technical_status_text(
+        "⌘ Command\n```sh\nset -euo pipefail\nuv run --extra dev pytest\n```\npreview 2/3 lines"
+    )
+
+    assert rendered == (
+        "⌘ Command\n```sh\nuv run --extra dev pytest\n```\npreview 2/3 lines"
+    )
+    assert "set -euo pipefail" not in rendered
+
+
+def test_command_history_drops_strict_mode_preamble_when_content_follows() -> None:
+    item = mq._extract_status_history_item(
+        "⌘ Command\n```sh\nset -euo pipefail\npython - <<'PY'\nprint('ok')\nPY\n```"
+    )
+
+    assert item == "💻 terminal: \"python - <<'PY'\""
+
+
+def test_normalize_command_status_keeps_strict_mode_when_it_is_only_line() -> None:
     rendered = mq._normalize_technical_status_text(
         "⌘ Command set -euo pipefail preview 1/11 lines"
     )

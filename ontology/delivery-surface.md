@@ -516,8 +516,9 @@ Preview refinements:
   edit or intentionally clear/replace the same bubble instead of stranding a
   duplicate; poll-only or empty statuses are never persisted
 - bare `⌘ Command` previews are shell command previews and must be rendered in
-  a `sh` fence; `⌘ Command output` is a distinct output category and may keep
-  `text` or `json` fences based on payload
+  a `sh` fence; leading `set -euo pipefail` is boilerplate and is skipped when
+  real command lines follow; `⌘ Command output` is a distinct output category
+  and may keep `text` or `json` fences based on payload
 - eligible command/tool technical statuses render as one mutable compact
   technical status artifact with a bounded delivered technical-status history
   above a fenced current detail panel; file/path-like command-output history

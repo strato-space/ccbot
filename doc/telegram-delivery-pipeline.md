@@ -45,8 +45,10 @@ The default Telegram surface is `compact`, not `verbose`.
   edit or intentionally clear/replace the same bubble instead of stranding a
   duplicate; poll-only or empty statuses are never persisted
 - bare `⌘ Command` previews are shell command previews and must be rendered in
-  a `sh` fence; `⌘ Command output` is a distinct output category and may keep
-  `text` or `json` fences based on payload
+  a `sh` fence; when a leading `set -euo pipefail` line is followed by real
+  command content, the preview/history skips that boilerplate; `⌘ Command
+  output` is a distinct output category and may keep `text` or `json` fences
+  based on payload
 - eligible command/tool technical statuses use a two-part mutable compact
   technical status artifact: a bounded delivered technical-status history above
   a fenced current detail panel. File/path-like command-output summaries in

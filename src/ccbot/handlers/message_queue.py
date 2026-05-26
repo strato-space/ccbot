@@ -1806,6 +1806,7 @@ def _render_clean_tool_output_status(text: str) -> str | None:
     code_payload = output or "completed · no output"
     lang = "json" if _looks_like_json_payload(code_payload) else "text"
     if command:
+        command = _strip_command_shell_preamble(command)
         rendered = f"⌘ Command\n```sh\n{command}\n```\n↳ Output\n```{lang}\n{code_payload}\n```"
     else:
         rendered = f"⌘ Command output\n```{lang}\n{code_payload}\n```"
@@ -1814,12 +1815,45 @@ def _render_clean_tool_output_status(text: str) -> str | None:
     return rendered
 
 
+def _strip_command_shell_preamble(command: str) -> str:
+    """Drop non-semantic shell strict-mode boilerplate when real command lines follow."""
+    lines = (command or "").splitlines()
+    first_content_index: int | None = None
+    for index, line in enumerate(lines):
+        if line.strip():
+            first_content_index = index
+            break
+    if first_content_index is None:
+        return command
+    if lines[first_content_index].strip() != "set -euo pipefail":
+        return command
+    if not any(line.strip() for line in lines[first_content_index + 1 :]):
+        return command
+    return "\n".join(lines[:first_content_index] + lines[first_content_index + 1 :]).strip()
+
+
+def _normalize_command_shell_preamble(text: str) -> str:
+    """Normalize the current command detail panel without touching outputs."""
+    raw = text or ""
+    stripped = raw.strip()
+    if not stripped.startswith("⌘ Command") or stripped.startswith("⌘ Command output"):
+        return text
+    match = _STATUS_CODE_BLOCK_RE.search(raw)
+    if not match:
+        return text
+    command = match.group("body")
+    cleaned = _strip_command_shell_preamble(command)
+    if cleaned == command or not cleaned:
+        return text
+    return f"{raw[: match.start('body')]}{cleaned}{raw[match.end('body') :]}"
+
+
 def _normalize_bare_command_status(text: str) -> str:
     raw = (text or "").strip()
     if not raw.startswith("⌘ Command") or raw.startswith("⌘ Command output"):
         return text
     if "```" in raw:
-        return text
+        return _normalize_command_shell_preamble(text)
     body = raw.removeprefix("⌘ Command").strip()
     if not body:
         return text
@@ -1832,6 +1866,7 @@ def _normalize_bare_command_status(text: str) -> str:
             r"^preview\s+1/\d+\s+lines?$", footer, re.IGNORECASE
         ):
             footer = ""
+    body = _strip_command_shell_preamble(body)
     if not body:
         return text
     rendered = f"⌘ Command\n```sh\n{body}\n```"
@@ -2018,7 +2053,8 @@ def _extract_status_history_item(text: str) -> str | None:
         if "↳ Output" in raw and len(blocks) >= 2:
             preview, kind = _command_output_preview_from_block(blocks[1])
             return _command_output_history_item(preview, kind)
-        preview = _sanitize_status_history_preview(_first_nonempty_line(blocks[0] if blocks else raw))
+        command_block = _strip_command_shell_preamble(blocks[0] if blocks else raw)
+        preview = _sanitize_status_history_preview(_first_nonempty_line(command_block))
         return f"💻 terminal: \"{preview}\"" if preview else None
     if raw.startswith("🛠 Tool") and blocks:
         preview = _sanitize_status_history_preview(_first_nonempty_line(blocks[0]))
