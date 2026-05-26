@@ -86,9 +86,10 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   artifact, and technical reasoning/tool/command/file-change churn stays in
   the mutable status artifact. Eligible command/tool status previews render as
   a bounded delivered technical-status history above a fenced current detail
-  panel; path-like command-output history entries may elide the generic
-  `output` label and render as `↳ .omx/...` while non-path output remains
-  explicitly labeled. This is Telegram delivery evidence, not durable runtime history. Once
+  panel; path-like and structured-JSON command-output history entries may
+  elide the generic `output` label and render as `↳ .omx/...` or `↳ {"kind": ...}`
+  while non-path prose output remains explicitly labeled. Command preview panels
+  prefer useful first-lines over low-value `preview 1/N lines` footers. This is Telegram delivery evidence, not durable runtime history. Once
   the final assistant answer lands, the
   whole pre-final visible surface closes until the next user turn, and the
   mutable technical status surface closes with it, so no late commentary, orchestration

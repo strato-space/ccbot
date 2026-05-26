@@ -4770,7 +4770,7 @@ def test_normalize_bare_command_status_wraps_shell_fence() -> None:
         "⌘ Command set -euo pipefail preview 1/11 lines"
     )
 
-    assert rendered == "⌘ Command\n```sh\nset -euo pipefail\n```\npreview 1/11 lines"
+    assert rendered == "⌘ Command\n```sh\nset -euo pipefail\n```"
 
 
 def test_normalize_already_fenced_command_status_is_idempotent() -> None:
@@ -5087,6 +5087,27 @@ async def test_poll_only_write_stdin_does_not_replace_existing_status_bubble(
     mq._status_msg_info.clear()
 
 
+def test_json_command_output_history_uses_whole_object_prefix() -> None:
+    text = (
+        "⌘ Command output\n"
+        "```json\n"
+        "{\n"
+        "  \"kind\": \"variantl-one-runner-manifest\",\n"
+        "  \"ok\": true,\n"
+        "  \"run_id\": \"media-joke-aroll-qpr-v2-seg3\",\n"
+        "  \"mode\": \"live\"\n"
+        "}\n"
+        "```"
+    )
+
+    item = mq._extract_status_history_item(text)
+
+    assert item is not None
+    assert item.startswith('↳ {"kind": "variantl-one-runner-manifest", "mode": "live"')
+    assert '"ok": true' in item
+    assert item != '↳ output: "{"'
+
+
 def test_file_path_command_output_history_drops_generic_output_label() -> None:
     text = (
         "⌘ Command output\n"
@@ -5099,6 +5120,18 @@ def test_file_path_command_output_history_drops_generic_output_label() -> None:
         mq._extract_status_history_item(text)
         == "↳ .omx/cinematic-shorts-ava/media-joke-brief-20260525T072046Z/live-submit_path.txt"
     )
+
+
+def test_file_path_command_output_history_uses_256_char_budget() -> None:
+    path = ".omx/" + "deep-segment/" * 20 + "live-submit-output.json"
+    text = f"⌘ Command output\n```text\n{path}\n```"
+
+    item = mq._extract_status_history_item(text)
+
+    assert item is not None
+    assert item.startswith("↳ .omx/deep-segment/")
+    assert len(item.removeprefix("↳ ")) > 160
+    assert len(item.removeprefix("↳ ")) <= 256
 
 
 def test_file_path_command_output_history_works_for_command_detail_output() -> None:
@@ -5120,6 +5153,10 @@ def test_non_file_command_output_history_keeps_generic_output_label() -> None:
     assert (
         mq._extract_status_history_item("⌘ Command output\n```text\n✓ 22 passed\n```")
         == '↳ output: "✓ 22 passed"'
+    )
+    assert (
+        mq._extract_status_history_item("⌘ Command output\n```text\n{not json\n```")
+        == '↳ output: "{not json"'
     )
     assert (
         mq._extract_status_history_item("⌘ Command output\n```text\n/home/tools/out.md\n```")

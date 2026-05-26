@@ -522,9 +522,11 @@ Preview refinements:
   technical status artifact with a bounded delivered technical-status history
   above a fenced current detail panel; file/path-like command-output history
   entries may be rendered as locators (for example `↳ .omx/...`) without the
-  generic `output` label, while non-path output remains explicitly labeled.
-  Locator rendering is limited to known locator prefixes such as `.omx/`,
-  `./`, `../`, `/data/`, `/home/`, `/tmp/`, `~/`, and `file://`;
+  generic `output` label, and structured JSON command-output history may render
+  as a compact JSON prefix from the whole block instead of `↳ output: "{"`.
+  Non-path, non-JSON output remains explicitly labeled. Locator rendering is
+  limited to known locator prefixes such as `.omx/`, `./`, `../`, `/data/`,
+  `/home/`, `/tmp/`, `~/`, and `file://`;
   this is visible delivery history, not
   durable runtime history, and it is separate from final/user/commentary/
   warning/pending-input/media/terminal-control/OMX workflow artifact lanes

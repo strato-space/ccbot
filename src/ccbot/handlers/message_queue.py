@@ -299,6 +299,7 @@ _status_msg_info: dict[TopicStateKey, tuple[int, str, str]] = {}
 StatusHistoryKey = tuple[TopicStateKey, str, int]
 STATUS_HISTORY_LIMIT = 8
 STATUS_HISTORY_ITEM_MAX_CHARS = 160
+STATUS_HISTORY_COMMAND_OUTPUT_MAX_CHARS = 256
 
 # Delivered technical-status history for the compact mutable status artifact.
 # This is intentionally not durable runtime history: it is only committed after
@@ -1827,6 +1828,10 @@ def _normalize_bare_command_status(text: str) -> str:
     if match:
         body = match.group("body").strip()
         footer = match.group("footer").strip()
+        if len([line for line in body.splitlines() if line.strip()]) <= 1 and re.match(
+            r"^preview\s+1/\d+\s+lines?$", footer, re.IGNORECASE
+        ):
+            footer = ""
     if not body:
         return text
     rendered = f"⌘ Command\n```sh\n{body}\n```"
@@ -1922,12 +1927,18 @@ def _normalize_technical_status_text(text: str) -> str:
     return _normalize_bare_tool_status(_normalize_bare_command_status(text))
 
 
-def _sanitize_status_history_preview(text: str) -> str:
+def _sanitize_status_history_preview(
+    text: str,
+    *,
+    max_chars: int = STATUS_HISTORY_ITEM_MAX_CHARS,
+    preserve_json_punctuation: bool = False,
+) -> str:
     compact = " ".join((text or "").strip().split())
     compact = compact.replace("```", "′′′").replace("`", "′")
-    compact = compact.replace("[", "［").replace("]", "］")
-    if len(compact) > STATUS_HISTORY_ITEM_MAX_CHARS:
-        return compact[: STATUS_HISTORY_ITEM_MAX_CHARS - 1].rstrip() + "…"
+    if not preserve_json_punctuation:
+        compact = compact.replace("[", "［").replace("]", "］")
+    if len(compact) > max_chars:
+        return compact[: max_chars - 1].rstrip() + "…"
     return compact
 
 
@@ -1947,10 +1958,45 @@ def _is_path_like_output_preview(text: str) -> bool:
     return preview.startswith((".omx/", "./", "../", "/data/", "/home/", "/tmp/", "~/", "file://"))
 
 
-def _command_output_history_item(preview: str) -> str | None:
+def _json_output_history_preview(text: str) -> str | None:
+    body = (text or "").strip()
+    if not body or body[0] not in "[{":
+        return None
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(parsed, (dict, list)):
+        return None
+    compact = json.dumps(parsed, ensure_ascii=False, sort_keys=True)
+    return _sanitize_status_history_preview(
+        compact,
+        max_chars=STATUS_HISTORY_COMMAND_OUTPUT_MAX_CHARS,
+        preserve_json_punctuation=True,
+    )
+
+
+def _command_output_preview_from_block(text: str) -> tuple[str, str]:
+    json_preview = _json_output_history_preview(text)
+    if json_preview:
+        return json_preview, "json"
+    first_line = _first_nonempty_line(text)
+    path_preview = _sanitize_status_history_preview(
+        first_line,
+        max_chars=STATUS_HISTORY_COMMAND_OUTPUT_MAX_CHARS,
+    )
+    if _is_path_like_output_preview(path_preview):
+        return path_preview, "path"
+    return (
+        _sanitize_status_history_preview(first_line),
+        "prose",
+    )
+
+
+def _command_output_history_item(preview: str, kind: str) -> str | None:
     if not preview:
         return None
-    if _is_path_like_output_preview(preview):
+    if kind in {"path", "json"}:
         return f"↳ {preview}"
     return f"↳ output: \"{preview}\""
 
@@ -1966,12 +2012,12 @@ def _extract_status_history_item(text: str) -> str | None:
         return None
     blocks = _status_code_blocks(raw)
     if raw.startswith("⌘ Command output"):
-        preview = _sanitize_status_history_preview(_first_nonempty_line(blocks[0] if blocks else raw))
-        return _command_output_history_item(preview)
+        preview, kind = _command_output_preview_from_block(blocks[0] if blocks else raw)
+        return _command_output_history_item(preview, kind)
     if raw.startswith("⌘ Command"):
         if "↳ Output" in raw and len(blocks) >= 2:
-            preview = _sanitize_status_history_preview(_first_nonempty_line(blocks[1]))
-            return _command_output_history_item(preview)
+            preview, kind = _command_output_preview_from_block(blocks[1])
+            return _command_output_history_item(preview, kind)
         preview = _sanitize_status_history_preview(_first_nonempty_line(blocks[0] if blocks else raw))
         return f"💻 terminal: \"{preview}\"" if preview else None
     if raw.startswith("🛠 Tool") and blocks:

@@ -2341,6 +2341,29 @@ def test_codex_rollout_summarizes_omx_state_write_without_raw_json() -> None:
     assert '"mode"' not in events[0].text
 
 
+def test_codex_rollout_exec_command_preview_caps_command_at_ten_lines() -> None:
+    command = "\n".join(f"echo line {i}" for i in range(12))
+    records = [
+        {
+            "timestamp": "2026-04-26T18:00:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "functions.exec_command",
+                "call_id": "call_exec",
+                "arguments": json.dumps({"cmd": command}),
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert "echo line 9" in events[0].text
+    assert "echo line 10" not in events[0].text
+    assert "preview 10/12 lines" in events[0].text
+
+
 def test_codex_rollout_formats_namespaced_exec_command_as_shell_preview() -> None:
     records = [
         {

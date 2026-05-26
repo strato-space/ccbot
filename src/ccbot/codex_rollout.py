@@ -347,7 +347,7 @@ def _preserve_existing_fenced_preview(text: str) -> str:
 def _command_code_block(
     command: str,
     *,
-    max_lines: int = 20,
+    max_lines: int = 10,
     max_chars: int = 180,
 ) -> str:
     payload = _extract_shell_payload(command)

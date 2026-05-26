@@ -164,6 +164,22 @@ class TestBuildResponseParts:
         assert "```text" in formatted
         assert "Tool output: 7 line(s)" in formatted
 
+    def test_command_execution_formats_first_ten_preview_lines(self):
+        text = "\n".join(f"echo line {i}" for i in range(12))
+
+        formatted = format_response_text(
+            text,
+            is_complete=True,
+            content_type="command_execution",
+            role="assistant",
+        )
+
+        assert "⌘ Command" in formatted
+        assert "echo line 9" in formatted
+        assert "echo line 10" not in formatted
+        assert "preview 10/12 lines" in formatted
+
+
     def test_tool_use_preserves_existing_fenced_preview_without_double_wrap(self):
         formatted = format_response_text(
             "exec_command\n```sh\nbd show server-k7k\n```\n\npreview 1/4 lines",

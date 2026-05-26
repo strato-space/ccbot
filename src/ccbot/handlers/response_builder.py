@@ -218,6 +218,15 @@ def format_response_text(
             text = text[:2996] + "…"
         return f"👤 {text}" if text else "👤"
 
+    if content_type == "command_execution":
+        text = _format_multiline_code_block(
+            text,
+            language="sh",
+            max_lines=10,
+            max_chars=180,
+            always_wrap=False,
+        )
+
     if content_type in {"tool_use", "tool_result", "file_change"}:
         text = _format_tool_like_text(text, content_type=content_type)
 
