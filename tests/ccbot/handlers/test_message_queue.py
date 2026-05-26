@@ -4804,6 +4804,14 @@ def test_tool_status_history_uses_inline_code_payload_without_quotes() -> None:
     assert item == "🛠 read_file: `Reading chunk 1/2`"
 
 
+def test_normalized_tool_status_history_splits_name_and_payload() -> None:
+    normalized = mq._normalize_technical_status_text("Tool read_file Reading chunk 1/2")
+    item = mq._extract_status_history_item(normalized)
+
+    assert normalized == "🛠 Tool\n```text\nread_file Reading chunk 1/2\n```"
+    assert item == "🛠 read_file: `Reading chunk 1/2`"
+
+
 def test_tool_status_history_keeps_bare_tool_name_when_no_payload() -> None:
     item = mq._extract_status_history_item("🛠 Tool\n```text\nread_file\n```")
 

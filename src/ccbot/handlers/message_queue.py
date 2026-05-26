@@ -2042,6 +2042,18 @@ def _command_output_history_item(preview: str, kind: str) -> str | None:
     return f"↳ `{preview}`"
 
 
+def _tool_history_name_and_payload(preview: str) -> tuple[str, str]:
+    compact = (preview or "").strip()
+    if not compact:
+        return "", ""
+    first, sep, rest = compact.partition(" ")
+    if "(" in first:
+        return first.split("(", 1)[0].strip(), compact
+    if sep and re.match(r"^[A-Za-z0-9_.:-]+$", first):
+        return first, rest.strip()
+    return compact, ""
+
+
 def _status_code_blocks(text: str) -> list[str]:
     return [match.group("body").strip() for match in _STATUS_CODE_BLOCK_RE.finditer(text or "")]
 
@@ -2064,9 +2076,9 @@ def _extract_status_history_item(text: str) -> str | None:
         return _inline_code_status_history_item("💻 terminal", preview)
     if raw.startswith("🛠 Tool") and blocks:
         preview = _sanitize_status_history_preview(_first_nonempty_line(blocks[0]))
-        name = preview.split("(", 1)[0].strip() if preview else ""
-        if name and preview != name:
-            return _inline_code_status_history_item(f"🛠 {name}", preview)
+        name, payload = _tool_history_name_and_payload(preview)
+        if name and payload:
+            return _inline_code_status_history_item(f"🛠 {name}", payload)
         return f"🛠 {name}" if name else None
     tool_match = re.match(r"^(?:🛠\s*)?Tool\s+([A-Za-z0-9_.:-]+)(.*)$", raw, re.DOTALL)
     if tool_match:
