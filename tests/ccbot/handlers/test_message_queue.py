@@ -4730,7 +4730,12 @@ async def test_status_clear_deletes_all_status_lanes_with_lane_metadata(monkeypa
     mq._status_msg_info.clear()
 
 @pytest.mark.asyncio
-async def test_final_barrier_drops_queued_mutable_progress_but_preserves_pending_input() -> None:
+async def test_final_barrier_drops_queued_mutable_progress_but_preserves_pending_input(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    audit_path = tmp_path / "telegram_delivery_audit.jsonl"
+    monkeypatch.setattr(delivery_audit.config, "telegram_delivery_audit_file", audit_path)
     queue: asyncio.Queue[MessageTask] = asyncio.Queue()
     lock = asyncio.Lock()
     user_id = 987654
@@ -4759,6 +4764,25 @@ async def test_final_barrier_drops_queued_mutable_progress_but_preserves_pending
         text="Working...",
         content_type="commentary",
         semantic_kind="commentary",
+        turn_generation=3,
+    )
+    image_preview_task = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        text="• Viewed Image\n  └ preview.png",
+        content_type="viewed_image_preview",
+        semantic_kind=IMAGE_PREVIEW_SEMANTIC_KIND,
+        image_data=[("image/png", b"preview")],
+        turn_generation=3,
+    )
+    plan_task = MessageTask(
+        task_type="plan_update",
+        window_id="@7",
+        thread_id=42,
+        text="Plan updated",
+        content_type="plan_update",
+        semantic_kind="plan_update",
         turn_generation=3,
     )
     pending_task = MessageTask(
@@ -4792,8 +4816,8 @@ async def test_final_barrier_drops_queued_mutable_progress_but_preserves_pending
         window_id="@7",
         thread_id=42,
         text="clear plan",
-        content_type="plan",
-        semantic_kind="plan",
+        content_type="plan_update",
+        semantic_kind="plan_update",
         turn_generation=3,
     )
     other_turn_status = MessageTask(
@@ -4808,6 +4832,8 @@ async def test_final_barrier_drops_queued_mutable_progress_but_preserves_pending
     for task in [
         status_task,
         commentary_task,
+        image_preview_task,
+        plan_task,
         pending_task,
         status_clear_task,
         commentary_clear_task,
@@ -4826,7 +4852,7 @@ async def test_final_barrier_drops_queued_mutable_progress_but_preserves_pending
         )
 
     remaining = mq._inspect_queue(queue)
-    assert dropped == 2
+    assert dropped == 4
     assert pending_task in remaining
     assert status_clear_task in remaining
     assert commentary_clear_task in remaining
@@ -4834,6 +4860,21 @@ async def test_final_barrier_drops_queued_mutable_progress_but_preserves_pending
     assert other_turn_status in remaining
     assert status_task not in remaining
     assert commentary_task not in remaining
+    assert image_preview_task not in remaining
+    assert plan_task not in remaining
+    rows = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    suppressed = [
+        row
+        for row in rows
+        if row["reason"] == "final_barrier_dropped_queued_mutable_progress"
+    ]
+    assert len(suppressed) == 4
+    assert {row["semantic_kind"] for row in suppressed} >= {
+        "technical_status",
+        "commentary",
+        "plan_update",
+        IMAGE_PREVIEW_SEMANTIC_KIND,
+    }
 
 
 @pytest.mark.asyncio

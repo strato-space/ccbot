@@ -1005,8 +1005,10 @@ def _is_final_barrier_droppable_task(task: MessageTask) -> bool:
     """Return True for obsolete same-turn mutable progress behind a final."""
     if task.semantic_kind == ASSISTANT_FINAL_SEMANTIC_KIND:
         return False
-    if task.semantic_kind in {USER_ECHO_SEMANTIC_KIND, IMAGE_PREVIEW_SEMANTIC_KIND}:
+    if task.semantic_kind == USER_ECHO_SEMANTIC_KIND:
         return False
+    if task.semantic_kind == IMAGE_PREVIEW_SEMANTIC_KIND:
+        return True
     if task.content_type == GENERATED_IMAGE_PREVIEW_CONTENT_TYPE:
         return False
     # Pending input previews belong to the future-input lane, not current-turn

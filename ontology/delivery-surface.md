@@ -410,8 +410,8 @@ tool results rather than being forced into command execution.
   durable ordering barrier: status, commentary, plan, and pending-input updates
   may replace older same-surface/window/turn/lane updates before Telegram sees
   them. When the durable barrier is `assistant_final`, queued status,
-  commentary, and plan updates for the same surface/window/turn are obsolete and
-  may be dropped with audit; pending-input remains future-input state and is
+  commentary, `plan_update`, and pre-final `image_preview` updates for the same
+  surface/window/turn are obsolete and may be dropped with audit; pending-input remains future-input state and is
   preserved. Durable content/final/warning/ingress artifacts remain ordered
   facts, not replaceable state.
 - Backlog metrics are payload-free observations, not delivery artifacts:

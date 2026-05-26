@@ -599,8 +599,8 @@ Late delivery must fail closed.
   ordering barrier. Durable content, final answers, warnings, ingress receipts,
   and terminal close tasks are never coalesced away.
 - When a canonical `assistant_final` enters the queue, it becomes a final
-  barrier for the same surface/window/turn. Queued `status`, `commentary`, and
-  `plan` updates behind that barrier are dropped with
+  barrier for the same surface/window/turn. Queued `status`, `commentary`,
+  `plan_update`, and pre-final `image_preview` updates behind that barrier are dropped with
   `final_barrier_dropped_queued_mutable_progress` audit instead of being sent
   just before or after the final. Pending-input previews are not dropped by this
   barrier because they describe future input rather than current-turn output.

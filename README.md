@@ -90,9 +90,9 @@ for staged Claude Code restore / fast-agent enablement. Together they document:
   milestone, or surfaced preview artifact appears below the
   final answer for the same turn, and no late status artifact appears below the
   final answer for the same turn. Put bluntly: no pre-final visible artifact
-  or late technical status may leak below the terminal assistant bubble. Queued
-  same-turn mutable status/commentary/plan updates that have not reached
-  Telegram are dropped with audit when the final answer becomes available.
+  or late technical status may leak below the terminal assistant bubble. Queued same-turn mutable
+  status/commentary/plan_update/image_preview updates that have not reached Telegram
+  are dropped with audit when the final answer becomes available.
   When compactness and semantic clarity conflict, the delivery surface prefers
   visibility-first edit-in-place updates over ambiguous silence.
   Long-wait reviewer/progress commentary may be re-sent at the chat tail while
