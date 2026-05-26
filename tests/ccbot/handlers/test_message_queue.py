@@ -795,6 +795,64 @@ async def test_process_content_task_drops_stale_binding() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "task",
+    [
+        MessageTask(
+            task_type="content",
+            window_id="@7",
+            thread_id=42,
+            parts=["final answer"],
+            content_type="text",
+            chat_id=-100,
+            surface_key="t:-100:42",
+        ),
+        MessageTask(
+            task_type="status_update",
+            window_id="@7",
+            thread_id=42,
+            text="Thinking…",
+            chat_id=-100,
+            surface_key="t:-100:42",
+        ),
+    ],
+)
+async def test_stale_task_clears_pending_input_only_on_canonical_surface(
+    task: MessageTask,
+) -> None:
+    legacy_key = mq._topic_state_key(1, 42)
+    surface_key = mq._topic_state_key(
+        1,
+        42,
+        chat_id=-100,
+        surface_key="t:-100:42",
+    )
+    mq._pending_input_msg_info.clear()
+    mq._pending_input_msg_info[legacy_key] = (701, "@7", "legacy pending")
+    mq._pending_input_msg_info[surface_key] = (702, "@7", "surface pending")
+
+    with (
+        patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+        patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+    ):
+        mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+        mock_sm.get_window_for_thread.return_value = "@9"
+        mock_sm.get_topic_binding_state.return_value = "bound"
+        bot = AsyncMock()
+        if task.task_type == "content":
+            await _process_content_task(bot, 1, task)
+        else:
+            await _process_status_update_task(bot, 1, task)
+
+    deleted_ids = {call.kwargs["message_id"] for call in bot.delete_message.await_args_list}
+    assert 702 in deleted_ids
+    assert 701 not in deleted_ids
+    assert legacy_key in mq._pending_input_msg_info
+    assert surface_key not in mq._pending_input_msg_info
+    mq._pending_input_msg_info.clear()
+
+
+@pytest.mark.asyncio
 async def test_process_status_task_drops_stale_binding() -> None:
     task = MessageTask(
         task_type="status_update",
@@ -1007,6 +1065,88 @@ async def test_process_content_task_edits_command_execution_by_tool_use_id() -> 
         assert "hi" in kwargs["text"]
     finally:
         mq._tool_msg_ids.clear()
+
+
+@pytest.mark.asyncio
+async def test_command_execution_plain_fallback_status_stays_on_surface_key() -> None:
+    first = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["⌘ Command\n```sh\necho hi\n```"],
+        content_type="command_execution",
+        semantic_kind="command_execution",
+        tool_use_id="call_exec",
+        chat_id=-100,
+        surface_key="t:-100:42",
+        turn_generation=1,
+    )
+    second = MessageTask(
+        task_type="content",
+        window_id="@7",
+        thread_id=42,
+        parts=["⌘ Command\n```sh\necho hi\n```\n```sh\nhi\n```"],
+        content_type="command_execution",
+        semantic_kind="command_execution",
+        tool_use_id="call_exec",
+        chat_id=-100,
+        surface_key="t:-100:42",
+        turn_generation=1,
+    )
+
+    bot = AsyncMock()
+    sent_first = AsyncMock()
+    sent_first.message_id = 301
+    bot.edit_message_text.side_effect = [Exception("markdown failed"), None]
+
+    mq._tool_msg_ids.clear()
+    legacy_key = mq._topic_state_key(1, 42)
+    surface_key = mq._topic_state_key(1, 42, chat_id=-100, surface_key="t:-100:42")
+    mq._status_msg_info.clear()
+    mq._status_msg_info[legacy_key] = (801, "@7", "legacy status")
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                side_effect=[sent_first],
+            ),
+            patch(
+                "ccbot.handlers.message_queue._do_send_status_message",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_status_send,
+            patch("ccbot.handlers.message_queue.current_turn_generation", return_value=1),
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=type("Window", (), {"window_id": "@7"})()
+            )
+            mock_tmux.capture_pane = AsyncMock(
+                return_value="output\n✻ Doing work\n──────────────────────────────"
+            )
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = -100
+
+            await _process_content_task(bot, 1, first)
+            mock_status_send.reset_mock()
+            await _process_content_task(bot, 1, second)
+
+        assert bot.edit_message_text.await_count == 2
+        mock_status_send.assert_awaited_once()
+        await_args = mock_status_send.await_args
+        assert await_args is not None
+        assert await_args.kwargs["chat_id"] == -100
+        assert await_args.kwargs["surface_key"] == "t:-100:42"
+        assert await_args.args[2] == 42
+        assert await_args.args[4] == "Doing work"
+        assert mq._status_msg_info[legacy_key] == (801, "@7", "legacy status")
+        assert surface_key != legacy_key
+    finally:
+        mq._tool_msg_ids.clear()
+        mq._status_msg_info.clear()
 
 
 @pytest.mark.asyncio

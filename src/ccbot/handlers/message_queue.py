@@ -2308,7 +2308,13 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             chat_id=task.chat_id,
             surface_key=task.surface_key,
         )
-        await _do_clear_pending_input_message(bot, user_id, tid)
+        await _do_clear_pending_input_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
         await _do_clear_plan_update_message(
             bot,
             user_id,
@@ -2568,6 +2574,8 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                         user_id,
                         wid,
                         task.thread_id,
+                        chat_id=task.chat_id,
+                        surface_key=task.surface_key,
                         expected_turn_generation=task.turn_generation,
                     )
                     return
@@ -3017,7 +3025,13 @@ async def _process_status_update_task(
             chat_id=task.chat_id,
             surface_key=task.surface_key,
         )
-        await _do_clear_pending_input_message(bot, user_id, tid)
+        await _do_clear_pending_input_message(
+            bot,
+            user_id,
+            tid,
+            chat_id=task.chat_id,
+            surface_key=task.surface_key,
+        )
         await _do_clear_plan_update_message(
             bot,
             user_id,
