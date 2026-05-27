@@ -191,8 +191,9 @@ The delivery pipeline keeps:
 - one latest-only visible commentary artifact per `(user_id, control surface)`
 - one mutable plan-update artifact per `(user_id, control surface)`; opening a
   new user turn retires the old plan pointer so the next plan appears at the
-  chat tail, but that next send deletes the retired plan bubble first instead
-  of accumulating a visible stack
+  chat tail, but that next send must delete the retired plan bubble first; if
+  deletion fails retryably or opaquely, the fresh send is deferred instead of
+  accumulating a visible stack
 - one mutable pending-input artifact per `(user_id, control surface)`
 - one mutable Telegram ingress receipt per pending fast-path proof, distinct
   from the pending-input artifact unless the input is actually queued behind an

@@ -556,8 +556,9 @@ Compact marker registry:
 
 - plan-update artifacts are latest-only on the visible surface; a new user turn
   must open a fresh tail-visible plan artifact instead of editing the previous
-  turn's bubble up-thread, and the fresh send deletes any retired plan bubble so
-  plan updates do not accumulate as a stack
+  turn's bubble up-thread, and the fresh send deletes any retired plan bubble
+  before sending; if deletion is retryable or unconfirmed, the fresh send is
+  deferred so plan updates do not accumulate as a stack
 - final assistant artifacts are terminal turn barriers; once a final answer is
   observed it must be delivered before a later queued user turn can advance the
   surface generation, and a user echo must never be rendered by editing an old

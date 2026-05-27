@@ -1701,6 +1701,134 @@ async def test_plan_update_new_turn_deletes_retired_plan_before_tail_send() -> N
 
 
 @pytest.mark.asyncio
+async def test_plan_update_retry_after_keeps_retired_pointer_and_blocks_fresh_send() -> None:
+    first = MessageTask(
+        task_type="plan_update",
+        window_id="@7",
+        thread_id=42,
+        text="• Updated Plan\n  ▶ First",
+        turn_generation=1,
+    )
+    second = MessageTask(
+        task_type="plan_update",
+        window_id="@7",
+        thread_id=42,
+        text="• Updated Plan\n  ☑ First\n  ▶ Second",
+        turn_generation=2,
+    )
+    sent_first = AsyncMock()
+    sent_first.message_id = 901
+    bot = AsyncMock()
+    bot.delete_message.side_effect = RetryAfter(1)
+
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                return_value=sent_first,
+            ) as mock_send,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+
+            open_new_turn_generation(1, 42)
+            await _process_plan_update_task(bot, 1, first)
+            open_new_turn_generation(1, 42)
+            with pytest.raises(RetryAfter):
+                await _process_plan_update_task(bot, 1, second)
+
+        mock_send.assert_awaited_once()
+        bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=901)
+        assert (1, 42) not in _plan_update_msg_info
+        assert mq._retired_plan_update_msg_info[(1, 42)] == (901, "@7", first.text)
+    finally:
+        clear_commentary_lane_state(1, 42)
+        _plan_update_msg_info.pop((1, 42), None)
+        mq._retired_plan_update_msg_info.pop((1, 42), None)
+
+
+@pytest.mark.asyncio
+async def test_plan_update_delete_failure_keeps_retired_pointer_and_blocks_fresh_send() -> None:
+    first = MessageTask(
+        task_type="plan_update",
+        window_id="@7",
+        thread_id=42,
+        text="• Updated Plan\n  ▶ First",
+        turn_generation=1,
+    )
+    second = MessageTask(
+        task_type="plan_update",
+        window_id="@7",
+        thread_id=42,
+        text="• Updated Plan\n  ☑ First\n  ▶ Second",
+        turn_generation=2,
+    )
+    sent_first = AsyncMock()
+    sent_first.message_id = 901
+    bot = AsyncMock()
+    bot.delete_message.side_effect = RuntimeError("telegram transport down")
+
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                return_value=sent_first,
+            ) as mock_send,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+
+            open_new_turn_generation(1, 42)
+            await _process_plan_update_task(bot, 1, first)
+            open_new_turn_generation(1, 42)
+            await _process_plan_update_task(bot, 1, second)
+
+        mock_send.assert_awaited_once()
+        bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=901)
+        assert (1, 42) not in _plan_update_msg_info
+        assert mq._retired_plan_update_msg_info[(1, 42)] == (901, "@7", first.text)
+    finally:
+        clear_commentary_lane_state(1, 42)
+        _plan_update_msg_info.pop((1, 42), None)
+        mq._retired_plan_update_msg_info.pop((1, 42), None)
+
+
+@pytest.mark.asyncio
+async def test_clear_plan_update_deletes_active_and_retired_bubbles() -> None:
+    bot = AsyncMock()
+    _plan_update_msg_info[(1, 42)] = (902, "@7", "• Updated Plan\n  ▶ Current")
+    mq._retired_plan_update_msg_info[(1, 42)] = (901, "@7", "• Updated Plan\n  ▶ Retired")
+    mq._latest_pre_final_visible_kind[(1, 42)] = "plan_update"
+
+    try:
+        with patch("ccbot.handlers.message_queue.session_manager") as mock_sm:
+            mock_sm.resolve_chat_id.return_value = 100
+            await mq._do_clear_plan_update_message(bot, 1, 42)
+
+        assert bot.delete_message.await_count == 2
+        bot.delete_message.assert_any_await(chat_id=100, message_id=902)
+        bot.delete_message.assert_any_await(chat_id=100, message_id=901)
+        assert (1, 42) not in _plan_update_msg_info
+        assert (1, 42) not in mq._retired_plan_update_msg_info
+        assert (1, 42) not in mq._latest_pre_final_visible_kind
+    finally:
+        clear_commentary_lane_state(1, 42)
+        _plan_update_msg_info.pop((1, 42), None)
+        mq._retired_plan_update_msg_info.pop((1, 42), None)
+        mq._latest_pre_final_visible_kind.pop((1, 42), None)
+
+
+@pytest.mark.asyncio
 async def test_enqueue_plan_update_suppresses_after_final_answer() -> None:
     _mark_commentary_closed(1, 42)
     try:

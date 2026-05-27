@@ -4113,6 +4113,110 @@ async def _process_plan_update_task(
     )
 
 
+async def _delete_tracked_plan_update_messages(
+    bot: Bot,
+    user_id: int,
+    thread_id_or_0: int,
+    pkey: TopicStateKey,
+    *,
+    chat_id: int | None,
+    reason: str,
+    task_type: str,
+) -> bool:
+    """Delete active and retired plan bubbles without losing retryable state."""
+    if chat_id is None:
+        chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
+
+    all_deleted = True
+    deleted_message_ids: set[int] = set()
+    tracked_items = (
+        ("active", _plan_update_msg_info.get(pkey)),
+        ("retired", _retired_plan_update_msg_info.get(pkey)),
+    )
+    for bucket, info in tracked_items:
+        if info is None:
+            continue
+        message_id, window_id, _last_text = info
+        if message_id in deleted_message_ids:
+            if bucket == "active" and _plan_update_msg_info.get(pkey) == info:
+                _plan_update_msg_info.pop(pkey, None)
+            elif bucket == "retired" and _retired_plan_update_msg_info.get(pkey) == info:
+                _retired_plan_update_msg_info.pop(pkey, None)
+            continue
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+            deleted_message_ids.add(message_id)
+            if bucket == "active" and _plan_update_msg_info.get(pkey) == info:
+                _plan_update_msg_info.pop(pkey, None)
+            elif bucket == "retired" and _retired_plan_update_msg_info.get(pkey) == info:
+                _retired_plan_update_msg_info.pop(pkey, None)
+            log_telegram_delivery(
+                action="delete",
+                user_id=user_id,
+                chat_id=chat_id,
+                thread_id=thread_id_or_0 or None,
+                message_id=message_id,
+                window_id=window_id,
+                task_type=task_type,
+                content_type="plan_update",
+                semantic_kind="plan_update",
+                reason=reason,
+            )
+        except RetryAfter as e:
+            log_telegram_delivery(
+                action="delete",
+                user_id=user_id,
+                chat_id=chat_id,
+                thread_id=thread_id_or_0 or None,
+                message_id=message_id,
+                window_id=window_id,
+                task_type=task_type,
+                content_type="plan_update",
+                semantic_kind="plan_update",
+                success=False,
+                error=e,
+                reason=f"{reason}_retry_after",
+            )
+            raise
+        except Exception as e:
+            if _is_message_known_gone_error(e):
+                deleted_message_ids.add(message_id)
+                if bucket == "active" and _plan_update_msg_info.get(pkey) == info:
+                    _plan_update_msg_info.pop(pkey, None)
+                elif bucket == "retired" and _retired_plan_update_msg_info.get(pkey) == info:
+                    _retired_plan_update_msg_info.pop(pkey, None)
+                log_telegram_delivery(
+                    action="delete",
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    thread_id=thread_id_or_0 or None,
+                    message_id=message_id,
+                    window_id=window_id,
+                    task_type=task_type,
+                    content_type="plan_update",
+                    semantic_kind="plan_update",
+                    reason=f"{reason}_already_gone",
+                )
+                continue
+            all_deleted = False
+            log_telegram_delivery(
+                action="delete",
+                user_id=user_id,
+                chat_id=chat_id,
+                thread_id=thread_id_or_0 or None,
+                message_id=message_id,
+                window_id=window_id,
+                task_type=task_type,
+                content_type="plan_update",
+                semantic_kind="plan_update",
+                success=False,
+                error=e,
+                reason=f"{reason}_failed",
+            )
+            logger.debug("Failed to delete plan update message %s: %s", message_id, e)
+    return all_deleted
+
+
 async def _do_send_plan_update_message(
     bot: Bot,
     user_id: int,
@@ -4139,19 +4243,16 @@ async def _do_send_plan_update_message(
     thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
     if chat_id is None:
         chat_id = session_manager.resolve_chat_id(user_id, thread_id)
-    old_items = [
-        info
-        for info in (
-            _plan_update_msg_info.pop(pkey, None),
-            _retired_plan_update_msg_info.pop(pkey, None),
-        )
-        if info is not None
-    ]
-    for old in old_items:
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=old[0])
-        except Exception:
-            pass
+    if not await _delete_tracked_plan_update_messages(
+        bot,
+        user_id,
+        thread_id_or_0,
+        pkey,
+        chat_id=chat_id,
+        reason="replace_plan_update",
+        task_type="plan_replace",
+    ):
+        return
 
     send_result = await _queue_send_with_fallback_result(
         bot,
@@ -4659,51 +4760,27 @@ async def _do_clear_plan_update_message(
     chat_id: int | None = None,
     surface_key: str | None = None,
 ) -> None:
-    """Delete the tracked plan update artifact for a user/topic."""
+    """Delete tracked active and retired plan update artifacts for a topic."""
     pkey = _topic_state_key(
         user_id,
         thread_id_or_0,
         chat_id=chat_id,
         surface_key=surface_key,
     )
-    info = _plan_update_msg_info.pop(pkey, None)
-    retired_info = _retired_plan_update_msg_info.pop(pkey, None)
-    if not info and retired_info:
-        info = retired_info
-    if info:
-        if chat_id is None:
-            chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=info[0])
-            log_telegram_delivery(
-                action="delete",
-                user_id=user_id,
-                chat_id=chat_id,
-                thread_id=thread_id_or_0 or None,
-                message_id=info[0],
-                window_id=info[1],
-                task_type="plan_clear",
-                content_type="plan_update",
-                semantic_kind="plan_update",
-                reason="clear_plan_update",
-            )
-        except Exception as e:
-            log_telegram_delivery(
-                action="delete",
-                user_id=user_id,
-                chat_id=chat_id,
-                thread_id=thread_id_or_0 or None,
-                message_id=info[0],
-                window_id=info[1],
-                task_type="plan_clear",
-                content_type="plan_update",
-                semantic_kind="plan_update",
-                success=False,
-                error=e,
-                reason="clear_plan_update_failed",
-            )
-            logger.debug(f"Failed to delete plan update message {info[0]}: {e}")
-    if _latest_pre_final_visible_kind.get(pkey) == "plan_update":
+    await _delete_tracked_plan_update_messages(
+        bot,
+        user_id,
+        thread_id_or_0,
+        pkey,
+        chat_id=chat_id,
+        reason="clear_plan_update",
+        task_type="plan_clear",
+    )
+    if (
+        pkey not in _plan_update_msg_info
+        and pkey not in _retired_plan_update_msg_info
+        and _latest_pre_final_visible_kind.get(pkey) == "plan_update"
+    ):
         _latest_pre_final_visible_kind.pop(pkey, None)
 
 
