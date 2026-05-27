@@ -167,63 +167,6 @@ def _nonempty_lines(text: str) -> list[str]:
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
-def _split_shell_chain_line(line: str) -> list[str]:
-    """Split a one-line shell chain into previewable command segments."""
-    segments: list[str] = []
-    current: list[str] = []
-    quote = ""
-    escaped = False
-    index = 0
-    while index < len(line):
-        char = line[index]
-        if escaped:
-            current.append(char)
-            escaped = False
-            index += 1
-            continue
-        if char == "\\":
-            current.append(char)
-            escaped = True
-            index += 1
-            continue
-        if quote:
-            current.append(char)
-            if char == quote:
-                quote = ""
-            index += 1
-            continue
-        if char in {"'", '"'}:
-            current.append(char)
-            quote = char
-            index += 1
-            continue
-        if line.startswith("&&", index) or char == ";":
-            segment = "".join(current).strip()
-            if segment:
-                segments.append(segment)
-            current = []
-            index += 2 if line.startswith("&&", index) else 1
-            while index < len(line) and line[index].isspace():
-                index += 1
-            continue
-        current.append(char)
-        index += 1
-    segment = "".join(current).strip()
-    if segment:
-        segments.append(segment)
-    return segments or [line.strip()]
-
-
-def _shell_preview_lines(text: str) -> list[str]:
-    """Return physical or shell-chain command lines for human previews."""
-    lines = _nonempty_lines(text)
-    if not lines:
-        return []
-    expanded: list[str] = []
-    for line in lines:
-        expanded.extend(_split_shell_chain_line(line))
-    return expanded
-
 
 def _compact_inline(text: str, *, max_chars: int = 160) -> str:
     text = reflow_whitespace(text).strip()
@@ -409,7 +352,7 @@ def _command_code_block(
     max_chars: int = 180,
 ) -> str:
     payload = _extract_shell_payload(command)
-    lines = _shell_preview_lines(payload)
+    lines = _nonempty_lines(payload)
     if not lines:
         return ""
 
