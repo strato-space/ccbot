@@ -332,6 +332,62 @@ async def test_create_or_reuse_window_reuses_exact_match_and_launches_codex_resu
 
 
 @pytest.mark.asyncio
+async def test_create_or_reuse_window_fails_closed_on_visible_codex_prompt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    existing = TmuxWindow(
+        window_id="@7",
+        window_name="workspace",
+        cwd=str(workspace),
+        pane_current_command="bash",
+    )
+    manager = TmuxManager(session_name="ccbot-test")
+    sent: list[tuple[str, str]] = []
+
+    async def _find_window_by_name(window_name: str):
+        return existing if window_name == "workspace" else None
+
+    async def _send_literal_text(window_id: str, text: str) -> bool:
+        sent.append((window_id, text))
+        return True
+
+    async def _send_enter(window_id: str) -> bool:
+        sent.append((window_id, "<enter>"))
+        return True
+
+    async def _capture_pane(window_id: str, with_ansi: bool = False) -> str:
+        assert window_id == "@7"
+        assert with_ansi is False
+        return (
+            "■ Conversation interrupted - tell the model what to do differently.\n"
+            "\n"
+            "› "
+        )
+
+    monkeypatch.setattr(manager, "find_window_by_name", _find_window_by_name)
+    monkeypatch.setattr(manager, "send_literal_text", _send_literal_text)
+    monkeypatch.setattr(manager, "send_enter", _send_enter)
+    monkeypatch.setattr(manager, "capture_pane", _capture_pane)
+    monkeypatch.setattr("ccbot.tmux_manager.config.ccbot_command", "codex")
+
+    ok, message, window_name, window_id, reused = await manager.create_or_reuse_window(
+        str(workspace),
+        window_name="workspace",
+        resume_session_id="thread-123",
+        runtime_kind="codex",
+    )
+
+    assert ok is False
+    assert "live Codex input surface" in message
+    assert window_name == ""
+    assert window_id == ""
+    assert reused is False
+    assert sent == []
+
+
+@pytest.mark.asyncio
 async def test_create_or_reuse_window_fails_closed_on_runtime_or_cwd_mismatch(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ):

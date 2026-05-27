@@ -29,6 +29,7 @@ from .config import SENSITIVE_ENV_VARS, config
 from .launcher_registration import infer_runtime_kind_from_command
 from .runtime_types import runtime_capability_registry
 from .state_schema import split_session_map_payload
+from .terminal_parser import classify_input_surface
 
 logger = logging.getLogger(__name__)
 
@@ -885,6 +886,25 @@ class TmuxManager:
                         )
 
                 if start_claude and active_runtime is None:
+                    if requested_runtime == "codex":
+                        pane_text = await self.capture_pane(existing.window_id)
+                        input_surface = classify_input_surface(pane_text or "")
+                        if input_surface.kind in {
+                            "busy",
+                            "input_ready",
+                            "blocked_prompt",
+                        }:
+                            return (
+                                False,
+                                (
+                                    f"Existing window '{final_window_name}' shows a "
+                                    "live Codex input surface but has no verified "
+                                    "runtime identity for resume"
+                                ),
+                                "",
+                                "",
+                                False,
+                            )
                     launch_cmd = self._build_runtime_launch_command(
                         path,
                         start_runtime=start_claude,
