@@ -2220,8 +2220,9 @@ def test_codex_rollout_multi_agent_wait_keeps_finished_waiting_after_early_notif
         "orchestration",
         "orchestration",
     ]
+    assert dispatchable[2].text == "• Waiting for 2 agents\n  └ Mill [explorer]\n  └ Ada [explorer]"
     assert dispatchable[3].text.startswith("• Mill [explorer] completed")
-    assert dispatchable[4].text == "• Finished waiting for 2 agents\n  └ Mill [explorer]\n    Ada [explorer]"
+    assert dispatchable[4].text == "• Finished waiting for 2 agents\n  └ Mill [explorer]\n  └ Ada [explorer]"
     assert dispatchable[5].text.startswith("• Ada [explorer] completed")
 
 

@@ -1740,7 +1740,9 @@ def _is_poll_only_status_text(text: str) -> bool:
 _TOOL_OUTPUT_METADATA_RE = re.compile(
     r"^(?:(?:Chunk ID|Wall time|Original token count):\s*|Process (?:exited|running)\b)"
 )
-_PREVIEW_FOOTER_RE = re.compile(r"^preview\s+\d+/\d+\s+lines?$", re.IGNORECASE)
+_PREVIEW_FOOTER_RE = re.compile(
+    r"^preview\s+(?P<shown>\d+)/(?P<total>\d+)\s+lines?$", re.IGNORECASE
+)
 
 
 def _looks_like_json_payload(text: str) -> bool:
@@ -1813,6 +1815,11 @@ def _render_clean_tool_output_status(text: str) -> str | None:
     else:
         rendered = f"⌘ Command output\n```{lang}\n{code_payload}\n```"
     if preview_footer:
+        footer_match = _PREVIEW_FOOTER_RE.match(preview_footer)
+        if footer_match:
+            total = int(footer_match.group("total"))
+            shown = len([line for line in output_lines if line.strip()])
+            preview_footer = f"preview {min(shown, total)}/{total} lines"
         rendered = f"{rendered}\n{preview_footer}"
     return rendered
 
@@ -1847,7 +1854,19 @@ def _normalize_command_shell_preamble(text: str) -> str:
     cleaned = _strip_command_shell_preamble(command)
     if cleaned == command or not cleaned:
         return text
-    return f"{raw[: match.start('body')]}{cleaned}{raw[match.end('body') :]}"
+    trailing = raw[match.end("body") :]
+    trailing_lines = trailing.splitlines(keepends=True)
+    for index, line in enumerate(trailing_lines):
+        footer_match = _PREVIEW_FOOTER_RE.match(line.strip())
+        if not footer_match:
+            continue
+        shown = len([line for line in cleaned.splitlines() if line.strip()])
+        total = int(footer_match.group("total"))
+        newline = "\n" if line.endswith("\n") else ""
+        trailing_lines[index] = f"preview {min(shown, total)}/{total} lines{newline}"
+        trailing = "".join(trailing_lines)
+        break
+    return f"{raw[: match.start('body')]}{cleaned}{trailing}"
 
 
 def _normalize_bare_command_status(text: str) -> str:
@@ -1871,7 +1890,18 @@ def _normalize_bare_command_status(text: str) -> str:
     body = _strip_command_shell_preamble(body)
     if not body:
         return text
-    if len(body) > COMMAND_STATUS_PREVIEW_MAX_CHARS:
+    physical_lines = [line.rstrip() for line in body.splitlines() if line.strip()]
+    if len(physical_lines) > 1:
+        clipped_lines = [
+            line[: COMMAND_STATUS_PREVIEW_MAX_CHARS - 1].rstrip() + "…"
+            if len(line) > COMMAND_STATUS_PREVIEW_MAX_CHARS
+            else line
+            for line in physical_lines[:10]
+        ]
+        body = "\n".join(clipped_lines)
+        if len(physical_lines) > 10:
+            footer = f"preview {len(clipped_lines)}/{len(physical_lines)} lines"
+    elif len(body) > COMMAND_STATUS_PREVIEW_MAX_CHARS:
         body = body[: COMMAND_STATUS_PREVIEW_MAX_CHARS - 1].rstrip() + "…"
     rendered = f"⌘ Command\n```sh\n{body}\n```"
     if footer:

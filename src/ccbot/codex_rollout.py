@@ -869,9 +869,8 @@ def _waiting_for_targets_text(
     details = [
         _agent_label(agents_by_id.get(target_id), target_id) for target_id in target_ids
     ]
-    first, *rest = details
-    lines = [f"• Waiting for {len(target_ids)} agents", f"  └ {first}"]
-    lines.extend(f"    {line}" for line in rest)
+    lines = [f"• Waiting for {len(target_ids)} agents"]
+    lines.extend(f"  └ {line}" for line in details)
     return "\n".join(lines)
 
 
@@ -890,9 +889,8 @@ def _wait_timeout_text(
     details = [
         _agent_label(agents_by_id.get(target_id), target_id) for target_id in target_ids
     ]
-    first, *rest = details
-    lines = [f"• Timed out waiting for {len(target_ids)} agents", f"  └ {first}"]
-    lines.extend(f"    {line}" for line in rest)
+    lines = [f"• Timed out waiting for {len(target_ids)} agents"]
+    lines.extend(f"  └ {line}" for line in details)
     return "\n".join(lines)
 
 
@@ -911,9 +909,8 @@ def _finished_waiting_text(
     details = [
         _agent_label(agents_by_id.get(target_id), target_id) for target_id in target_ids
     ]
-    first, *rest = details
-    lines = [f"• Finished waiting for {len(target_ids)} agents", f"  └ {first}"]
-    lines.extend(f"    {line}" for line in rest)
+    lines = [f"• Finished waiting for {len(target_ids)} agents"]
+    lines.extend(f"  └ {line}" for line in details)
     return "\n".join(lines)
 
 

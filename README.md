@@ -831,7 +831,8 @@ intentionally narrow:
 - **User echo** — The submitted Telegram message is echoed back into the topic
 - **Orchestration milestones** — Spawned/waiting/completed subagent status is
   rendered as Codex-style human-facing milestone bubbles instead of raw
-  `spawn_agent` / `wait_agent` / `<subagent_notification>` payloads
+  `spawn_agent` / `wait_agent` / `<subagent_notification>` payloads; multi-agent
+  wait lists show each agent on its own tree row
 - **Commentary** — Human-facing progress narrative remains visible as ordinary
   content so execution context does not disappear under mutable status churn;
   commentary may span multiple Telegram messages when needed to preserve the

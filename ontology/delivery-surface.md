@@ -432,7 +432,7 @@ tool results rather than being forced into command execution.
 When command/tool/file previews are surfaced:
 
 - fenced code blocks contain only preview body lines
-- truncation metadata lives outside the fenced block
+- truncation metadata lives outside the fenced block and reports visible preview rows after cleanup over the original total
 - outcome metadata is a separate footer
 - shell and file previews prefer `sh`
 - structured payloads that are genuinely JSON prefer `json`

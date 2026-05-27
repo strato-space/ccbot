@@ -4786,13 +4786,35 @@ def test_normalize_bare_command_status_keeps_shell_chain_one_line() -> None:
     assert "\n" not in body
 
 
+def test_normalize_bare_command_status_caps_physical_multiline_preview() -> None:
+    command = "\n".join(f"echo line {i}" for i in range(12))
+
+    rendered = mq._normalize_technical_status_text(f"⌘ Command {command}")
+
+    assert "echo line 9" in rendered
+    assert "echo line 10" not in rendered
+    assert "preview 10/12 lines" in rendered
+
+
+def test_normalize_bare_command_status_clips_long_multiline_rows() -> None:
+    command = "\n".join(["python " + "x" * 500, "echo ok"] + [f"echo {i}" for i in range(10)])
+
+    rendered = mq._normalize_technical_status_text(f"⌘ Command {command}")
+
+    body = rendered.split("```sh\n", 1)[1].split("\n```", 1)[0]
+    first_line = body.splitlines()[0]
+    assert len(first_line) <= mq.COMMAND_STATUS_PREVIEW_MAX_CHARS
+    assert first_line.endswith("…")
+    assert "preview 10/12 lines" in rendered
+
+
 def test_normalize_command_status_drops_strict_mode_preamble_when_content_follows() -> None:
     rendered = mq._normalize_technical_status_text(
         "⌘ Command\n```sh\nset -euo pipefail\nuv run --extra dev pytest\n```\npreview 2/3 lines"
     )
 
     assert rendered == (
-        "⌘ Command\n```sh\nuv run --extra dev pytest\n```\npreview 2/3 lines"
+        "⌘ Command\n```sh\nuv run --extra dev pytest\n```\npreview 1/3 lines"
     )
     assert "set -euo pipefail" not in rendered
 
@@ -5161,6 +5183,34 @@ async def test_poll_only_write_stdin_does_not_replace_existing_status_bubble(
     mq._status_msg_info.clear()
 
 
+def test_tool_output_footer_matches_cleaned_visible_lines() -> None:
+    text = (
+        "↳ Tool Output\n"
+        "```text\n"
+        "Chunk ID: x\n"
+        "Wall time: 0\n"
+        "Process exited with code 0\n"
+        "Original token count: 123\n"
+        "Output:\n"
+        "line 0\n"
+        "line 1\n"
+        "line 2\n"
+        "line 3\n"
+        "line 4\n"
+        "line 5\n"
+        "line 6\n"
+        "```\n"
+        "preview 10/21 lines"
+    )
+
+    rendered = mq._normalize_technical_status_text(text)
+
+    assert "Chunk ID" not in rendered
+    assert "line 6" in rendered
+    assert "preview 7/21 lines" in rendered
+    assert "preview 10/21 lines" not in rendered
+
+
 def test_json_command_output_history_uses_whole_object_prefix() -> None:
     text = (
         "⌘ Command output\n"
@@ -5365,7 +5415,7 @@ async def test_status_tool_output_wrapper_is_cleaned_for_humans(
     assert sent_text.startswith("↳ `✓ 22")
     assert "```text" in sent_text
     assert "desktop" in sent_text
-    assert "preview 10/11 lines" in sent_text
+    assert "preview 2/11 lines" in sent_text
     assert "Chunk ID" not in sent_text
     assert "Wall time" not in sent_text
     assert "Process exited" not in sent_text

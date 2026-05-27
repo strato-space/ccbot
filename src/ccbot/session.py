@@ -12,6 +12,7 @@ is migrated task by task.
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -304,6 +305,24 @@ def _codex_composer_holds_workflow_command(
             candidate = candidate[1:].strip()
         candidate = " ".join(candidate.split()).casefold()
         if candidate in aliases:
+            return True
+    return False
+
+
+def _codex_composer_holds_expected_text(
+    pane_text: str | None,
+    expected_text: str,
+) -> bool:
+    """Return True when the visible Codex composer still contains text."""
+    expected = _canonical_codex_ack_text(expected_text)
+    if not expected or "\n" in expected:
+        return False
+    for line in (pane_text or "").splitlines()[-12:]:
+        candidate = line.strip()
+        if not candidate.startswith(("›", "❯", ">")):
+            continue
+        candidate = candidate[1:].strip()
+        if _canonical_codex_ack_text(candidate) == expected:
             return True
     return False
 
@@ -4672,12 +4691,17 @@ class SessionManager:
                 )
                 return False, message, proof
             self._log_fast_input_stage(proof, "submit_key_sent")
-            if _workflow_command_aliases(text):
+            if _workflow_command_aliases(text) or (
+                _canonical_codex_ack_text(text) and "\n" not in text
+            ):
                 await asyncio.sleep(FAST_CODEX_ACK_POLL_SECONDS)
-                pane_text = await tmux_manager.capture_pane(window.window_id)
+                captured = tmux_manager.capture_pane(window.window_id)
+                pane_text = await captured if inspect.isawaitable(captured) else None
             else:
                 pane_text = None
-            if _codex_composer_holds_workflow_command(pane_text, text):
+            if _codex_composer_holds_workflow_command(
+                pane_text, text
+            ) or _codex_composer_holds_expected_text(pane_text, text):
                 success, message = await runtime_input_driver.send_multiline_submit_key(
                     window.window_id,
                     runtime_kind="codex",
@@ -4801,10 +4825,12 @@ class SessionManager:
                 await asyncio.sleep(CODEX_MULTILINE_ACK_POLL_SECONDS)
 
             pane_text = await tmux_manager.capture_pane(window_id)
-            if _codex_composer_holds_workflow_command(pane_text, text):
+            if _codex_composer_holds_workflow_command(
+                pane_text, text
+            ) or _codex_composer_holds_expected_text(pane_text, text):
                 logger.info(
-                    "codex_submit_ack: workflow autocomplete left command "
-                    "in composer; sending confirming Enter to %s",
+                    "codex_submit_ack: expected input remains in composer; "
+                    "sending confirming Enter to %s",
                     window_id,
                 )
                 success, message = await runtime_input_driver.send_multiline_submit_key(

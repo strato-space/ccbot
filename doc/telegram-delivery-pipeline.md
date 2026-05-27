@@ -504,7 +504,7 @@ In the production-facing `compact` mode, durable Telegram content bubbles are
 deliberately narrow:
 
 - user-visible user echo
-- orchestration milestones such as spawned/waiting/completed subagent summaries
+- orchestration milestones such as spawned/waiting/completed subagent summaries; multi-agent wait lists render each agent as its own tree row
 - warning artifacts (latest-warning dedup with `×N` counter for `N > 2`;
   distinct runtime-discontinuity warnings may intentionally bypass collapse)
 - final assistant text
@@ -587,7 +587,7 @@ When compact/verbose surfaces materialize technical previews, they must follow
 one formatting contract:
 
 - the fenced code block contains only preview body lines
-- truncation markers such as `preview 5/91 lines` live outside the fenced block
+- truncation markers such as `preview 5/91 lines` live outside the fenced block and count the visible post-cleanup preview rows over the original total
 - outcome metadata such as `completed`, `failed`, or `output 1 line` is a
   separate footer line, not part of the code block body
 - if the visible preview already conveys the outcome clearly, the footer should
