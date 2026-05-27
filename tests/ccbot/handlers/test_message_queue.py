@@ -1648,6 +1648,59 @@ async def test_process_plan_update_task_edits_existing_plan_artifact() -> None:
 
 
 @pytest.mark.asyncio
+async def test_plan_update_new_turn_deletes_retired_plan_before_tail_send() -> None:
+    first = MessageTask(
+        task_type="plan_update",
+        window_id="@7",
+        thread_id=42,
+        text="• Updated Plan\n  ▶ First",
+        turn_generation=1,
+    )
+    second = MessageTask(
+        task_type="plan_update",
+        window_id="@7",
+        thread_id=42,
+        text="• Updated Plan\n  ☑ First\n  ▶ Second",
+        turn_generation=2,
+    )
+    sent_first = AsyncMock()
+    sent_first.message_id = 901
+    sent_second = AsyncMock()
+    sent_second.message_id = 902
+    bot = AsyncMock()
+
+    try:
+        with (
+            patch("ccbot.handlers.message_queue.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.message_queue.session_manager") as mock_sm,
+            patch(
+                "ccbot.handlers.message_queue.send_with_fallback",
+                new_callable=AsyncMock,
+                side_effect=[sent_first, sent_second],
+            ) as mock_send,
+        ):
+            mock_tmux.find_window_by_id = AsyncMock(return_value=object())
+            mock_sm.get_window_for_thread.return_value = "@7"
+            mock_sm.get_topic_binding_state.return_value = "bound"
+            mock_sm.resolve_chat_id.return_value = 100
+
+            open_new_turn_generation(1, 42)
+            await _process_plan_update_task(bot, 1, first)
+            open_new_turn_generation(1, 42)
+            await _process_plan_update_task(bot, 1, second)
+
+        assert mock_send.await_count == 2
+        bot.edit_message_text.assert_not_awaited()
+        bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=901)
+        assert _plan_update_msg_info[(1, 42)] == (902, "@7", second.text)
+        assert (1, 42) not in mq._retired_plan_update_msg_info
+    finally:
+        clear_commentary_lane_state(1, 42)
+        _plan_update_msg_info.pop((1, 42), None)
+        mq._retired_plan_update_msg_info.pop((1, 42), None)
+
+
+@pytest.mark.asyncio
 async def test_enqueue_plan_update_suppresses_after_final_answer() -> None:
     _mark_commentary_closed(1, 42)
     try:

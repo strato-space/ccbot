@@ -250,7 +250,9 @@ When the configured launch lane is Codex, ccbot also advertises the Codex core l
 - Latest commentary remains visible as a dedicated artifact, but it is not a
   durable ordinary content bubble.
 - Codex `update_plan` calls render as a separate mutable plan artifact; new plan
-  events edit that artifact and commentary/status/tool output must not replace it.
+  events edit that artifact within a turn, and after a new user turn the next
+  plan send deletes the retired plan bubble before opening a fresh tail-visible
+  artifact. Commentary/status/tool output must not replace it.
 - Commentary is not clipped by the internal status-helper limit; if it exceeds
   one Telegram message it may span multiple Telegram messages while remaining
   one logical commentary artifact.

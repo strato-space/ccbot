@@ -554,9 +554,10 @@ Compact marker registry:
 | `🧭 OMX` | OMX workflow status | optional OMX workflow progress telemetry | latest-only workflow status plus `↳` summary |
 | `❓` / `✅` / `❌` / `⚠️` | question/control/warning | interactive question, success, hard failure, or warning | ordinary control text |
 
-- plan-update artifacts are latest-only within one assistant turn, not across
-  turns; a new user turn must open a fresh plan artifact instead of editing the
-  previous turn's plan bubble up-thread
+- plan-update artifacts are latest-only on the visible surface; a new user turn
+  must open a fresh tail-visible plan artifact instead of editing the previous
+  turn's bubble up-thread, and the fresh send deletes any retired plan bubble so
+  plan updates do not accumulate as a stack
 - final assistant artifacts are terminal turn barriers; once a final answer is
   observed it must be delivered before a later queued user turn can advance the
   surface generation, and a user echo must never be rendered by editing an old

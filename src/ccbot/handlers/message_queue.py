@@ -420,6 +420,10 @@ _ingress_receipt_superseded: set[tuple[int, int | str, str]] = set()
 
 # Plan update artifact tracking: delivery surface -> (message_id, window_id, last_text)
 _plan_update_msg_info: dict[TopicStateKey, tuple[int, str, str]] = {}
+# Plan bubbles retired by a new user turn.  The next plan send deletes these
+# before opening a fresh tail-visible plan artifact so plan updates stay
+# latest-only without editing an old bubble up-thread.
+_retired_plan_update_msg_info: dict[TopicStateKey, tuple[int, str, str]] = {}
 
 
 @dataclass(frozen=True)
@@ -4135,8 +4139,15 @@ async def _do_send_plan_update_message(
     thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
     if chat_id is None:
         chat_id = session_manager.resolve_chat_id(user_id, thread_id)
-    old = _plan_update_msg_info.pop(pkey, None)
-    if old:
+    old_items = [
+        info
+        for info in (
+            _plan_update_msg_info.pop(pkey, None),
+            _retired_plan_update_msg_info.pop(pkey, None),
+        )
+        if info is not None
+    ]
+    for old in old_items:
         try:
             await bot.delete_message(chat_id=chat_id, message_id=old[0])
         except Exception:
@@ -4656,6 +4667,9 @@ async def _do_clear_plan_update_message(
         surface_key=surface_key,
     )
     info = _plan_update_msg_info.pop(pkey, None)
+    retired_info = _retired_plan_update_msg_info.pop(pkey, None)
+    if not info and retired_info:
+        info = retired_info
     if info:
         if chat_id is None:
             chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
@@ -5583,6 +5597,7 @@ def clear_pre_final_visible_lane_state(
     _pending_input_enqueued.pop(key, None)
     _pending_input_enqueued.pop(legacy_key, None)
     _plan_update_msg_info.pop(key, None)
+    _retired_plan_update_msg_info.pop(key, None)
     if forget_image_preview:
         _image_preview_msg_info.pop(key, None)
         _image_preview_msg_info.pop(legacy_key, None)
@@ -5652,12 +5667,13 @@ def open_new_turn_generation(
         chat_id=chat_id,
         surface_key=surface_key,
     )
-    # Plan artifacts are latest-only within one assistant turn. Reusing an old
-    # plan bubble across a new user turn edits history above the current chat
-    # tail, making the plan appear missing even though Telegram accepted the
-    # edit. Drop only the pointer; the old message remains as historical
-    # evidence and the next plan update opens a fresh visible bubble.
-    _plan_update_msg_info.pop(key, None)
+    # A new user turn should not edit an old plan bubble up-thread, but plan
+    # updates are still latest-only on the visible Telegram surface.  Retire
+    # the old pointer so the next plan update can delete it before opening a
+    # fresh tail-visible artifact.
+    old_plan = _plan_update_msg_info.pop(key, None)
+    if old_plan is not None:
+        _retired_plan_update_msg_info[key] = old_plan
     _clear_status_history_for_surface(key)
     return generation
 
@@ -5854,6 +5870,7 @@ async def shutdown_workers() -> None:
     _commentary_msg_info.clear()
     _commentary_extra_msg_ids.clear()
     _plan_update_msg_info.clear()
+    _retired_plan_update_msg_info.clear()
     _image_preview_msg_info.clear()
     for retry_task in list(_image_preview_delete_retry_tasks.values()):
         if not retry_task.done():

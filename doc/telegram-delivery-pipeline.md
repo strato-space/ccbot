@@ -189,9 +189,10 @@ The delivery pipeline keeps:
 
 - one mutable progress/status artifact per `(user_id, control surface)`
 - one latest-only visible commentary artifact per `(user_id, control surface)`
-- one mutable plan-update artifact per `(user_id, control surface)` within the
-  current assistant turn; opening a new user turn drops the old tracking pointer
-  so a new plan appears at the chat tail rather than editing history up-thread
+- one mutable plan-update artifact per `(user_id, control surface)`; opening a
+  new user turn retires the old plan pointer so the next plan appears at the
+  chat tail, but that next send deletes the retired plan bubble first instead
+  of accumulating a visible stack
 - one mutable pending-input artifact per `(user_id, control surface)`
 - one mutable Telegram ingress receipt per pending fast-path proof, distinct
   from the pending-input artifact unless the input is actually queued behind an
