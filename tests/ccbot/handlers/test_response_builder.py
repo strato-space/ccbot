@@ -179,6 +179,21 @@ class TestBuildResponseParts:
         assert "echo line 10" not in formatted
         assert "preview 10/12 lines" in formatted
 
+    def test_command_execution_splits_one_line_shell_chain(self):
+        text = " && ".join(f"sed -n '{i},{i + 10}p' file{i}.py" for i in range(12))
+
+        formatted = format_response_text(
+            text,
+            is_complete=True,
+            content_type="command_execution",
+            role="assistant",
+        )
+
+        assert "sed -n '0,10p' file0.py" in formatted
+        assert "sed -n '9,19p' file9.py" in formatted
+        assert "sed -n '10,20p' file10.py" not in formatted
+        assert "preview 10/12 lines" in formatted
+
 
     def test_tool_use_preserves_existing_fenced_preview_without_double_wrap(self):
         formatted = format_response_text(

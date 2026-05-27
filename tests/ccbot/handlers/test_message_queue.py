@@ -4771,6 +4771,19 @@ def test_normalize_bare_command_status_wraps_shell_fence() -> None:
     assert rendered == "⌘ Command\n```sh\npytest -q\n```"
 
 
+def test_normalize_bare_command_status_splits_shell_chain_preview() -> None:
+    command = " && ".join(f"sed -n '{i},{i + 10}p' file{i}.py" for i in range(12))
+
+    rendered = mq._normalize_technical_status_text(
+        f"⌘ Command {command} preview 1/12 lines"
+    )
+
+    assert "sed -n '0,10p' file0.py" in rendered
+    assert "sed -n '9,19p' file9.py" in rendered
+    assert "sed -n '10,20p' file10.py" not in rendered
+    assert "preview 10/12 lines" in rendered
+
+
 def test_normalize_command_status_drops_strict_mode_preamble_when_content_follows() -> None:
     rendered = mq._normalize_technical_status_text(
         "⌘ Command\n```sh\nset -euo pipefail\nuv run --extra dev pytest\n```\npreview 2/3 lines"

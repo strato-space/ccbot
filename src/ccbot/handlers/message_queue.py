@@ -315,6 +315,61 @@ _BARE_COMMAND_PREVIEW_RE = re.compile(
 _STATUS_CODE_BLOCK_RE = re.compile(r"```[^\n`]*\n(?P<body>.*?)(?:\n```|```$)", re.DOTALL)
 
 
+def _split_shell_chain_line(line: str) -> list[str]:
+    """Split top-level shell chains so compact command previews stay useful."""
+    segments: list[str] = []
+    current: list[str] = []
+    quote = ""
+    escaped = False
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if escaped:
+            current.append(char)
+            escaped = False
+            index += 1
+            continue
+        if char == "\\":
+            current.append(char)
+            escaped = True
+            index += 1
+            continue
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            current.append(char)
+            quote = char
+            index += 1
+            continue
+        if line.startswith("&&", index) or char == ";":
+            segment = "".join(current).strip()
+            if segment:
+                segments.append(segment)
+            current = []
+            index += 2 if line.startswith("&&", index) else 1
+            while index < len(line) and line[index].isspace():
+                index += 1
+            continue
+        current.append(char)
+        index += 1
+    segment = "".join(current).strip()
+    if segment:
+        segments.append(segment)
+    return segments or [line.strip()]
+
+
+def _shell_preview_lines(text: str) -> list[str]:
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    expanded: list[str] = []
+    for line in lines:
+        expanded.extend(_split_shell_chain_line(line))
+    return expanded
+
+
 def _status_artifacts_file() -> Path:
     return config.config_dir / _STATUS_ARTIFACTS_FILENAME
 
@@ -1869,6 +1924,11 @@ def _normalize_bare_command_status(text: str) -> str:
     body = _strip_command_shell_preamble(body)
     if not body:
         return text
+    preview_lines = _shell_preview_lines(body)
+    if preview_lines:
+        body = "\n".join(preview_lines[:10])
+        if len(preview_lines) > 10:
+            footer = f"preview 10/{len(preview_lines)} lines"
     rendered = f"⌘ Command\n```sh\n{body}\n```"
     if footer:
         rendered = f"{rendered}\n{footer}"

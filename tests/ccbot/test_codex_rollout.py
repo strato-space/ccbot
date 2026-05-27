@@ -2364,6 +2364,30 @@ def test_codex_rollout_exec_command_preview_caps_command_at_ten_lines() -> None:
     assert "preview 10/12 lines" in events[0].text
 
 
+def test_codex_rollout_exec_command_preview_splits_shell_chain_at_ten_lines() -> None:
+    command = " && ".join(f"sed -n '{i},{i + 10}p' file{i}.py" for i in range(12))
+    records = [
+        {
+            "timestamp": "2026-04-26T18:00:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "functions.exec_command",
+                "call_id": "call_exec",
+                "arguments": json.dumps({"cmd": command}),
+            },
+        }
+    ]
+
+    events = CodexRolloutNormalizer.normalize_records(records, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert "sed -n '0,10p' file0.py" in events[0].text
+    assert "sed -n '9,19p' file9.py" in events[0].text
+    assert "sed -n '10,20p' file10.py" not in events[0].text
+    assert "preview 10/12 lines" in events[0].text
+
+
 def test_codex_rollout_formats_namespaced_exec_command_as_shell_preview() -> None:
     records = [
         {
@@ -2389,5 +2413,7 @@ def test_codex_rollout_formats_namespaced_exec_command_as_shell_preview() -> Non
     assert events[0].tool_name == "functions.exec_command"
     assert events[0].content_type == "command_execution"
     assert "```sh" in events[0].text
-    assert "echo one && echo two" in events[0].text
+    assert "echo one" in events[0].text
+    assert "echo two" in events[0].text
+    assert "echo one && echo two" not in events[0].text
     assert '"cmd"' not in events[0].text

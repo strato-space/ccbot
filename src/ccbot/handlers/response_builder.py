@@ -55,6 +55,61 @@ def _clip_code_lines(
     return clipped, len(lines)
 
 
+def _split_shell_chain_line(line: str) -> list[str]:
+    """Split top-level shell chains so command previews show useful rows."""
+    segments: list[str] = []
+    current: list[str] = []
+    quote = ""
+    escaped = False
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if escaped:
+            current.append(char)
+            escaped = False
+            index += 1
+            continue
+        if char == "\\":
+            current.append(char)
+            escaped = True
+            index += 1
+            continue
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            current.append(char)
+            quote = char
+            index += 1
+            continue
+        if line.startswith("&&", index) or char == ";":
+            segment = "".join(current).strip()
+            if segment:
+                segments.append(segment)
+            current = []
+            index += 2 if line.startswith("&&", index) else 1
+            while index < len(line) and line[index].isspace():
+                index += 1
+            continue
+        current.append(char)
+        index += 1
+    segment = "".join(current).strip()
+    if segment:
+        segments.append(segment)
+    return segments or [line.strip()]
+
+
+def _shell_preview_lines(text: str) -> list[str]:
+    lines = [line.rstrip() for line in text.strip().splitlines() if line.strip()]
+    expanded: list[str] = []
+    for line in lines:
+        expanded.extend(_split_shell_chain_line(line))
+    return expanded
+
+
 def _preview_footer(total_lines: int, shown_lines: int) -> str:
     remaining = max(0, total_lines - shown_lines)
     if remaining <= 0:
@@ -141,7 +196,9 @@ def _format_multiline_code_block(
     stripped = text.strip()
     if not stripped or stripped.startswith("```"):
         return stripped
-    lines = [line.rstrip() for line in stripped.splitlines() if line.strip()]
+    lines = _shell_preview_lines(stripped) if language == "sh" else [
+        line.rstrip() for line in stripped.splitlines() if line.strip()
+    ]
     if len(lines) <= 1 and not always_wrap:
         return stripped
     clipped, total_lines = _clip_code_lines(
