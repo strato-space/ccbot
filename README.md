@@ -556,12 +556,14 @@ Telegram routing coordinate: it may derive or validate the canonical
 chat-qualified surface key, but it is not itself a complete control-surface
 identity.
 
-For Codex-backed restore, the controller service environment must also include
-the Codex replay root and non-interactive OMX setting, for example:
+For Codex-backed restore, the controller service environment carries the
+controller-readable replay root as `CCBOT_RUNTIME_CODEX_HOME`, while
+`CODEX_HOME` is set only by the runtime launch wrapper immediately before
+`exec`.  For example:
 
 ```env
-CCBOT_COMMAND=omx --madmax
-CODEX_HOME=/data/iqdoctor/.codex
+CCBOT_COMMAND=/data/iqdoctor/.ccbot/scripts/launch-openai-omx.sh omx --madmax
+CCBOT_RUNTIME_CODEX_HOME=/data/iqdoctor/.codex
 OMX_AUTO_UPDATE=0
 CCBOT_RESTORE_ENABLED=1
 CCBOT_RESTORE_WINDOW=comfy-agent
@@ -571,11 +573,13 @@ CCBOT_RESTORE_USER_ID=3045664
 CCBOT_RESTORE_SURFACE_KEY=t:-1003685295814:555
 CCBOT_RESTORE_CHAT_ID=-1003685295814
 CCBOT_RESTORE_SHARED_GROUP=true
-CCBOT_RESTORE_COMMAND=omx --madmax
+CCBOT_RESTORE_COMMAND=/data/iqdoctor/.ccbot/scripts/launch-openai-omx.sh omx --madmax
 ```
 
-Runtime launches scrub controller-only `CCBOT_RESTORE_*`, Telegram token, and
-controller selection variables from child process env. If OpenAI auth still
+`CODEX_HOME` is non-authoritative for configured restore proof and must not be
+left in the controller or tmux server environment. Runtime launches scrub
+controller-only `CCBOT_RESTORE_*`, `CCBOT_RUNTIME_CODEX_HOME`, Telegram token,
+and controller selection variables from child process env. If OpenAI auth still
 requires a secret wrapper for a particular host, that wrapper must be auth-only
 and cwd-neutral; the selected workspace remains the explicit bind path.
 
@@ -617,7 +621,7 @@ record the tmux server PID and `tmux
 list-sessions` output.  Non-target tmux sessions/windows/panes must not be
 restarted or killed by this recovery path.
 
-| Bot controller | systemd user service | `CCBOT_DIR` | tmux session/window | Telegram identity/routing | runtime cwd | `CODEX_HOME` |
+| Bot controller | systemd user service | `CCBOT_DIR` | tmux session/window | Telegram identity/routing | runtime cwd | runtime Codex home (`CCBOT_RUNTIME_CODEX_HOME`; wrapper child `CODEX_HOME`) |
 | --- | --- | --- | --- | --- | --- | --- |
 | ComfyCodexBot | `ccbot.service` | `/data/iqdoctor/.ccbot` | `comfy` / `comfy-agent` | user `3045664`, surface `t:-1003685295814:555`, chat `-1003685295814` | `/home/tools/mediagen-comfy` | `/data/iqdoctor/.codex` |
 | ImmArenaBot | `imm_arena_bot.service` | `/data/iqdoctor/.ccbot-imm_arena_bot` | `imm_arena_bot` / `imm` | user `3045664`, surface `t:-1003974721114:3`, chat `-1003974721114` | `/home/tools/imm` | `/home/tools/imm/.codex` |

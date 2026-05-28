@@ -37,15 +37,17 @@ _UUID_RE = re.compile(
 def _default_codex_homes() -> tuple[Path, ...]:
     """Return Codex homes that may contain live runtime sessions.
 
-    Codex supports ``CODEX_HOME`` for per-project/runtime session stores, but
-    long-lived tmux panes can predate a service env change and still append to
-    the service user's ``~/.codex``. Prefer the runtime CODEX_HOME while keeping
-    the HOME fallback readable so mixed live panes do not go dark.
+    ``CCBOT_RUNTIME_CODEX_HOME`` is ccbot's controller-readable replay-root
+    configuration. ``CODEX_HOME`` remains a compatibility/runtime-child env,
+    and ``~/.codex`` stays a non-restore browsing fallback.
     """
     homes: list[Path] = []
-    configured_home = os.getenv("CODEX_HOME", "").strip()
+    configured_home = os.getenv("CCBOT_RUNTIME_CODEX_HOME", "").strip()
     if configured_home:
         homes.append(Path(configured_home).expanduser())
+    legacy_home = os.getenv("CODEX_HOME", "").strip()
+    if legacy_home:
+        homes.append(Path(legacy_home).expanduser())
     homes.append(Path.home() / ".codex")
 
     unique_homes: list[Path] = []
@@ -313,6 +315,12 @@ class CodexThreadCatalog:
         session_index_path: Path | None = None,
         sessions_root: Path | None = None,
     ) -> None:
+        self.explicit_codex_home = bool(
+            codex_home is not None
+            or session_index_path is not None
+            or sessions_root is not None
+            or os.getenv("CCBOT_RUNTIME_CODEX_HOME", "").strip()
+        )
         if (
             codex_home is not None
             or session_index_path is not None

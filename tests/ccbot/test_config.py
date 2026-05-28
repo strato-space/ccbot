@@ -33,6 +33,11 @@ class TestConfigValid:
         cfg = Config()
         assert cfg.monitor_poll_interval == 5.0
 
+    def test_runtime_codex_home_env(self, monkeypatch):
+        monkeypatch.setenv("CCBOT_RUNTIME_CODEX_HOME", "/tmp/runtime-codex")
+        cfg = Config()
+        assert cfg.runtime_codex_home == "/tmp/runtime-codex"
+
     def test_is_user_allowed_true(self):
         cfg = Config()
         assert cfg.is_user_allowed(12345) is True

@@ -284,6 +284,11 @@ class Config:
         self.openai_base_url: str = os.getenv(
             "OPENAI_BASE_URL", "https://api.openai.com/v1"
         )
+        # Controller-readable Codex replay root for catalog/proof lookup.
+        # This is intentionally not CODEX_HOME: runtime launch wrappers export
+        # CODEX_HOME only to the child runtime process, while ccbot uses this
+        # value to find replay evidence without poisoning the tmux server env.
+        self.runtime_codex_home: str = os.getenv("CCBOT_RUNTIME_CODEX_HOME", "").strip()
         voice_stt_provider = (
             os.getenv("CCBOT_VOICE_STT_PROVIDER", "openai").strip().lower()
         )

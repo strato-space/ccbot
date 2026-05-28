@@ -584,7 +584,8 @@ class SessionManager:
 
     def __post_init__(self) -> None:
         if self.codex_thread_catalog is None:
-            self.codex_thread_catalog = CodexThreadCatalog()
+            codex_home = Path(config.runtime_codex_home) if config.runtime_codex_home else None
+            self.codex_thread_catalog = CodexThreadCatalog(codex_home=codex_home)
         if self.fast_agent_session_catalog is None:
             self.fast_agent_session_catalog = FastAgentSessionCatalog()
         self._load_state()

@@ -14,6 +14,7 @@ import shlex
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Mapping
 
 from .config import config
@@ -91,13 +92,16 @@ class RestoreCheckResult:
 class EnvRestoreFacts:
     """Safe-to-log restore environment facts.
 
-    Values such as Telegram tokens are intentionally omitted.  ``CODEX_HOME``
-    is a path needed for replay lookup, and ``OMX_AUTO_UPDATE`` is a startup
-    safety gate for non-interactive restore.
+    Values such as Telegram tokens are intentionally omitted.
+    ``runtime_codex_home`` is the controller-readable replay root used for
+    proof/catalog lookup. Controller-env ``CODEX_HOME`` is intentionally
+    tracked only as legacy ambient state and is not authoritative restore proof.
     """
 
     codex_home: str = ""
     codex_home_present: bool = False
+    runtime_codex_home: str = ""
+    runtime_codex_home_present: bool = False
     omx_auto_update: str = ""
     omx_auto_update_disabled: bool = False
 
@@ -318,13 +322,17 @@ def parse_restore_intent(
     source: Mapping[str, str] = os.environ if environ is None else environ
     if not _has_restore_env(source):
         return None
-    if "CCBOT_RESTORE_ENABLED" in source and not _truthy(source.get("CCBOT_RESTORE_ENABLED")):
+    if "CCBOT_RESTORE_ENABLED" in source and not _truthy(
+        source.get("CCBOT_RESTORE_ENABLED")
+    ):
         return None
 
     window_name = _required(source, "CCBOT_RESTORE_WINDOW", "window_name")
     cwd = _required(source, "CCBOT_RESTORE_CWD", "cwd")
     runtime_id = _required(source, "CCBOT_RESTORE_RUNTIME_ID", "runtime_id")
-    user_id = _parse_int(_required(source, "CCBOT_RESTORE_USER_ID", "user_id"), "user_id")
+    user_id = _parse_int(
+        _required(source, "CCBOT_RESTORE_USER_ID", "user_id"), "user_id"
+    )
     surface_key = _normalize_surface_key(
         _required(source, "CCBOT_RESTORE_SURFACE_KEY", "surface_key")
     )
@@ -334,13 +342,19 @@ def parse_restore_intent(
     surface_chat_id, _surface_thread_id_value = _surface_coordinates(surface_key)
     if group_chat_id is not None and surface_chat_id is not None:
         if group_chat_id != surface_chat_id:
-            raise RestoreIntentError("restore intent chat_id does not match surface_key")
+            raise RestoreIntentError(
+                "restore intent chat_id does not match surface_key"
+            )
     elif group_chat_id is None and shared_group and surface_chat_id is not None:
         group_chat_id = surface_chat_id
     if shared_group and group_chat_id is None:
-        raise RestoreIntentError("restore intent missing chat_id for shared group surface")
+        raise RestoreIntentError(
+            "restore intent missing chat_id for shared group surface"
+        )
 
-    launcher_command = str(source.get("CCBOT_RESTORE_COMMAND") or config.ccbot_command).strip()
+    launcher_command = str(
+        source.get("CCBOT_RESTORE_COMMAND") or config.ccbot_command
+    ).strip()
     runtime_kind = infer_runtime_kind_from_command(launcher_command)
     return RestoreIntent(
         window_name=window_name,
@@ -393,7 +407,9 @@ def _derive_restore_intent_from_state(
     candidates: list[RestoreIntent] = []
     rejected: list[str] = []
     launcher_command = _intent_launcher_command(environ)
-    for raw_user_id, bindings in getattr(session_manager, "surface_bindings", {}).items():
+    for raw_user_id, bindings in getattr(
+        session_manager, "surface_bindings", {}
+    ).items():
         if not isinstance(bindings, dict):
             continue
         try:
@@ -416,10 +432,9 @@ def _derive_restore_intent_from_state(
             if not cwd:
                 rejected.append(f"{surface_key}: missing cwd")
                 continue
-            runtime_kind = (
-                str(getattr(state, "runtime_kind", "") or "").strip()
-                or infer_runtime_kind_from_command(launcher_command)
-            )
+            runtime_kind = str(
+                getattr(state, "runtime_kind", "") or ""
+            ).strip() or infer_runtime_kind_from_command(launcher_command)
             runtime_id = str(getattr(state, "thread_id", "") or "").strip()
             if runtime_kind == "codex" and not runtime_id:
                 rejected.append(f"{surface_key}: missing Codex runtime id")
@@ -495,24 +510,93 @@ def _is_shell_command(command: str) -> bool:
 def _env_restore_facts(environ: Mapping[str, str] | None = None) -> EnvRestoreFacts:
     source: Mapping[str, str] = os.environ if environ is None else environ
     codex_home = str(source.get("CODEX_HOME") or "").strip()
+    runtime_codex_home = str(
+        source.get("CCBOT_RUNTIME_CODEX_HOME")
+        or getattr(config, "runtime_codex_home", "")
+        or ""
+    ).strip()
     omx_auto_update = str(source.get("OMX_AUTO_UPDATE") or "").strip()
     return EnvRestoreFacts(
         codex_home=codex_home,
         codex_home_present=bool(codex_home),
+        runtime_codex_home=runtime_codex_home,
+        runtime_codex_home_present=bool(runtime_codex_home),
         omx_auto_update=omx_auto_update,
         omx_auto_update_disabled=_falsy(omx_auto_update),
     )
 
 
+def _catalog_codex_home(session_manager: Any | None) -> str:
+    catalog = (
+        getattr(session_manager, "codex_thread_catalog", None)
+        if session_manager is not None
+        else None
+    )
+    if catalog is None or not bool(getattr(catalog, "explicit_codex_home", False)):
+        return ""
+    home = getattr(catalog, "codex_home", "") or ""
+    return _normalize_path(str(home)) if home else ""
+
+
+def _path_is_relative_to(path: str, root: str) -> bool:
+    if not path or not root:
+        return False
+    try:
+        Path(path).expanduser().resolve(strict=False).relative_to(
+            Path(root).expanduser().resolve(strict=False)
+        )
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _catalog_replay_root_conflict(
+    replay_root: str,
+    session_manager: Any | None,
+) -> bool:
+    catalog_root = _catalog_codex_home(session_manager)
+    return bool(replay_root and catalog_root and replay_root != catalog_root)
+
+
+def _locator_replay_path(locator: Any) -> str:
+    path = (
+        getattr(locator, "file_path", "") or getattr(locator, "rollout_file", "") or ""
+    )
+    return str(path)
+
+
+def _restore_replay_codex_home(
+    environ: Mapping[str, str] | None = None,
+    session_manager: Any | None = None,
+) -> str:
+    env = _env_restore_facts(environ)
+    if env.runtime_codex_home:
+        replay_root = _normalize_path(env.runtime_codex_home)
+        if _catalog_replay_root_conflict(replay_root, session_manager):
+            return ""
+        return replay_root
+    return _catalog_codex_home(session_manager)
+
+
 def validate_restore_env_contract(
     intent: RestoreIntent,
     environ: Mapping[str, str] | None = None,
+    session_manager: Any | None = None,
 ) -> RestoreCheckResult:
-    """Validate controller env needed before restore can become writable."""
+    """Validate controller config needed before restore can become writable."""
     env = _env_restore_facts(environ)
     if intent.runtime_kind == "codex":
-        if not env.codex_home_present:
-            return RestoreCheckResult(False, "missing CODEX_HOME for Codex restore")
+        if env.codex_home_present:
+            return RestoreCheckResult(
+                False,
+                "controller CODEX_HOME must be unset; use CCBOT_RUNTIME_CODEX_HOME "
+                "for replay lookup and a launch wrapper for child CODEX_HOME",
+            )
+        if not _restore_replay_codex_home(environ, session_manager):
+            return RestoreCheckResult(
+                False,
+                "missing CCBOT_RUNTIME_CODEX_HOME for Codex restore",
+            )
         if not env.omx_auto_update_disabled:
             return RestoreCheckResult(
                 False,
@@ -525,11 +609,14 @@ def build_restore_launch_command(
     intent: RestoreIntent,
     environ: Mapping[str, str] | None = None,
 ) -> str:
-    """Return launch command with durable non-interactive restore env prefix."""
+    """Return launch command with durable non-interactive restore env prefix.
+
+    ``CODEX_HOME`` is intentionally not prefixed from controller env here.
+    Instance launch wrappers own child-runtime CODEX_HOME so controller env
+    cannot poison the shared tmux server.
+    """
     env = _env_restore_facts(environ)
     assignments: list[str] = []
-    if intent.runtime_kind == "codex" and env.codex_home:
-        assignments.append(f"CODEX_HOME={shlex.quote(env.codex_home)}")
     if env.omx_auto_update:
         assignments.append(f"OMX_AUTO_UPDATE={shlex.quote(env.omx_auto_update)}")
     command = intent.launcher_command.strip()
@@ -607,14 +694,18 @@ def _window_active_pane_snapshot(window: Any) -> RestorePaneSnapshot:
     )
 
 
-async def _list_restore_panes(tmux_manager: Any, window: Any) -> tuple[RestorePaneSnapshot, ...]:
+async def _list_restore_panes(
+    tmux_manager: Any, window: Any
+) -> tuple[RestorePaneSnapshot, ...]:
     window_id = str(getattr(window, "window_id", "") or "")
     list_panes = getattr(tmux_manager, "list_panes", None)
     if callable(list_panes) and window_id:
         try:
             panes = await list_panes(window_id)
         except Exception as exc:
-            logger.warning("Startup restore failed to list panes for %s: %s", window_id, exc)
+            logger.warning(
+                "Startup restore failed to list panes for %s: %s", window_id, exc
+            )
             panes = []
         snapshots = tuple(_pane_snapshot(window_id, pane) for pane in panes)
         if snapshots:
@@ -642,7 +733,19 @@ def _binding_fingerprint(session_manager: Any, intent: RestoreIntent) -> str:
     bound = surface_bindings.get(intent.user_id, {}).get(intent.surface_key, "")
     external = external_bindings.get(intent.user_id, {}).get(intent.surface_key, {})
     state = surface_states.get(intent.user_id, {}).get(intent.surface_key, "")
-    return f"{bound}|{external!r}|{state}"
+    thread_id = _surface_thread_id(intent.surface_key)
+    group_chat_ids = getattr(session_manager, "group_chat_ids", {})
+    group_parts = []
+    if intent.group_chat_id is not None:
+        keys = [
+            f"{intent.user_id}:{thread_id or 0}",
+            f"t:{intent.group_chat_id}:{thread_id}"
+            if thread_id
+            else f"c:{intent.group_chat_id}",
+        ]
+        for key in keys:
+            group_parts.append(f"{key}={group_chat_ids.get(key, '')}")
+    return f"{bound}|{external!r}|{state}|{'/'.join(group_parts)}"
 
 
 def _validate_group_chat_coordinate(
@@ -655,7 +758,9 @@ def _validate_group_chat_coordinate(
     group_chat_ids = getattr(session_manager, "group_chat_ids", {})
     keys = [
         f"{intent.user_id}:{thread_id or 0}",
-        f"t:{intent.group_chat_id}:{thread_id}" if thread_id else f"c:{intent.group_chat_id}",
+        f"t:{intent.group_chat_id}:{thread_id}"
+        if thread_id
+        else f"c:{intent.group_chat_id}",
     ]
     existing_values = []
     for key in keys:
@@ -664,7 +769,9 @@ def _validate_group_chat_coordinate(
             existing_values.append(int(existing))
     if not existing_values and thread_id:
         for surface_key, chat_id in group_chat_ids.items():
-            if str(surface_key).startswith("t:") and str(surface_key).endswith(f":{thread_id}"):
+            if str(surface_key).startswith("t:") and str(surface_key).endswith(
+                f":{thread_id}"
+            ):
                 existing_values.append(int(chat_id))
     if existing_values and int(intent.group_chat_id) not in existing_values:
         return RestoreCheckResult(False, "telegram routing chat_id mismatch")
@@ -692,33 +799,43 @@ def build_live_runtime_proof(
     helper_check = getattr(session_manager, "_is_codex_helper_window", None)
     if callable(helper_check) and helper_check(window_id):
         return None
-    env = _env_restore_facts(environ)
     replay_path = ""
+    replay_codex_home = _restore_replay_codex_home(environ, session_manager)
     if intent.runtime_kind == "codex":
+        if not replay_codex_home:
+            return None
         catalog = getattr(session_manager, "codex_thread_catalog", None)
-        if catalog is not None:
-            try:
-                candidate = catalog.get_candidate_fast(intent.runtime_id)
-            except Exception as exc:
-                logger.warning(
-                    "Unable to resolve Codex live proof replay path for %s: %s",
-                    intent.runtime_id,
-                    exc,
-                )
-                candidate = None
-            if candidate is not None:
-                replay_path = str(getattr(candidate, "rollout_file", "") or "")
+        if catalog is None:
+            return None
+        try:
+            candidate = catalog.get_candidate_fast(intent.runtime_id)
+        except Exception as exc:
+            logger.warning(
+                "Unable to resolve Codex live proof replay path for %s: %s",
+                intent.runtime_id,
+                exc,
+            )
+            candidate = None
+        if candidate is None or candidate.normalized_cwd != _normalize_path(intent.cwd):
+            return None
+        replay_path = str(getattr(candidate, "rollout_file", "") or "")
+        if not _path_is_relative_to(replay_path, replay_codex_home):
+            return None
     return LiveRuntimeProof(
         window_id=window_id,
         pane_id=pane_id or str(getattr(window, "pane_id", "") or ""),
         runtime_kind=runtime_kind,
         runtime_id=runtime_id,
         proof_source=proof_source,
-        codex_home=env.codex_home,
+        codex_home=replay_codex_home,
         replay_path=replay_path,
-        cwd=_normalize_path(str(getattr(state, "cwd", "") or getattr(window, "cwd", "") or "")),
+        cwd=_normalize_path(
+            str(getattr(state, "cwd", "") or getattr(window, "cwd", "") or "")
+        ),
         window_name=str(
-            getattr(state, "window_name", "") or getattr(window, "window_name", "") or ""
+            getattr(state, "window_name", "")
+            or getattr(window, "window_name", "")
+            or ""
         ),
         observed_at=time.time(),
         descriptor_fingerprint=_descriptor_fingerprint(session_manager, window_id),
@@ -760,7 +877,6 @@ def build_resume_target_proof(
     environ: Mapping[str, str] | None = None,
 ) -> ResumeTargetProof | None:
     """Build proof that a configured runtime id exists as a resume target."""
-    env = _env_restore_facts(environ)
     if intent.runtime_kind != "codex":
         return ResumeTargetProof(
             runtime_kind=intent.runtime_kind,
@@ -768,7 +884,8 @@ def build_resume_target_proof(
             proof_source="runtime_kind_without_catalog",
             cwd=_normalize_path(intent.cwd),
         )
-    if not env.codex_home_present:
+    replay_codex_home = _restore_replay_codex_home(environ, session_manager)
+    if not replay_codex_home:
         return None
     catalog = getattr(session_manager, "codex_thread_catalog", None)
     if catalog is None:
@@ -780,19 +897,24 @@ def build_resume_target_proof(
             locator = exact_locator(intent.runtime_id, intent.cwd)
         if locator is None:
             candidate = catalog.get_candidate_fast(intent.runtime_id)
-            if candidate is not None and candidate.normalized_cwd == _normalize_path(intent.cwd):
+            if candidate is not None and candidate.normalized_cwd == _normalize_path(
+                intent.cwd
+            ):
                 locator = candidate.to_locator()
     except Exception as exc:
         logger.warning("Unable to build Codex resume target proof: %s", exc)
         return None
     if locator is None:
         return None
+    replay_path = _locator_replay_path(locator)
+    if not _path_is_relative_to(replay_path, replay_codex_home):
+        return None
     return ResumeTargetProof(
         runtime_kind="codex",
         runtime_id=intent.runtime_id,
         proof_source="codex_replay_catalog",
-        codex_home=env.codex_home,
-        replay_path=str(getattr(locator, "file_path", "") or ""),
+        codex_home=replay_codex_home,
+        replay_path=replay_path,
         cwd=_normalize_path(str(getattr(locator, "cwd", "") or intent.cwd)),
     )
 
@@ -801,6 +923,8 @@ def validate_existing_runtime_window_for_restore(
     session_manager: Any,
     window_id: str,
     intent: RestoreIntent,
+    *,
+    environ: Mapping[str, str] | None = None,
 ) -> RestoreCheckResult:
     """Return whether an already-running runtime window may be reused."""
     state = getattr(session_manager, "window_states", {}).get(window_id)
@@ -818,16 +942,19 @@ def validate_existing_runtime_window_for_restore(
     helper_check = getattr(session_manager, "_is_codex_helper_window", None)
     if callable(helper_check) and helper_check(window_id):
         return RestoreCheckResult(False, "runtime helper window is not bindable")
-    proof = LiveRuntimeProof(
-        window_id=window_id,
-        runtime_kind=runtime_kind,
-        runtime_id=thread_id,
-        proof_source="live_descriptor",
-        cwd=_normalize_path(str(getattr(state, "cwd", "") or "")),
-        window_name=str(getattr(state, "window_name", "") or ""),
-        observed_at=time.time(),
-        descriptor_fingerprint=_descriptor_fingerprint(session_manager, window_id),
+    proof = build_live_runtime_proof(
+        session_manager,
+        SimpleNamespace(
+            window_id=window_id,
+            cwd=str(getattr(state, "cwd", "") or ""),
+            window_name=str(getattr(state, "window_name", "") or ""),
+        ),
+        intent,
+        proof_source="descriptor_catalog",
+        environ=environ,
     )
+    if proof is None:
+        return RestoreCheckResult(False, "missing Codex replay proof")
     return RestoreCheckResult(True, live_proof=proof)
 
 
@@ -895,7 +1022,9 @@ def _classify_existing_window(
         return RestoreClassification.EXISTING_CWD_MISMATCH, "target window cwd mismatch"
 
     command = str(getattr(window, "pane_current_command", "") or "")
-    active_runtime = runtime_capability_registry.known_runtime_kind_from_command(command)
+    active_runtime = runtime_capability_registry.known_runtime_kind_from_command(
+        command
+    )
     if active_runtime is not None and active_runtime != intent.runtime_kind:
         return (
             RestoreClassification.EXISTING_RUNTIME_KIND_MISMATCH,
@@ -976,7 +1105,7 @@ async def inspect_configured_startup_target(
             intent.runtime_kind,
         )
 
-    env_check = validate_restore_env_contract(intent, source)
+    env_check = validate_restore_env_contract(intent, source, session_manager)
     if not env_check.ok:
         return StartupRestoreInventory(
             classification=RestoreClassification.ENV_CONTRACT_FAILED,
@@ -1075,6 +1204,9 @@ async def _revalidate_before_bind(
 ) -> RestoreCheckResult:
     if _binding_fingerprint(session_manager, intent) != inventory.binding_fingerprint:
         return RestoreCheckResult(False, "binding state changed during restore")
+    route_check = _validate_group_chat_coordinate(session_manager, intent)
+    if not route_check.ok:
+        return route_check
     existing = await tmux_manager.find_window_by_name(intent.window_name)
     if existing is None or str(getattr(existing, "window_id", "") or "") != window_id:
         return RestoreCheckResult(False, "target window changed during restore")
@@ -1176,7 +1308,13 @@ async def restore_configured_startup_target(
             inventory,
         )
 
-    success, message, _window_name, window_id, _reused = await tmux_manager.create_or_reuse_window(
+    (
+        success,
+        message,
+        _window_name,
+        window_id,
+        _reused,
+    ) = await tmux_manager.create_or_reuse_window(
         intent.cwd,
         window_name=intent.window_name,
         start_claude=True,
@@ -1200,7 +1338,10 @@ async def restore_configured_startup_target(
             await wait_for_entry(window_id)
 
     created_window = await tmux_manager.find_window_by_name(intent.window_name)
-    if created_window is None or str(getattr(created_window, "window_id", "") or "") != window_id:
+    if (
+        created_window is None
+        or str(getattr(created_window, "window_id", "") or "") != window_id
+    ):
         return StartupRestoreResult(
             "failed",
             "target window changed before restore proof",

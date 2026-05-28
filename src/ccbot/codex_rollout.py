@@ -1939,7 +1939,11 @@ def _replay_saved_image_url(
 def _codex_generated_image_url(thread_id: str, call_id: str) -> str:
     if not thread_id or not call_id:
         return ""
-    codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+    codex_home = Path(
+        os.environ.get("CCBOT_RUNTIME_CODEX_HOME")
+        or config.runtime_codex_home
+        or (Path.home() / ".codex")
+    )
     image_path = codex_home / "generated_images" / thread_id / f"{call_id}.png"
     if not image_path.is_file():
         return ""

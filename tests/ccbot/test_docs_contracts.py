@@ -42,7 +42,8 @@ def test_readme_points_to_strato_ops_runbook() -> None:
     assert "media, and non-`/bind` commands stay silent until exact `/bind`" in readme
     assert "Command entry paths also capture the Telegram group `chat_id`" in readme
     assert "standalone `chat_id` as a\nTelegram routing coordinate" in readme
-    assert "CODEX_HOME=/data/iqdoctor/.codex" in readme
+    assert "CCBOT_RUNTIME_CODEX_HOME=/data/iqdoctor/.codex" in readme
+    assert "CODEX_HOME` is non-authoritative for configured restore proof" in readme
     assert "OMX_AUTO_UPDATE=0" in readme
     assert "`CCBOT_RESTORE_*` remains restore\nintent, not proof" in readme
     assert "LiveRuntimeProof" in readme
@@ -158,7 +159,8 @@ def test_strato_ops_runbook_captures_cutover_and_rollback_contract() -> None:
     assert "raw `/ACP`" in runbook
     assert "Startup restore must inventory before action" in runbook
     assert "`CCBOT_RESTORE_*` declares intent only" in runbook
-    assert "CODEX_HOME" in runbook
+    assert "CCBOT_RUNTIME_CODEX_HOME" in runbook
+    assert "Controller `CODEX_HOME` is non-authoritative" in runbook
     assert "OMX_AUTO_UPDATE=0" in runbook
     assert "Do not blindly restart `imm_arena_bot.service`" in runbook
     assert "ComfyCodexBot: `ccbot.service`" in runbook

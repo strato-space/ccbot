@@ -96,12 +96,16 @@ Prefer explicit non-interactive Codex policy in that command when your host poli
   tmux window. Duplicate runtime-claim cleanup is allowed only after a
   current service-epoch restore-owner proof validates runtime id, cwd, exact
   surface, chat/topic coordinates, and tmux window.
-- For Codex restore, set `CODEX_HOME` in the controller service env so replay
-  ACK/catalog lookup uses the intended root, and set `OMX_AUTO_UPDATE=0` so an
-  OMX update prompt cannot block non-interactive startup.
-- Prefer `CCBOT_COMMAND=omx --madmax` with `CODEX_HOME`/`OMX_AUTO_UPDATE` owned
-  by the controller service/drop-ins. Any host-specific auth wrapper must be
-  cwd-neutral and must not carry `CCBOT_RESTORE_*` intent into runtime children.
+- For Codex restore, set `CCBOT_RUNTIME_CODEX_HOME` in the controller service
+  env so replay ACK/catalog lookup uses the intended root, and set
+  `OMX_AUTO_UPDATE=0` so an OMX update prompt cannot block non-interactive
+  startup. Controller `CODEX_HOME` is non-authoritative for configured restore
+  proof and must not be present in the controller/tmux server environment.
+- Prefer `CCBOT_COMMAND=<instance launch wrapper> omx --madmax`; the wrapper
+  exports child-process `CODEX_HOME` immediately before `exec`, and the
+  configured value must match `CCBOT_RUNTIME_CODEX_HOME`. Any host-specific auth
+  wrapper must be cwd-neutral and must not carry `CCBOT_RESTORE_*` intent into
+  runtime children.
 - `/bind` directory browsing starts from configured workspace roots or
   `/home/tools`, not from the controller service `WorkingDirectory`.
 - Telegram forum-topic bindings are keyed by `t:<chat_id>:<thread_id>`; bare
@@ -112,12 +116,14 @@ Prefer explicit non-interactive Codex policy in that command when your host poli
   - ComfyCodexBot: `ccbot.service`, `CCBOT_DIR=/data/iqdoctor/.ccbot`,
     tmux `comfy:comfy-agent`, user/surface `3045664/t:-1003685295814:555`, chat
     `-1003685295814`, runtime cwd `/home/tools/mediagen-comfy`,
-    `CODEX_HOME=/data/iqdoctor/.codex`.
+    `CCBOT_RUNTIME_CODEX_HOME=/data/iqdoctor/.codex`; the runtime wrapper exports
+    child `CODEX_HOME=/data/iqdoctor/.codex`.
   - ImmArenaBot: `imm_arena_bot.service`,
     `CCBOT_DIR=/data/iqdoctor/.ccbot-imm_arena_bot`, tmux
     `imm_arena_bot:imm`, user/surface `3045664/t:-1003974721114:3`, chat
     `-1003974721114`, runtime cwd `/home/tools/imm`,
-    `CODEX_HOME=/home/tools/imm/.codex`.
+    `CCBOT_RUNTIME_CODEX_HOME=/home/tools/imm/.codex`; the runtime wrapper exports
+    child `CODEX_HOME=/home/tools/imm/.codex`.
 - `/home/tools/server/comfy` is historical/runtime-runbook context only; it is
   not the primary ComfyCodexBot Codex workspace for binding preflight, runtime
   input, or final Cinematic media-evidence gates.

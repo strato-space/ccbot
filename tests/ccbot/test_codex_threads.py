@@ -33,6 +33,23 @@ def test_codex_catalog_defaults_to_codex_home_env(
     assert catalog.sessions_root == codex_home / "sessions"
 
 
+
+def test_codex_catalog_prefers_runtime_codex_home_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime_home = tmp_path / "runtime-codex-home"
+    legacy_home = tmp_path / "legacy-codex-home"
+    monkeypatch.setenv("CCBOT_RUNTIME_CODEX_HOME", str(runtime_home))
+    monkeypatch.setenv("CODEX_HOME", str(legacy_home))
+
+    catalog = CodexThreadCatalog()
+
+    assert catalog.codex_home == runtime_home
+    assert catalog.explicit_codex_home is True
+    assert catalog.session_index_path == runtime_home / "session_index.jsonl"
+    assert legacy_home in catalog.codex_homes
+
 def test_codex_catalog_keeps_home_fallback_with_codex_home_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

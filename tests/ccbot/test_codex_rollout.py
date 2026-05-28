@@ -213,6 +213,36 @@ def test_codex_rollout_image_generation_end_is_pre_final_media_preview(
     )
 
 
+
+
+def test_codex_rollout_generated_image_fallback_uses_runtime_codex_home(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    legacy_home = tmp_path / "legacy"
+    runtime_home = tmp_path / "runtime"
+    image_path = runtime_home / "generated_images" / "thread-1" / "ig_runtime.png"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(_PNG_BYTES)
+    monkeypatch.setenv("CODEX_HOME", str(legacy_home))
+    monkeypatch.setenv("CCBOT_RUNTIME_CODEX_HOME", str(runtime_home))
+
+    record = {
+        "timestamp": "2026-05-22T08:30:06.540Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "image_generation_end",
+            "call_id": "ig_runtime",
+            "revised_prompt": "Primary request: Create one epic portrait.",
+            "result": base64.b64encode(_PNG_BYTES).decode("ascii"),
+        },
+    }
+
+    event = CodexRolloutNormalizer.normalize_records([record], thread_id="thread-1")[0]
+
+    assert str(runtime_home) in event.text
+    assert str(legacy_home) not in event.text
+
 def test_codex_rollout_image_generation_end_prefers_replay_saved_path(
     monkeypatch,
     tmp_path,

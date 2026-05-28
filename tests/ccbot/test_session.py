@@ -3341,3 +3341,18 @@ class TestIsWindowId:
         assert mgr._is_window_id("@") is False
         assert mgr._is_window_id("") is False
         assert mgr._is_window_id("@abc") is False
+
+
+def test_session_manager_injects_runtime_codex_home_into_catalog(monkeypatch, tmp_path):
+    from ccbot import session as session_mod
+
+    runtime_home = tmp_path / "runtime-codex"
+    monkeypatch.setattr(session_mod.config, "runtime_codex_home", str(runtime_home))
+    monkeypatch.setattr(session_mod.SessionManager, "_load_state", lambda self: None)
+    monkeypatch.setattr(session_mod.SessionManager, "_save_state", lambda self: None)
+
+    manager = session_mod.SessionManager()
+
+    assert manager.codex_thread_catalog is not None
+    assert manager.codex_thread_catalog.codex_home == runtime_home
+    assert manager.codex_thread_catalog.explicit_codex_home is True

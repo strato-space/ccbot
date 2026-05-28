@@ -34,6 +34,8 @@ from .terminal_parser import classify_input_surface
 logger = logging.getLogger(__name__)
 
 RUNTIME_ENV_UNSET_VARS = frozenset(SENSITIVE_ENV_VARS) | {
+    "CODEX_HOME",
+    "CCBOT_RUNTIME_CODEX_HOME",
     "CCBOT_COMMAND",
     "CCBOT_DIR",
     "CCBOT_RESTORE_CHAT_ID",
@@ -106,6 +108,7 @@ class TmuxManager:
         """Get or create tmux server connection."""
         if self._server is None:
             self._server = libtmux.Server()
+            self._scrub_global_env()
         return self._server
 
     def get_session(self) -> libtmux.Session | None:
@@ -117,6 +120,7 @@ class TmuxManager:
 
     def get_or_create_session(self) -> libtmux.Session:
         """Get existing session or create a new one."""
+        self._scrub_global_env()
         session = self.get_session()
         if session:
             self._scrub_session_env(session)
@@ -127,11 +131,26 @@ class TmuxManager:
             session_name=self.session_name,
             start_directory=str(Path.home()),
         )
+        self._scrub_global_env()
         # Rename the default window to the main window name
         if session.windows:
             session.windows[0].rename_window(config.tmux_main_window_name)
         self._scrub_session_env(session)
         return session
+
+    @staticmethod
+    def _scrub_global_env() -> None:
+        """Remove controller-only env vars from the shared tmux server env."""
+        for var in RUNTIME_ENV_UNSET_VARS:
+            try:
+                subprocess.run(
+                    ["tmux", "set-environment", "-g", "-u", var],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
 
     @staticmethod
     def _scrub_session_env(session: libtmux.Session) -> None:

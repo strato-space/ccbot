@@ -41,7 +41,7 @@ def _intent_env(**overrides: str) -> dict[str, str]:
         "CCBOT_RESTORE_SHARED_GROUP": "true",
         "CCBOT_RESTORE_CHAT_ID": "-1004242",
         "CCBOT_RESTORE_COMMAND": "omx --madmax",
-        "CODEX_HOME": "/tmp/codex-home",
+        "CCBOT_RUNTIME_CODEX_HOME": "/tmp/codex-home",
         "OMX_AUTO_UPDATE": "0",
     }
     env.update(overrides)
@@ -63,6 +63,28 @@ def _intent(**overrides) -> RestoreIntent:
     payload.update(overrides)
     return RestoreIntent(**payload)
 
+
+def _install_codex_catalog(
+    mgr: SessionManager,
+    *,
+    codex_home: str = "/tmp/codex-home",
+    replay_path: str = "/tmp/codex-home/sessions/rollout-thread-1.jsonl",
+    cwd: str = "/home/tools/mediagen-comfy",
+    helper: bool = False,
+) -> None:
+    class _Candidate:
+        normalized_cwd = cwd
+        rollout_file = replay_path
+
+        def to_locator(self):
+            return SimpleNamespace(file_path=replay_path, cwd=cwd)
+
+    mgr.codex_thread_catalog = SimpleNamespace(
+        codex_home=codex_home,
+        explicit_codex_home=True,
+        get_candidate_fast=lambda _tid: _Candidate(),
+        is_helper_thread_fast=lambda _tid: helper,
+    )
 
 
 def test_bind_restored_surface_records_proof_and_reclaims_duplicate(
@@ -148,7 +170,9 @@ def test_restore_owner_proof_persists_with_service_epoch(
     restored = SessionManager()
 
     assert proof is not None
-    assert restored.restore_owner_proofs["thread-1"].service_epoch == proof.service_epoch
+    assert (
+        restored.restore_owner_proofs["thread-1"].service_epoch == proof.service_epoch
+    )
     assert restored._restore_intent_owner_window_for_thread("thread-1") is None
 
 
@@ -217,10 +241,9 @@ def test_startup_restore_retryable_only_for_transient_reboot_surfaces() -> None:
         )
     )
 
+
 def test_parse_restore_intent_requires_full_surface_identity_and_group_chat() -> None:
-    intent = parse_restore_intent(
-        _intent_env()
-    )
+    intent = parse_restore_intent(_intent_env())
 
     assert intent == _intent()
 
@@ -279,23 +302,43 @@ def _state_restore_env(**overrides: str) -> dict[str, str]:
     env = {
         "CCBOT_OWNED_SURFACES": "t:-1004242:42",
         "CCBOT_COMMAND": "omx --madmax",
-        "CODEX_HOME": "/tmp/codex-home",
+        "CCBOT_RUNTIME_CODEX_HOME": "/tmp/codex-home",
         "OMX_AUTO_UPDATE": "0",
     }
     env.update(overrides)
     return env
 
 
-def test_restore_env_contract_requires_codex_home_and_disabled_omx_update() -> None:
+def test_restore_env_contract_requires_runtime_codex_home_and_disabled_omx_update() -> (
+    None
+):
     intent = _intent()
 
     missing_codex = validate_restore_env_contract(intent, {"OMX_AUTO_UPDATE": "0"})
     assert missing_codex.ok is False
-    assert "CODEX_HOME" in missing_codex.reason
+    assert "CCBOT_RUNTIME_CODEX_HOME" in missing_codex.reason
+
+    legacy_controller_codex_home = validate_restore_env_contract(
+        intent,
+        {"CODEX_HOME": "/tmp/codex-home", "OMX_AUTO_UPDATE": "0"},
+    )
+    assert legacy_controller_codex_home.ok is False
+    assert "CCBOT_RUNTIME_CODEX_HOME" in legacy_controller_codex_home.reason
+
+    poisoned_controller_env = validate_restore_env_contract(
+        intent,
+        {
+            "CODEX_HOME": "/tmp/legacy-controller",
+            "CCBOT_RUNTIME_CODEX_HOME": "/tmp/codex-home",
+            "OMX_AUTO_UPDATE": "0",
+        },
+    )
+    assert poisoned_controller_env.ok is False
+    assert "controller CODEX_HOME" in poisoned_controller_env.reason
 
     update_prompt_allowed = validate_restore_env_contract(
         intent,
-        {"CODEX_HOME": "/tmp/codex-home", "OMX_AUTO_UPDATE": "1"},
+        {"CCBOT_RUNTIME_CODEX_HOME": "/tmp/codex-home", "OMX_AUTO_UPDATE": "1"},
     )
     assert update_prompt_allowed.ok is False
     assert "OMX_AUTO_UPDATE=0" in update_prompt_allowed.reason
@@ -304,11 +347,59 @@ def test_restore_env_contract_requires_codex_home_and_disabled_omx_update() -> N
     assert ok.ok is True
 
 
-def test_restore_launch_command_carries_controller_restore_env() -> None:
+def test_restore_env_contract_accepts_explicit_catalog_root(
+    mgr: SessionManager,
+) -> None:
+    mgr.codex_thread_catalog = SimpleNamespace(
+        codex_home="/tmp/codex-home",
+        explicit_codex_home=True,
+    )
+
+    ok = validate_restore_env_contract(
+        _intent(),
+        {"OMX_AUTO_UPDATE": "0"},
+        mgr,
+    )
+
+    assert ok.ok is True
+
+
+def test_restore_env_contract_rejects_default_catalog_root(mgr: SessionManager) -> None:
+    mgr.codex_thread_catalog = SimpleNamespace(
+        codex_home="/home/test/.codex",
+        explicit_codex_home=False,
+    )
+
+    result = validate_restore_env_contract(
+        _intent(),
+        {"CODEX_HOME": "/tmp/legacy-controller", "OMX_AUTO_UPDATE": "0"},
+        mgr,
+    )
+
+    assert result.ok is False
+    assert "CCBOT_RUNTIME_CODEX_HOME" in result.reason
+
+
+def test_restore_env_contract_rejects_runtime_catalog_root_mismatch(
+    mgr: SessionManager,
+) -> None:
+    _install_codex_catalog(mgr, codex_home="/tmp/catalog-codex")
+
+    result = validate_restore_env_contract(
+        _intent(),
+        {"CCBOT_RUNTIME_CODEX_HOME": "/tmp/env-codex", "OMX_AUTO_UPDATE": "0"},
+        mgr,
+    )
+
+    assert result.ok is False
+    assert "CCBOT_RUNTIME_CODEX_HOME" in result.reason
+
+
+def test_restore_launch_command_omits_controller_codex_home() -> None:
     command = build_restore_launch_command(_intent(), _intent_env())
 
-    assert command.startswith("CODEX_HOME=/tmp/codex-home OMX_AUTO_UPDATE=0 ")
-    assert command.endswith("omx --madmax")
+    assert command == "OMX_AUTO_UPDATE=0 omx --madmax"
+    assert "CODEX_HOME=" not in command
 
 
 @pytest.mark.asyncio
@@ -328,8 +419,10 @@ async def test_inventory_json_preserves_surface_key_without_secret_env(
     assert data["intent"]["surface_key"] == "t:42"
     assert "TELEGRAM_BOT_TOKEN" not in repr(data)
     assert data["env"] == {
-        "codex_home": "/tmp/codex-home",
-        "codex_home_present": True,
+        "codex_home": "",
+        "codex_home_present": False,
+        "runtime_codex_home": "/tmp/codex-home",
+        "runtime_codex_home_present": True,
         "omx_auto_update": "0",
         "omx_auto_update_disabled": True,
     }
@@ -350,6 +443,7 @@ def test_existing_runtime_reuse_requires_matching_identity_and_not_helper(
     assert "identity" in result.reason
 
     mgr.window_states["@1"].thread_id = "thread-1"
+    _install_codex_catalog(mgr)
     result = validate_existing_runtime_window_for_restore(mgr, "@1", intent)
     assert result.ok is True
 
@@ -359,7 +453,7 @@ def test_existing_runtime_reuse_requires_matching_identity_and_not_helper(
     assert "cwd mismatch" in result.reason
 
     mgr.window_states["@1"].cwd = "/home/tools/mediagen-comfy"
-    mgr.codex_thread_catalog = SimpleNamespace(is_helper_thread_fast=lambda _tid: True)
+    _install_codex_catalog(mgr, helper=True)
     result = validate_existing_runtime_window_for_restore(mgr, "@1", intent)
     assert result.ok is False
     assert "helper" in result.reason
@@ -449,7 +543,9 @@ def test_classify_restore_pane_keeps_omx_helpers_out_of_work_runtime() -> None:
         == RestorePaneKind.OMX_HELPER
     )
     assert (
-        classify_restore_pane(SimpleNamespace(pane_current_command="bash", pane_title=""))
+        classify_restore_pane(
+            SimpleNamespace(pane_current_command="bash", pane_title="")
+        )
         == RestorePaneKind.SHELL_OR_EMPTY
     )
     assert (
@@ -573,6 +669,7 @@ async def test_shared_topic_same_thread_wrong_chat_id_fails_closed(
 async def test_window_change_between_inventory_and_bind_fails_closed(
     mgr: SessionManager,
 ) -> None:
+    _install_codex_catalog(mgr)
     mgr.window_states["@1"] = LiveProcessDescriptor(
         thread_id="thread-1",
         cwd="/home/tools/mediagen-comfy",
@@ -642,7 +739,9 @@ async def test_full_loss_binds_only_after_resume_and_live_proofs(
                 cwd="/home/tools/mediagen-comfy",
             )
 
-    mgr.codex_thread_catalog = SimpleNamespace(get_candidate_fast=lambda _tid: _Candidate())
+    mgr.codex_thread_catalog = SimpleNamespace(
+        get_candidate_fast=lambda _tid: _Candidate()
+    )
 
     created_window = SimpleNamespace(
         window_id="@9",
@@ -676,7 +775,7 @@ async def test_full_loss_binds_only_after_resume_and_live_proofs(
     assert mgr.surface_bindings[100]["t:42"] == "@9"
     assert (
         tmux.create_or_reuse_window.await_args.kwargs["launch_command"]
-        == "CODEX_HOME=/tmp/codex-home OMX_AUTO_UPDATE=0 omx --madmax"
+        == "OMX_AUTO_UPDATE=0 omx --madmax"
     )
 
 
@@ -698,7 +797,9 @@ async def test_full_loss_binds_after_fd_proof_even_without_session_map(
                 cwd="/home/tools/mediagen-comfy",
             )
 
-    mgr.codex_thread_catalog = SimpleNamespace(get_candidate_fast=lambda _tid: _Candidate())
+    mgr.codex_thread_catalog = SimpleNamespace(
+        get_candidate_fast=lambda _tid: _Candidate()
+    )
 
     created_window = SimpleNamespace(
         window_id="@9",
@@ -744,6 +845,7 @@ async def test_full_loss_binds_after_fd_proof_even_without_session_map(
 async def test_existing_window_binds_after_fd_proof_reconciliation(
     mgr: SessionManager,
 ) -> None:
+    _install_codex_catalog(mgr)
     """A resumed runtime with no persisted window_state can still be restored."""
 
     existing_window = SimpleNamespace(
@@ -783,6 +885,7 @@ async def test_existing_window_binds_after_fd_proof_reconciliation(
 async def test_startup_restore_reuses_registered_node_runtime_without_injecting(
     mgr: SessionManager,
 ) -> None:
+    _install_codex_catalog(mgr)
     intent_env = _intent_env()
     mgr.window_states["@1"] = LiveProcessDescriptor(
         thread_id="thread-1",
@@ -812,6 +915,7 @@ async def test_startup_restore_reuses_registered_node_runtime_without_injecting(
 async def test_env_absent_state_derived_restore_adopts_whitelisted_live_runtime(
     mgr: SessionManager,
 ) -> None:
+    _install_codex_catalog(mgr)
     mgr.set_group_chat_id(100, 42, -1004242)
     mgr.register_live_process(
         "@31",
@@ -868,7 +972,9 @@ async def test_env_absent_state_derived_restore_recreates_missing_whitelisted_wi
                 cwd="/home/tools/mediagen-comfy",
             )
 
-    mgr.codex_thread_catalog = SimpleNamespace(get_candidate_fast=lambda _tid: _Candidate())
+    mgr.codex_thread_catalog = SimpleNamespace(
+        get_candidate_fast=lambda _tid: _Candidate()
+    )
     mgr.set_group_chat_id(100, 42, -1004242)
     mgr.register_live_process(
         "@31",
@@ -920,7 +1026,7 @@ async def test_env_absent_state_derived_restore_recreates_missing_whitelisted_wi
     assert mgr.surface_bindings[100]["t:-1004242:42"] == "@32"
     assert (
         tmux.create_or_reuse_window.await_args.kwargs["launch_command"]
-        == "CODEX_HOME=/tmp/codex-home OMX_AUTO_UPDATE=0 omx --madmax"
+        == "OMX_AUTO_UPDATE=0 omx --madmax"
     )
 
 
@@ -942,7 +1048,7 @@ async def test_env_absent_restore_skips_without_autonomous_whitelist(
     result = await restore_configured_startup_target(
         mgr,
         tmux,
-        environ={"CODEX_HOME": "/tmp/codex-home", "OMX_AUTO_UPDATE": "0"},
+        environ={"CCBOT_RUNTIME_CODEX_HOME": "/tmp/codex-home", "OMX_AUTO_UPDATE": "0"},
     )
 
     assert result.status == "skipped"
@@ -964,7 +1070,9 @@ async def test_env_absent_restore_rejects_stale_replay_cwd(
                 cwd="/tmp/other",
             )
 
-    mgr.codex_thread_catalog = SimpleNamespace(get_candidate_fast=lambda _tid: _Candidate())
+    mgr.codex_thread_catalog = SimpleNamespace(
+        get_candidate_fast=lambda _tid: _Candidate()
+    )
     mgr.set_group_chat_id(100, 42, -1004242)
     mgr.register_live_process(
         "@31",

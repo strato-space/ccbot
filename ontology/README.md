@@ -78,11 +78,20 @@ current whitelisted controller/tmux targets are exactly:
 
 - ComfyCodexBot: `ccbot.service`, `CCBOT_DIR=/data/iqdoctor/.ccbot`, tmux
   `comfy:comfy-agent`, control surface `3045664/t:-1003685295814:555`, runtime cwd
-  `/home/tools/mediagen-comfy`, `CODEX_HOME=/data/iqdoctor/.codex`.
+  `/home/tools/mediagen-comfy`, runtime Codex home `/data/iqdoctor/.codex`
+  (`CCBOT_RUNTIME_CODEX_HOME` for controller replay lookup; wrapper child
+  `CODEX_HOME` for the runtime process).
 - ImmArenaBot: `imm_arena_bot.service`,
   `CCBOT_DIR=/data/iqdoctor/.ccbot-imm_arena_bot`, tmux
   `imm_arena_bot:imm`, control surface `3045664/t:-1003974721114:3`, runtime cwd
-  `/home/tools/imm`, `CODEX_HOME=/home/tools/imm/.codex`.
+  `/home/tools/imm`, runtime Codex home `/home/tools/imm/.codex`
+  (`CCBOT_RUNTIME_CODEX_HOME` for controller replay lookup; wrapper child
+  `CODEX_HOME` for the runtime process).
+
+`CODEX_HOME` must not live in the controller or tmux server environment for
+these targets; restore proof uses `CCBOT_RUNTIME_CODEX_HOME` or an injected
+Codex catalog root, while runtime wrappers set child `CODEX_HOME` only for the
+runtime process.
 
 Both whitelisted controller services now carry `tmux-preserve.conf` with
 `KillMode=process`, but that drop-in is only a blast-radius guard.  Recovery

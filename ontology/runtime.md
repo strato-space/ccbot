@@ -172,13 +172,18 @@ This note defines the core runtime nouns for `ccbot`.
   - current allowed instances are exactly:
     - ComfyCodexBot: `ccbot.service`, `CCBOT_DIR=/data/iqdoctor/.ccbot`, tmux
       `comfy:comfy-agent`, control surface `3045664/t:-1003685295814:555`, chat
-      `-1003685295814`, cwd `/home/tools/mediagen-comfy`, Codex home
-      `/data/iqdoctor/.codex`
+      `-1003685295814`, cwd `/home/tools/mediagen-comfy`, runtime Codex home
+      `/data/iqdoctor/.codex` (`CCBOT_RUNTIME_CODEX_HOME` for controller replay
+      lookup; wrapper child `CODEX_HOME` for the runtime process)
     - ImmArenaBot: `imm_arena_bot.service`,
       `CCBOT_DIR=/data/iqdoctor/.ccbot-imm_arena_bot`, tmux
       `imm_arena_bot:imm`, control surface `3045664/t:-1003974721114:3`, chat
-      `-1003974721114`, cwd `/home/tools/imm`, Codex home
-      `/home/tools/imm/.codex`
+      `-1003974721114`, cwd `/home/tools/imm`, runtime Codex home
+      `/home/tools/imm/.codex` (`CCBOT_RUNTIME_CODEX_HOME` for controller replay
+      lookup; wrapper child `CODEX_HOME` for the runtime process)
+  - `CODEX_HOME` must not live in the controller or tmux server environment;
+    configured restore proof is rooted in `CCBOT_RUNTIME_CODEX_HOME` or an
+    explicitly injected Codex catalog root.
   - `/home/tools/server/comfy` is historical/runtime-runbook context for
     ComfyCodexBot, not the primary Codex workspace for binding preflight,
     runtime input, or final media-evidence gates

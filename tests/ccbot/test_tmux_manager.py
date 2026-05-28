@@ -173,11 +173,62 @@ async def test_create_window_prefers_ccbot_command_over_legacy_claude_command(
     ]
 
 
+def test_get_or_create_session_scrubs_global_env_after_first_server_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pane = _FakePane()
+    window = _FakeWindow(pane)
+    session = _FakeSession(window)
+    session.windows = []  # type: ignore[attr-defined]
+    calls: list[str] = []
+
+    class _EmptySessions:
+        def get(self, **_kwargs):
+            return None
+
+    class _Server:
+        sessions = _EmptySessions()
+
+        def new_session(self, **_kwargs):
+            calls.append("new_session")
+            return session
+
+    manager = TmuxManager(session_name="ccbot-test")
+    manager._server = _Server()  # type: ignore[assignment]
+
+    def scrub_global_env():
+        calls.append("scrub_global")
+
+    monkeypatch.setattr(manager, "_scrub_global_env", scrub_global_env)
+
+    assert manager.get_or_create_session() is session
+    assert calls == ["scrub_global", "new_session", "scrub_global"]
+
+
+def test_global_env_scrub_unsets_codex_home_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(list(cmd))
+        return None
+
+    monkeypatch.setattr(tmux_manager_module.subprocess, "run", fake_run)
+
+    TmuxManager._scrub_global_env()
+
+    assert ["tmux", "set-environment", "-g", "-u", "CODEX_HOME"] in calls
+    assert ["tmux", "set-environment", "-g", "-u", "CCBOT_RUNTIME_CODEX_HOME"] in calls
+
+
 def test_runtime_env_scrub_prefix_removes_controller_restore_vars() -> None:
     prefix = TmuxManager._runtime_env_scrub_prefix()
 
     assert "env " in prefix
     assert "-u CCBOT_RESTORE_RUNTIME_ID" in prefix
+    assert "-u CODEX_HOME" in prefix
+    assert "-u CCBOT_RUNTIME_CODEX_HOME" in prefix
     assert "-u CCBOT_RESTORE_SURFACE_KEY" in prefix
     assert "-u TELEGRAM_BOT_TOKEN" in prefix
     assert "-u OPENAI_API_KEY" in prefix
@@ -361,9 +412,7 @@ async def test_create_or_reuse_window_fails_closed_on_visible_codex_prompt(
         assert window_id == "@7"
         assert with_ansi is False
         return (
-            "■ Conversation interrupted - tell the model what to do differently.\n"
-            "\n"
-            "› "
+            "■ Conversation interrupted - tell the model what to do differently.\n\n› "
         )
 
     monkeypatch.setattr(manager, "find_window_by_name", _find_window_by_name)
